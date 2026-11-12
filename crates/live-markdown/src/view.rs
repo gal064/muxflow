@@ -21,7 +21,7 @@ use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::doc::Selection;
-use crate::edit::{CellDir, LiveDoc};
+use crate::edit::{LiveDoc, TableKey};
 use crate::projection::{Align, Block, BlockKind, Leaf, Marker, Projection, SegKind, Style};
 
 actions!(
@@ -44,6 +44,9 @@ actions!(
         Enter,
         TabNext,
         TabPrev,
+        Escape,
+        ToggleBold,
+        ToggleItalic,
         Undo,
         Redo,
         SelectAll,
@@ -54,8 +57,6 @@ actions!(
         MoveWordRight,
         SelectWordLeft,
         SelectWordRight,
-        ToggleBold,
-        ToggleItalic,
         Indent,
         Outdent,
     ]
@@ -97,6 +98,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("enter", Enter, context),
         KeyBinding::new("tab", TabNext, context),
         KeyBinding::new("shift-tab", TabPrev, context),
+        KeyBinding::new("escape", Escape, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -254,6 +256,7 @@ impl LiveView {
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
         if self.read_only != read_only {
             self.read_only = read_only;
+            self.live.set_read_only(read_only);
             cx.notify();
         }
     }
@@ -290,12 +293,12 @@ impl LiveView {
     }
 
     fn hit(&self, at: Point<Pixels>) -> Option<usize> {
-        self.hit_side(at).map(|(pos, _)| pos)
+        self.hit_leaf(at).map(|(_, pos, _)| pos)
     }
 
-    /// The source position nearest `at`, and whether `at` fell on the
-    /// character before it rather than the one after.
-    fn hit_side(&self, at: Point<Pixels>) -> Option<(usize, bool)> {
+    /// The leaf under `at`, the source position there, and whether `at`
+    /// fell on the character before that position rather than the one after.
+    fn hit_leaf(&self, at: Point<Pixels>) -> Option<(usize, usize, bool)> {
         let frame = self.frame.borrow();
         let projection = frame.projection.clone();
         let mut leaves: Vec<(Pixels, Pixels, usize, &LeafGeometry)> = Vec::new();
@@ -330,7 +333,7 @@ impl LiveView {
             })?;
         let index = geometry.index_for_position(at);
         let before = geometry.position_for_index(index).x > at.x;
-        Some((projection.from_display(i, index), before))
+        Some((i, projection.from_display(i, index), before))
     }
 
     fn caret_rect(&self) -> Option<Bounds<Pixels>> {
@@ -338,7 +341,9 @@ impl LiveView {
     }
 
     fn vertical(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
-        if !extend && self.live.cell_vertical(down) {
+        // By cell inside a table, Shift or not, as today's widget.
+        let key = if down { TableKey::Down } else { TableKey::Up };
+        if self.live.table_key(key) {
             self.changed(cx);
             return;
         }
@@ -367,6 +372,10 @@ impl LiveView {
                 }
             });
             if moved {
+                if !extend && self.live.enter_table(pos, down) {
+                    self.changed(cx);
+                    return;
+                }
                 if extend {
                     self.live.extend_to(pos, down)
                 } else {
@@ -463,7 +472,7 @@ impl LiveView {
             return;
         }
         window.focus(&self.focus, cx);
-        let Some((pos, before)) = self.hit_side(event.position) else {
+        let Some((leaf, pos, before)) = self.hit_leaf(event.position) else {
             return;
         };
         if event.modifiers.secondary(cx)
@@ -472,10 +481,16 @@ impl LiveView {
             cx.emit(LiveEvent::Link(href));
             return;
         }
+        // A cell a short row lacks is drawn, with no source of its own: any
+        // click there puts the caret in it, as a click in Tauri's empty td.
+        let missing = (self.frame.borrow().projection)
+            .missing_leaf(leaf)
+            .map(|cell| (cell.from, cell.col));
         match event.click_count {
+            _ if event.modifiers.shift => self.live.set_head(pos),
+            _ if let Some((at, col)) = missing => self.live.set_caret_in_missing(at, col),
             2 => self.live.select_word(pos, before),
             3.. => self.live.select_block(pos),
-            _ if event.modifiers.shift => self.live.set_head(pos),
             _ => self.live.set_caret(pos),
         }
         // A drag extends a single click only: one after a double or triple
@@ -576,6 +591,55 @@ fn caret_origin(frame: &Frame, leaf: usize, disp: usize, head: usize) -> Option<
         }
     }
     Some(origin)
+}
+
+/// The column and row of the cell holding `head`, as Tauri's ring on the td.
+/// gpui-base draws each cell as wide as its column's widest text plus
+/// padding (`px_3`, 7px) and shares a table's spare width out to the
+/// columns in proportion to those widths, beside or around the cell as the
+/// column aligns. `table` is the table's frame, the width of the page.
+fn cell_ring(
+    frame: &Frame,
+    head: usize,
+    table: Bounds<Pixels>,
+    rem: Pixels,
+) -> Option<Bounds<Pixels>> {
+    let p = &frame.projection;
+    let (t, _, cell) = p.cell_at(head)?;
+    let cells = &p.tables[t].cells;
+    let extent = |same: &dyn Fn(&crate::projection::Cell) -> bool| {
+        cells
+            .iter()
+            .filter(|c| same(c))
+            .filter_map(|c| frame.geometry.get(&p.leaves[c.leaf].key))
+            .map(|g| g.bounds())
+            .reduce(|a, b| a.union(&b))
+    };
+    let pad = rem * 0.75;
+    let columns = cells.iter().filter(|c| c.row == 0).count();
+    let boxes = (0..columns)
+        .map(|k| extent(&|c| c.col == k).map(|b| (b.left() - pad, b.right() + pad)))
+        .collect::<Option<Vec<_>>>()?;
+    let row = extent(&|c| c.row == cell.row)?;
+    // Inside the frame's 1px border; a 1px divider follows each column.
+    let (left, right) = (table.left() + px(1.), table.right() - px(1.));
+    let content = boxes.iter().fold(px(0.), |sum, (l, r)| sum + (*r - *l));
+    let spare = right - left - content - px(columns as f32 - 1.);
+    let (mut x0, mut x1) = boxes[cell.col];
+    if spare > px(1.) {
+        let mut x = left;
+        for (k, (l, r)) in boxes.iter().enumerate() {
+            let width = (*r - *l) * (1. + spare / content);
+            if k == cell.col {
+                (x0, x1) = (x, x + width);
+            }
+            x += width + px(1.);
+        }
+    }
+    Some(Bounds::from_corners(
+        point(x0.max(left), row.top() - px(7.)),
+        point(x1.min(right), row.bottom() + px(7.)),
+    ))
 }
 
 fn text_mark(style: &Style) -> TextMark {
@@ -832,6 +896,8 @@ struct LiveRoot {
     head: usize,
     show_caret: bool,
     read_only: bool,
+    /// The cell with the caret gets a focus ring, unless read-only.
+    cell_ring: bool,
     reveal: Rc<Cell<bool>>,
     style: LiveStyle,
     view: Entity<LiveView>,
@@ -919,6 +985,21 @@ impl Element for LiveRoot {
                 }
             }
         }
+        if self.cell_ring
+            && let Some(ring) =
+                cell_ring(&self.frame.borrow(), self.head, bounds, window.rem_size())
+        {
+            // As Tauri's focused cell: a 2px inset ring, the accent at 70%.
+            let color = self.style.accent.opacity(0.7);
+            window.paint_quad(quad(
+                ring,
+                px(0.),
+                transparent_black(),
+                px(2.),
+                color,
+                BorderStyle::Solid,
+            ));
+        }
         let caret = caret_bounds(&self.frame.borrow(), self.head);
         if let Some(rect) = caret {
             if self.show_caret {
@@ -991,6 +1072,7 @@ impl Render for LiveView {
             head: sel.head,
             show_caret: focused,
             read_only: self.read_only,
+            cell_ring: focused && !self.read_only,
             reveal: self.reveal.clone(),
             style: style.clone(),
             view: cx.entity(),
@@ -1013,10 +1095,18 @@ impl Render for LiveView {
             .line_height(relative(LINE_HEIGHT))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
-                this.motion(cx, |l| l.move_horizontal(false, false))
+                this.motion(cx, |l| {
+                    if !l.table_key(TableKey::Left) {
+                        l.move_horizontal(false, false)
+                    }
+                })
             }))
             .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
-                this.motion(cx, |l| l.move_horizontal(true, false))
+                this.motion(cx, |l| {
+                    if !l.table_key(TableKey::Right) {
+                        l.move_horizontal(true, false)
+                    }
+                })
             }))
             .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
                 this.motion(cx, |l| l.move_horizontal(false, true))
@@ -1074,17 +1164,25 @@ impl Render for LiveView {
             // way it stays in the document rather than moving focus.
             .on_action(cx.listener(|this, _: &TabNext, _, cx| {
                 this.edit(cx, |l| {
-                    if !l.cell_navigate(CellDir::Next) {
+                    if !l.table_key(TableKey::Tab) {
                         l.change_list_indent(false);
                     }
                 })
             }))
             .on_action(cx.listener(|this, _: &TabPrev, _, cx| {
                 this.edit(cx, |l| {
-                    if !l.cell_navigate(CellDir::Prev) {
+                    if !l.table_key(TableKey::ShiftTab) {
                         l.change_list_indent(true);
                     }
                 })
+            }))
+            // Escape leaves a table; elsewhere it is the app's.
+            .on_action(cx.listener(|this, _: &Escape, _, cx| {
+                if !this.read_only && this.live.table_key(TableKey::Escape) {
+                    this.changed(cx);
+                } else {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.edit(cx, LiveDoc::undo)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.edit(cx, LiveDoc::redo)))

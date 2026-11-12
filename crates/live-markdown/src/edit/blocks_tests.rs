@@ -721,3 +721,41 @@ fn enter_on_an_empty_nested_item_between_items_keeps_the_caret_there() {
     d.insert_text("X");
     assert_eq!(d.text(), "- alpha\n  X\n- beta");
 }
+
+// markdown-rs 1.0.0 panics on this source ("mismatched ListOrdered /
+// ListUnordered"), which typing can reach.
+#[test]
+fn a_source_the_parser_panics_on_draws_as_plain_lines() {
+    let bad = "  - a10.\n  - ```\n   2. \n   2. ";
+    let mut d = doc("- item", 6);
+    d.doc
+        .edit(0..6, bad, Selection::caret(bad.len()), EditKind::Other);
+    let drawn: Vec<_> = d
+        .projection()
+        .leaves
+        .iter()
+        .map(|l| l.text.clone())
+        .collect();
+    assert_eq!(drawn, ["  - a10.", "  - ```", "   2. ", "   2. "]);
+    // Editing goes on, on the plain lines.
+    d.set_caret(bad.find("```").unwrap());
+    d.insert_text("x");
+    assert_eq!(d.text(), "  - a10.\n  - x```\n   2. \n   2. ");
+    // Text that parses again is drawn as Markdown again.
+    d.undo();
+    d.undo();
+    assert_eq!(d.text(), "- item");
+    assert_eq!(d.projection().leaves[0].text, "\u{2022}");
+}
+
+#[test]
+fn ctrl_b_in_a_cell_follows_the_cells_rules() {
+    let text = "| ab | cd |\n|---|---|\n";
+    let ab = text.find("ab").unwrap();
+    let mut through_inline = selected(text, ab, ab + 2);
+    through_inline.toggle_inline("**");
+    let mut in_cell = selected(text, ab, ab + 2);
+    assert!(in_cell.toggle_marker_in_cell("**"));
+    assert_eq!(through_inline.text(), in_cell.text());
+    assert_eq!(through_inline.selection(), in_cell.selection());
+}
