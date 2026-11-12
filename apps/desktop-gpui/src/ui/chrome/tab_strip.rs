@@ -11,9 +11,9 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use desktop_core::app_state::AppTabKind;
 use gpui_kit::{
-    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Entity, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    RenderOnce, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window,
+    AnyElement, App, Bounds, ClickEvent, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Window,
     base::{Disableable, Tab, Tabs},
     canvas,
     component::{
@@ -225,7 +225,9 @@ impl RenderOnce for TabStrip {
                                 .px(ui(14.))
                                 .text_size(ui(13.))
                                 .text_color(palette.chrome_faint)
-                                .child(pending_dot(palette.chrome_faint))
+                                .child(PendingDot {
+                                    color: palette.chrome_faint,
+                                })
                                 .child(div().italic().truncate().child(tab.title.clone())),
                         )
                         .into_any_element(),
@@ -956,51 +958,63 @@ fn tab_menu(
 }
 
 /// A tab whose window the host has not created yet: the pulse is what says
-/// "still waiting". Under reduced motion GPUI draws the start of a repeating
-/// animation and schedules nothing, and this pulse starts mid-range, so the
-/// dot stays, still, at the 0.6 or so Tauri gave it there.
-fn pending_dot(color: gpui_kit::Rgba) -> impl IntoElement {
-    div().size(ui(6.)).rounded_full().bg(color).with_animation(
-        "tab-pending-pulse",
-        Animation::new(std::time::Duration::from_millis(1200))
-            .repeat()
-            .with_easing(pulsating_between(0.3, 1.)),
-        |dot, opacity| dot.opacity(opacity),
-    )
+/// "still waiting". It steps with the shared motion clock rather than asking
+/// for every frame (see [`crate::ui::motion`]). Under reduced motion it holds
+/// the pulse's start, mid-range, so the dot stays, still, at the 0.6 or so
+/// Tauri gave it there.
+#[derive(IntoElement)]
+struct PendingDot {
+    color: gpui_kit::Rgba,
+}
+
+/// Tauri's `tab-pending-pulse`: 1.2 s, between 0.3 and 1.
+const PULSE: std::time::Duration = std::time::Duration::from_millis(1200);
+
+impl RenderOnce for PendingDot {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let phase = crate::ui::motion::frame(window, cx)
+            .map(|elapsed| {
+                (elapsed.as_millis() % PULSE.as_millis()) as f32 / PULSE.as_millis() as f32
+            })
+            .unwrap_or(0.);
+        div()
+            .size(ui(6.))
+            .rounded_full()
+            .bg(self.color)
+            .opacity(pulsating_between(0.3, 1.)(phase))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{Context, Render, TestAppContext, px, size};
+    use gpui_kit::{AnyElement, TestAppContext};
 
     use super::*;
+    use crate::ui::motion::tests::{frames_requested, open, renders_in_a_second};
 
-    struct Pending;
-
-    impl Render for Pending {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .child(pending_dot(gpui_kit::rgba(0x808080ff)))
+    fn pending() -> AnyElement {
+        PendingDot {
+            color: gpui_kit::rgba(0x808080ff),
         }
-    }
-
-    fn frames_asked(reduce: bool, cx: &mut TestAppContext) -> usize {
-        cx.update(|cx| cx.set_reduce_motion(reduce));
-        let window = cx.open_window(size(px(40.), px(40.)), |_, _| Pending);
-        cx.run_until_parked();
-        window
-            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
-            .unwrap()
+        .into_any_element()
     }
 
     #[gpui_kit::test]
-    fn a_pending_tab_pulses_unless_motion_is_reduced(cx: &mut TestAppContext) {
-        assert!(frames_asked(false, cx) > 0, "the dot pulses");
+    fn a_pending_tab_pulses_at_the_motion_clock_rate(cx: &mut TestAppContext) {
+        let (window, renders) = open(pending, cx);
+        let per_second = renders_in_a_second(&renders, cx);
+        assert!(
+            (10..=15).contains(&per_second),
+            "{per_second} frames a second"
+        );
+        assert_eq!(frames_requested(&window, cx), 0, "no every-frame animation");
     }
 
     #[gpui_kit::test]
     fn reduced_motion_keeps_the_pending_dot_still(cx: &mut TestAppContext) {
-        assert_eq!(frames_asked(true, cx), 0);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (window, renders) = open(pending, cx);
+        assert_eq!(renders_in_a_second(&renders, cx), 0);
+        assert_eq!(frames_requested(&window, cx), 0);
     }
 }
