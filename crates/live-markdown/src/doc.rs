@@ -64,8 +64,61 @@ pub struct Document {
     /// composition's commit).
     break_coalescing: bool,
     revision: u64,
-    /// The text changed since the host last took it.
-    unsent: bool,
+    /// What changed since the host last took the text.
+    unsent: Option<Change>,
+    /// What changed since [`Self::take_change`] last took it, so the parse can
+    /// redo only that part.
+    change: Option<Change>,
+}
+
+/// One span that covers every edit since a point in time: the text before it
+/// is unchanged, `start..old_end` of the old text is now `start..new_end`,
+/// and what follows is unchanged but shifted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub start: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+}
+
+impl Change {
+    /// How far text after the change moved.
+    pub fn delta(&self) -> isize {
+        self.new_end as isize - self.old_end as isize
+    }
+
+    /// Where an old position is now. A position inside the replaced span
+    /// moves to its start.
+    pub fn map(&self, pos: usize) -> usize {
+        if pos <= self.start {
+            pos
+        } else if pos >= self.old_end {
+            pos - self.old_end + self.new_end
+        } else {
+            self.start
+        }
+    }
+
+    /// `change`, if any, and then `range` replaced by `len` bytes.
+    fn grow(change: Option<Self>, range: Range<usize>, len: usize) -> Self {
+        let first = Self {
+            start: range.start,
+            old_end: range.start,
+            new_end: range.start,
+        };
+        change.unwrap_or(first).then(range, len)
+    }
+
+    /// This change followed by the replacement of `range` (in the text after
+    /// this change) with `len` bytes.
+    fn then(self, range: Range<usize>, len: usize) -> Self {
+        let end = self.new_end.max(range.end);
+        Self {
+            start: self.start.min(range.start),
+            old_end: self.old_end + (end - self.new_end),
+            new_end: end + len - range.len(),
+        }
+    }
 }
 
 impl Document {
@@ -77,8 +130,18 @@ impl Document {
             redo: Vec::new(),
             break_coalescing: true,
             revision: 0,
-            unsent: false,
+            unsent: None,
+            change: None,
         }
+    }
+
+    /// The span changed since the last call, if any.
+    pub fn take_change(&mut self) -> Option<Change> {
+        self.change.take()
+    }
+
+    fn record(&mut self, range: Range<usize>, len: usize) {
+        self.change = Some(Change::grow(self.change, range, len));
     }
 
     pub fn text(&self) -> &str {
@@ -109,16 +172,17 @@ impl Document {
 
     /// Whether the text changed since the host last took it.
     pub fn edited(&self) -> bool {
-        self.unsent
+        self.unsent.is_some()
     }
 
-    /// Whether the text changed since the last call.
-    pub fn take_edited(&mut self) -> bool {
-        std::mem::take(&mut self.unsent)
+    /// The span changed since the last call, if any.
+    pub fn take_edited(&mut self) -> Option<Change> {
+        self.unsent.take()
     }
 
     fn splice(&mut self, range: Range<usize>, text: &str) {
-        self.unsent = true;
+        self.unsent = Some(Change::grow(self.unsent, range.clone(), text.len()));
+        self.record(range.clone(), text.len());
         self.text.replace_range(range, text);
         self.revision += 1;
     }
@@ -204,11 +268,12 @@ impl Document {
         if start == old_end && start == new_end {
             return;
         }
-        let change = Change {
+        let change = Outside {
             from: start,
             to: old_end,
             len: new_end - start,
         };
+        self.record(start..old_end, new_end - start);
         self.text
             .replace_range(start..old_end, &text[start..new_end]);
         self.selection = change.map_selection(self.selection);
@@ -216,7 +281,7 @@ impl Document {
             self.undo.clear();
             self.redo.clear();
         }
-        self.unsent = false;
+        self.unsent = None;
         self.break_coalescing = true;
         self.revision += 1;
     }
@@ -224,13 +289,13 @@ impl Document {
 
 /// An outside change: `from..to` of the text became `len` bytes.
 #[derive(Clone, Copy, Debug)]
-struct Change {
+struct Outside {
     from: usize,
     to: usize,
     len: usize,
 }
 
-impl Change {
+impl Outside {
     fn map(&self, at: usize) -> usize {
         if at <= self.from {
             at
@@ -346,12 +411,12 @@ mod tests {
     #[test]
     fn the_host_is_told_of_an_edit_once() {
         let mut d = Document::new("ab");
-        assert!(!d.take_edited());
+        assert!(d.take_edited().is_none());
         d.replace(1..1, "x", 2, EditKind::Typing);
         d.undo();
         assert!(d.edited());
-        assert!(d.take_edited());
-        assert!(!d.take_edited());
+        assert!(d.take_edited().is_some());
+        assert!(d.take_edited().is_none());
     }
 
     // Mirrors LiveMarkdownEditor.test.tsx "minimalChange".
@@ -372,6 +437,28 @@ mod tests {
         assert_eq!(span("a\u{e9}", "a\u{e8}"), (1, 3, "\u{e8}".into()));
     }
 
+    #[test]
+    fn one_change_covers_every_edit_since_it_was_taken() {
+        let mut d = Document::new("0123456789");
+        let base = d.text().to_owned();
+        d.replace(5..5, "ab", 7, EditKind::Typing);
+        d.replace(1..2, "", 1, EditKind::Deletion);
+        d.replace(9..11, "xyz", 12, EditKind::Other);
+        d.undo();
+        d.reset_text("0234ab5678X9");
+        let c = d.take_change().unwrap();
+        let rebuilt = format!(
+            "{}{}{}",
+            &base[..c.start],
+            &d.text()[c.start..c.new_end],
+            &base[c.old_end..]
+        );
+        assert_eq!(rebuilt, d.text());
+        assert_eq!(c.map(0), 0);
+        assert_eq!(c.map(base.len()), d.text().len());
+        assert_eq!(d.take_change(), None);
+    }
+
     // Mirrors LiveMarkdownEditor.test.tsx "takes an outside change in place".
     #[test]
     fn an_outside_change_keeps_the_caret_and_is_not_undoable_or_queued() {
@@ -383,7 +470,7 @@ mod tests {
         d.reset_text("zero\none\ntwo\n!");
         assert_eq!(d.text(), "zero\none\ntwo\n!");
         assert_eq!(d.selection().head, 11);
-        assert!(!d.take_edited());
+        assert!(d.take_edited().is_none());
         // Undo takes back the user's edit, past the outside change, and never
         // the outside change itself.
         assert!(d.undo());

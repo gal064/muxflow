@@ -106,7 +106,7 @@ impl LiveDoc {
     /// The target of the link at `pos`, for a ⌘-click (Ctrl on Linux).
     pub fn link_at(&mut self, pos: usize) -> Option<String> {
         self.refresh();
-        crate::link::link_at(&self.ast, pos)
+        crate::link::link_at(self.tree.ast(), pos)
     }
 }
 
