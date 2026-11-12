@@ -55,6 +55,7 @@ tokio.workspace = true
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 terminal-engine = { path = "../../crates/terminal-engine" }
 terminal-interactions = { path = "../../crates/terminal-interactions" }
+live-markdown = { path = "../../crates/live-markdown" }
 tmux-control = { path = "../../crates/tmux-control" }
 uuid.workspace = true
 

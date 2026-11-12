@@ -7,7 +7,7 @@
 //! admitted over what is on screen. The text itself lives in the editor's
 //! buffer, which the surface creates when it first draws the document.
 
-use std::{rc::Rc, time::Duration};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use desktop_core::app_state::AppTabKind;
 
@@ -109,6 +109,9 @@ pub struct Document {
     /// A read's error over content that is still on screen.
     error: Option<String>,
     binary_generation: Option<String>,
+    /// The size of the text file as last read, which decides whether a
+    /// Markdown tab may show its Live view.
+    read_bytes: Option<u64>,
     editor: Option<Entity<EditorState>>,
     /// Text for the editor the next time it draws: a read or a change on disk.
     pending_text: Option<Rope>,
@@ -163,6 +166,7 @@ impl Document {
             autosave: None,
             error: None,
             binary_generation: None,
+            read_bytes: None,
             editor: None,
             pending_text: None,
             load_serial: 0,
@@ -216,6 +220,12 @@ impl Document {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// The size in bytes of the text file as last read, not of the buffer:
+    /// typing past a limit must not swap the view under the user.
+    pub fn read_bytes(&self) -> Option<u64> {
+        self.read_bytes
     }
 
     /// The buffer as it stands, for the Markdown preview.
@@ -449,6 +459,9 @@ impl Document {
             }
             Opened::Text(file) => {
                 self.binary_generation = None;
+                // What was read, not the size the host reported, which may be
+                // missing.
+                self.read_bytes = Some(file.content.len() as u64);
                 if file.size_bytes > TEXT_FILE_LIMIT_BYTES {
                     self.paint.abandon();
                     self.autosave = None;
@@ -476,14 +489,33 @@ impl Document {
                         if autosave.external(snapshot, external_operation.as_deref()) {
                             self.debounce = None;
                             self.pending_text = Some(text);
+                            self.revision += 1;
                         }
                     }
                     None => {
                         self.pending_text = Some(snapshot.content.clone());
                         self.autosave = Some(Autosave::new(snapshot));
+                        self.revision += 1;
                     }
                 }
             }
+        }
+    }
+
+    /// An edit from a view other than the source editor (the Markdown tab's
+    /// Live view): `range` of the buffer, in bytes, becomes `text`. It saves
+    /// as a typed edit does, and the source editor takes it when next drawn,
+    /// or made: until then `pending_text` holds the text it starts from.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        let Some(mut buffer) = self.text() else {
+            return;
+        };
+        buffer.remove(range.clone());
+        buffer.insert(range.start, text);
+        let revision = self.revision;
+        self.edit(buffer.clone(), cx);
+        if self.revision != revision {
+            self.pending_text = Some(buffer);
         }
     }
 
