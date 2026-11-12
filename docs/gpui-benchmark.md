@@ -50,10 +50,323 @@ pulse, which lasts as long as a tab is loading.
 GPUI still uses more GPU time than Tauri whenever the window redraws (streaming output,
 agents printing), because it repaints the whole window. It costs no extra CPU.
 
-## macOS
+## macOS headline (MacBook Pro, Apple silicon, macOS 26.5, medians of 3 runs)
 
-Pending. The owner runs the same harness (`run-macos.sh`) on an Apple silicon Mac,
-local first and then against the same VM.
+Built from `3c42f6e`: the spinner still stepped at 13 fps, before the still ring. The SSH
+host was a VM with the same spec as the Linux run's. Memory is macOS `footprint`, not PSS.
+"Hidden" means minimized.
+
+| What | Tauri | GPUI |
+|---|---|---|
+| CPU, idle (1x1 and 8x2) | 15-17% | 2.3-2.5% |
+| Memory, idle | 280-290 MB | 126-127 MB |
+| Memory, peak, SSH `cat` of 200k colored lines | 1464 MB | 177 MB |
+| Heavy output, local wall time (`seq` / `cat`) | 4.04 / 4.14 s | 3.21 / 3.58 s |
+| Heavy output, app CPU-seconds | about 3x GPUI | |
+| CPU, 60 lines/s across 16 panes | 48.5% | 30.2% |
+| CPU, 3 Claude + 3 Codex replays | 31.6% | 24.3% |
+| CPU, 6 agents working, visible (13 fps spinner) | 21.9% | 14.6% |
+| CPU, 6 agents working, minimized | 0.3% | 1.3% |
+| Quick Open of a 5 MB file, app CPU-seconds | 2.16 | 0.42 |
+| Window shown, local cold | 294 ms | 413 ms |
+| First terminal content, local / SSH | 1.29 / 1.65 s | 1.37 / 1.49 s |
+| App binary | 21.7 MB (WebKit is part of macOS) | 53.2 MB |
+
+- **Minimized:** WebKit throttles a minimized page, so Tauri drops to 0.3%. GPUI keeps
+  about 1.3% of a core. That is the one cell where GPUI loses on CPU.
+- **Startup:** Tauri maps its window about 100 ms sooner. First content arrives at about
+  the same time. Screen captures take about 180 ms each on this Mac, so startup and
+  heavy-output times are coarse.
+- **Tauri stall:** in one of 6 local `cat` runs, Tauri stopped drawing at line 199,794 of
+  200,000, with a broken SGR sequence shown as text. GPUI never failed.
+- **Not measured:** typing latency, because this Mac quantized key-to-screen time in
+  steps of about 107-170 ms system-wide during the run (a Terminal.app control showed the
+  same steps), and GPU, because `powermetrics` needs sudo.
+
+## Full macOS results
+
+
+Run started 2026-11-11T22:40:34-0800; 3 runs per cell; steady windows 60.0 s after 15.0 s settle; compositor: WindowServer.
+
+Cells: median [min-max] over runs. Ratio = Tauri / GPUI (above 1: Tauri uses more or takes longer).
+CPU in % of one core; GPU as % engine-busy time from DRM fdinfo; memory summed over the process tree.
+
+### Sizes (macOS arm64)
+
+| Binary | As built (MB) | strip -S -x (MB) | gzip -9 of as-built (MB) |
+|---|---|---|---|
+| Tauri app (muxflow, frontend embedded) | 21.7 | 17.2 | 9.7 |
+| GPUI app (muxflow-gpui) | 53.2 | 43.2 | 16.9 |
+| Host helper (muxflow-host) | 11.2 | 8.8 | 4.0 |
+
+Muxflow.app bundle on disk: 35.1 MB (includes the helper sidecar and Linux helpers).
+WKWebView is part of macOS, so Tauri ships no web engine here.
+
+### Host: local
+
+#### Startup, cold (fresh app state, no helper daemon)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Window mapped (ms) | 294 [283-329] | 413 [318-429] | 0.71x |
+| First terminal content (ms) | 1288 [1278-1300] | 1365 [1278-1410] | 0.94x |
+| CPU during startup window (CPU-s) | 0.39 [0.37-0.40] | 0.23 [0.16-0.23] | 1.70x |
+| App PSS (max) (MB) | 386 [373-388] | 129 [128-148] | 2.99x |
+
+#### Startup, warm (seeded state, daemon and tmux running)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Window mapped (ms) | 353 [329-381] | 410 [393-420] | 0.86x |
+| First terminal content (ms) | 1391 [1358-1430] | 1383 [1365-1403] | 1.01x |
+| CPU during startup window (CPU-s) | 0.41 [0.40-0.44] | 0.20 [0.19-0.21] | 2.05x |
+| App PSS (max) (MB) | 394 [354-400] | 127 [126-148] | 3.10x |
+
+#### Idle, 1 workspace x 1 terminal
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 16.1 [15.1-16.8] | 2.4 [2.0-2.5] | 6.79x |
+| Local host helper CPU (% core) | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 1.15x |
+| tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
+| App PSS (mean) (MB) | 282 [274-282] | 126 [125-147] | 2.23x |
+| App RSS (mean) (MB) | 426 [422-430] | 122 [121-122] | 3.50x |
+| Host helper PSS (mean) (MB) | 9 [9-10] | 10 [9-10] | 0.99x |
+
+#### Idle, 8 tabs x 2 panes
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 17.2 [16.1-17.7] | 2.5 [2.4-2.6] | 6.97x |
+| Local host helper CPU (% core) | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 1.28x |
+| tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 1.00x |
+| App PSS (mean) (MB) | 288 [281-289] | 127 [127-127] | 2.27x |
+| App RSS (mean) (MB) | 441 [423-448] | 122 [122-122] | 3.62x |
+| Host helper PSS (mean) (MB) | 10 [10-10] | 10 [10-10] | 1.00x |
+
+#### Heavy output: seq 1 3000000
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Wall time to final line (s) | 4.04 [3.99-4.16] | 3.21 [3.09-3.22] | 1.26x |
+| App CPU-seconds (CPU-s) | 9.22 [8.80-9.41] | 3.12 [3.03-3.12] | 2.96x |
+| Local host helper CPU-seconds (CPU-s) | 2.70 [2.62-2.78] | 4.36 [4.33-4.40] | 0.62x |
+| tmux CPU-seconds (CPU-s) | 3.06 [3.02-3.06] | 2.76 [2.70-2.77] | 1.11x |
+| App PSS (peak sample) (MB) | 490 [490-512] | 187 [185-188] | 2.63x |
+| App RSS (peak sample) (MB) | 767 [710-803] | 162 [161-162] | 4.73x |
+
+#### Heavy output: cat of 200k colored lines
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Wall time to final line (s) | 4.14 [4.09-4.19] (n=2) | 3.58 [3.57-3.64] | 1.15x |
+| App CPU-seconds (CPU-s) | 9.92 [9.48-59.85] | 2.68 [2.57-2.69] | 3.70x |
+| Local host helper CPU-seconds (CPU-s) | 2.35 [2.23-2.96] | 2.69 [2.56-2.85] | 0.87x |
+| tmux CPU-seconds (CPU-s) | 3.48 [3.42-3.56] | 3.26 [3.24-3.27] | 1.07x |
+| App PSS (peak sample) (MB) | 568 [481-581] | 195 [193-195] | 2.91x |
+| App RSS (peak sample) (MB) | 874 [853-998] | 170 [170-171] | 5.13x |
+
+#### Agent-like line stream (60 lines/s, 8x2 layout)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 48.5 [47.1-48.5] | 30.2 [30.2-30.5] | 1.61x |
+| Local host helper CPU (% core) | 1.7 [1.7-1.9] | 2.2 [2.2-2.3] | 0.79x |
+| tmux CPU (% core) | 1.2 [1.1-1.2] | 1.3 [1.3-1.3] | 0.89x |
+| App PSS (mean) (MB) | 393 [383-393] | 161 [158-165] | 2.44x |
+| App RSS (mean) (MB) | 543 [535-546] | 137 [136-137] | 3.98x |
+| Host helper PSS (mean) (MB) | 9 [8-9] | 8 [8-9] | 1.01x |
+
+#### Recorded agents: 3 Claude + 3 Codex replays, rows working/done
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 31.6 [31.5-31.6] | 24.3 [24.1-24.6] | 1.30x |
+| Local host helper CPU (% core) | 1.8 [1.8-1.8] | 1.5 [1.5-1.5] | 1.21x |
+| tmux CPU (% core) | 1.0 [1.0-1.0] | 0.8 [0.8-0.9] | 1.22x |
+| App PSS (mean) (MB) | 369 [366-394] | 163 [162-164] | 2.27x |
+| App RSS (mean) (MB) | 563 [561-597] | 136 [136-136] | 4.14x |
+| Host helper PSS (mean) (MB) | 11 [11-12] | 11 [11-12] | 1.00x |
+
+#### 6 agents working, no output, window visible
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 21.9 [21.5-22.8] | 14.6 [14.6-15.1] | 1.50x |
+| Local host helper CPU (% core) | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 1.39x |
+| tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.40x |
+| App PSS (mean) (MB) | 348 [345-380] | 163 [163-163] | 2.13x |
+| App RSS (mean) (MB) | 580 [579-624] | 137 [137-137] | 4.23x |
+| Host helper PSS (mean) (MB) | 9 [9-10] | 9 [9-10] | 1.00x |
+
+#### 6 agents working, no output, window on another workspace
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 0.3 [0.3-0.5] | 1.3 [1.3-1.4] | 0.24x |
+| Local host helper CPU (% core) | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 1.00x |
+| tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
+| App PSS (mean) (MB) | 359 [357-360] | 155 [155-155] | 2.32x |
+| App RSS (mean) (MB) | 581 [579-624] | 138 [137-138] | 4.23x |
+| Host helper PSS (mean) (MB) | 9 [9-9] | 9 [9-10] | 0.98x |
+
+#### Editor: Quick Open and open a 5 MB file (no scrolling)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Action window (s) | 9.4 [9.4-9.4] | 9.4 [9.4-9.4] | 1.00x |
+| App CPU-seconds (CPU-s) | 2.16 [2.15-2.21] | 0.42 [0.41-0.45] | 5.14x |
+| Local host helper CPU-seconds (CPU-s) | 0.09 [0.08-0.10] | 0.08 [0.08-0.08] | 1.12x |
+| App PSS (peak sample) (MB) | 464 [462-568] | 240 [240-265] | 1.93x |
+| App RSS (peak sample) (MB) | 594 [594-604] | 264 [260-264] | 2.26x |
+
+### Host: ssh
+
+#### Startup, cold (fresh app state, no helper daemon)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Window mapped (ms) | 351 [302-371] | 413 [329-418] | 0.85x |
+| First terminal content (ms) | 1648 [1606-1725] | 1488 [1382-1539] | 1.11x |
+| CPU during startup window (CPU-s) | 0.39 [0.39-0.41] | 0.27 [0.19-0.27] | 1.44x |
+| App PSS (max) (MB) | 391 [387-432] | 102 [102-102] | 3.83x |
+
+#### Startup, warm (seeded state, daemon and tmux running)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Window mapped (ms) | 367 [324-372] | 366 [327-374] | 1.00x |
+| First terminal content (ms) | 1535 [1490-1604] | 1431 [1316-1601] | 1.07x |
+| CPU during startup window (CPU-s) | 0.39 [0.39-0.43] | 0.19 [0.19-0.20] | 2.05x |
+| App PSS (max) (MB) | 411 [409-412] | 102 [102-113] | 4.03x |
+
+#### Idle, 1 workspace x 1 terminal
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 15.0 [14.7-16.5] | 2.3 [2.3-2.4] | 6.45x |
+| Local host helper CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | n/a (GPUI 0) |
+| App PSS (mean) (MB) | 285 [266-294] | 102 [102-106] | 2.79x |
+| App RSS (mean) (MB) | 428 [420-430] | 115 [115-115] | 3.72x |
+| Host helper PSS (mean) (MB) | 4 [4-4] | 4 [4-4] | 1.03x |
+| Remote helper CPU (% core) | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 0.93x |
+| Remote tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 23 [22-23] | 22 [22-23] | 1.00x |
+
+#### Idle, 8 tabs x 2 panes
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 16.0 [15.8-16.5] | 2.5 [2.5-2.5] | 6.27x |
+| Local host helper CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 1.00x |
+| App PSS (mean) (MB) | 295 [295-295] | 114 [103-123] | 2.59x |
+| App RSS (mean) (MB) | 440 [431-445] | 116 [116-117] | 3.79x |
+| Host helper PSS (mean) (MB) | 4 [4-4] | 4 [4-4] | 1.05x |
+| Remote helper CPU (% core) | 0.3 [0.3-0.3] | 0.3 [0.3-0.4] | 1.00x |
+| Remote tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 23 [23-24] | 23 [23-23] | 0.99x |
+
+#### Heavy output: seq 1 3000000
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Wall time to final line (s) | 7.96 [7.94-8.06] | 7.97 [7.95-7.99] | 1.00x |
+| App CPU-seconds (CPU-s) | 9.59 [9.59-9.63] | 3.22 [3.19-3.27] | 2.98x |
+| Local host helper CPU-seconds (CPU-s) | 0.00 [0.00-0.00] | 0.00 [0.00-0.00] | = |
+| ssh client CPU-seconds (CPU-s) | 0.47 [0.47-0.48] | 0.31 [0.31-0.32] | 1.52x |
+| App PSS (peak sample) (MB) | 428 [426-437] | 186 [182-186] | 2.30x |
+| App RSS (peak sample) (MB) | 535 [530-613] | 155 [155-156] | 3.44x |
+| Remote helper CPU-seconds (CPU-s) | 2.35 [2.34-2.41] | 2.14 [2.13-2.19] | 1.10x |
+| Remote tmux CPU-seconds (CPU-s) | 7.53 [7.53-7.53] | 7.48 [7.47-7.52] | 1.01x |
+
+#### Heavy output: cat of 200k colored lines
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Wall time to final line (s) | 13.20 [13.05-13.27] | 13.20 [13.09-13.27] | 1.00x |
+| App CPU-seconds (CPU-s) | 19.19 [19.18-19.43] | 7.34 [6.63-7.44] | 2.61x |
+| Local host helper CPU-seconds (CPU-s) | 0.00 [0.00-0.00] | 0.00 [0.00-0.00] | = |
+| ssh client CPU-seconds (CPU-s) | 0.54 [0.53-0.56] | 0.54 [0.53-0.54] | 1.00x |
+| App PSS (peak sample) (MB) | 1464 [1231-1651] | 177 [176-179] | 8.27x |
+| App RSS (peak sample) (MB) | 1081 [988-1205] | 161 [160-165] | 6.72x |
+| Remote helper CPU-seconds (CPU-s) | 4.24 [4.12-4.29] | 4.38 [4.36-4.44] | 0.97x |
+| Remote tmux CPU-seconds (CPU-s) | 12.73 [12.67-12.76] | 12.76 [12.70-12.85] | 1.00x |
+
+#### Agent-like line stream (60 lines/s, 8x2 layout)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 49.1 [48.8-49.3] | 31.2 [30.7-31.6] | 1.57x |
+| Local host helper CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| ssh client CPU (% core) | 0.9 [0.9-0.9] | 1.2 [1.1-1.2] | 0.80x |
+| App PSS (mean) (MB) | 417 [407-418] | 157 [153-160] | 2.66x |
+| App RSS (mean) (MB) | 560 [558-577] | 131 [130-131] | 4.28x |
+| Host helper PSS (mean) (MB) | 2 [2-2] | 2 [2-2] | 1.00x |
+| Remote helper CPU (% core) | 5.2 [5.2-5.5] | 5.2 [5.2-5.2] | 1.01x |
+| Remote tmux CPU (% core) | 2.6 [2.6-2.6] | 2.6 [2.6-2.6] | 1.00x |
+| Remote sshd CPU (% core) | 1.7 [1.7-1.9] | 1.7 [1.7-1.7] | 1.03x |
+| Remote helper RSS (mean) (MB) | 19 [18-19] | 19 [18-19] | 1.00x |
+
+#### Recorded agents: 3 Claude + 3 Codex replays, rows working/done
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 33.9 [27.5-34.6] | 26.1 [25.7-26.1] | 1.30x |
+| Local host helper CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| ssh client CPU (% core) | 1.0 [0.8-1.0] | 0.8 [0.8-0.8] | 1.22x |
+| App PSS (mean) (MB) | 406 [372-415] | 160 [159-161] | 2.54x |
+| App RSS (mean) (MB) | 577 [567-613] | 131 [129-131] | 4.41x |
+| Host helper PSS (mean) (MB) | 4 [4-4] | 4 [4-4] | 1.00x |
+| Remote helper CPU (% core) | 4.1 [4.1-4.2] | 4.2 [4.2-4.2] | 0.99x |
+| Remote tmux CPU (% core) | 3.6 [3.6-3.6] | 3.6 [3.6-3.6] | 0.99x |
+| Remote sshd CPU (% core) | 1.1 [1.0-1.1] | 1.1 [1.1-1.1] | 1.00x |
+| Remote helper RSS (mean) (MB) | 24 [24-24] | 24 [24-25] | 1.00x |
+
+#### 6 agents working, no output, window visible
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 21.1 [19.2-21.8] | 14.4 [14.3-14.8] | 1.47x |
+| Local host helper CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
+| App PSS (mean) (MB) | 391 [349-435] | 158 [158-160] | 2.48x |
+| App RSS (mean) (MB) | 584 [526-635] | 132 [131-133] | 4.41x |
+| Host helper PSS (mean) (MB) | 2 [2-4] | 2 [2-2] | 1.00x |
+| Remote helper CPU (% core) | 0.5 [0.5-0.6] | 0.5 [0.5-0.5] | 1.02x |
+| Remote tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.70x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 20 [20-24] | 20 [20-21] | 1.00x |
+
+#### 6 agents working, no output, window on another workspace
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| App CPU (% core) | 0.3 [0.1-0.5] | 1.3 [1.3-1.4] | 0.21x |
+| Local host helper CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| App PSS (mean) (MB) | 350 [321-419] | 150 [149-152] | 2.34x |
+| App RSS (mean) (MB) | 600 [512-635] | 132 [131-133] | 4.54x |
+| Host helper PSS (mean) (MB) | 2 [2-2] | 2 [2-2] | 1.00x |
+| Remote helper CPU (% core) | 0.5 [0.5-0.5] | 0.5 [0.5-0.5] | 0.96x |
+| Remote tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.88x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 20 [19-20] | 20 [20-20] | 1.00x |
+
+#### Editor: Quick Open and open a 5 MB file (no scrolling)
+
+| Metric | Tauri | GPUI | Tauri/GPUI |
+|---|---|---|---|
+| Action window (s) | 9.4 [9.4-9.4] | 9.4 [9.4-9.4] | 1.00x |
+| App CPU-seconds (CPU-s) | 2.24 [2.22-2.25] | 0.44 [0.44-0.48] | 5.09x |
+| Local host helper CPU-seconds (CPU-s) | 0.04 [0.04-0.04] | 0.05 [0.04-0.06] | 0.80x |
+| App PSS (peak sample) (MB) | 568 [563-569] | 254 [232-256] | 2.23x |
+| App RSS (peak sample) (MB) | 592 [584-596] | 252 [251-253] | 2.35x |
+| Remote helper CPU-seconds (CPU-s) | 0.21 [0.20-0.21] | 0.21 [0.19-0.21] | 1.00x |
+
 
 ## Full Linux results
 
