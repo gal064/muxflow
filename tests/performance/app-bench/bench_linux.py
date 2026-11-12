@@ -119,7 +119,8 @@ class Compositor:
             time.sleep(0.1)
             new = set(os.listdir(f"{self.runtime}/hypr")) - before
             for signature in new:
-                if os.path.exists(f"{self.runtime}/hypr/{signature}/.socket.sock"):
+                if (os.path.exists(f"{self.runtime}/hypr/{signature}/.socket.sock")
+                        and self._lock_pid(signature) == self.proc.pid):
                     self.signature = signature
             if self.signature:
                 break
@@ -156,11 +157,21 @@ class Compositor:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
 
+    def _lock_pid(self, signature: str) -> int | None:
+        try:
+            first = Path(f"{self.runtime}/hypr/{signature}/hyprland.lock").read_text().split("\n", 1)[0]
+            return int(first.strip())
+        except (OSError, ValueError):
+            return None
+
     def hyprctl(self, *args: str) -> str:
         if not self.signature:
             raise RuntimeError("no compositor instance selected")
-        if self.mode == "private" and self.signature == self.session_signature:
-            raise RuntimeError("refusing to send hyprctl commands to the session compositor")
+        if self.mode == "private":
+            # Only ever the instance this harness started: its lock file names our pid.
+            if (self.proc is None or self.signature == self.session_signature
+                    or self._lock_pid(self.signature) != self.proc.pid):
+                raise RuntimeError("refusing to send hyprctl commands to a compositor we did not start")
         env = dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.signature)
         return subprocess.run(["hyprctl", *args], env=env, capture_output=True, text=True).stdout
 
@@ -975,7 +986,7 @@ def install_local_hooks(ctx: Context) -> None:
 
 
 def block_agents(ctx: Context, app: str, run: int, scenarios: set[str]) -> None:
-    if not scenarios & {"agents", "spinner"}:
+    if not scenarios & {"agents", "spinner", "still"}:
         return
     log(f"{ctx.host} {app} run {run}: agents block")
     ctx.reset("agents", seeded=True)
@@ -1029,6 +1040,20 @@ def block_agents(ctx: Context, app: str, run: int, scenarios: set[str]) -> None:
         result, ticks, remote = sample_window(ctx, ctx.window, 1.0, f"spin-h-{app}-{run}")
         save(ctx, "spinner-hidden", app, run, result, ticks, remote)
         ctx.compositor.show_workspace(1)
+    if "still" in scenarios:
+        # The spinner's baseline: the same six rows and silent panes, driven
+        # working and then done through the same hooks, so only the motion goes.
+        panes = start_agents(ctx, "idle")
+        time.sleep(2.0)
+        for index, pane in enumerate(panes):
+            agent_hook(ctx, pane, index, "UserPromptSubmit")
+        time.sleep(1.0)
+        for index, pane in enumerate(panes):
+            agent_hook(ctx, pane, index, "Stop")
+        time.sleep(ctx.settle)
+        ctx.compositor.save_png(evidence / f"still-{app}-run{run}.png")
+        result, ticks, remote = sample_window(ctx, ctx.window, 1.0, f"still-{app}-{run}")
+        save(ctx, "spinner-still", app, run, result, ticks, remote)
     ctx.stop_app()
 
 
@@ -1178,10 +1203,10 @@ def main() -> int:
             subprocess.run(["perl", str(HERE / "workloads" / "colored.pl"), "200000"], stdout=handle, check=True)
     for name in ("stream.pl", "keyprobe.pl"):
         shutil.copy(HERE / "workloads" / name, ctx.data / name)
-    if not args.recordings and set(args.scenarios.split(",")) & {"agents", "spinner"}:
+    if not args.recordings and set(args.scenarios.split(",")) & {"agents", "spinner", "still"}:
         log("no --recordings: skipping the agents and spinner scenarios")
-        args.scenarios = ",".join(s for s in args.scenarios.split(",") if s not in ("agents", "spinner"))
-    if set(args.scenarios.split(",")) & {"agents", "spinner"}:
+        args.scenarios = ",".join(s for s in args.scenarios.split(",") if s not in ("agents", "spinner", "still"))
+    if set(args.scenarios.split(",")) & {"agents", "spinner", "still"}:
         # Recordings stay outside the repository: they hold local paths and names.
         recordings = Path(args.recordings).resolve()
         agents = ctx.data / "agents"
