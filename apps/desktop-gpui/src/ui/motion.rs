@@ -1,32 +1,31 @@
-//! Motion for indicators that can stay on for minutes: the working-agent
-//! spinner and the pending-tab pulse.
+//! Motion for indicators that can stay on for a while: the pending-tab pulse.
 //!
 //! GPUI's `with_animation` asks for another frame on every frame, and a frame
 //! re-renders the view that drew the element and every view above it: here the
-//! whole chrome. Six working agents held the window at 60 frames a second, at
-//! about 3 ms of main-thread CPU and 1 ms of GPU each, with nothing else
-//! changing. These indicators read one clock instead, which steps every
+//! whole chrome. These indicators read one clock instead, which steps every
 //! [`STEP`] and wakes only the views that drew one at the last frame. A window
 //! that is not shown gets no steps: it is woken when it is shown again.
 //! Reduced motion stops the clock, as it stops GPUI's animations.
+//!
+//! The working-agent mark is [`WorkingIcon`], which does not move at all: a
+//! spinner stepped on this clock still cost about 5 % of a core and 3.7 % GPU
+//! busy with six agents working and nothing else changing, against the same
+//! rows drawn still.
 
 use std::{
     collections::HashMap,
-    f32::consts::TAU,
     time::{Duration, Instant},
 };
 
 use gpui_kit::{
     App, EntityId, Global, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Subscription,
-    Transformation, Window, WindowId, div, radians, svg,
+    Window, WindowId, div, svg,
 };
 
 use crate::theme::metrics::ui;
 
 /// One step of the shared clock: 13.3 frames a second.
 pub const STEP: Duration = Duration::from_millis(75);
-/// Tauri's `sidebar-spin`: one turn every 0.9 s, linear, so 12 steps of 30°.
-const TURN_STEPS: u32 = 12;
 
 #[derive(Default)]
 struct Clock {
@@ -96,15 +95,15 @@ fn wake(id: WindowId, cx: &mut App) {
     }
 }
 
-/// Tauri's spinner: a ring at 35 % with its top quarter in full colour,
-/// turning once every 0.9 s.
+/// A working agent: Tauri's spinner ring, a ring at 35 % with its top quarter
+/// in full colour, held still. Nothing about it asks for a frame.
 #[derive(IntoElement)]
-pub struct Spinner {
+pub struct WorkingIcon {
     size: f32,
     color: Hsla,
 }
 
-impl Spinner {
+impl WorkingIcon {
     /// `size` in CSS pixels, as Tauri's `.spinner` box; the ring is 1.5 px.
     pub fn new(size: f32, color: impl Into<Hsla>) -> Self {
         Self {
@@ -114,12 +113,8 @@ impl Spinner {
     }
 }
 
-impl RenderOnce for Spinner {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let step = frame(window, cx)
-            .map(|elapsed| (elapsed.as_millis() / STEP.as_millis()) as u32 % TURN_STEPS)
-            .unwrap_or(0);
-        let angle = TAU * step as f32 / TURN_STEPS as f32;
+impl RenderOnce for WorkingIcon {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let (ring, arc) = ring_svgs(self.size);
         div()
             .relative()
@@ -137,8 +132,7 @@ impl RenderOnce for Spinner {
                     .data(arc.as_bytes())
                     .absolute()
                     .size_full()
-                    .text_color(self.color)
-                    .with_transformation(Transformation::rotate(radians(angle))),
+                    .text_color(self.color),
             )
     }
 }
@@ -218,13 +212,24 @@ pub(crate) mod tests {
         count
     }
 
-    fn spinner() -> AnyElement {
-        Spinner::new(9., gpui_kit::rgba(0x808080ff)).into_any_element()
+    /// An element on the clock, as the pending-tab pulse is.
+    #[derive(IntoElement)]
+    struct Ticker;
+
+    impl RenderOnce for Ticker {
+        fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+            frame(window, cx);
+            div().size(px(4.))
+        }
+    }
+
+    fn ticker() -> AnyElement {
+        Ticker.into_any_element()
     }
 
     #[gpui_kit::test]
-    fn a_spinner_asks_for_at_most_fifteen_frames_a_second(cx: &mut TestAppContext) {
-        let (window, renders) = open(spinner, cx);
+    fn the_clock_asks_for_at_most_fifteen_frames_a_second(cx: &mut TestAppContext) {
+        let (window, renders) = open(ticker, cx);
         let per_second = renders_in_a_second(&renders, cx);
         assert!(
             (10..=15).contains(&per_second),
@@ -235,7 +240,7 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn a_hidden_window_asks_for_no_frames_until_shown(cx: &mut TestAppContext) {
-        let (window, renders) = open(spinner, cx);
+        let (window, renders) = open(ticker, cx);
         cx.simulate_window_visibility_change(window.into(), WindowVisibility::Hidden);
         // The step already armed may still land once.
         cx.executor().advance_clock(STEP * 2);
@@ -246,20 +251,30 @@ pub(crate) mod tests {
         cx.run_until_parked();
         assert!(
             renders_in_a_second(&renders, cx) >= 10,
-            "shown: it turns again"
+            "shown: it steps again"
         );
     }
 
     #[gpui_kit::test]
-    fn reduced_motion_holds_the_spinner_still(cx: &mut TestAppContext) {
+    fn reduced_motion_stops_the_clock(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (window, renders) = open(spinner, cx);
+        let (window, renders) = open(ticker, cx);
         assert_eq!(renders_in_a_second(&renders, cx), 0);
         assert_eq!(frames_requested(&window, cx), 0);
     }
 
     #[gpui_kit::test]
-    fn the_clock_stops_when_no_spinner_is_drawn(cx: &mut TestAppContext) {
+    fn the_working_icon_asks_for_no_frames(cx: &mut TestAppContext) {
+        fn working() -> AnyElement {
+            WorkingIcon::new(9., gpui_kit::rgba(0x808080ff)).into_any_element()
+        }
+        let (window, renders) = open(working, cx);
+        assert_eq!(renders_in_a_second(&renders, cx), 0);
+        assert_eq!(frames_requested(&window, cx), 0);
+    }
+
+    #[gpui_kit::test]
+    fn the_clock_stops_when_nothing_on_it_is_drawn(cx: &mut TestAppContext) {
         fn nothing() -> AnyElement {
             div().into_any_element()
         }
