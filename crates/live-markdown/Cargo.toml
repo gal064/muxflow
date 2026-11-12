@@ -1,0 +1,19 @@
+[package]
+name = "live-markdown"
+version = "0.1.0"
+license = "MIT"
+description = "Live Markdown editing over a source string: hidden syntax, inline tables, IME. GPUI only in `view`."
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Exact pins, as the app's: the view renders through gpui-base's `editor_host`.
+gpui-kit = { version = "=0.9.0", default-features = true }
+# Both already resolved through gpui-base; `markdown` gives source offsets.
+markdown = "=1.0.0"
+unicode-segmentation = "=1.13.3"
+
+[dev-dependencies]
+# `HeadlessAppContext` for the typing benchmark in `examples/`.
+gpui-kit = { version = "=0.9.0", default-features = true, features = ["test-support"] }

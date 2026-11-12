@@ -1,0 +1,311 @@
+//! The document: the Markdown source string is the single truth.
+//!
+//! Everything the editor shows is derived from `text` and the selection. Undo
+//! records byte-range source edits only, so a change made through a rendered
+//! table cell undoes exactly like one made while the raw markers were showing.
+//! The host is told the text changed, and takes the new text into the buffer
+//! it saves from.
+
+use std::ops::Range;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: usize,
+    pub head: usize,
+}
+
+impl Selection {
+    pub fn caret(pos: usize) -> Self {
+        Self {
+            anchor: pos,
+            head: pos,
+        }
+    }
+    pub fn range(&self) -> Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+}
+
+/// Why an edit happened; adjacent edits of the same coalescing kind share one
+/// undo step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditKind {
+    Typing,
+    Deletion,
+    Composition,
+    Other,
+}
+
+#[derive(Clone, Debug)]
+struct Edit {
+    from: usize,
+    removed: String,
+    inserted: String,
+}
+
+#[derive(Clone, Debug)]
+struct Entry {
+    edits: Vec<Edit>,
+    before: Selection,
+    after: Selection,
+    kind: EditKind,
+}
+
+#[derive(Debug)]
+pub struct Document {
+    text: String,
+    selection: Selection,
+    undo: Vec<Entry>,
+    redo: Vec<Entry>,
+    /// The next edit starts a new undo step (set by caret moves and by a
+    /// composition's commit).
+    break_coalescing: bool,
+    revision: u64,
+    /// The text changed since the host last took it.
+    unsent: bool,
+}
+
+impl Document {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            selection: Selection::caret(0),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            break_coalescing: true,
+            revision: 0,
+            unsent: false,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn selection(&self) -> Selection {
+        self.selection
+    }
+    /// Advances on every change to the text.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.selection = selection;
+        self.break_coalescing = true;
+    }
+
+    /// Selection change that keeps the current undo step open (used while the
+    /// caret follows typing).
+    pub fn set_selection_coalescing(&mut self, selection: Selection) {
+        self.selection = selection;
+    }
+
+    pub fn end_undo_group(&mut self) {
+        self.break_coalescing = true;
+    }
+
+    /// Whether the text changed since the host last took it.
+    pub fn edited(&self) -> bool {
+        self.unsent
+    }
+
+    /// Whether the text changed since the last call.
+    pub fn take_edited(&mut self) -> bool {
+        std::mem::take(&mut self.unsent)
+    }
+
+    fn splice(&mut self, range: Range<usize>, text: &str) {
+        self.unsent = true;
+        self.text.replace_range(range, text);
+        self.revision += 1;
+    }
+
+    /// Replace `range` and leave the caret at `caret`.
+    pub fn replace(&mut self, range: Range<usize>, inserted: &str, caret: usize, kind: EditKind) {
+        let removed = self.text[range.clone()].to_string();
+        if removed.is_empty() && inserted.is_empty() {
+            return;
+        }
+        let before = self.selection;
+        let after = Selection::caret(caret);
+        self.splice(range.clone(), inserted);
+        let edit = Edit {
+            from: range.start,
+            removed,
+            inserted: inserted.to_string(),
+        };
+        self.selection = after;
+        self.redo.clear();
+
+        let coalesce = !self.break_coalescing
+            && kind != EditKind::Other
+            && self.undo.last().is_some_and(|last| last.kind == kind);
+        if coalesce {
+            let last = self.undo.last_mut().expect("checked above");
+            last.edits.push(edit);
+            last.after = after;
+        } else {
+            self.undo.push(Entry {
+                edits: vec![edit],
+                before,
+                after,
+                kind,
+            });
+        }
+        self.break_coalescing = kind == EditKind::Other;
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo.pop() else {
+            return false;
+        };
+        for edit in entry.edits.iter().rev() {
+            let end = edit.from + edit.inserted.len();
+            self.splice(edit.from..end, &edit.removed);
+        }
+        self.selection = entry.before;
+        self.redo.push(entry);
+        self.break_coalescing = true;
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo.pop() else {
+            return false;
+        };
+        for edit in &entry.edits {
+            let end = edit.from + edit.removed.len();
+            self.splice(edit.from..end, &edit.inserted);
+        }
+        self.selection = entry.after;
+        self.undo.push(entry);
+        self.break_coalescing = true;
+        true
+    }
+
+    /// The text changed outside this editor (on disk, or in another view).
+    /// Only the span that differs is replaced, so the caret stays where it was
+    /// in the unchanged text. The change is not undoable and empties the
+    /// history: undoing past it would bring back text the file no longer has,
+    /// and autosave would write it straight back. The host, where it came
+    /// from, is not told of it.
+    pub fn reset_text(&mut self, text: &str) {
+        let (start, old_end, new_end) = minimal_change(&self.text, text);
+        if start == old_end && start == new_end {
+            return;
+        }
+        let shift = |at: usize| {
+            if at <= start {
+                at
+            } else if at >= old_end {
+                at - old_end + new_end
+            } else {
+                new_end
+            }
+        };
+        self.text
+            .replace_range(start..old_end, &text[start..new_end]);
+        self.selection = Selection {
+            anchor: shift(self.selection.anchor),
+            head: shift(self.selection.head),
+        };
+        self.undo.clear();
+        self.redo.clear();
+        self.unsent = false;
+        self.break_coalescing = true;
+        self.revision += 1;
+    }
+}
+
+/// Where `before` and `after` differ: the common prefix's end, then the ends
+/// of the differing spans in each, all on character boundaries. Port of
+/// `minimalChange` in `LiveMarkdownEditor.tsx`.
+pub fn minimal_change(before: &str, after: &str) -> (usize, usize, usize) {
+    let start = before
+        .char_indices()
+        .zip(after.chars())
+        .find(|((_, a), b)| a != b)
+        .map_or(before.len().min(after.len()), |((at, _), _)| at);
+    let suffix: usize = before[start..]
+        .chars()
+        .rev()
+        .zip(after[start..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    (start, before.len() - suffix, after.len() - suffix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typing_coalesces_into_one_undo_and_caret_moves_end_it() {
+        let mut d = Document::new("ab");
+        d.set_selection(Selection::caret(1));
+        d.replace(1..1, "x", 2, EditKind::Typing);
+        d.replace(2..2, "y", 3, EditKind::Typing);
+        assert_eq!(d.text(), "axyb");
+        d.undo();
+        assert_eq!(d.text(), "ab");
+        assert_eq!(d.selection(), Selection::caret(1));
+        d.redo();
+        assert_eq!(d.text(), "axyb");
+    }
+
+    #[test]
+    fn undo_restores_the_exact_source() {
+        let mut d = Document::new("| a |");
+        d.replace(2..3, "bbb", 5, EditKind::Other);
+        assert_eq!(d.text(), "| bbb |");
+        d.undo();
+        assert_eq!(d.text(), "| a |");
+    }
+
+    #[test]
+    fn the_host_is_told_of_an_edit_once() {
+        let mut d = Document::new("ab");
+        assert!(!d.take_edited());
+        d.replace(1..1, "x", 2, EditKind::Typing);
+        d.undo();
+        assert!(d.edited());
+        assert!(d.take_edited());
+        assert!(!d.take_edited());
+    }
+
+    // Mirrors LiveMarkdownEditor.test.tsx "minimalChange".
+    #[test]
+    fn replaces_only_what_differs() {
+        let span = |a: &str, b: &str| {
+            let (from, to, end) = minimal_change(a, b);
+            (from, to, b[from..end].to_string())
+        };
+        assert_eq!(
+            span("hello world", "hello brave world"),
+            (6, 6, "brave ".into())
+        );
+        assert_eq!(span("aaa", "aa"), (2, 3, String::new()));
+        assert_eq!(span("same", "same"), (4, 4, String::new()));
+        assert_eq!(span("", "new"), (0, 0, "new".into()));
+        // Never inside a character.
+        assert_eq!(span("a\u{e9}", "a\u{e8}"), (1, 3, "\u{e8}".into()));
+    }
+
+    // Mirrors LiveMarkdownEditor.test.tsx "takes an outside change in place".
+    #[test]
+    fn an_outside_change_keeps_the_caret_and_is_not_undoable_or_queued() {
+        let mut d = Document::new("one\ntwo\n");
+        d.replace(8..8, "!", 9, EditKind::Typing);
+        d.take_edited();
+        d.set_selection(Selection::caret(6));
+        d.reset_text("zero\none\ntwo\n!");
+        assert_eq!(d.text(), "zero\none\ntwo\n!");
+        assert_eq!(d.selection().head, 11);
+        assert!(!d.take_edited());
+        assert!(!d.undo());
+    }
+}

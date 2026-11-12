@@ -18,6 +18,7 @@ use super::*;
 use crate::{
     app::{self, Core},
     editor::{
+        LiveMarkdown,
         autosave::{LineEnding, SAVE_DELAY, SaveRequest},
         io::{FileScope, Opened, Reply, Slot, TEXT_FILE_LIMIT_BYTES, TextFile},
     },
@@ -29,6 +30,8 @@ struct Host {
     reads: RefCell<usize>,
     /// How many times the Markdown preview was asked to draw.
     previews: Cell<usize>,
+    /// How many times the Live view was asked to draw.
+    lives: Cell<usize>,
     writes: RefCell<Vec<String>>,
     unanswered: RefCell<Vec<Slot<Opened>>>,
 }
@@ -107,6 +110,25 @@ fn open_tab(
             cx,
         );
     });
+    cx.update(|cx| {
+        let host = host.clone();
+        let focus = cx.focus_handle();
+        crate::editor::set_live_markdown(
+            LiveMarkdown {
+                surface: Rc::new(move |_, _, _, _| {
+                    host.lives.set(host.lives.get() + 1);
+                    let element = div()
+                        .id("live-stub")
+                        .track_focus(&focus)
+                        .size_full()
+                        .into_any_element();
+                    (element, focus.clone())
+                }),
+                limit_bytes: LIVE_LIMIT,
+            },
+            cx,
+        );
+    });
     let io: Rc<dyn FileIo> = Rc::new(Io(host.clone()));
     let live = Rc::new(Live {
         scope: Box::new(move |_| {
@@ -129,6 +151,9 @@ fn open_tab(
     draw(cx);
     (pane, host, cx)
 }
+
+/// The Live view's limit: a file longer than this shows as source.
+const LIVE_LIMIT: u64 = live_markdown::LIMIT_BYTES;
 
 fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -540,4 +565,104 @@ fn the_preview_takes_the_keyboard_back_from_the_editor_it_hides(cx: &mut TestApp
     draw(cx);
     // Not the hidden editor, where the app's shortcuts would stop as at a field.
     assert!(cx.update(|window, cx| pane.read(cx).focus.is_focused(window)));
+}
+
+#[gpui_kit::test]
+fn a_live_markdown_tab_shows_the_live_view_and_never_makes_an_editor(cx: &mut TestAppContext) {
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Live),
+        Some(text("# heading")),
+        true,
+    );
+    assert!(host.lives.get() > 0, "the Live view was not drawn");
+    assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_none()));
+    assert_eq!(host.previews.get(), 0);
+    // Offered in Tauri's order, and pressed.
+    let modes: Vec<_> = cx.update(|_, cx| markdown_modes(cx));
+    assert_eq!(
+        modes,
+        [
+            AppTabViewMode::Source,
+            AppTabViewMode::Live,
+            AppTabViewMode::Preview,
+            AppTabViewMode::Split
+        ]
+    );
+    assert_eq!(
+        cx.update(|_, cx| pane.read(cx).shown_mode(cx)),
+        AppTabViewMode::Live
+    );
+}
+
+#[gpui_kit::test]
+fn a_file_at_the_live_limit_shows_live(cx: &mut TestAppContext) {
+    let at = format!("# at\n{}", "x".repeat(LIVE_LIMIT as usize - 5));
+    assert_eq!(at.len() as u64, LIVE_LIMIT);
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Live),
+        Some(text(&at)),
+        true,
+    );
+    assert!(host.lives.get() > 0);
+    assert_eq!(
+        cx.update(|_, cx| pane.read(cx).shown_mode(cx)),
+        AppTabViewMode::Live
+    );
+}
+
+#[gpui_kit::test]
+fn a_file_over_the_live_limit_shows_as_source_and_stays_live_on_record(cx: &mut TestAppContext) {
+    let big = format!("# big\n{}", "x".repeat(LIVE_LIMIT as usize - 5));
+    assert_eq!(big.len() as u64, LIVE_LIMIT + 1);
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Live),
+        Some(text(&big)),
+        true,
+    );
+    assert_eq!(host.lives.get(), 0);
+    assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_some()));
+    assert_eq!(
+        cx.update(|_, cx| pane.read(cx).shown_mode(cx)),
+        AppTabViewMode::Source
+    );
+    assert_eq!(
+        cx.update(|_, cx| pane.read(cx).record.view_mode),
+        Some(AppTabViewMode::Live)
+    );
+    assert!(cx.update(|_, cx| pane.read(cx).live_unavailable(cx)));
+}
+
+#[gpui_kit::test]
+fn the_live_view_takes_the_keyboard_and_gives_it_to_the_editor_on_leaving(cx: &mut TestAppContext) {
+    let (pane, _, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Live),
+        Some(text("one")),
+        true,
+    );
+    let tab = cx.update(|_, cx| pane.read(cx).focus.clone());
+    cx.update(|window, cx| window.focus(&tab, cx));
+    draw(cx);
+    let live = cx
+        .update(|_, cx| pane.read(cx).input_focus(cx))
+        .expect("the Live view takes the keyboard");
+    assert!(cx.update(|window, _| live.is_focused(window)));
+    cx.update(|_, cx| {
+        pane.update(cx, |pane, _| {
+            pane.record.view_mode = Some(AppTabViewMode::Source)
+        })
+    });
+    draw(cx);
+    draw(cx);
+    let editor = editor(&pane, cx);
+    assert!(cx.update(|window, cx| editor.read(cx).focus_handle(cx).is_focused(window)));
+}
+
+#[test]
+fn the_live_limit_is_written_as_tauri_writes_it() {
+    assert_eq!(size_label(1024 * 1024), "1 MiB");
+    assert_eq!(size_label(48 * 1024), "48 KiB");
 }
