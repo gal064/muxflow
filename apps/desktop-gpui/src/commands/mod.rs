@@ -290,7 +290,12 @@ fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
             .iter()
             .any(|context| context.contains(POPUP_MENU_CONTEXT));
     let pressed = shortcut_from_keystroke(&event.keystroke);
-    let has_input = window.has_focused_input(cx);
+    // The Live Markdown view is a text field too, though not a Kit input.
+    let has_input = window.has_focused_input(cx)
+        || event
+            .context_stack
+            .iter()
+            .any(|context| context.contains(live_markdown::view::KEY_CONTEXT));
     let commands = cx.global::<Commands>();
     // A focused text field gets first refusal; a chord it does not bind
     // reaches the app, unless the app's command leaves it to the platform.
