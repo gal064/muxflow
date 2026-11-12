@@ -15,6 +15,10 @@ EXCLUDED_PATHS = (
     ".claude/",
 )
 EXCLUDED_FILES = {"todo.md", "docs/history/implementation.md"}
+# Upstream copies (see each VENDORED.md): their author and example addresses
+# are upstream's, so only home paths and tokens are checked there, except in
+# our own VENDORED.md.
+THIRD_PARTY_PATHS = ("vendor/markdown/",)
 EXAMPLE_ACCOUNTS = {
     "ade", "agents", "alice", "deploy", "dev", "example", "linuxbrew", "me",
     "operator", "operator-extra", "someone", "test", "u", "user", "x", "zed",
@@ -49,8 +53,9 @@ def main() -> int:
         if b"\0" in content:
             continue
         text = content.decode("utf-8", errors="replace")
+        third_party = name.startswith(THIRD_PARTY_PATHS) and not name.endswith("/VENDORED.md")
         for number, line in enumerate(text.splitlines(), 1):
-            for match in EMAIL.finditer(line):
+            for match in [] if third_party else EMAIL.finditer(line):
                 domain = match.group(1).lower()
                 if domain not in EXAMPLE_EMAIL_DOMAINS and not domain.endswith(".patch"):
                     findings.append(f"{name}:{number}: non-fixture email")
