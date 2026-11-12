@@ -334,10 +334,13 @@ buffer, so autosave, outside-change reconciliation and dirty state stay in
 | 2 | T7.3 `live-md-tables` | Full | opus, high | Full `liveTable` parity | T7.1 |
 | 2 | T7.5 `live-md-viewport` | Full, large, design | opus, high | Draw only on-screen blocks, reparse only the edited block, restore the 1 MiB limit | T7.1 |
 | 3 | T7.4 `live-md-find` | Full | opus, high | ⌘F in the live view: highlights, count, replace | T7.5 |
+| 3 | T7.6 `live-md-wide-tables` | Full | opus, high | Wide tables scroll sideways and follow the caret, as in Tauri (gpui-base clips them past about 11 columns) | T7.5 |
 
 Each task ports the Tauri tests for its area and closes those ledger rows. Root merges
-wave 2 in the order T7.3, T7.2, T7.5, then runs T7.4 on top, because find and T7.5 both
-change how the view draws. Then `gdev_qa_phase7` runs on Linux, local and
+wave 2 in the order T7.3, T7.2, T7.5, then runs T7.4 and T7.6 on top, because they and
+T7.5 all change how the view draws; T7.6 merges before T7.4. Accepted (owner, 2026-11-12):
+a space typed at the end of a table cell stays in the file; Tauri trims it when the caret
+leaves the cell. Then `gdev_qa_phase7` runs on Linux, local and
 SSH, and the owner runs a Mac test for typing feel and IME.
 
 ## Phase 8: Packaging and CI
@@ -388,7 +391,7 @@ final sweep command returning only justified hits.
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
 | 6 | Done, owner Mac test done | `f93e815` | Integrated QA passed. Mac test found bugs, now being fixed. Benchmark: `docs/gpui-benchmark.md`; the owner committed to GPUI |
-| 7 | In progress, T7.1 merged (48 KiB limit) | | Wave 2: T7.2, T7.3, T7.5; then T7.4 |
+| 7 | In progress, T7.1 and T7.3 merged (48 KiB limit) | | T7.2 and T7.5 running; then T7.4 and T7.6 |
 | 8 to 10 | After parity, owner decides | | |
 
 ### Task log
