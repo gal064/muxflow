@@ -24,13 +24,13 @@ the document.
 | `doc` | The source text, the selection, undo and redo (kept across an outside change), and whether the host has taken the latest text |
 | `projection` | Source to drawn leaves: which bytes show, hide or are replaced, and their styles. A list item's marker is a leaf of its own, drawn in a marker column. Pure |
 | `link` | The link under a source position, for ⌘-click |
-| `lists` | The parse as Tauri's lezer reads lists: inside a list, an empty item or one not numbered 1 may break into a paragraph (CommonMark refuses both) |
+| `lists` | The parse as Tauri's lezer reads lists (through `projection::parse`, which draws a source markdown-rs panics on as plain lines): inside a list, an empty item or one not numbered 1 may break into a paragraph (CommonMark refuses both) |
 | `edit/mod.rs` | `LiveDoc`: caret motion across hidden ranges, typing, Backspace and Delete, IME preedit, undo |
 | `edit/list.rs` | List commands: Enter, Tab and Shift-Tab, renumbering |
 | `edit/commands.rs` | ⌘B and ⌘I, the task box, Enter before a heading |
 | `edit/motion.rs` | Word motion, double- and triple-click selection, Home and End |
 | `edit/changes.rs` | Several replacements made as one undo step |
-| `edit/table.rs` | Editing inside a rendered table |
+| `edit/table.rs` | Editing inside a rendered table: cell writes, Tab, Enter, the arrows and Escape, adding and removing rows, Ctrl+B and Ctrl+I |
 | `table` | Pure port of `liveTable.ts`'s source logic: cell spans and cell writes |
 | `view` | The GPUI view. The only module that uses GPUI types |
 
@@ -39,6 +39,19 @@ A `find` module (⌘F) goes beside these, at `src/find.rs`.
 The source is parsed once per change, and the drawn projection is kept until
 the text or the selection changes. A question about one caret position
 projects only the top-level blocks around it.
+
+## Tables
+
+A table is edited as Tauri's widget edits it (`liveTable.ts`). A short row is
+drawn to the header's width, as GFM draws it: its missing cells take the caret
+and write nothing until typed into, which fills the row out. Cells past the
+header's width are not drawn. In a read-only document no cell takes the caret.
+
+A wide table wraps its columns to fit, as Tauri's does. Past gpui-base's 4 rem
+column floor (about 11 columns at full width) it clips, where Tauri's scrolls
+sideways: gpui-base's scrolling table keeps its scroll position to itself, so
+the caret could not be kept in view, and it would scroll from 160 px columns
+on, well before Tauri.
 
 ## Not here
 

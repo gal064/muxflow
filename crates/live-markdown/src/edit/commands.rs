@@ -11,9 +11,12 @@ use crate::doc::{EditKind, Selection};
 impl LiveDoc {
     /// Wraps the selection in `marker`, or unwraps it if it already is. An
     /// empty selection takes an empty pair with the caret between, as in
-    /// Tauri.
+    /// Tauri. In a table cell, the cell's own rules.
     pub fn toggle_inline(&mut self, marker: &str) {
         self.commit_composition();
+        if self.toggle_marker_in_cell(marker) {
+            return;
+        }
         self.cell_typed_end = None;
         let sel = self.doc.selection();
         let Range { start, end } = sel.range();
