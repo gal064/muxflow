@@ -34,6 +34,7 @@ owner accepted these. Each one is recorded in the ledger and can be added later.
 | Live Markdown spellcheck | Not built. GPUI has none |
 | Live Markdown for large files | No virtualized view or incremental parser. A measurement sets the size limit, and larger files open as source |
 | Screen-reader access to terminal and Live Markdown text | Not built. The terminal mirror and its setting go away. Controls keep their AccessKit roles |
+| Screen-reader support (VoiceOver, Orca) | Not a requirement. Controls keep their AccessKit roles and names, which the tests and QA tooling use |
 | `MUXFLOW_NATIVE_DECORATIONS`, `MUXFLOW_WINDOW_CONTROLS` | Removed. Automatic title-bar selection stays |
 
 Rune was considered and rejected for now: it is pre-release, and text editing, IME,

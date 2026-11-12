@@ -671,35 +671,3 @@ pub(crate) fn report(message: String, cx: &mut App) {
         controller.update(cx, |controller, cx| controller.report_status(message, cx));
     }
 }
-
-/// Whether a chord pressed in a file tab's editor is one the editor leaves
-/// alone, so the app's shortcut for it runs, as Monaco let unhandled chords
-/// through. Typing, and copy, cut and paste, stay native; the find and go to
-/// line fields too, as Monaco's widgets sat inside its host.
-pub fn yields_shortcut(event: &gpui_kit::KeystrokeEvent, cx: &App) -> bool {
-    let within = |context: &str| event.context_stack.iter().any(|c| c.contains(context));
-    if !within(pane::CONTEXT) {
-        return false;
-    }
-    let keystroke = &event.keystroke;
-    let modifiers = &keystroke.modifiers;
-    if !modifiers.control && !modifiers.platform && keystroke.key.chars().count() == 1 {
-        return false;
-    }
-    let secondary = if cfg!(target_os = "macos") {
-        modifiers.platform && !modifiers.control
-    } else {
-        modifiers.control && !modifiers.platform
-    };
-    if secondary
-        && !modifiers.alt
-        && matches!(keystroke.key.to_ascii_lowercase().as_str(), "c" | "x" | "v")
-    {
-        return false;
-    }
-    cx.key_bindings()
-        .borrow()
-        .bindings_for_input(std::slice::from_ref(keystroke), &event.context_stack)
-        .0
-        .is_empty()
-}

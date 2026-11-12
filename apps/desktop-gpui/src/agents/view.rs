@@ -40,6 +40,7 @@ use crate::{
         },
     },
     ui::{
+        chrome::host_letter,
         dialog::{self, Action, Prose},
         surface_error::SurfaceError,
     },
@@ -198,19 +199,6 @@ pub fn agent_mark(
         .child(icon)
         .children(badge)
         .into_any_element()
-}
-
-fn host_letter_mark(letter: &str, palette: &Palette) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px(ui(3.))
-        .rounded(ui(3.))
-        .border_1()
-        .border_color(palette.chrome_border)
-        .text_size(ui(TYPE_LABEL))
-        .font_family(fonts::MONO)
-        .text_color(palette.chrome_dim)
-        .child(letter.to_owned())
 }
 
 /// What the row's host allows, as the Tauri sidebar's `agentHost` said it.
@@ -893,7 +881,7 @@ fn agent_row(
             cx,
         ))
         .when(!row.location.host_letter.is_empty(), |this| {
-            this.child(host_letter_mark(&row.location.host_letter, &palette))
+            this.child(host_letter(&row.location.host_letter, selected, &palette))
         })
         .child(
             h_flex()
@@ -916,35 +904,52 @@ fn agent_row(
                 .child(row.location.workspace_name.clone()),
         );
     let group = SharedString::from(format!("agent-row-group-{key}"));
+    let action_ink = if selected {
+        palette.accent_ink
+    } else {
+        palette.chrome_dim
+    };
     h_flex()
         .id(SharedString::from(format!("agent-row-item-{key}")))
         .group(group.clone())
         .role(Role::ListItem)
+        .relative()
         .w_full()
         .mb(ui(1.))
         .child(button)
         // Outside the row, as the workspace list draws its own, and only
         // for the keyboard, as `:focus-visible`.
         .when(focused, |this| {
-            this.relative()
-                .when(window.last_input_was_keyboard(), |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .top(ui(-2.))
-                            .left(ui(-2.))
-                            .right(ui(-2.))
-                            .bottom(ui(-2.))
-                            .border_2()
-                            .border_color(palette.accent)
-                            .rounded(ui(RADIUS_CONTROL + 2.)),
-                    )
-                })
-                .child(crate::context_menu::anchor(&keys.focus))
+            this.when(window.last_input_was_keyboard(), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(ui(-2.))
+                        .left(ui(-2.))
+                        .right(ui(-2.))
+                        .bottom(ui(-2.))
+                        .border_2()
+                        .border_color(palette.accent)
+                        .rounded(ui(RADIUS_CONTROL + 2.)),
+                )
+            })
+            .child(crate::context_menu::anchor(&keys.focus))
         })
+        // Over the row's right edge, on a backing of the row's own colour, as
+        // the workspace list's pin: showing them takes no width from the row.
         .child(
             h_flex()
-                .flex_none()
+                .absolute()
+                .top(ui(4.))
+                .right(ui(4.))
+                .p(ui(1.))
+                .bg(if selected {
+                    palette.accent
+                } else if unavailable {
+                    palette.chrome_bg
+                } else {
+                    palette.chrome_hover
+                })
                 .invisible()
                 .group_hover(group, |style| style.visible())
                 .child(
@@ -957,7 +962,7 @@ fn agent_row(
                             "Pin tab"
                         },
                         !row.routable,
-                        palette.chrome_dim,
+                        action_ink,
                     )
                     .on_click(move |_, _, cx| toggle_tab_pin(&pin, cx)),
                 )
@@ -967,7 +972,7 @@ fn agent_row(
                         BRANCH,
                         "Branch conversation",
                         !can_branch(row, cx),
-                        palette.chrome_dim,
+                        action_ink,
                     )
                     .on_click(move |_, _, cx| branch(&branch_row, cx)),
                 ),
@@ -2030,5 +2035,63 @@ mod tests {
             after.y > before.y && after.x == before.x,
             "{before:?} {after:?}"
         );
+    }
+
+    struct OneRow(AgentListRow, FocusHandle);
+
+    impl Render for OneRow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let keys = workspaces::RowKeys::for_rows(std::slice::from_ref(&self.1), 0);
+            div()
+                .w(gpui_kit::px(240.))
+                .child(agent_row(&self.0, "a", true, false, keys, window, cx))
+        }
+    }
+
+    /// Tauri's `.agent-button { width: 100% }`, with `.row-actions` over it.
+    #[gpui_kit::test]
+    fn an_agent_row_spans_the_list_with_its_actions_over_it(cx: &mut TestAppContext) {
+        use crate::agents::{
+            list::{AgentLocation, PriorityBucket},
+            model::fixtures,
+        };
+        use gpui_kit::test::TestWindowExt as _;
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
+        });
+        let agent = fixtures::agent();
+        let row = AgentListRow {
+            state: DisplayState::Working,
+            bucket: PriorityBucket::Working,
+            location: AgentLocation {
+                host_letter: "L".into(),
+                ..AgentLocation::unlisted(&agent)
+            },
+            routable: true,
+            pinned: false,
+            agent,
+        };
+        let (_, visual) = cx.add_window_view(move |window, cx| {
+            let shown = cx.new(|cx| OneRow(row, cx.focus_handle()));
+            gpui_kit::base::Root::new(shown, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, _| {
+            let row = window.find("agent-row-a").bounds();
+            let pin = window.find_by_label("Pin tab").bounds();
+            assert_eq!(
+                row.size.width,
+                gpui_kit::px(240.),
+                "the row is the list's width"
+            );
+            assert!(
+                pin.right() <= row.right()
+                    && pin.top() >= row.top()
+                    && pin.bottom() <= row.bottom(),
+                "the actions sit over the row: {pin:?} in {row:?}"
+            );
+        });
     }
 }

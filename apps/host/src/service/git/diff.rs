@@ -1,7 +1,8 @@
-use super::path::{WorktreeRoot, descriptor_path};
+use super::path::WorktreeRoot;
 use super::runner::git_output_cancellable;
 use super::*;
-use std::os::unix::{ffi::OsStringExt, io::AsRawFd};
+use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
 
 struct DiffContents {
     old: Vec<u8>,
@@ -115,8 +116,14 @@ pub(super) fn read_diff(
                 )?
                 .ok_or_else(|| anyhow::anyhow!("untracked symlink diff classification failed"));
             }
-            let pinned = entry.open_regular_for_git()?;
-            let stable = descriptor_path(pinned.as_raw_fd());
+            // The pinned bytes go to Git on stdin. Given the descriptor's path
+            // (`/proc/self/fd/N`), Git diffs it as a symlink: the patch, and a
+            // staged hunk, held the file's absolute path instead of its text.
+            let mut content = Vec::new();
+            entry
+                .open_regular()?
+                .take(MAX_DIFF_CONTENT as u64 + 1)
+                .read_to_end(&mut content)?;
             let output = git_output_cancellable(
                 root,
                 &[
@@ -126,9 +133,9 @@ pub(super) fn read_diff(
                     OsStr::new("--no-textconv"),
                     OsStr::new("--"),
                     OsStr::new("/dev/null"),
-                    stable.as_os_str(),
+                    OsStr::new("-"),
                 ],
-                None,
+                Some(&content),
                 cancellation,
             )?;
             if output.status.success() || output.status.code() == Some(1) {

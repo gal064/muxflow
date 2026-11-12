@@ -241,6 +241,34 @@ fn store_overrides(
     })
 }
 
+/// Whether a chord pressed in a focused text field is one the field leaves
+/// alone, so the app's shortcut for it runs from anywhere, as Monaco let
+/// unhandled chords through. Typing, copy, cut and paste stay the field's, and
+/// so does every chord its own key context binds: ⌘A, ⌘Z, ⌘← and the rest.
+fn field_yields(event: &KeystrokeEvent, cx: &App) -> bool {
+    let keystroke = &event.keystroke;
+    let modifiers = &keystroke.modifiers;
+    if !modifiers.control && !modifiers.platform && keystroke.key.chars().count() == 1 {
+        return false;
+    }
+    let secondary = if cfg!(target_os = "macos") {
+        modifiers.platform && !modifiers.control
+    } else {
+        modifiers.control && !modifiers.platform
+    };
+    if secondary
+        && !modifiers.alt
+        && matches!(keystroke.key.to_ascii_lowercase().as_str(), "c" | "x" | "v")
+    {
+        return false;
+    }
+    cx.key_bindings()
+        .borrow()
+        .bindings_for_input(std::slice::from_ref(keystroke), &event.context_stack)
+        .0
+        .is_empty()
+}
+
 fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
     // A window with no Kit root (some tests) has no overlays or inputs to consult.
     if window.root::<Root>().flatten().is_none() {
@@ -264,12 +292,13 @@ fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
     let pressed = shortcut_from_keystroke(&event.keystroke);
     let has_input = window.has_focused_input(cx);
     let commands = cx.global::<Commands>();
-    // A document editor gets first refusal; a chord it does not bind reaches
-    // the app, unless the app's command leaves it to the platform.
-    let editor_fallback = crate::editor::yields_shortcut(event, cx)
+    // A focused text field gets first refusal; a chord it does not bind
+    // reaches the app, unless the app's command leaves it to the platform.
+    let field_yields = has_input
         && command_for_shortcut(&pressed, commands.platform, &commands.overrides)
-            .is_some_and(|command| !command.native_fallback);
-    let text_field = has_input && !editor_fallback;
+            .is_some_and(|command| !command.native_fallback)
+        && field_yields(event, cx);
+    let text_field = has_input && !field_yields;
     let disposition = shortcut_disposition(
         &pressed,
         overlay_open,
