@@ -52,6 +52,7 @@ pub mod chrome;
 pub mod dialog;
 pub mod error_summary;
 pub mod icons;
+pub mod motion;
 pub mod shell;
 pub mod surface_error;
 pub mod title_bar;
