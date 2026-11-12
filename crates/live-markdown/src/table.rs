@@ -155,6 +155,22 @@ pub fn cell_change(
     Some((target.end..target.end, format!("{close}{padding} {text} |")))
 }
 
+/// A cell's selected text wrapped in `marker`, or unwrapped if it already is,
+/// as typing it would.
+pub fn toggled_marker(text: &str, marker: &str) -> String {
+    let size = marker.len();
+    // `**bold**` starts with `*` but is not italic; `***both***` is.
+    let wrapped = text.len() >= size * 2
+        && text.starts_with(marker)
+        && text.ends_with(marker)
+        && (size > 1 || !text.starts_with("**") || text.starts_with("***"));
+    if wrapped {
+        text[size..text.len() - size].to_string()
+    } else {
+        format!("{marker}{text}{marker}")
+    }
+}
+
 /// The change adding an empty row after `row` (after the header means after
 /// the delimiter row).
 pub fn row_insertion(layout: &TableLayout, row: usize) -> (usize, String) {
@@ -205,6 +221,17 @@ mod tests {
         assert_eq!(cell_source("a|b"), "a\\|b");
         assert_eq!(cell_source("a\\|b"), "a\\|b");
         assert_eq!(cell_source("one\ntwo"), "one two");
+        assert_eq!(cell_source("a\u{a0}b"), "a b");
+    }
+
+    #[test]
+    fn toggles_bold_and_italic_on_a_cells_selected_text() {
+        assert_eq!(toggled_marker("2", "**"), "**2**");
+        assert_eq!(toggled_marker("**2**", "**"), "2");
+        assert_eq!(toggled_marker("*it*", "*"), "it");
+        assert_eq!(toggled_marker("**bold**", "*"), "***bold***");
+        assert_eq!(toggled_marker("***both***", "*"), "**both**");
+        assert_eq!(toggled_marker("", "**"), "****");
     }
 
     #[test]
