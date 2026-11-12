@@ -258,7 +258,7 @@ font row covers them).
 | `commands/fuzzy.test.ts` | 43 | port | 2 | `commands/fuzzy.rs` | done (T6.4) |
 | `commands/fuzzy.ts` | 61 | port | 2 | `commands/fuzzy.rs` | done (T6.4) |
 | `commands/registry.test.ts` | 524 | port | 2 | `commands/{registry,keymap}.rs`, `tests/commands.rs` (tab moves, host delete, macOS Cmd+C, the editor fallback). The WebKit control-character cases retire; non-Latin and Option-letter chords come from GPUI's platform keystroke | done (T6.4) |
-| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. The editor fallback is editor/mod.rs `yields_shortcut`; the terminal's IME check is `terminal::input::is_composing` (T3.4). GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | done (T6.4) |
+| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. A focused text field passes on the chords it does not handle through commands/mod.rs `field_yields` (T6.9); the terminal's IME check is `terminal::input::is_composing` (T3.4). GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | done (T6.4) |
 | `commands/rowCommands.test.ts` | 54 | port | 2 | `tests/commands.rs`, two surfaces included; change notification and lifetime are GPUI globals | done (T6.4) |
 | `commands/rowCommands.ts` | 99 | port | 2 | `commands/mod.rs` `publish_row_commands` (tests/commands.rs) | done (T6.4) |
 | `commands/shortcutGlyphs.test.ts` | 47 | port | 2 | `commands/glyphs.rs` | done (T6.4) |

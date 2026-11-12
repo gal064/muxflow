@@ -1174,7 +1174,7 @@ impl DocumentPane {
                         .xsmall()
                         .compact()
                         .label("All")
-                        .tooltip("Replace All (Ctrl+Enter)")
+                        .tooltip("Replace All")
                         .accessibility_label("Replace All")
                         .on_click(cx.listener(|this, _, window, cx| this.replace_all(window, cx))),
                 )

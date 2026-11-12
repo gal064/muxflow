@@ -53,6 +53,7 @@ impl Global for Git {}
 
 /// Called once from [`crate::features::init`].
 pub fn init(cx: &mut App) {
+    panel::init(cx);
     PanelBodies::register("git", body, cx);
     crate::editor::set_diff_surface(
         Rc::new(|tab, window, cx| {
