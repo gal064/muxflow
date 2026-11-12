@@ -133,6 +133,8 @@ pub struct DocumentPane {
     loading_wake: Option<Task<()>>,
     /// The decoded image preview, kept while the file's generation is shown.
     image: Option<(String, Arc<Image>)>,
+    /// The Live view's keyboard, while the tab shows it.
+    live: Option<FocusHandle>,
     find: Option<FindBar>,
     go_to: Option<GoTo>,
     /// The last query and toggles, for the next time find opens.
@@ -206,6 +208,7 @@ impl DocumentPane {
             loading_shown: false,
             loading_wake: None,
             image: None,
+            live: None,
             find: None,
             go_to: None,
             remembered: Query::default(),
@@ -216,6 +219,14 @@ impl DocumentPane {
 
     pub(super) fn editor(&self, cx: &App) -> Option<Entity<EditorState>> {
         self.document.read(cx).existing_editor().cloned()
+    }
+
+    /// Where typing goes: the Live view while it is shown, else the editor.
+    pub(super) fn input_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.live.clone().or_else(|| {
+            self.editor(cx)
+                .map(|editor| editor.read(cx).focus_handle(cx))
+        })
     }
 
     /// The calm save status, and a wake-up for when it may change on its own.
@@ -257,9 +268,10 @@ impl DocumentPane {
         let Some(workspaces) = workspaces::current(cx) else {
             return;
         };
-        // Only a person leaving the preview for the editor starts a new
-        // editor-paint interaction.
-        if self.previewing(cx) && mode != AppTabViewMode::Preview {
+        // Only a person leaving the preview or Live for the editor starts a
+        // new editor-paint interaction.
+        if self.source_hidden(cx) && matches!(mode, AppTabViewMode::Source | AppTabViewMode::Split)
+        {
             self.document
                 .update(cx, |document, _| document.hold_editor_paint());
         }
@@ -280,16 +292,37 @@ impl DocumentPane {
 
     // Find and replace.
 
-    /// A Markdown tab showing only its preview, where the editor's boxes do
-    /// not draw.
-    fn previewing(&self, cx: &App) -> bool {
-        self.record.kind == AppTabKind::Markdown
-            && self.record.view_mode == Some(AppTabViewMode::Preview)
-            && markdown_modes(cx).contains(&AppTabViewMode::Preview)
+    /// The view the tab shows: its own, unless that view's surface has not
+    /// arrived or the file is too large for Live. Either way the mode stays
+    /// on record, so it comes back when it can.
+    fn shown_mode(&self, cx: &App) -> AppTabViewMode {
+        let markdown = self.record.kind == AppTabKind::Markdown;
+        let live_unavailable = self.live_unavailable(cx);
+        self.record
+            .view_mode
+            .filter(|mode| markdown && markdown_modes(cx).contains(mode))
+            .filter(|mode| !(*mode == AppTabViewMode::Live && live_unavailable))
+            .unwrap_or(AppTabViewMode::Source)
+    }
+
+    /// The file as read is over the Live view's limit, as in Tauri.
+    fn live_unavailable(&self, cx: &App) -> bool {
+        let read = self.document.read(cx).read_bytes();
+        super::live_markdown(cx)
+            .is_some_and(|live| read.is_some_and(|read| read > live.limit_bytes))
+    }
+
+    /// A Markdown tab showing its preview or Live view, where the source
+    /// editor's boxes do not draw.
+    fn source_hidden(&self, cx: &App) -> bool {
+        matches!(
+            self.shown_mode(cx),
+            AppTabViewMode::Preview | AppTabViewMode::Live
+        )
     }
 
     fn open_find(&mut self, replacing: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor(cx).filter(|_| !self.previewing(cx)) else {
+        let Some(editor) = self.editor(cx).filter(|_| !self.source_hidden(cx)) else {
             return;
         };
         self.go_to = None;
@@ -619,7 +652,7 @@ impl DocumentPane {
     // Go to line.
 
     fn open_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor(cx).is_none() || self.previewing(cx) {
+        if self.editor(cx).is_none() || self.source_hidden(cx) {
             return;
         }
         let input = cx.new(|cx| InputState::new(window, cx));
@@ -715,12 +748,25 @@ fn parent_path(path: &str) -> String {
 
 /// The modes a Markdown tab offers: source always, and the rendered ones once
 /// their surfaces exist.
+/// In Tauri's order: source, live, preview, split.
 fn markdown_modes(cx: &App) -> Vec<AppTabViewMode> {
     let mut modes = vec![AppTabViewMode::Source];
+    if super::live_markdown(cx).is_some() {
+        modes.push(AppTabViewMode::Live);
+    }
     if super::preview(cx).is_some() {
         modes.extend([AppTabViewMode::Preview, AppTabViewMode::Split]);
     }
     modes
+}
+
+/// A byte limit as Tauri's tooltip writes it: "1 MiB", "48 KiB".
+fn size_label(bytes: u64) -> String {
+    if bytes >= 1 << 20 && bytes.is_multiple_of(1 << 20) {
+        format!("{} MiB", bytes >> 20)
+    } else {
+        format!("{} KiB", bytes >> 10)
+    }
 }
 
 fn mode_label(mode: AppTabViewMode) -> &'static str {
@@ -740,6 +786,9 @@ impl Render for DocumentPane {
         if content != Content::Loading {
             self.loading_shown = false;
             self.loading_wake = None;
+        }
+        if content != Content::Text {
+            self.live = None;
         }
         let download = super::download(cx).is_some();
         let can_write = self.document.read(cx).can_write(cx);
@@ -896,12 +945,15 @@ impl DocumentPane {
             .child(chip)
             .when_some(modes, |bar, modes| {
                 let shown = mode.unwrap_or(AppTabViewMode::Source);
+                let live_unavailable = self.live_unavailable(cx);
+                let live_limit = super::live_markdown(cx).map_or(0, |live| live.limit_bytes);
                 bar.child(
                     h_flex()
                         .id("markdown-modes")
                         .role(Role::Group)
                         .aria_label("Markdown view")
                         .children(modes.into_iter().map(|item| {
+                            let disabled = item == AppTabViewMode::Live && live_unavailable;
                             toolbar_button(
                                 Button::new(SharedString::from(format!(
                                     "markdown-mode-{}",
@@ -909,13 +961,20 @@ impl DocumentPane {
                                 )))
                                 .label(mode_label(item))
                                 .selected(item == shown)
-                                .toggled(item == shown),
+                                .toggled(item == shown)
+                                .disabled(disabled)
+                                .when(disabled, |button| {
+                                    button.tooltip(format!(
+                                        "Live view is limited to files under {}",
+                                        size_label(live_limit)
+                                    ))
+                                }),
                                 if item == shown {
                                     Tone::Pressed
                                 } else {
                                     Tone::Plain
                                 },
-                                false,
+                                disabled,
                                 &palette,
                             )
                             .on_click(
@@ -935,19 +994,12 @@ impl DocumentPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let markdown = self.record.kind == AppTabKind::Markdown;
-        let available = markdown_modes(cx);
-        // A mode whose surface has not arrived shows as source; it stays on
-        // record, so it comes back when the surface does.
-        let mode = self
-            .record
-            .view_mode
-            .filter(|mode| markdown && available.contains(mode))
-            .unwrap_or(AppTabViewMode::Source);
+        let mode = self.shown_mode(cx);
         let visible = self.visible_save_state(cx);
         let error = self.document.read(cx).save_error();
-        // A preview-only tab never makes an editor.
-        let editor = (mode != AppTabViewMode::Preview).then(|| {
+        // A preview-only or Live tab never makes an editor.
+        let shows_source = matches!(mode, AppTabViewMode::Source | AppTabViewMode::Split);
+        let editor = shows_source.then(|| {
             self.document
                 .update(cx, |document, cx| document.editor(window, cx))
         });
@@ -963,21 +1015,33 @@ impl DocumentPane {
                 let _ = document.editor_paint_due();
             });
         }
+        let live = (mode == AppTabViewMode::Live)
+            .then(|| super::live_markdown(cx))
+            .flatten()
+            .map(|live| (live.surface)(&self.record, &self.document, window, cx));
+        let was_live = std::mem::replace(
+            &mut self.live,
+            live.as_ref().map(|(_, focus)| focus.clone()),
+        );
+        let typing = editor
+            .as_ref()
+            .map(|editor| editor.read(cx).focus_handle(cx))
+            .or_else(|| self.live.clone());
         // Focus given to the tab before its editor existed goes on to it.
-        if let Some(editor) = &editor
+        if let Some(target) = typing.clone()
             && self.focus.is_focused(window)
         {
-            let target = editor.read(cx).focus_handle(cx);
             window.defer(cx, move |window, cx| window.focus(&target, cx));
         }
-        // And comes back from an editor the preview hides, which would keep it
-        // unseen and stop the app's shortcuts as a field does.
-        if editor.is_none()
-            && self
-                .editor(cx)
-                .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
-        {
-            let target = self.focus.clone();
+        // And comes back from a surface the new view hides, which would keep
+        // it unseen and stop the app's shortcuts as a field does.
+        let hidden =
+            |handle: &FocusHandle| Some(handle) != typing.as_ref() && handle.is_focused(window);
+        let hidden_editor = self
+            .editor(cx)
+            .is_some_and(|editor| hidden(&editor.read(cx).focus_handle(cx)));
+        if hidden_editor || was_live.as_ref().is_some_and(hidden) {
+            let target = typing.clone().unwrap_or_else(|| self.focus.clone());
             window.defer(cx, move |window, cx| window.focus(&target, cx));
         }
         if self.find.is_some() {
@@ -1004,6 +1068,15 @@ impl DocumentPane {
                 )
                 .children(find_bar)
                 .children(go_to)
+        });
+        let live = live.map(|(element, _)| {
+            div()
+                .id("live-markdown-host")
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .child(element)
         });
         let preview = matches!(mode, AppTabViewMode::Preview | AppTabViewMode::Split)
             .then(|| super::preview(cx))
@@ -1039,6 +1112,7 @@ impl DocumentPane {
                     .min_h_0()
                     .min_w_0()
                     .children(source)
+                    .children(live)
                     .children(preview),
             )
     }

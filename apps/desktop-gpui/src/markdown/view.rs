@@ -209,7 +209,7 @@ impl PreviewView {
 }
 
 /// The preview's palette: the app's, unless Settings chose one.
-fn palette(cx: &App) -> (Palette, bool) {
+pub(super) fn palette(cx: &App) -> (Palette, bool) {
     match crate::settings::get(cx).markdown_appearance {
         MarkdownAppearance::Default => {
             (theme::palette(cx), cx.global::<theme::Appearance>().is_dark)
