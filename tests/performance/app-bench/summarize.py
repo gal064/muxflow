@@ -7,7 +7,10 @@
 Each cell is the median over runs with the [min-max] spread; the ratio is
 Tauri / GPUI, so above 1 means Tauri uses more (or takes longer).
 
-Usage: summarize.py <results-dir>
+Usage: summarize.py <results-dir> [<gpui-after-fix-results-dir>]
+
+With a second directory (a GPUI-only rerun after a fix), scenarios it holds
+get a "GPUI after fix" column and the ratio uses it; Tauri is not rerun.
 """
 
 from __future__ import annotations
@@ -28,6 +31,10 @@ SCENARIOS = [
     ("agents-replay", "Recorded agents: 3 Claude + 3 Codex replays, rows working/done"),
     ("spinner-visible", "6 agents working, no output, window visible"),
     ("spinner-hidden", "6 agents working, no output, window on another workspace"),
+    ("spinner-still", "B0: the same 6 agent rows done (no animation), no output, window visible"),
+    ("agents-replay-static", "Recorded agents with a static working icon: 3 Claude + 3 Codex replays"),
+    ("spinner-static-visible", "6 agents working with a static working icon, no output, window visible"),
+    ("spinner-static-hidden", "6 agents working with a static working icon, window on another workspace"),
     ("editor", "Editor: Quick Open and open a 5 MB file (no scrolling)"),
     ("explorer", "Explorer: expand a 10,000-entry directory, 300 x Down"),
     ("typing", "Typing latency (keystroke to pixels)"),
@@ -130,11 +137,25 @@ def ratio(tauri: list[float], gpui: list[float]) -> str:
     return f"{a / b:.2f}x"
 
 
+def load(scenario_dir: Path) -> dict[str, list[dict]]:
+    results: dict[str, list[dict]] = {}
+    if scenario_dir.exists():
+        for path in sorted(scenario_dir.glob("*-run*.json")):
+            data = json.loads(path.read_text())
+            results.setdefault(data["app"], []).append(data)
+    return results
+
+
+def values(runs: list[dict], path: tuple) -> list[float]:
+    return [v for v in (dig(r, path) for r in runs) if v is not None]
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     root = Path(sys.argv[1])
+    after_root = Path(sys.argv[2]) if len(sys.argv) == 3 else None
     meta = json.loads((root / "meta.json").read_text()) if (root / "meta.json").exists() else {}
     lines = ["# Muxflow desktop benchmark: Tauri vs GPUI", ""]
     if meta:
@@ -151,6 +172,8 @@ def main() -> int:
     ]
     if (root / "notes.md").exists():  # run-specific caveats written by the operator
         lines += [(root / "notes.md").read_text().strip(), ""]
+    if (root / "fix.md").exists():  # operator's note on a fix measured with a second directory
+        lines += [(root / "fix.md").read_text().strip(), ""]
     if (root / "sizes.md").exists():
         lines += [(root / "sizes.md").read_text().strip(), ""]
     for host in ("local", "ssh"):
@@ -160,12 +183,10 @@ def main() -> int:
         lines += [f"## Host: {host}", ""]
         for scenario, title in SCENARIOS:
             scenario_dir = host_dir / scenario
-            if not scenario_dir.exists():
+            if not scenario_dir.exists() and not (after_root and (after_root / host / scenario).exists()):
                 continue
-            results: dict[str, list[dict]] = {}
-            for path in sorted(scenario_dir.glob("*-run*.json")):
-                data = json.loads(path.read_text())
-                results.setdefault(data["app"], []).append(data)
+            results = load(scenario_dir)
+            after = load(after_root / host / scenario).get("gpui", []) if after_root else []
             lines += [f"### {title}", ""]
             if scenario == "compositor-baseline":
                 data = results.get("none", [{}])[0]
@@ -173,16 +194,25 @@ def main() -> int:
                           f"GPU {data.get('gpu_pct', {}).get('compositor', 'n/a')} % busy over "
                           f"{data.get('duration_s', 'n/a')} s.", ""]
                 continue
-            lines += ["| Metric | Tauri | GPUI | Tauri/GPUI |", "|---|---|---|---|"]
+            if after:
+                lines += ["| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |",
+                          "|---|---|---|---|---|"]
+            else:
+                lines += ["| Metric | Tauri | GPUI | Tauri/GPUI |", "|---|---|---|---|"]
             for label, path, unit, decimals in METRICS[kind(scenario)]:
-                tauri = [v for v in (dig(r, path) for r in results.get("tauri", [])) if v is not None]
-                gpui = [v for v in (dig(r, path) for r in results.get("gpui", [])) if v is not None]
-                if not tauri and not gpui:
+                tauri = values(results.get("tauri", []), path)
+                gpui = values(results.get("gpui", []), path)
+                fixed = values(after, path)
+                if not tauri and not gpui and not fixed:
                     continue
                 name = f"{label} ({unit})" if unit else label
-                lines.append(f"| {name} | {cell(tauri, decimals)} | {cell(gpui, decimals)} | {ratio(tauri, gpui)} |")
+                if after:
+                    lines.append(f"| {name} | {cell(tauri, decimals)} | {cell(gpui, decimals)} | "
+                                 f"{cell(fixed, decimals)} | {ratio(tauri, fixed)} |")
+                else:
+                    lines.append(f"| {name} | {cell(tauri, decimals)} | {cell(gpui, decimals)} | {ratio(tauri, gpui)} |")
             errors = [f"{r['app']} run {r['run']}: {r['metrics']['error']}"
-                      for runs in results.values() for r in runs if r.get("metrics", {}).get("error")]
+                      for runs in [*results.values(), after] for r in runs if r.get("metrics", {}).get("error")]
             if errors:
                 lines += ["", "Errors: " + "; ".join(errors)]
             lines.append("")
