@@ -1,19 +1,36 @@
-//! Editing inside a rendered table: every cell edit goes through today's
-//! whole-cell normalization, Tab and Enter move by cell, Up and Down keep the
-//! column. Full `liveTable` behaviour is T7.3's.
+//! Editing inside a rendered table, as today's table widget (`liveTable.ts`):
+//! every cell edit goes through the whole-cell normalization; Tab, Enter and
+//! the arrows move by cell and leave the table at its edges; a row is added
+//! from the last row and an empty one removed with Backspace. A short row's
+//! missing cells take the caret, and typing into one fills the row out to it.
 
 use std::ops::Range;
 
 use super::LiveDoc;
 use crate::doc::{EditKind, Selection};
-use crate::projection::Projection;
-use crate::table::{cell_source, row_insertion};
+use crate::projection::{Cell, Projection};
+use crate::table::{cell_change, cell_source, row_insertion, toggled_marker};
 
+/// The keys today's table widget takes while a cell has the caret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CellDir {
-    Next,
-    Prev,
+pub enum TableKey {
+    Left,
+    Right,
+    Up,
     Down,
+    Tab,
+    ShiftTab,
+    Enter,
+    Escape,
+}
+
+/// A missing cell holding the caret: its row's end and its column. It holds
+/// only while the caret stays there and the text is unchanged.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Missing {
+    at: usize,
+    col: usize,
+    revision: u64,
 }
 
 /// The point after the first padding space of empty cell `col` in an inserted
@@ -22,10 +39,72 @@ fn col_offset(col: usize) -> usize {
     1 + col * 3
 }
 
+fn odd_backslashes(text: &str) -> bool {
+    text.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
+}
+
 impl LiveDoc {
+    /// The missing cell holding the caret, as (row end, column).
+    pub(super) fn missing(&self) -> Option<(usize, usize)> {
+        let m = self.missing?;
+        (m.revision == self.doc.revision() && self.doc.selection() == Selection::caret(m.at))
+            .then_some((m.at, m.col))
+    }
+
+    /// Tables are drawn but take no caret and no edit, as in a read-only
+    /// document today. A caret in a cell moves off the table.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        if self.read_only == read_only {
+            return;
+        }
+        self.read_only = read_only;
+        let head = self.doc.selection().head;
+        if read_only && self.here().cell_at(head).is_some() {
+            self.set_caret(head);
+        }
+    }
+
+    /// Puts the caret in a short row's missing cell (a click on it).
+    pub fn set_caret_in_missing(&mut self, at: usize, col: usize) {
+        if self.read_only {
+            return self.set_caret(at);
+        }
+        self.cell_typed_end = None;
+        self.commit_composition();
+        self.doc.set_selection(Selection::caret(at));
+        self.missing = Some(Missing {
+            at,
+            col,
+            revision: self.doc.revision(),
+        });
+    }
+
+    fn go(&mut self, cell: &Cell, end: bool) {
+        if cell.missing {
+            self.set_caret_in_missing(cell.from, cell.col);
+        } else {
+            self.set_caret(if end { cell.to } else { cell.from });
+        }
+    }
+
+    /// Fills the caret's short row out to its missing cell, which becomes an
+    /// empty cell holding the caret, as the first keystroke into it does
+    /// today. Returns the caret.
+    pub(super) fn fill_missing(&mut self, kind: EditKind) -> Option<usize> {
+        let (at, col) = self.missing()?;
+        let p = self.here();
+        let (t, _, cell) = p.cell_at(at)?;
+        let (range, insert) = cell_change(&p.tables[t].layout, cell.row, col, "")?;
+        // Written `  |`: the caret goes after the first space, as in any empty cell.
+        let caret = range.start + insert.len() - 2;
+        self.doc.replace(range, &insert, caret, kind);
+        Some(caret)
+    }
+
     /// Typing that starts and ends in one cell writes that cell. False when
     /// `range` is not inside a single cell.
     pub(super) fn type_in_cell(&mut self, range: Range<usize>, text: &str, kind: EditKind) -> bool {
+        let range = self.fill_missing(kind).map_or(range, |at| at..at);
         let p = self.near(Selection::caret(range.start), range.clone());
         let cell = p.cell_at(range.start).map(|c| (c.2.from, c.2.limit));
         let Some((from, limit)) = cell else {
@@ -60,20 +139,26 @@ impl LiveDoc {
     ) -> usize {
         let normalized = cell_source(new);
         let caret = from + cell_source(&new[..caret_in_new]).len();
-        let slashes = normalized.bytes().rev().take_while(|b| *b == b'\\').count();
-        let next = self.doc.text().as_bytes().get(limit).copied();
-        let suffix = if slashes % 2 == 1 && next == Some(b'|') {
+        let src = self.doc.text();
+        // The space that kept a trailing backslash off the pipe was written
+        // with it, and goes with it.
+        let mut end = limit;
+        if odd_backslashes(&src[from..limit]) && src.as_bytes().get(limit) == Some(&b' ') {
+            end += 1;
+        }
+        let next = src.as_bytes().get(end).copied();
+        let suffix = if odd_backslashes(&normalized) && next == Some(b'|') {
             " "
         } else {
             ""
         };
         self.doc
-            .replace(from..limit, &format!("{normalized}{suffix}"), caret, kind);
+            .replace(from..end, &format!("{normalized}{suffix}"), caret, kind);
         caret
     }
 
     /// Backspace in a cell: within the cell's text, or removing an empty row
-    /// from its first cell. True when the caret is in a cell.
+    /// from an empty cell. True when the caret is in a cell.
     pub(super) fn backspace_in_cell(&mut self, p: &Projection, caret: usize) -> bool {
         let Some((t, _, cell)) = p.cell_at(caret) else {
             return false;
@@ -94,15 +179,21 @@ impl LiveDoc {
             );
             self.cell_typed_end = self.cell_typed_end.map(|_| at);
             self.settle();
-        } else if let Some(line) = empty_row(p, t, cell.row) {
-            let (up, col) = (cell.row - 1, cell.col);
-            let new_caret = p.tables[t]
+        } else if cell.from == cell.limit
+            && let Some(line) = empty_row(p, t, cell.row)
+        {
+            // Above the removed line, so its offsets hold.
+            let above = p.tables[t]
                 .cells
                 .iter()
-                .find(|c| c.row == up && c.col == col)
-                .map_or(line.start, |c| c.to);
-            self.doc.replace(line, "", new_caret, EditKind::Other);
-            self.settle();
+                .find(|c| c.row == cell.row - 1 && c.col == cell.col)
+                .cloned();
+            self.doc
+                .replace(line.clone(), "", line.start, EditKind::Other);
+            match above {
+                Some(above) => self.go(&above, true),
+                None => self.settle(),
+            }
         }
         true
     }
@@ -134,81 +225,209 @@ impl LiveDoc {
     /// Enter in a cell moves down a row, adding one at the end; never a
     /// newline, which would split the row. True when the caret is in a cell.
     pub(super) fn enter_in_cell(&mut self) -> bool {
-        if self.cell_ops().is_none() {
+        self.table_key(TableKey::Enter)
+    }
+
+    /// A key with the caret in a cell, as today's widget takes it. Left and
+    /// Right inside a cell's text, or with a selection, are the editor's;
+    /// from outside, a step that lands in a table enters it as `enterTable`
+    /// does. False when the key is not the table's.
+    pub fn table_key(&mut self, key: TableKey) -> bool {
+        if self.read_only {
             return false;
         }
-        self.cell_navigate(CellDir::Down);
+        let sel = self.doc.selection();
+        let p = self.here();
+        let Some((t, _, cell)) = p.cell_at(sel.head) else {
+            let forward = key == TableKey::Right;
+            return matches!(key, TableKey::Left | TableKey::Right)
+                && sel.is_empty()
+                && self
+                    .next_stop(sel.head, forward)
+                    .is_some_and(|to| self.enter_table(to, forward));
+        };
+        let cell = cell.clone();
+        let table = &p.tables[t];
+        let src = table.src.clone();
+        let (row, col) = (cell.row, cell.col);
+        let last_row = table.layout.rows.len() - 1;
+        let last_col = table.cells.iter().filter(|c| c.row == 0).count() - 1;
+        let at = |r: usize, c: usize| table.cells.iter().find(|x| x.row == r && x.col == c);
+        let edge = sel.is_empty()
+            && sel.head
+                == if key == TableKey::Left {
+                    cell.from
+                } else {
+                    cell.limit
+                };
+        let (target, end) = match key {
+            TableKey::Left | TableKey::Right if !edge => return false,
+            TableKey::Tab | TableKey::Right if col < last_col => (at(row, col + 1), false),
+            TableKey::Tab | TableKey::Right if row < last_row => (at(row + 1, 0), false),
+            TableKey::ShiftTab | TableKey::Left if col > 0 => (at(row, col - 1), true),
+            TableKey::ShiftTab | TableKey::Left if row > 0 => (at(row - 1, last_col), true),
+            TableKey::Up if row > 0 => (at(row - 1, col), true),
+            TableKey::Down if row < last_row => (at(row + 1, col), true),
+            TableKey::Enter if row < last_row => (at(row + 1, col), false),
+            TableKey::Tab | TableKey::Enter => {
+                let new_col = if key == TableKey::Tab { 0 } else { col };
+                let (at, insert) = row_insertion(&table.layout, row);
+                self.cell_typed_end = None;
+                self.doc.replace(
+                    at..at,
+                    &insert,
+                    at + 2 + col_offset(new_col),
+                    EditKind::Other,
+                );
+                self.settle();
+                return true;
+            }
+            TableKey::Right | TableKey::Down | TableKey::Escape => {
+                self.exit_table(src, true);
+                return true;
+            }
+            TableKey::Left | TableKey::ShiftTab | TableKey::Up => {
+                self.exit_table(src, false);
+                return true;
+            }
+        };
+        if let Some(target) = target.cloned() {
+            self.go(&target, end);
+        }
         true
     }
 
-    /// The caret's table, row, column and the table's last row.
-    fn cell_ops(&mut self) -> Option<(usize, usize, usize, usize)> {
-        let caret = self.doc.selection().head;
-        let p = self.here();
-        let (t, _c, cell) = p.cell_at(caret)?;
-        Some((t, cell.row, cell.col, p.tables[t].layout.rows.len() - 1))
-    }
-
-    /// Up or Down inside a table goes by cell, not by pixels: a wrapped neighbour
-    /// must not pull the caret out of its column. False at the table's edge.
-    pub fn cell_vertical(&mut self, down: bool) -> bool {
-        let Some((t, row, col, last_row)) = self.cell_ops() else {
+    /// The caret arriving at `pos` from outside a table enters it as today's
+    /// `enterTable`: at the first cell's start going forward, at the last
+    /// cell's end going back. A read-only table is crossed whole, as the
+    /// caret passes any drawn block. False when `pos` is in no table.
+    pub fn enter_table(&mut self, pos: usize, forward: bool) -> bool {
+        let head = self.doc.selection().head;
+        let p = self.near(Selection::caret(pos), pos..pos);
+        let inside = |t: &Range<usize>, at: usize| t.start <= at && at <= t.end;
+        let Some(table) = p.tables.iter().find(|t| inside(&t.src, pos)) else {
             return false;
         };
-        if (down && row == last_row) || (!down && row == 0) {
+        if inside(&table.src, head) {
             return false;
         }
-        let to = if down { row + 1 } else { row - 1 };
-        let p = self.here();
-        let cells = &p.tables[t].cells;
-        let target = cells
-            .iter()
-            .find(|c| c.row == to && c.col == col)
-            .or_else(|| cells.iter().rfind(|c| c.row == to))
-            .map(|c| c.to);
-        match target {
-            Some(at) => {
-                self.set_caret(at);
+        if table.read_only {
+            let edge = if forward {
+                table.src.end
+            } else {
+                table.src.start
+            };
+            if let Some(to) = self.next_stop(edge, forward) {
+                self.set_caret(to);
+            }
+            return true;
+        }
+        let cell = if forward {
+            table.cells.first()
+        } else {
+            table.cells.last()
+        };
+        match cell.cloned() {
+            Some(cell) => {
+                self.go(&cell, !forward);
                 true
             }
             None => false,
         }
     }
 
-    /// Tab, Shift-Tab and Enter inside a table.
-    pub fn cell_navigate(&mut self, dir: CellDir) -> bool {
-        let Some((t, row, col, last_row)) = self.cell_ops() else {
+    /// Leaves the table for the text above or below it, as today's
+    /// `exitTable`. A line of text directly under a table would be read as
+    /// another row, so going down lands after a blank line, added if the
+    /// document has none there.
+    fn exit_table(&mut self, table: Range<usize>, forward: bool) {
+        self.cell_typed_end = None;
+        let (from, to) = (table.start, table.end);
+        if !forward {
+            if from == 0 {
+                self.doc.replace(0..0, "\n", 0, EditKind::Other);
+            } else {
+                // The line above's end; never snapped forward into the table.
+                let pos = if self.is_stop(from - 1) {
+                    from - 1
+                } else {
+                    self.next_stop(from - 1, false).unwrap_or(from - 1)
+                };
+                self.set_caret(pos);
+            }
+            return;
+        }
+        let src = self.doc.text().as_bytes();
+        let insert = match &src[to..(to + 2).min(src.len())] {
+            b"\n\n" => None,
+            // The document ends after the table's line break.
+            b"\n" => Some((to + 1, "\n")),
+            b"" => Some((to, "\n\n")),
+            _ => Some((to + 1, "\n\n")),
+        };
+        match insert {
+            None => self.set_caret(to + 2),
+            Some((at, text)) => {
+                self.doc.replace(at..at, text, to + 2, EditKind::Other);
+                self.settle();
+            }
+        }
+    }
+
+    /// Ctrl+B and Ctrl+I in a cell: the selected text wrapped in `marker`, or
+    /// unwrapped, and left selected, as today; with nothing
+    /// selected the caret goes between the markers. False outside a cell.
+    pub fn toggle_marker_in_cell(&mut self, marker: &str) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let range = self.doc.selection().range();
+        let p = self.here();
+        let Some((_, _, cell)) = p.cell_at(range.start) else {
             return false;
         };
-        let p = self.here();
-        let table = &p.tables[t];
-        let cell = |r: usize, c: usize| table.cells.iter().find(|x| x.row == r && x.col == c);
-        let last_in = |r: usize| table.cells.iter().rfind(|x| x.row == r);
-        let target = match dir {
-            CellDir::Next => cell(row, col + 1).or_else(|| cell(row + 1, 0)),
-            CellDir::Prev if col > 0 => cell(row, col - 1),
-            CellDir::Prev if row > 0 => last_in(row - 1),
-            CellDir::Prev => None,
-            CellDir::Down => cell(row + 1, col).or_else(|| last_in(row + 1)),
+        let range = match self.fill_missing(EditKind::Typing) {
+            Some(at) => at..at,
+            None if range.end <= cell.limit => range,
+            None => return false,
         };
-        if let Some(cell) = target {
-            let at = if dir == CellDir::Prev {
-                cell.to
-            } else {
-                cell.from
-            };
-            self.set_caret(at);
-            return true;
-        }
-        if matches!(dir, CellDir::Next | CellDir::Down) && row == last_row {
-            let (at, insert) = row_insertion(&table.layout, row);
-            let new_caret = at + 2 + col_offset(if dir == CellDir::Down { col } else { 0 });
-            self.doc
-                .replace(at..at, &insert, new_caret, EditKind::Other);
-            self.settle();
-            return true;
-        }
-        false
+        let p = self.here();
+        let Some((_, _, cell)) = p.cell_at(range.start) else {
+            return false;
+        };
+        let src = self.doc.text();
+        let text = &src[range.clone()];
+        let result = toggled_marker(text, marker);
+        let unwrapped = result.len() < text.len();
+        let new = format!(
+            "{}{}{}",
+            &src[cell.from..range.start],
+            result,
+            &src[range.end..cell.limit]
+        );
+        // Where the text lands once normalized: a non-breaking space before it
+        // is written as a plain one, a byte shorter.
+        let at = range.start - cell.from;
+        let (lead, kept) = if unwrapped {
+            (at, result.as_str())
+        } else {
+            (at + marker.len(), text)
+        };
+        let start = cell.from + cell_source(&new[..lead]).len();
+        let len = cell_source(kept).len();
+        self.write_cell(
+            cell.from,
+            cell.limit,
+            &new,
+            at + result.len(),
+            EditKind::Typing,
+        );
+        self.cell_typed_end = None;
+        self.doc.set_selection(Selection {
+            anchor: start,
+            head: start + len,
+        });
+        true
     }
 }
 

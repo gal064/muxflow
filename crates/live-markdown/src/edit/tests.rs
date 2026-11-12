@@ -200,7 +200,9 @@ fn enter_in_a_cell_above_a_short_row_never_splits_it() {
     let mut d = doc(text, text.find('b').unwrap());
     d.enter();
     assert_eq!(d.text(), text);
-    assert_eq!(head(&d), text.find('1').unwrap());
+    // The short row's missing cell, drawn as GFM draws it, has the caret.
+    let end = text.find("| 1 |").unwrap() + 5;
+    assert_eq!((head(&d), d.missing()), (end, Some((end, 1))));
 }
 
 #[test]
@@ -263,35 +265,36 @@ fn padding_is_skipped_but_typed_spaces_are_caret_stops() {
 }
 
 #[test]
-fn up_and_down_in_a_table_keep_the_column_and_stop_at_its_edges() {
-    let text = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
+fn up_and_down_in_a_table_keep_the_column_and_leave_at_its_edges() {
+    let text = "top\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
     let mut d = doc(text, text.find('4').unwrap());
-    assert!(d.cell_vertical(false));
+    assert!(d.table_key(TableKey::Up));
     assert_eq!(head(&d), text.find('2').unwrap() + 1);
-    assert!(d.cell_vertical(false));
+    assert!(d.table_key(TableKey::Up));
     assert_eq!(head(&d), text.find('b').unwrap() + 1);
-    assert!(
-        !d.cell_vertical(false),
-        "the top row falls through to pixel motion"
-    );
-    let mut d = doc(text, text.find('4').unwrap());
-    assert!(!d.cell_vertical(true));
+    assert!(d.table_key(TableKey::Up));
+    assert_eq!(head(&d), 4, "out onto the line above the table");
+    let mut d = doc(text, text.find('2').unwrap());
+    assert!(d.table_key(TableKey::Down));
+    assert_eq!(head(&d), text.find('4').unwrap() + 1);
 }
 
 #[test]
-fn cell_navigation_prev_and_down() {
+fn shift_tab_and_enter_move_by_cell() {
     let text = "| a | b |\n|---|---|\n| 1 | 2 |\n";
     let two = text.find('2').unwrap();
     let mut d = doc(text, two);
-    assert!(d.cell_navigate(CellDir::Prev));
+    assert!(d.table_key(TableKey::ShiftTab));
     assert_eq!(
         head(&d),
         text.find('1').unwrap() + 1,
         "Shift-Tab lands at the end of the previous cell"
     );
-    let mut d = doc(text, text.find('b').unwrap());
-    assert!(d.cell_navigate(CellDir::Down));
-    assert_eq!(head(&d), two);
+    assert!(d.table_key(TableKey::ShiftTab));
+    assert_eq!(head(&d), text.find('b').unwrap() + 1, "and up a row");
+    let mut d = doc(text, text.find('b').unwrap() + 1);
+    assert!(d.table_key(TableKey::Enter));
+    assert_eq!(head(&d), two, "Enter goes down to the start of the cell");
 }
 
 #[test]
@@ -334,7 +337,7 @@ fn a_trailing_backslash_stays_off_the_closing_pipe() {
 fn tab_moves_between_cells_and_adds_a_row_at_the_end() {
     let text = "| a | b |\n|---|---|\n| 1 | 2 |\n";
     let mut d = doc(text, text.find('2').unwrap());
-    assert!(d.cell_navigate(CellDir::Next));
+    assert!(d.table_key(TableKey::Tab));
     assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n|  |  |\n");
     d.insert_text("z");
     assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n| z |  |\n");
@@ -347,6 +350,7 @@ fn backspace_in_an_empty_row_removes_it() {
     let mut d = doc(text, row + 1);
     d.backspace();
     assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n");
+    assert_eq!(head(&d), text.find('2').unwrap() + 1, "to the cell above");
 }
 
 #[test]
@@ -576,6 +580,303 @@ fn follows_an_edit_made_outside_the_table() {
     let leaf = &p.leaves[p.tables[0].cells[1].leaf];
     assert_eq!(leaf.text, "two");
     assert!(leaf.marks.iter().any(|(r, s)| r == &(0..3) && s.bold));
+}
+
+/// As the Tauri tests' `type`: the cell's whole text replaced by `text`.
+fn type_cell(d: &mut LiveDoc, row: usize, col: usize, text: &str) {
+    let p = d.projection();
+    let cell = p.tables[0]
+        .cells
+        .iter()
+        .find(|c| c.row == row && c.col == col)
+        .unwrap();
+    d.select_range(cell.from..cell.limit);
+    d.insert_text(text);
+}
+
+#[test]
+fn types_word_by_word_without_leaving_padding_and_never_merges_cells_over_a_backslash() {
+    let text = "|a|b|\n|-|-|\n|1|2|";
+    let mut d = doc(text, text.find('1').unwrap() + 1);
+    for typed in [" ", "x", " ", "y"] {
+        d.insert_text(typed);
+    }
+    assert_eq!(d.text(), "|a|b|\n|-|-|\n|1 x y|2|");
+    type_cell(&mut d, 1, 0, "1\\");
+    assert_eq!(d.text(), "|a|b|\n|-|-|\n|1\\ |2|");
+    d.insert_text("z");
+    assert_eq!(d.text(), "|a|b|\n|-|-|\n|1\\z|2|");
+}
+
+#[test]
+fn typing_that_ends_the_table_in_a_cell_takes_the_caret_out_with_the_text() {
+    let text = "a | b\n-- | --\n1 | 2\n3 | 4";
+    let mut d = doc(text, text.find('1').unwrap() + 1);
+    type_cell(&mut d, 1, 0, "- 1");
+    assert_eq!(d.text(), "a | b\n-- | --\n- 1 | 2\n3 | 4");
+    // The row became a list item, so the table is the header alone.
+    assert_eq!(d.projection().tables[0].layout.rows.len(), 1);
+    assert_eq!(head(&d), "a | b\n-- | --\n- 1".len());
+}
+
+#[test]
+fn leaves_with_escape_onto_a_line_below_the_table_never_inside_its_last_row() {
+    let text = "| a |\n|---|\n| 1 |\n\nnext";
+    let mut d = doc(text, text.find('1').unwrap());
+    assert!(d.table_key(TableKey::Escape));
+    assert_eq!(head(&d), text.find("next").unwrap());
+    assert_eq!(d.text(), text);
+}
+
+#[test]
+fn adds_a_row_from_the_last_cell_and_removes_an_empty_one_with_backspace() {
+    let text = "| a | b |\n|---|---|\n| 1 | 2 |";
+    let mut d = doc(text, text.find('2').unwrap());
+    d.table_key(TableKey::Tab);
+    assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n|  |  |");
+    d.backspace();
+    assert_eq!(d.text(), text);
+    assert_eq!(head(&d), text.find('1').unwrap() + 1);
+    d.enter();
+    assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n|  |  |");
+}
+
+#[test]
+fn leaves_below_the_table_onto_a_line_of_its_own_not_into_a_new_row() {
+    let text = "| a |\n|---|\n| 1 |";
+    let mut d = doc(text, text.find('1').unwrap());
+    assert!(d.table_key(TableKey::Down));
+    assert_eq!(d.text(), "| a |\n|---|\n| 1 |\n\n");
+    assert_eq!(head(&d), d.text().len());
+    // A document ending in the table's line break gets one more.
+    let text = "| a |\n|---|\n| 1 |\n";
+    let mut d = doc(text, text.find('1').unwrap() + 1);
+    assert!(d.table_key(TableKey::Right));
+    assert_eq!(d.text(), "| a |\n|---|\n| 1 |\n\n");
+    // Under a heading that ends the table, a blank line goes between.
+    let text = "| a |\n|---|\n| 1 |\n# h";
+    let mut d = doc(text, text.find('1').unwrap());
+    assert!(d.table_key(TableKey::Down));
+    assert_eq!(d.text(), "| a |\n|---|\n| 1 |\n\n\n# h");
+    assert_eq!(head(&d), text.find("\n# h").unwrap() + 2);
+}
+
+#[test]
+fn undoes_a_cell_edit_from_inside_the_cell() {
+    let text = "| a |\n| - |\n| 1 |\n\nend";
+    let mut d = doc(text, text.find('1').unwrap() + 1);
+    type_cell(&mut d, 1, 0, "12");
+    assert!(d.text().contains("| 12 |"));
+    d.undo();
+    assert_eq!(d.text(), text);
+    let p = d.projection();
+    assert_eq!(p.leaves[p.tables[0].cells[1].leaf].text, "1");
+}
+
+#[test]
+fn is_not_editable_in_a_read_only_document() {
+    let text = "x\n\n| a |\n| - |\n| 1 |\n\ny";
+    let table = text.find('|').unwrap()..text.find("\n\ny").unwrap();
+    let below = table.end + 1;
+    let mut d = doc(text, text.find('1').unwrap());
+    d.set_read_only(true);
+    assert!(!table.contains(&head(&d)), "the caret moves off the table");
+    let p = d.projection();
+    assert!(
+        table.clone().all(|pos| !p.is_stop(pos)),
+        "no cell takes the caret"
+    );
+    assert!(!d.table_key(TableKey::Tab));
+    assert!(!d.toggle_marker_in_cell("**"));
+    // The caret crosses the table whole, both ways.
+    let mut d = doc(text, 2);
+    d.set_read_only(true);
+    d.move_horizontal(true, false);
+    assert_eq!(head(&d), below);
+    d.move_horizontal(false, false);
+    assert_eq!(head(&d), 2);
+    assert!(d.enter_table(table.start + 2, true));
+    assert_eq!(head(&d), below);
+}
+
+#[test]
+fn arrows_at_a_cells_edges_move_by_cell_and_leave_the_table() {
+    let text = "top\n\n| ab | c |\n|---|---|\n| 1 | 2 |\n\nend";
+    let a = text.find("ab").unwrap();
+    let mut d = doc(text, a + 1);
+    assert!(
+        !d.table_key(TableKey::Right),
+        "inside the text, the editor's"
+    );
+    let mut d = doc(text, a + 2);
+    assert!(d.table_key(TableKey::Right));
+    assert_eq!(head(&d), text.find('c').unwrap());
+    assert!(d.table_key(TableKey::Left));
+    assert_eq!(head(&d), a + 2);
+    let mut d = doc(text, text.find('c').unwrap() + 1);
+    assert!(d.table_key(TableKey::Right));
+    assert_eq!(head(&d), text.find('1').unwrap(), "to the next row");
+    assert!(d.table_key(TableKey::Left));
+    assert_eq!(head(&d), text.find('c').unwrap() + 1, "and back up");
+    let mut d = doc(text, text.find('2').unwrap() + 1);
+    assert!(d.table_key(TableKey::Right));
+    assert_eq!(head(&d), text.find("end").unwrap(), "out below");
+    let mut d = doc(text, a);
+    assert!(d.table_key(TableKey::Left));
+    assert_eq!(head(&d), 4, "out above");
+    // A selection is the editor's to collapse.
+    let mut d = doc(text, a);
+    d.select_range(a..a + 2);
+    assert!(!d.table_key(TableKey::Left));
+}
+
+#[test]
+fn a_table_at_the_start_gets_a_line_above_when_left_upward() {
+    let text = "| a |\n|---|\n| 1 |";
+    let mut d = doc(text, text.find('a').unwrap());
+    assert!(d.table_key(TableKey::ShiftTab));
+    assert_eq!(d.text(), format!("\n{text}"));
+    assert_eq!(head(&d), 0);
+}
+
+#[test]
+fn arrows_enter_a_table_from_outside_at_its_first_or_last_cell() {
+    let text = "top\n\n| a | b |\n|---|---|\n| 1 |\n\nend";
+    let mut d = doc(text, 4);
+    assert!(d.table_key(TableKey::Right));
+    assert_eq!(head(&d), text.find('a').unwrap());
+    // From the line below, into the short last row's missing cell.
+    let end = text.find("| 1 |").unwrap() + 5;
+    let mut d = doc(text, end + 1);
+    assert!(d.table_key(TableKey::Left));
+    assert_eq!((head(&d), d.missing()), (end, Some((end, 1))));
+    // Up and Down land wherever the pointer row is, then enter at the edge.
+    let mut d = doc(text, 4);
+    assert!(d.enter_table(text.find('b').unwrap(), true));
+    assert_eq!(head(&d), text.find('a').unwrap());
+    let mut d = doc(text, text.len());
+    assert!(d.enter_table(text.find('a').unwrap(), false));
+    assert_eq!(head(&d), end);
+    assert!(!d.enter_table(2, false), "not in a table");
+}
+
+#[test]
+fn a_short_rows_missing_cells_take_the_caret_and_typing_fills_the_row() {
+    let text = "| a | b | c |\n|---|---|---|\n| 1 |\n\nend";
+    let end = text.find("| 1 |").unwrap() + 5;
+    let mut d = doc(text, end - 2);
+    let p = d.projection();
+    assert_eq!(p.tables[0].cells.len(), 6, "drawn to the header's width");
+    assert!(
+        !p.is_stop(end),
+        "a missing cell takes the caret only when put there"
+    );
+    d.table_key(TableKey::Tab);
+    assert_eq!(d.missing(), Some((end, 1)));
+    assert!(d.projection().is_stop(end));
+    d.table_key(TableKey::Tab);
+    assert_eq!(d.missing(), Some((end, 2)));
+    assert_eq!(d.text(), text, "moving through one writes nothing");
+    d.insert_text("z");
+    assert_eq!(
+        d.text(),
+        "| a | b | c |\n|---|---|---|\n| 1 |  | z |\n\nend"
+    );
+    d.undo();
+    assert_eq!(d.text(), text, "filling and typing undo together");
+    // A click puts the caret there too; Home and End keep it there; Ctrl+B
+    // writes the markers.
+    d.set_caret_in_missing(end, 1);
+    d.move_line_edge(true, false);
+    d.move_line_edge(false, false);
+    assert_eq!(d.missing(), Some((end, 1)));
+    assert!(d.toggle_marker_in_cell("**"));
+    assert_eq!(
+        d.text(),
+        "| a | b | c |\n|---|---|---|\n| 1 | **** |\n\nend"
+    );
+    assert_eq!(head(&d), end + 3);
+}
+
+#[test]
+fn a_row_without_outer_pipes_fills_out_too() {
+    let text = "a | b\n-|-\n1\n\nend";
+    let end = text.find("\n\nend").unwrap();
+    let mut d = doc(text, end - 1);
+    d.table_key(TableKey::Tab);
+    assert_eq!(d.missing(), Some((end, 1)));
+    d.insert_text("z");
+    assert_eq!(d.text(), "a | b\n-|-\n1 | z |\n\nend");
+}
+
+#[test]
+fn cells_past_the_headers_width_are_not_drawn() {
+    let text = "| a |\n|---|\n| 1 | 2 |\n";
+    let mut d = doc(text, text.len());
+    let p = d.projection();
+    let cells: Vec<_> = p.tables[0]
+        .cells
+        .iter()
+        .map(|c| p.leaves[c.leaf].text.clone())
+        .collect();
+    assert_eq!(cells, vec!["a", "1"]);
+}
+
+#[test]
+fn backspace_in_a_missing_cell_of_an_empty_row_removes_the_row() {
+    let text = "| a | b |\n|---|---|\n| 1 | 2 |\n|  |\n";
+    let row = text.rfind("|  |").unwrap();
+    let mut d = doc(text, row + 2);
+    d.table_key(TableKey::Tab);
+    assert_eq!(d.missing(), Some((row + 4, 1)));
+    d.backspace();
+    assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n");
+    assert_eq!(head(&d), text.find('2').unwrap() + 1);
+}
+
+#[test]
+fn alignment_rows_survive_cell_edits_and_new_rows() {
+    let text = "| a | b |\n|:--|--:|\n| 1 | 2 |";
+    let mut d = doc(text, text.find('2').unwrap() + 1);
+    d.insert_text("0");
+    d.enter();
+    d.insert_text("x");
+    assert_eq!(d.text(), "| a | b |\n|:--|--:|\n| 1 | 20 |\n|  | x |");
+}
+
+#[test]
+fn bold_and_italic_toggle_in_a_cell_and_keep_the_text_selected() {
+    let text = "| a | two |\n|---|---|\n";
+    let two = text.find("two").unwrap();
+    let mut d = doc(text, two);
+    d.select_range(two..two + 3);
+    assert!(d.toggle_marker_in_cell("**"));
+    assert_eq!(d.text(), "| a | **two** |\n|---|---|\n");
+    assert_eq!(d.selected_text(), "two");
+    // Selecting the markers too, the same key takes them off.
+    d.select_range(two..two + 7);
+    assert!(d.toggle_marker_in_cell("**"));
+    assert_eq!(d.text(), text);
+    assert_eq!(d.selected_text(), "two");
+    assert!(d.toggle_marker_in_cell("*"));
+    assert_eq!(d.text(), "| a | *two* |\n|---|---|\n");
+    // With nothing selected, the caret goes between the markers.
+    let mut d = doc(text, two - 3);
+    assert!(d.toggle_marker_in_cell("**"));
+    assert_eq!(d.text(), "| a**** | two |\n|---|---|\n");
+    assert_eq!(head(&d), two - 1);
+    // A non-breaking space before the text is written as a plain space, and
+    // the selection follows it.
+    let text = "| x\u{a0}é |\n|---|\n";
+    let e = text.find('é').unwrap();
+    let mut d = doc(text, e);
+    d.select_range(e..e + 2);
+    assert!(d.toggle_marker_in_cell("**"));
+    assert_eq!(d.text(), "| x **é** |\n|---|\n");
+    assert_eq!(d.selected_text(), "é");
+    // Outside a cell it is not the table's.
+    let mut d = doc("plain", 2);
+    assert!(!d.toggle_marker_in_cell("**"));
 }
 
 // Not from the spike or Tauri: the drawn projection is reused until the text
