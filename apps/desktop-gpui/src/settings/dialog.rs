@@ -15,7 +15,7 @@ use gpui_kit::{
     base::{SliderIndicator, SliderThumb, SliderTrack, TestSupportExt},
     component::{
         ActiveTheme, Disableable, Sizable, WindowExt,
-        button::{Button, ButtonVariants},
+        button::Button,
         checkbox::Checkbox,
         dialog::DialogFooter,
         input::{Input, InputEvent, InputState},
@@ -984,14 +984,15 @@ impl SettingsDialog {
                     .gap(ui(4.))
                     .items_start()
                     .child(legend("System notifications", cx))
-                    .child(
+                    .child(dialog::button(
                         Button::new("settings-test-notification")
-                            .ghost()
-                            .xsmall()
                             .label(if self.sending_test { "Sending…" } else { "Send test notification" })
                             .disabled(!can_test)
                             .on_click(cx.listener(|this, _, _, cx| this.send_test_notification(cx))),
-                    )
+                        Action::Plain,
+                        !can_test,
+                        &theme::palette(cx),
+                    ))
                     .child(hint(notification_status_hint(self.notification_status.as_deref()), cx))
                     .children(self.test_failure.as_ref().map(|failure| {
                         SurfaceError::new("settings-test-failure", failure.clone())
@@ -1159,7 +1160,16 @@ impl Render for SettingsDialog {
                             .font_weight(FontWeight::BOLD)
                             .child("Settings"),
                     )
-                    .child(tabs),
+                    // Tauri's `aria-label="Settings sections"`. Kit's tab bar
+                    // takes no name, so a named group holds it.
+                    .child(
+                        div()
+                            .id("settings-sections")
+                            .test_support()
+                            .role(Role::Group)
+                            .aria_label("Settings sections")
+                            .child(tabs),
+                    ),
             )
             .child(
                 div()

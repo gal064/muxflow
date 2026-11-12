@@ -1956,6 +1956,44 @@ mod surface {
         assert!(gone, "recovery is not delayed");
     }
 
+    /// The first workspace starts the host's first tmux server, and the bridge
+    /// reconnects to attach to it: no outage to show, while a real drop after
+    /// it still shows one.
+    #[gpui_kit::test]
+    fn the_first_tmux_server_starting_shows_no_strip(cx: &mut TestAppContext) {
+        const CHANGED: &str = "tmux server identity changed; authoritative reconnect required";
+        let harness = two_shown_hosts(cx);
+        let mut visual = open(cx, &harness);
+        let strip = |visual: &mut VisualTestContext| {
+            visual
+                .executor()
+                .advance_clock(Duration::from_millis(2 * STRIP_APPEAR_DELAY_MS));
+            visual.run_until_parked();
+            visual.update(|window, _| window.try_find_by_label("Reconnect").is_some())
+        };
+        harness.publish_visual(&mut visual, 0, state_frame("connected"));
+        harness.publish_visual(&mut visual, 0, world("tmux:none", 1, &[]));
+        for frame in [
+            error_frame(CHANGED),
+            state_frame("disconnected"),
+            state_frame("reconnecting"),
+        ] {
+            harness.publish_visual(&mut visual, 0, frame);
+            assert!(!strip(&mut visual), "no strip while it attaches");
+        }
+        let detail = harness.controller.read_with(&visual, |state, _| {
+            state.active_link().unwrap().detail.clone()
+        });
+        assert!(!detail.contains("identity"), "{detail}");
+        harness.publish_visual(&mut visual, 0, state_frame("connected"));
+        harness.publish_visual(&mut visual, 0, world("srv-qa", 2, &[("$0", "home")]));
+        assert!(!strip(&mut visual));
+
+        harness.publish_visual(&mut visual, 0, error_frame(UNREACHABLE));
+        harness.publish_visual(&mut visual, 0, state_frame("disconnected"));
+        assert!(strip(&mut visual), "a real drop after it still shows");
+    }
+
     #[gpui_kit::test]
     fn the_helper_consent_dialog_stays_open_and_turns_into_progress(cx: &mut TestAppContext) {
         let harness = confirming(cx, |fake| fake.state().hold_installs = true);

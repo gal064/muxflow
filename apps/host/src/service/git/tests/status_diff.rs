@@ -479,6 +479,18 @@ async fn descriptor_pinned_untracked_diff_generates_an_applicable_repo_relative_
             .iter()
             .any(|entry| { entry.path == raw && entry.index_status == "A" })
     );
+    // The file's text, not the name of the descriptor Git was handed.
+    let mut spec = b":0:".to_vec();
+    spec.extend_from_slice(&raw);
+    let blob = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fixture.root)
+        .arg("cat-file")
+        .arg("blob")
+        .arg(std::ffi::OsString::from_vec(spec))
+        .output()
+        .unwrap();
+    assert_eq!(blob.stdout, b"first\nsecond\n");
 }
 
 #[tokio::test]

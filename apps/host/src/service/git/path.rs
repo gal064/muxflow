@@ -208,24 +208,21 @@ impl WorktreeRoot {
 }
 
 impl WorktreeEntry {
-    pub(super) fn open_regular_for_git(&self) -> anyhow::Result<File> {
+    /// The leaf, read by the host itself: Git gets its bytes, not the
+    /// descriptor, so it is not kept across exec.
+    pub(super) fn open_regular(&self) -> anyhow::Result<File> {
         let leaf = CString::new(self.leaf.as_bytes()).context("Git path contains NUL")?;
         // SAFETY: openat uses a live parent and O_NOFOLLOW pins only a regular leaf.
         let fd = unsafe {
             libc::openat(
                 self.parent.as_raw_fd(),
                 leaf.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         if fd < 0 {
             return Err(std::io::Error::last_os_error())
                 .context("worktree file capability is unavailable");
-        }
-        if let Err(error) = retain_across_exec(fd) {
-            // SAFETY: ownership has not moved into File.
-            unsafe { libc::close(fd) };
-            return Err(error);
         }
         // SAFETY: successful open returned a uniquely owned fd.
         Ok(unsafe { File::from_raw_fd(fd) })

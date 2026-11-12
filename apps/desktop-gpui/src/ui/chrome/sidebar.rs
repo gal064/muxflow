@@ -35,7 +35,7 @@ use crate::{
     dragdrop::{self, DropTarget, WorkspaceRef},
     fonts,
     theme::{
-        self,
+        self, Palette,
         metrics::{RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, WEIGHT_ROW, ui},
     },
     tooltips::with_shortcut,
@@ -419,22 +419,7 @@ fn workspace_row(
                             )
                         })
                         .when(!row.letter.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .w(ui(12.))
-                                    .text_center()
-                                    .font_family(fonts::MONO)
-                                    .text_size(ui(TYPE_META))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    // A step darker than the number: an address.
-                                    .text_color(if selected {
-                                        palette.accent_ink
-                                    } else {
-                                        palette.chrome_dim
-                                    })
-                                    .child(row.letter.clone()),
-                            )
+                            this.child(host_letter(&row.letter, selected, &palette))
                         })
                         .child(indicator)
                         .child(
@@ -529,6 +514,24 @@ fn workspace_row(
         )
         .context_menu(move |popup, window, cx| menu(popup, window, cx))
         .into_any_element()
+}
+
+/// A row's host letter, in the workspace and agent lists alike: `.host-letter`.
+pub(crate) fn host_letter(letter: &str, selected: bool, palette: &Palette) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w(ui(12.))
+        .text_center()
+        .font_family(fonts::MONO)
+        .text_size(ui(TYPE_META))
+        .font_weight(FontWeight::SEMIBOLD)
+        // A step darker than a row's number: an address.
+        .text_color(if selected {
+            palette.accent_ink
+        } else {
+            palette.chrome_dim
+        })
+        .child(letter.to_owned())
 }
 
 /// A block's label and a hairline filling the rest of the line. The first

@@ -607,6 +607,49 @@ fn a_reset_of_saved_state_makes_its_defaults_live(cx: &mut TestAppContext) {
     assert!(palette_opens(cx));
 }
 
+/// What a QA driver does: finds each section by role and name, inside the
+/// named section list, and presses it. GPUI performs an accessibility press on
+/// a node with no handler of its own as a click at the node's centre; the test
+/// platform has no adapter to send one, so the click is sent here.
+#[gpui_kit::test]
+fn each_settings_section_is_found_by_role_and_name_and_pressed(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let handle = open_app(&state, cx);
+    open_settings(handle, None, cx);
+    let sections = [
+        "Connection",
+        "Workspace",
+        "Terminal",
+        "Appearance",
+        "Sounds",
+        "Accessibility",
+    ];
+    for name in sections.iter().rev() {
+        let centre = with_window(handle, cx, |window, _| {
+            let list = window.find_by_label("Settings sections");
+            assert_eq!(list.role(), Some(Role::Group));
+            let tab = window
+                .find_all_by_role(Role::Tab)
+                .into_iter()
+                .find(|tab| tab.label() == Some(*name) && tab.path().starts_with(list.path()))
+                .unwrap_or_else(|| panic!("no section {name}"));
+            tab.bounds().center()
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.simulate_click(centre, gpui_kit::Modifiers::none());
+        visual.run_until_parked();
+        let selected = with_window(handle, cx, |window, _| {
+            window
+                .find_all_by_role(Role::Tab)
+                .into_iter()
+                .find(|tab| tab.label() == Some(*name))
+                .and_then(|tab| tab.selected())
+        });
+        assert_eq!(selected, Some(true), "{name}");
+    }
+}
+
 #[gpui_kit::test]
 fn tab_reaches_the_sections_as_one_stop_and_the_arrows_move_between_them(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

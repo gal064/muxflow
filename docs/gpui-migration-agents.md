@@ -248,6 +248,7 @@ through the T2.1 seam.
 | T6.1 `accessibility` | opus, high, full cycle, large, invariant | `gpui/accessibility` | Merged | `a000c07` | Keyboard context menus everywhere Tauri has them (Shift+F10, Menu key, Home/End, Tab trap, open on checked item), roving and per-row Tab stops as in Tauri, focus return after menus and dialogs, posinset fix, named alerts and groups. 4 review rounds, QA pass. Volume slider fixed in T6.8. Kit/AccessKit gaps recorded in `ui/mod.rs` |
 | T6.8 `final-polish` | opus, high, full cycle | `gpui/final-polish` | Merged | `805c07f` | Keyboard volume slider (saved on every change), tab pitch from the current CSS, confirmation width 620 px. Accepted: Markdown preview text clips 48 px below the top and 80 px above the bottom while scrolling (Kit pads outside its virtualized list; an unvirtualized fix cost 4 to 20 ms a frame), and Kit's 16 px dialog gutter below 600 px. Drag-select in editor and preview fails under xdotool only; on the Mac prompt |
 | `gdev_qa_phase6` | fresh QA | `gpui/integration` | Passed | `f93e815` | Release build, local and SSH journeys, relaunch restore, both perf scripts, all Rust and frontend gates, CI green on Linux and macOS. Acceptance lanes needing Docker-published ports, 25 GiB scratch or a Tauri package build not run. Pre-existing on `main`, not the port: the source scan looked for a README line that moved to `docs/setup.md` (fixed here), and the `phase6-ssh` agents lane fails on a renamed field and a lifecycle expectation (not run in CI) |
+| T6.9 `mac-fixes` | opus, high, full cycle | `gpui/mac-fixes` | Committed | | The owner's Mac test. Fixed: Home/End sent as tmux's keys, Ctrl+Enter commits on macOS, the agent row's host letter and full width with its actions over it, the test notification button, the notification prompt at launch, the palette search field role, no "Disconnected" strip while the first tmux server is adopted, the Replace All tooltip, unknown key names refused in the shortcut editor, one full-screen item in the macOS View menu, app shortcuts from text fields (except the field's own chords), a named Settings section list. The blank diff tab after a commit did not reproduce on Linux; chasing it found a host bug that staged an untracked file's hunk as the file's absolute path (Git read the pinned `/proc/self/fd` path as a symlink), fixed by passing the content on stdin. Accepted: while the bridge reattaches to the first tmux server, a real drop shows only once that attempt fails; a server started during the handshake still flashes the strip |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
@@ -287,6 +288,14 @@ against a scratch remote over Docker SSH.
 `run-stall.sh`, `run-pause-probe.sh`, and release builds that connect to a local and an
 SSH host, reported by `gdev_qa_phase6`. The owner then runs one Mac test prompt.
 **The plan is done here.**
+
+**Accepted differences from the Mac test (T6.9, dropped by the owner):**
+
+- The window is not restored on a secondary display: GPUI's macOS bounds are relative to their display and no display is saved; on X11, GPUI writes no position hint.
+- The Git rows' hover-only buttons cannot be pressed through a screen reader until the row is focused, as in Tauri.
+- A `pane.reseedFailed` journal line after ⌘W: a harmless race, nothing shown.
+- Red destructive menu items and the red Delete dialog button lack screen-reader names (Kit).
+- As in Tauri: the shortcut field shows the stored form ("Meta+K"), terminal find searches on Enter, and Return on the New workspace host picker opens it.
 
 ## After parity
 

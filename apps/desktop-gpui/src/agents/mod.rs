@@ -92,6 +92,11 @@ pub fn start(
     let data_dir = core.paths.app_data_dir().ok();
     let activations = activation::ActivationQueue::default();
     let notifications = NativeNotifications::new(Arc::new(activations.clone()), data_dir);
+    // At launch, as Tauri asks, so the permission prompt is there while the
+    // person is looking. It blocks until answered, so on a thread of its own;
+    // a no-op once answered, and outside a bundled app.
+    let prompt = notifications.clone();
+    std::thread::spawn(move || prompt.request_authorization());
     let effects = Rc::new(NativeEffects {
         notifications: notifications.clone(),
         app_state: app_state.clone(),

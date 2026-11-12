@@ -18,7 +18,7 @@ pub mod layout;
 mod right_panel;
 pub use right_panel::PanelBodies;
 mod sidebar;
-pub(crate) use sidebar::phase_color;
+pub(crate) use sidebar::{host_letter, phase_color};
 mod tab_strip;
 mod title_content;
 mod workspace;

@@ -606,7 +606,7 @@ impl Render for QuickOpen {
                             div().flex_1().min_w_0().child(
                                 Input::new(&self.input)
                                     .id("quick-open-input")
-                                    .role(Role::ComboBox)
+                                    .role(Role::EditableComboBox)
                                     .aria_label("Search files, workspaces, and tabs")
                                     .appearance(false)
                                     .xsmall()
