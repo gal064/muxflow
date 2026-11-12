@@ -24,7 +24,7 @@ impl LiveDoc {
     pub(super) fn continue_list(&mut self, caret: usize) {
         self.refresh();
         let text = self.doc.text();
-        let lists = Lists::new(text, &self.ast);
+        let lists = Lists::new(text, self.tree.ast());
         let Some(item) = lists.at(caret).map(|at| lists.items[at].range.clone()) else {
             return self.insert_plain(caret, "\n");
         };
@@ -71,7 +71,7 @@ impl LiveDoc {
             len += gt + 1;
             len += usize::from(line[len..].starts_with([' ', '\t']));
         }
-        if len == 0 || in_code(&self.ast, caret) {
+        if len == 0 || in_code(self.tree.ast(), caret) {
             return false;
         }
         if caret < from + len {
@@ -96,10 +96,10 @@ impl LiveDoc {
         self.refresh();
         let text = self.doc.text();
         let range = self.doc.selection().range();
-        if range.is_empty() && in_code(&self.ast, range.start) {
+        if range.is_empty() && in_code(self.tree.ast(), range.start) {
             return false;
         }
-        let lists = Lists::new(text, &self.ast);
+        let lists = Lists::new(text, self.tree.ast());
         let last = if range.end > range.start {
             range.end - 1
         } else {

@@ -1,28 +1,31 @@
 //! The GPUI view, and the only module with GPUI types. It draws the projection
 //! through gpui-base's `editor_host` (a `BlockNode` tree plus per-leaf
 //! geometry), paints the caret and the selection, registers the platform
-//! input handler, and turns keys and the pointer into `edit` calls.
+//! input handler, and turns keys and the pointer into `edit` calls. Only the
+//! blocks near the viewport are laid out (`viewport`).
 //!
 //! The host owns the buffer: it starts the view with the text, hands it every
 //! change made elsewhere ([`LiveView::set_text`]) and takes the view's edits
 //! when told ([`LiveEvent::Edited`], [`LiveView::take_edited`]).
 
+mod viewport;
+
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui_kit::base::TextViewStyle;
 use gpui_kit::base::text::editor_host::{
-    BlockNode, ColumnAlign, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
-    RenderContext, Table, TextMark, collect_leaf_geometry,
+    BlockNode, ColumnAlign, FlowPosition, InlineNode, LinkMark, Paragraph, RenderContext, Table,
+    TextMark,
 };
+use gpui_kit::base::{Scrollbar, TextViewStyle};
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::doc::Selection;
+use crate::doc::{Change, Selection};
 use crate::edit::{LiveDoc, TableKey};
 use crate::projection::{Align, Block, BlockKind, Leaf, Marker, Projection, SegKind, Style};
+use viewport::{Frame, LiveScroll, Viewport};
 
 actions!(
     live_markdown,
@@ -35,6 +38,10 @@ actions!(
         SelectRight,
         SelectUp,
         SelectDown,
+        PageUp,
+        PageDown,
+        SelectPageUp,
+        SelectPageDown,
         MoveHome,
         MoveEnd,
         SelectHome,
@@ -88,6 +95,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, context),
         KeyBinding::new("shift-up", SelectUp, context),
         KeyBinding::new("shift-down", SelectDown, context),
+        KeyBinding::new("pageup", PageUp, context),
+        KeyBinding::new("pagedown", PageDown, context),
+        KeyBinding::new("shift-pageup", SelectPageUp, context),
+        KeyBinding::new("shift-pagedown", SelectPageDown, context),
         KeyBinding::new("home", MoveHome, context),
         KeyBinding::new("end", MoveEnd, context),
         KeyBinding::new("shift-home", SelectHome, context),
@@ -172,17 +183,6 @@ pub enum LiveEvent {
     Link(String),
 }
 
-/// Geometry reported by the last prepaint, read by caret placement and input.
-#[derive(Default)]
-struct Frame {
-    projection: Rc<Projection>,
-    geometry: HashMap<u64, LeafGeometry>,
-    /// Home put the caret here, at a wrapped line's start, which is also the
-    /// end of the line above: draw it on the later line, as CodeMirror's
-    /// caret association does.
-    wrap_start: Option<usize>,
-}
-
 pub struct LiveView {
     live: LiveDoc,
     style: LiveStyle,
@@ -192,9 +192,9 @@ pub struct LiveView {
     /// The x a run of Up and Down keeps to.
     goal_x: Option<Pixels>,
     selecting: bool,
-    /// The caret moved by key: scroll it into view at the next paint.
+    /// The caret moved by key: scroll it into view at the next layout.
     reveal: Rc<Cell<bool>>,
-    scroll: ScrollHandle,
+    scroll: LiveScroll,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -224,7 +224,7 @@ impl LiveView {
             goal_x: None,
             selecting: false,
             reveal: Rc::default(),
-            scroll: ScrollHandle::new(),
+            scroll: LiveScroll::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -247,9 +247,9 @@ impl LiveView {
         cx.notify();
     }
 
-    /// Whether the text changed since the last call, for the host's buffer.
-    /// Never for an open IME preedit.
-    pub fn take_edited(&mut self) -> bool {
+    /// The span of the text changed since the last call, for the host's
+    /// buffer. Never for an open IME preedit.
+    pub fn take_edited(&mut self) -> Option<Change> {
         self.live.take_edited()
     }
 
@@ -293,16 +293,22 @@ impl LiveView {
     }
 
     fn hit(&self, at: Point<Pixels>) -> Option<usize> {
-        self.hit_leaf(at).map(|(_, pos, _)| pos)
+        self.hit_leaf(at).map(|(_, _, pos, _)| pos)
     }
 
-    /// The leaf under `at`, the source position there, and whether `at`
-    /// fell on the character before that position rather than the one after.
-    fn hit_leaf(&self, at: Point<Pixels>) -> Option<(usize, usize, bool)> {
+    /// The segment and leaf under `at`, the source position there, and
+    /// whether `at` fell on the character before that position rather than
+    /// the one after.
+    fn hit_leaf(&self, at: Point<Pixels>) -> Option<(Rc<Projection>, usize, usize, bool)> {
         let frame = self.frame.borrow();
-        let projection = frame.projection.clone();
-        let mut leaves: Vec<(Pixels, Pixels, usize, &LeafGeometry)> = Vec::new();
-        for (i, leaf) in projection.leaves.iter().enumerate() {
+        let mut leaves = Vec::new();
+        let laid = frame.segments.iter().flat_map(|p| {
+            p.leaves
+                .iter()
+                .enumerate()
+                .map(move |(i, leaf)| (p, i, leaf))
+        });
+        for (projection, i, leaf) in laid {
             let Some(geometry) = frame.geometry.get(&leaf.key) else {
                 continue;
             };
@@ -318,12 +324,12 @@ impl LiveView {
             };
             let dy = distance(at.y, bounds.top(), bounds.bottom());
             let dx = distance(at.x, bounds.left(), bounds.right());
-            leaves.push((dy, dx, i, geometry));
+            leaves.push((dy, dx, projection, i, geometry));
         }
         // Nearest row first, then nearest column: leaves on one visual row differ
         // by a few pixels (inline code is a taller run), so compare rows loosely.
         let nearest_row = leaves.iter().map(|l| l.0).reduce(|a, b| a.min(b))?;
-        let &(_, _, i, geometry) = leaves
+        let &(_, _, projection, i, geometry) = leaves
             .iter()
             .filter(|l| l.0 <= nearest_row + px(8.))
             .min_by(|a, b| {
@@ -333,7 +339,8 @@ impl LiveView {
             })?;
         let index = geometry.index_for_position(at);
         let before = geometry.position_for_index(index).x > at.x;
-        Some((i, projection.from_display(i, index), before))
+        let pos = projection.from_display(i, index);
+        Some((projection.clone(), i, pos, before))
     }
 
     fn caret_rect(&self) -> Option<Bounds<Pixels>> {
@@ -402,8 +409,7 @@ impl LiveView {
 
     fn visual_edge(&self, end: bool) -> Option<usize> {
         let frame = self.frame.borrow();
-        let p = &frame.projection;
-        let (mut leaf, mut disp) = p.locate(self.live.selection().head)?;
+        let (p, mut leaf, mut disp) = frame.locate(self.live.selection().head)?;
         // An ordered item's number is a leaf of its own beside the text; the
         // two are one line, so Home goes before the number and End past the
         // text, as in Tauri where the number is plain text.
@@ -424,8 +430,8 @@ impl LiveView {
         if end && number == Some(leaf) {
             (leaf, disp) = (leaf + 1, 0);
         }
-        let geometry = frame.geometry.get(&frame.projection.leaves[leaf].key)?;
-        let caret = caret_origin(&frame, leaf, disp, self.live.selection().head)?;
+        let geometry = frame.geometry.get(&p.leaves[leaf].key)?;
+        let caret = caret_origin(&frame, p, leaf, disp, self.live.selection().head)?;
         let bounds = geometry.bounds();
         let x = if end {
             bounds.right() + px(1.)
@@ -436,7 +442,7 @@ impl LiveView {
             geometry.index_for_position(point(x, caret.y + geometry.line_height() / 2.));
         // A wrapped line's end is the next line's start, where the caret
         // would be drawn: stop before the character the line wraps after.
-        let text = &frame.projection.leaves[leaf].text;
+        let text = &p.leaves[leaf].text;
         if end && index < text.len() && geometry.position_for_index(index).y > caret.y {
             index = text[..index]
                 .grapheme_indices(true)
@@ -456,10 +462,10 @@ impl LiveView {
     fn task_at(&self, at: Point<Pixels>) -> Option<usize> {
         let frame = self.frame.borrow();
         frame
-            .projection
-            .blocks
+            .segments
             .iter()
-            .filter_map(|block| task_box(&frame, block))
+            .flat_map(|p| p.blocks.iter().map(move |block| (p, block)))
+            .filter_map(|(p, block)| task_box(&frame, p, block))
             .find(|(bounds, ..)| bounds.contains(&at))
             .map(|(_, _, at)| at)
     }
@@ -472,7 +478,7 @@ impl LiveView {
             return;
         }
         window.focus(&self.focus, cx);
-        let Some((leaf, pos, before)) = self.hit_leaf(event.position) else {
+        let Some((projection, leaf, pos, before)) = self.hit_leaf(event.position) else {
             return;
         };
         if event.modifiers.secondary(cx)
@@ -483,7 +489,7 @@ impl LiveView {
         }
         // A cell a short row lacks is drawn, with no source of its own: any
         // click there puts the caret in it, as a click in Tauri's empty td.
-        let missing = (self.frame.borrow().projection)
+        let missing = projection
             .missing_leaf(leaf)
             .map(|cell| (cell.from, cell.col));
         match event.click_count {
@@ -500,6 +506,51 @@ impl LiveView {
         self.reveal.set(false);
     }
 
+    /// Page Up and Page Down: the caret moves a viewport up or down, and the
+    /// view with it.
+    fn page(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        let Some(rect) = self.caret_rect() else {
+            return;
+        };
+        if !self.scroll.viewport().intersects(&rect) {
+            // Off screen, only the caret's own blocks are laid out: the view
+            // goes to it first.
+            self.reveal.set(true);
+            cx.notify();
+            return;
+        }
+        let page = (self.scroll.viewport().size.height - px(FONT_SIZE * LINE_HEIGHT)).max(px(0.));
+        let goal = self.goal_x.unwrap_or(rect.origin.x);
+        let y = rect.center().y + if down { page } else { -page };
+        let Some(pos) = self.hit(point(goal, y)) else {
+            return;
+        };
+        if extend {
+            self.live.extend_to(pos, down)
+        } else {
+            self.live.set_caret(pos)
+        }
+        self.scroll.scroll_by(if down { page } else { -page });
+        self.changed(cx);
+        self.goal_x = Some(goal);
+    }
+
+    /// A drag that selects, wherever the pointer is: past the top or bottom,
+    /// the view follows it.
+    fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some(pos) = self.hit(event.position) else {
+            return;
+        };
+        self.live.set_head(pos);
+        self.changed(cx);
+        let viewport = self.scroll.viewport();
+        let outside = event.position.y < viewport.top() || event.position.y > viewport.bottom();
+        self.reveal.set(outside);
+    }
+
     fn copy(&self, cx: &mut Context<Self>) {
         let text = self.live.selected_text();
         if !text.is_empty() {
@@ -510,7 +561,7 @@ impl LiveView {
 
 /// A task item's box, drawn over the space its marker leaf leaves for it:
 /// where, whether it is ticked, and where its `[` is.
-fn task_box(frame: &Frame, block: &Block) -> Option<(Bounds<Pixels>, bool, usize)> {
+fn task_box(frame: &Frame, p: &Projection, block: &Block) -> Option<(Bounds<Pixels>, bool, usize)> {
     let BlockKind::ListItem {
         marker: Some(Marker::Task { checked, at }),
         ..
@@ -518,7 +569,7 @@ fn task_box(frame: &Frame, block: &Block) -> Option<(Bounds<Pixels>, bool, usize
     else {
         return None;
     };
-    let leaf = &frame.projection.leaves[block.leaves[0]];
+    let leaf = &p.leaves[block.leaves[0]];
     let space = leaf.segs.last()?.disp.start;
     let geometry = frame.geometry.get(&leaf.key)?;
     let origin = geometry.position_for_index(space);
@@ -568,19 +619,25 @@ fn paint_task(
 }
 
 fn caret_bounds(frame: &Frame, head: usize) -> Option<Bounds<Pixels>> {
-    let (leaf, disp) = frame.projection.locate(head)?;
-    let geometry = frame.geometry.get(&frame.projection.leaves[leaf].key)?;
-    let origin = caret_origin(frame, leaf, disp, head)?;
+    let (p, leaf, disp) = frame.locate(head)?;
+    let geometry = frame.geometry.get(&p.leaves[leaf].key)?;
+    let origin = caret_origin(frame, p, leaf, disp, head)?;
     Some(Bounds::new(origin, size(px(1.5), geometry.caret_height())))
 }
 
 /// Where the caret at display offset `disp` of `leaf` is drawn: at a wrap
 /// that Home went to, the start of the later line.
-fn caret_origin(frame: &Frame, leaf: usize, disp: usize, head: usize) -> Option<Point<Pixels>> {
-    let geometry = frame.geometry.get(&frame.projection.leaves[leaf].key)?;
+fn caret_origin(
+    frame: &Frame,
+    p: &Projection,
+    leaf: usize,
+    disp: usize,
+    head: usize,
+) -> Option<Point<Pixels>> {
+    let geometry = frame.geometry.get(&p.leaves[leaf].key)?;
     let origin = geometry.position_for_index(disp);
     if frame.wrap_start == Some(head)
-        && let Some(g) = frame.projection.leaves[leaf]
+        && let Some(g) = p.leaves[leaf]
             .text
             .get(disp..)
             .and_then(|t| t.graphemes(true).next())
@@ -604,8 +661,10 @@ fn cell_ring(
     table: Bounds<Pixels>,
     rem: Pixels,
 ) -> Option<Bounds<Pixels>> {
-    let p = &frame.projection;
-    let (t, _, cell) = p.cell_at(head)?;
+    let (p, (t, _, cell)) = frame
+        .segments
+        .iter()
+        .find_map(|p| Some((p, p.cell_at(head)?)))?;
     let cells = &p.tables[t].cells;
     let extent = |same: &dyn Fn(&crate::projection::Cell) -> bool| {
         cells
@@ -886,202 +945,50 @@ fn quoted(block: &Block, s: &LiveStyle, inner: Div) -> AnyElement {
     }
 }
 
-/// Runs the child under an editor-host geometry scope, then paints the caret
-/// and registers the platform input handler.
-struct LiveRoot {
-    child: Option<AnyElement>,
-    frame: Rc<RefCell<Frame>>,
-    projection: Rc<Projection>,
-    selection: Range<usize>,
-    head: usize,
-    show_caret: bool,
-    read_only: bool,
-    /// The cell with the caret gets a focus ring, unless read-only.
-    cell_ring: bool,
-    reveal: Rc<Cell<bool>>,
-    style: LiveStyle,
-    view: Entity<LiveView>,
-    focus: FocusHandle,
-    scroll: ScrollHandle,
-}
-
-impl IntoElement for LiveRoot {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for LiveRoot {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (
-            self.child
-                .as_mut()
-                .expect("child set")
-                .request_layout(window, cx),
-            (),
-        )
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let mut decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
-        if !self.selection.is_empty() {
-            for (i, leaf) in self.projection.leaves.iter().enumerate() {
-                if let Some(range) = self.projection.leaf_selection(i, &self.selection) {
-                    decorations
-                        .entry(leaf.key)
-                        .or_default()
-                        .push((range, self.style.selection));
-                }
-            }
-        }
-        let child = self.child.as_mut().expect("child set");
-        let (_, geometry) = collect_leaf_geometry(decorations, || child.prepaint(window, cx));
-        let mut frame = self.frame.borrow_mut();
-        frame.projection = self.projection.clone();
-        frame.geometry = geometry;
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.child.as_mut().expect("child set").paint(window, cx);
-        {
-            let frame = self.frame.borrow();
-            for block in &frame.projection.blocks {
-                if let Some((bounds, checked, _)) = task_box(&frame, block) {
-                    paint_task(bounds, checked, self.read_only, &self.style, window);
-                }
-            }
-        }
-        if self.cell_ring
-            && let Some(ring) =
-                cell_ring(&self.frame.borrow(), self.head, bounds, window.rem_size())
-        {
-            // As Tauri's focused cell: a 2px inset ring, the accent at 70%.
-            let color = self.style.accent.opacity(0.7);
-            window.paint_quad(quad(
-                ring,
-                px(0.),
-                transparent_black(),
-                px(2.),
-                color,
-                BorderStyle::Solid,
-            ));
-        }
-        let caret = caret_bounds(&self.frame.borrow(), self.head);
-        if let Some(rect) = caret {
-            if self.show_caret {
-                window.paint_quad(fill(rect, self.style.ink_strong));
-            }
-            // Keep a caret moved by key in view; the pointer scrolls freely.
-            let viewport = self.scroll.bounds();
-            if self.reveal.take() && viewport.size.height > px(0.) {
-                let mut offset = self.scroll.offset();
-                let margin = px(FONT_SIZE * LINE_HEIGHT);
-                if rect.bottom() > viewport.bottom() {
-                    offset.y -= rect.bottom() - viewport.bottom() + margin;
-                } else if rect.top() < viewport.top() {
-                    offset.y += viewport.top() - rect.top() + margin;
-                }
-                if offset != self.scroll.offset() {
-                    self.scroll.set_offset(offset);
-                    cx.notify(self.view.entity_id());
-                }
-            }
-        }
-        window.handle_input(
-            &self.focus,
-            ElementInputHandler::new(bounds, self.view.clone()),
-            cx,
-        );
-    }
-}
-
 impl Render for LiveView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
         self.live.focused = focused;
         let style = self.style.clone();
-        let projection = self.live.projection();
+        let segments = self.live.segments();
+        let sel = self.live.selection();
         let mut context = KeyContext::default();
         context.add(KEY_CONTEXT);
         if self.read_only {
             context.add("read_only");
         }
-        let in_list = projection
-            .locate(self.live.selection().head)
-            .and_then(|(leaf, _)| projection.blocks.iter().find(|b| b.leaves.contains(&leaf)))
-            .is_some_and(|b| matches!(b.kind, BlockKind::ListItem { .. }));
+        let at = segments.partition_point(|s| s.src.end < sel.head);
+        let in_list = (segments.iter().skip(at).take(2)).any(|s| {
+            let p = &s.projection;
+            p.locate(sel.head)
+                .and_then(|(leaf, _)| p.blocks.iter().find(|b| b.leaves.contains(&leaf)))
+                .is_some_and(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+        });
         if in_list {
             context.add("in_list");
         }
         let rcx = RenderContext::new(text_style(&style))
             .with_body_font_size(px(FONT_SIZE))
             .on_link_click(|_, _, _, _| {});
-        let blocks: Vec<AnyElement> = projection
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(ix, block)| render_block(ix, block, &projection, &style, &rcx, window, cx))
-            .collect();
-        let sel = self.live.selection();
-        let root = LiveRoot {
-            child: Some(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .children(blocks)
-                    .into_any_element(),
-            ),
-            frame: self.frame.clone(),
-            projection,
+        let root = Viewport {
+            segments,
+            style: style.clone(),
+            rcx,
+            // `clamp(20px, 4vw, 48px)`, as `--markdown-gutter`.
+            gutter: (window.viewport_size().width * 0.04).clamp(px(20.), px(48.)),
+            bottom: window.viewport_size().height * 0.4,
             selection: sel.range(),
             head: sel.head,
+            marked: self.live.marked().map(|m| m.start),
             show_caret: focused,
             read_only: self.read_only,
             cell_ring: focused && !self.read_only,
             reveal: self.reveal.clone(),
-            style: style.clone(),
+            frame: self.frame.clone(),
+            scroll: self.scroll.clone(),
             view: cx.entity(),
             focus: self.focus.clone(),
-            scroll: self.scroll.clone(),
         };
-        // `clamp(20px, 4vw, 48px)`, as `--markdown-gutter`.
-        let gutter = (window.viewport_size().width * 0.04).clamp(px(20.), px(48.));
-        let bottom = window.viewport_size().height * 0.4;
 
         div()
             .id("live-markdown")
@@ -1118,6 +1025,10 @@ impl Render for LiveView {
             .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.vertical(true, false, cx)))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(false, true, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(true, true, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.page(false, false, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.page(true, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| this.page(false, true, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.page(true, true, cx)))
             .on_action(cx.listener(|this, _: &MoveHome, _, cx| this.line_edge(false, false, cx)))
             .on_action(cx.listener(|this, _: &MoveEnd, _, cx| this.line_edge(true, false, cx)))
             .on_action(cx.listener(|this, _: &SelectHome, _, cx| this.line_edge(false, true, cx)))
@@ -1203,16 +1114,6 @@ impl Render for LiveView {
                     this.press(event, window, cx)
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if this.selecting
-                    && event.pressed_button == Some(MouseButton::Left)
-                    && let Some(pos) = this.hit(event.position)
-                {
-                    this.live.set_head(pos);
-                    this.changed(cx);
-                    this.reveal.set(false);
-                }
-            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| this.selecting = false),
@@ -1221,25 +1122,8 @@ impl Render for LiveView {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| this.selecting = false),
             )
-            .child(
-                div()
-                    .id("live-markdown-scroll")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(CONTENT_WIDTH) + gutter * 2.)
-                            .px(gutter)
-                            .pt(px(48.))
-                            .pb(bottom)
-                            .child(root),
-                    ),
-            )
+            .child(root)
+            .child(Scrollbar::vertical(&self.scroll))
     }
 }
 
