@@ -325,7 +325,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
         }
         assert_eq!(
             window.find_by_label("Search commands").role(),
-            Some(Role::ComboBox)
+            Some(Role::EditableComboBox)
         );
     });
 }
@@ -892,7 +892,7 @@ fn quick_open_lists_tabs_and_workspaces_before_any_typing(cx: &mut TestAppContex
             window
                 .find_by_label("Search files, workspaces, and tabs")
                 .role(),
-            Some(Role::ComboBox)
+            Some(Role::EditableComboBox)
         );
         assert_eq!(
             window.find_by_label("api").role(),
@@ -1266,6 +1266,35 @@ fn escape_from_a_dialog_returns_focus_to_what_had_it(cx: &mut TestAppContext) {
         assert!(!dialog_open(handle, cx), "{command}");
         assert!(field_focused(cx), "{command} gives focus back");
     }
+}
+
+/// App shortcuts work from any text field, while the chords the field binds
+/// itself stay its own.
+#[gpui_kit::test]
+fn a_text_field_passes_on_app_chords_it_does_not_bind(cx: &mut TestAppContext) {
+    let (_dir, _shell) = no_state(cx);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let log = ran.clone();
+    cx.update(|cx| {
+        implement_all(log, cx);
+        fully_available_context(cx);
+    });
+    let (handle, input) = focused_field_window(cx);
+    type_text(handle, "message", cx);
+    press(handle, "secondary-n", cx);
+    assert_eq!(*ran.borrow(), ["session.new"], "New workspace");
+
+    // Select all is the field's, even bound to an app command.
+    let overrides: ShortcutOverrides =
+        [("view.togglePanel".to_owned(), Some(format!("{PRIMARY}+A")))].into();
+    with_window(handle, cx, move |window, cx| {
+        commands::set_overrides(overrides, window, cx)
+    });
+    cx.run_until_parked();
+    press(handle, "secondary-a", cx);
+    assert_eq!(ran.borrow().len(), 1, "the field keeps its own chord");
+    let selected = cx.read(|cx| input.read(cx).selected_text().to_string());
+    assert_eq!(selected, "message");
 }
 
 /// A document tab's editor: its key context around a Kit input.
