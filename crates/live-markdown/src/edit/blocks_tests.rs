@@ -722,29 +722,41 @@ fn enter_on_an_empty_nested_item_between_items_keeps_the_caret_there() {
     assert_eq!(d.text(), "- alpha\n  X\n- beta");
 }
 
-// markdown-rs 1.0.0 panics on this source ("mismatched ListOrdered /
-// ListUnordered"), which typing can reach.
+// markdown-rs 1.0.0 panicked on these ("mismatched (non-jsx)"): a list item
+// ending in unclosed code or HTML, then another item. Typing reached the
+// first in Live, and Preview parses the same text with math on. Fixed in
+// vendor/markdown.
 #[test]
-fn a_source_the_parser_panics_on_draws_as_plain_lines() {
-    let bad = "  - a10.\n  - ```\n   2. \n   2. ";
-    let mut d = doc("- item", 6);
-    d.doc
-        .edit(0..6, bad, Selection::caret(bad.len()), EditKind::Other);
-    let drawn: Vec<_> = d
-        .projection()
-        .leaves
+fn an_item_after_unclosed_code_no_longer_panics_the_parser() {
+    let mut preview = markdown::ParseOptions::gfm();
+    preview.constructs.math_text = true;
+    preview.constructs.math_flow = true;
+    for src in [
+        "  - a10.\n  - ```\n   2. \n   2. ",
+        "- \t<!--\n2. )\n\\ | ---\n\nx~~",
+        "*\t~~~\n1.",
+    ] {
+        for options in [&markdown::ParseOptions::gfm(), &preview] {
+            assert!(markdown::to_mdast(src, options).is_ok(), "{src:?}");
+        }
+    }
+    // The items keep their shape: a bullet list of `a10.` and a fence, then
+    // an ordered list of two empty items, as CommonMark reads it.
+    let ast = markdown::to_mdast("  - a10.\n  - ```\n   2. \n   2. ", &preview).unwrap();
+    let lists: Vec<_> = ast
+        .children()
+        .unwrap()
         .iter()
-        .map(|l| l.text.clone())
+        .map(|n| match n {
+            markdown::mdast::Node::List(l) => (l.ordered, l.children.len()),
+            other => panic!("{other:?}"),
+        })
         .collect();
-    assert_eq!(drawn, ["  - a10.", "  - ```", "   2. ", "   2. "]);
-    // Editing goes on, on the plain lines.
-    d.set_caret(bad.find("```").unwrap());
-    d.insert_text("x");
-    assert_eq!(d.text(), "  - a10.\n  - x```\n   2. \n   2. ");
-    // Text that parses again is drawn as Markdown again.
-    d.undo();
-    d.undo();
-    assert_eq!(d.text(), "- item");
+    assert_eq!(lists, vec![(false, 2), (true, 2)]);
+    // And Live draws it as Markdown: the items' markers are bullets.
+    let mut d = doc("  - a10. ```\n   2. \n   2. ", 8);
+    d.enter();
+    assert_eq!(d.text(), "  - a10.\n  -  ```\n   2. \n   2. ");
     assert_eq!(d.projection().leaves[0].text, "\u{2022}");
 }
 
