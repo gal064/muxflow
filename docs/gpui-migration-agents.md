@@ -303,11 +303,33 @@ Phases 7 to 10 do not start until the owner asks for them.
 
 ## Phase 7: Live Markdown
 
+Approved by the owner on 2026-11-11, to run through final QA.
+
+**Scope.** Live editing with hidden syntax, as today. Inline editable tables with full
+`liveTable` behaviour. Lists and list commands, task boxes, links, ⌘F find built into the
+live view with a match count and replace, file sync and autosave, and IME. The Live mode
+sits beside Source, Preview and Split, with the default-view setting, as in Tauri.
+Images draw no picture: the alt text is styled like a link and the markup hides until the
+caret enters it. Not built: spellcheck, screen-reader text, a virtualized view, an
+incremental parser, a rope. Files above `LIVE_MARKDOWN_LIMIT_CHARS` (1 MiB) open as
+source, as today.
+
+**Isolation.** Everything lives in a new crate, `crates/live-markdown`. Its modules hold
+no GPUI types except one `view` module. The app registers the live view for Markdown tabs
+through one seam, like `set_markdown_preview`. The view edits the editor's document
+buffer, so autosave, outside-change reconciliation and dirty state stay in
+`apps/desktop-gpui/src/editor`. The starting point is `spikes/gpui/markdown`.
+
 | Wave | Task | Mode | Model, effort | Touches | Depends on |
 |---|---|---|---|---|---|
-| 1 | T7.1 `live-markdown` | Full, large, design | opus, high | Live Markdown on `gpui-base` `editor_host`, per the plan | Pilot, owner approval |
+| 1 | T7.1 `live-md-core` | Full, large, design | opus, high | New crate from the spike, editor seam, Live mode, size limit, sync, IME | |
+| 2 | T7.2 `live-md-blocks` | Full | opus, high | Projection parity, list commands and indent, task toggle, link click, word motion and clicks | T7.1 |
+| 2 | T7.3 `live-md-tables` | Full | opus, high | Full `liveTable` parity | T7.1 |
+| 2 | T7.4 `live-md-find` | Full | opus, high | ⌘F in the live view: highlights, count, replace | T7.1 |
 
-**Worker QA:** edit real Markdown files, including tables and lists, and test IME.
+Each task ports the Tauri tests for its area and closes those ledger rows. Root merges
+wave 2 in the order T7.3, T7.4, T7.2. Then `gdev_qa_phase7` runs on Linux, local and
+SSH, and the owner runs a Mac test for typing feel and IME.
 
 ## Phase 8: Packaging and CI
 
@@ -357,7 +379,8 @@ final sweep command returning only justified hits.
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
 | 6 | Done, owner Mac test done | `f93e815` | Integrated QA passed. Mac test found bugs, now being fixed. Benchmark: `docs/gpui-benchmark.md`; the owner committed to GPUI |
-| 7 to 10 | After parity, owner decides | | |
+| 7 | In progress, T7.1 dispatched | | Wave 2 after T7.1 merges |
+| 8 to 10 | After parity, owner decides | | |
 
 ### Task log
 
