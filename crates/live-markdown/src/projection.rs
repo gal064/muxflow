@@ -126,13 +126,19 @@ pub struct Cell {
     /// Last position the caret may take: the trimmed end, or just past
     /// whitespace typed there.
     pub limit: usize,
+    /// A short row's cell, drawn empty as GFM draws it, with no source until
+    /// it is typed into. `from`, `to` and `limit` are the row's end.
+    pub missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableInfo {
     pub src: Range<usize>,
     pub layout: TableLayout,
+    /// Row by row, each row cut or padded to the header's width.
     pub cells: Vec<Cell>,
+    /// No cell takes the caret, so the caret crosses the table whole.
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -140,6 +146,8 @@ pub struct Projection {
     pub blocks: Vec<Block>,
     pub leaves: Vec<Leaf>,
     pub tables: Vec<TableInfo>,
+    /// The missing cell holding the caret, as (table, cell) indices.
+    pub missing: Option<(usize, usize)>,
 }
 
 /// What the projection needs to know about the editor state.
@@ -153,6 +161,10 @@ pub struct Active {
     /// Just past whitespace the user typed at the end of a table cell, so the
     /// caret can stand there. Alignment padding is otherwise not a caret stop.
     pub cell_typed_end: Option<usize>,
+    /// The missing cell the caret was put in, as (its row's end, column).
+    pub missing: Option<(usize, usize)>,
+    /// Tables are drawn but take no caret, as today's read-only widget.
+    pub read_only: bool,
 }
 
 fn touches(active: &Active, from: usize, to: usize) -> bool {
@@ -298,10 +310,17 @@ fn project_window(
             b.point_block(src.len(), BlockKind::Blank, src.len()..src.len());
         }
     }
+    let missing = active.missing.and_then(|(at, col)| {
+        b.tables.iter().enumerate().find_map(|(t, table)| {
+            let found = |c: &Cell| c.missing && c.from == at && c.col == col;
+            table.cells.iter().position(found).map(|c| (t, c))
+        })
+    });
     Projection {
         blocks: b.blocks,
         leaves: b.leaves,
         tables: b.tables,
+        missing,
     }
 }
 
@@ -799,11 +818,32 @@ impl<'a> Builder<'a> {
                 mdast::AlignKind::None => Align::None,
             })
             .collect();
+        let read_only = self.active.read_only;
+        let columns = layout.rows.first().map_or(0, |r| r.cells.len());
         let mut rows = Vec::new();
         let mut cells = Vec::new();
         for (row, span) in layout.rows.iter().enumerate() {
             let mut leaf_row = Vec::new();
-            for (col, cell) in span.cells.iter().enumerate() {
+            // A caret in this row's missing cell is at the row's end, which
+            // can also be the last real cell's end: that cell stays rendered.
+            let reveal = !read_only && self.active.missing.is_none_or(|(at, _)| at != span.end);
+            // As GFM draws a row: cut or padded to the header's width.
+            for col in 0..columns {
+                let Some(cell) = span.cells.get(col) else {
+                    let active = self.active.missing == Some((span.end, col));
+                    let leaf = self.missing_cell(span.end, active);
+                    leaf_row.push(leaf);
+                    cells.push(Cell {
+                        leaf,
+                        row,
+                        col,
+                        from: span.end,
+                        to: span.end,
+                        limit: span.end,
+                        missing: true,
+                    });
+                    continue;
+                };
                 let bytes = src.as_bytes();
                 let mut inner_end = cell.to;
                 while inner_end < span.to && bytes[inner_end] == b' ' {
@@ -813,7 +853,15 @@ impl<'a> Builder<'a> {
                     Some(end) if end > cell.to && end <= inner_end => end,
                     _ => cell.to,
                 };
-                let leaf = self.table_cell(cell.from, cell.to, limit);
+                let leaf = self.table_cell(cell.from, cell.to, limit, reveal);
+                if read_only {
+                    // Drawn and selectable, never a caret stop.
+                    for seg in &mut self.leaves[leaf].segs {
+                        if seg.kind == SegKind::Text {
+                            seg.kind = SegKind::Replaced;
+                        }
+                    }
+                }
                 leaf_row.push(leaf);
                 cells.push(Cell {
                     leaf,
@@ -822,6 +870,7 @@ impl<'a> Builder<'a> {
                     from: cell.from,
                     to: cell.to,
                     limit,
+                    missing: false,
                 });
             }
             rows.push(leaf_row);
@@ -832,18 +881,42 @@ impl<'a> Builder<'a> {
             src: start..end,
             layout,
             cells,
+            read_only,
         });
     }
 
-    fn table_cell(&mut self, from: usize, to: usize, limit: usize) -> usize {
+    /// An empty leaf for a short row's missing cell: a caret stop only while
+    /// the caret is put there, since it has no source of its own.
+    fn missing_cell(&mut self, at: usize, active: bool) -> usize {
+        let segs = if active {
+            vec![Seg {
+                src: at..at,
+                disp: 0..0,
+                kind: SegKind::Text,
+            }]
+        } else {
+            Vec::new()
+        };
+        self.leaves.push(Leaf {
+            key: self.leaves.len() as u64 + 1,
+            src: at..at,
+            text: String::new(),
+            segs,
+            marks: Vec::new(),
+        });
+        self.leaves.len() - 1
+    }
+
+    fn table_cell(&mut self, from: usize, to: usize, limit: usize, reveal: bool) -> usize {
         let src = self.src;
         let mut l = self.start_leaf(from);
         let plain = Style::default();
-        if self
-            .active
-            .ranges
-            .iter()
-            .any(|r| r.start >= from && r.end <= limit)
+        if reveal
+            && self
+                .active
+                .ranges
+                .iter()
+                .any(|r| r.start >= from && r.end <= limit)
         {
             // The cell holding the caret or selection shows its own source.
             l.visible(src, from..limit, &plain);
@@ -903,6 +976,11 @@ impl Projection {
     /// The leaf and display offset that show source position `pos`, if the
     /// position is visible (a caret stop).
     pub fn locate(&self, pos: usize) -> Option<(usize, usize)> {
+        if let Some(cell) = self.missing_cell()
+            && cell.from == pos
+        {
+            return Some((cell.leaf, 0));
+        }
         for (i, leaf) in self.leaves.iter().enumerate() {
             if pos < leaf.src.start || pos > leaf.src.end {
                 continue;
@@ -922,6 +1000,18 @@ impl Projection {
 
     /// Past the hidden or replaced stretch around `pos`, in the given direction.
     pub fn jump_over(&self, pos: usize, forward: bool) -> Option<usize> {
+        let locked = self
+            .tables
+            .iter()
+            .find(|t| t.read_only && t.src.contains(&pos));
+        if let Some(table) = locked {
+            return Some(if forward {
+                table.src.end
+            } else {
+                table.src.start
+            })
+            .filter(|&to| to != pos);
+        }
         for leaf in &self.leaves {
             for seg in &leaf.segs {
                 if seg.kind == SegKind::Text || seg.src.is_empty() {
@@ -1002,13 +1092,31 @@ impl Projection {
         out.filter(|r| !r.is_empty())
     }
 
+    /// The missing cell holding the caret.
+    pub fn missing_cell(&self) -> Option<&Cell> {
+        self.missing.map(|(t, c)| &self.tables[t].cells[c])
+    }
+
+    /// The missing cell drawn by `leaf`, if it is one.
+    pub fn missing_leaf(&self, leaf: usize) -> Option<&Cell> {
+        let cells = self.tables.iter().flat_map(|t| &t.cells);
+        cells.into_iter().find(|c| c.missing && c.leaf == leaf)
+    }
+
+    /// The cell at `pos`: the missing cell holding the caret, ahead of a real
+    /// cell ending at the same offset, else a real cell.
     pub fn cell_at(&self, pos: usize) -> Option<(usize, usize, &Cell)> {
+        if let Some((t, c)) = self.missing
+            && self.tables[t].cells[c].from == pos
+        {
+            return Some((t, c, &self.tables[t].cells[c]));
+        }
         for (t, table) in self.tables.iter().enumerate() {
             if pos < table.src.start || pos > table.src.end {
                 continue;
             }
             for (c, cell) in table.cells.iter().enumerate() {
-                if pos >= cell.from && pos <= cell.limit {
+                if !cell.missing && pos >= cell.from && pos <= cell.limit {
                     return Some((t, c, cell));
                 }
             }
