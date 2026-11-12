@@ -759,3 +759,43 @@ fn ctrl_b_in_a_cell_follows_the_cells_rules() {
     assert_eq!(through_inline.text(), in_cell.text());
     assert_eq!(through_inline.selection(), in_cell.selection());
 }
+
+// As prose: the same key again, with only the text still selected, unwraps.
+#[test]
+fn ctrl_b_or_i_twice_in_a_cell_or_in_prose_gives_the_text_back() {
+    let text = "| a | b |\n|---|---|\n| 1 | 2 |\n\nword\n";
+    for marker in ["**", "*"] {
+        for at in [text.find('2').unwrap(), text.find("word").unwrap()] {
+            let len = if text[at..].starts_with('2') { 1 } else { 4 };
+            let mut d = selected(text, at, at + len);
+            d.toggle_inline(marker);
+            assert_ne!(d.text(), text);
+            d.toggle_inline(marker);
+            assert_eq!(d.text(), text, "{marker} at {at}");
+            assert_eq!(d.selection().range(), at..at + len);
+        }
+    }
+    // An empty pair from a caret goes away the same way.
+    let one = text.find('1').unwrap();
+    let mut d = doc(text, one + 1);
+    d.toggle_inline("**");
+    assert_eq!(&d.text()[one..one + 5], "1****");
+    d.toggle_inline("**");
+    assert_eq!(d.text(), text);
+    // So does an empty italic pair, which is not a bold marker.
+    let mut d = doc(text, one + 1);
+    d.toggle_inline("*");
+    d.toggle_inline("*");
+    assert_eq!(d.text(), text);
+    // Selected text starting with a lone `*` unwraps as in prose.
+    let mut d = selected("| a |\n|---|\n| **x* |\n", 15, 17);
+    d.toggle_inline("*");
+    assert_eq!(d.text(), "| a |\n|---|\n| *x |\n");
+    assert_eq!(d.selected_text(), "*x");
+    // Italic around bold text wraps it, not half the bold marker.
+    let bold = "| a |\n|---|\n| **2** |\n";
+    let two = bold.find('2').unwrap();
+    let mut d = selected(bold, two, two + 1);
+    d.toggle_inline("*");
+    assert_eq!(d.text(), "| a |\n|---|\n| ***2*** |\n");
+}

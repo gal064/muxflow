@@ -22,30 +22,12 @@ impl LiveDoc {
         let Range { start, end } = sel.range();
         let text = self.doc.text();
         let size = marker.len();
-        let slice = |from: usize, to: usize| text.get(from..to).unwrap_or_default();
-        let run = |pos: usize, forward: bool| {
-            let side = if forward { &text[pos..] } else { &text[..pos] };
-            let mut count = 0;
-            while (forward && side[count * size..].starts_with(marker))
-                || (!forward && side[..side.len() - count * size].ends_with(marker))
-            {
-                count += 1;
-            }
-            count
-        };
-        // Around `**bold**` the nearest `*` is half of the bold marker; an odd
-        // run on both sides (`*it*`, `***both***`) is the one that holds an italic.
-        let italic = size > 1 || (run(start, false) % 2 == 1 && run(end, true) % 2 == 1);
         let inner = &text[start..end];
         let inner_longer = size == 1
             && inner.as_bytes().get(1) == marker.as_bytes().first()
             && inner.len() >= 2
             && inner.as_bytes()[inner.len() - 2] == marker.as_bytes()[0];
-        let (changes, from, to) = if start >= size
-            && slice(start - size, start) == marker
-            && slice(end, end + size) == marker
-            && italic
-        {
+        let (changes, from, to) = if wrapped_by(text, 0..text.len(), &(start..end), marker) {
             (
                 vec![
                     (start - size..start, String::new()),
@@ -126,4 +108,36 @@ impl LiveDoc {
         self.refresh();
         crate::link::link_at(&self.ast, pos)
     }
+}
+
+/// Whether `marker` sits just outside `range` on both sides, within
+/// `bounds`: the selection is already wrapped. Around `**bold**` the nearest
+/// `*` is half of the bold marker; an odd run on both sides (`*it*`,
+/// `***both***`) is the one that holds an italic.
+pub(super) fn wrapped_by(
+    text: &str,
+    bounds: Range<usize>,
+    range: &Range<usize>,
+    marker: &str,
+) -> bool {
+    let size = marker.len();
+    let run = |mut at: usize, forward: bool| {
+        let mut count = 0;
+        loop {
+            let next = if forward {
+                (at + size <= bounds.end).then(|| at..at + size)
+            } else {
+                (at >= bounds.start + size).then(|| at - size..at)
+            };
+            match next {
+                Some(next) if text.get(next.clone()) == Some(marker) => {
+                    count += 1;
+                    at = if forward { next.end } else { next.start };
+                }
+                _ => return count,
+            }
+        }
+    };
+    let (before, after) = (run(range.start, false), run(range.end, true));
+    before > 0 && after > 0 && (size > 1 || (before % 2 == 1 && after % 2 == 1))
 }
