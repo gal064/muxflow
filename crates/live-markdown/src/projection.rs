@@ -17,14 +17,18 @@ use markdown::{Constructs, ParseOptions};
 
 use crate::table::{TableLayout, table_layout};
 
-/// The tree as Tauri's parser has it; see [`crate::lists`]. markdown-rs
-/// 1.0.0 panics on some list inputs (the test `a_source_the_parser_panics_on_draws_as_plain_lines`
-/// holds one). Rather than take the app down, such a source is drawn as its
-/// plain lines, and the next edit that parses goes back to normal.
+/// The tree as Tauri's parser has it; see [`crate::lists`]. The panics
+/// known in markdown-rs are fixed in `vendor/markdown`; should another one
+/// turn up, the source is drawn as its plain lines rather than taking the app
+/// down, and the next edit that parses goes back to normal.
 pub fn parse(src: &str) -> Node {
+    parse_with(src, crate::lists::parse)
+}
+
+fn parse_with(src: &str, parser: impl FnOnce(&str) -> Node + std::panic::UnwindSafe) -> Node {
     quiet_parse_panics();
     PARSING.set(true);
-    let ast = std::panic::catch_unwind(|| crate::lists::parse(src));
+    let ast = std::panic::catch_unwind(|| parser(src));
     PARSING.set(false);
     match ast {
         Ok(ast) => {
@@ -1396,6 +1400,18 @@ impl Projection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Should markdown-rs panic again, the source is drawn as written, with
+    // a caret stop on each line, instead of the panic reaching the app.
+    #[test]
+    fn a_source_the_parser_panics_on_draws_as_plain_lines() {
+        let src = "  - a\n\n> b";
+        let ast = parse_with(src, |_| panic!("a parser bug"));
+        let p = project(src, &ast, &Active::default());
+        let drawn: Vec<_> = p.leaves.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(drawn, ["  - a", "", "> b"]);
+        assert!(p.is_stop(0) && p.is_stop(src.len()));
+    }
 
     fn at(src: &str, caret: Option<usize>) -> Projection {
         let active = Active {
