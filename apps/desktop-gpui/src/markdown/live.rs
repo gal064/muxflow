@@ -40,12 +40,16 @@ pub fn live_markdown() -> LiveMarkdown {
 
 /// The Live view of `document` and the handle that takes its keyboard.
 fn surface(
-    _: &desktop_core::app_state::AppTabRecord,
+    record: &desktop_core::app_state::AppTabRecord,
     document: &Entity<Document>,
     window: &mut Window,
     cx: &mut App,
 ) -> (AnyElement, FocusHandle) {
     let surface = kept(document, window, cx);
+    // The tab record is replaced as the tab is moved; links resolve against its session.
+    surface.update(cx, |surface, _| {
+        surface.session_id = record.session_id.clone()
+    });
     let focus = surface.read(cx).view.focus_handle(cx);
     (surface.into_any_element(), focus)
 }
@@ -100,6 +104,8 @@ struct Surface {
     view: Entity<LiveView>,
     /// The document revision the view shows.
     synced: u64,
+    /// The tab's session, which a followed link must still be in.
+    session_id: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -111,12 +117,18 @@ impl Surface {
         let view = cx.new(|cx| LiveView::new(&text, style, window, cx));
         let subscriptions = vec![
             cx.observe(document, |this, _, cx| this.sync(cx)),
-            cx.subscribe(&view, |this, _, event: &LiveEvent, cx| match event {
-                LiveEvent::Edited => this.push(cx),
-            }),
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &LiveEvent, window, cx| match event {
+                    LiveEvent::Edited => this.push(cx),
+                    LiveEvent::Link(href) => this.follow(href, window, cx),
+                },
+            ),
         ];
         Self {
             synced: document.read(cx).revision(),
+            session_id: String::new(),
             document: document.downgrade(),
             view,
             _subscriptions: subscriptions,
@@ -139,6 +151,21 @@ impl Surface {
         };
         let text = normalized(&buffer.to_string());
         self.view.update(cx, |view, cx| view.set_text(&text, cx));
+    }
+
+    /// A ⌘-clicked link (Ctrl on Linux), opened as the preview opens one.
+    fn follow(&mut self, href: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(document) = self.document.upgrade() else {
+            return;
+        };
+        let document = document.read(cx);
+        let origin = super::view::Origin {
+            resource: document.resource.clone(),
+            host: document.host.clone(),
+            server: document.server.clone(),
+            session_id: self.session_id.clone(),
+        };
+        super::view::follow(&origin, href, window, cx);
     }
 
     /// The view's edits, into the buffer: the one span where the buffer and

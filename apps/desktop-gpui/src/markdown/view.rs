@@ -270,11 +270,11 @@ fn style(p: &Palette, dark: bool) -> TextViewStyle {
 
 /// What a link is resolved and checked against: the tab's file and workspace.
 #[derive(Clone)]
-struct Origin {
-    resource: String,
-    host: String,
-    server: String,
-    session_id: String,
+pub(super) struct Origin {
+    pub(super) resource: String,
+    pub(super) host: String,
+    pub(super) server: String,
+    pub(super) session_id: String,
 }
 
 /// How far the pointer may travel between press and release and still be a click.
@@ -296,7 +296,7 @@ fn is_click(event: &ClickEvent, pressed: Option<Point<Pixels>>) -> bool {
     }
 }
 
-fn follow(origin: &Origin, href: &str, window: &mut Window, cx: &mut App) {
+pub(super) fn follow(origin: &Origin, href: &str, window: &mut Window, cx: &mut App) {
     match link::target(&origin.resource, href) {
         Target::External(url) => open_confirmation(
             Confirmation {

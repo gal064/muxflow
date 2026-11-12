@@ -18,10 +18,11 @@ use gpui_kit::base::text::editor_host::{
     RenderContext, Table, TextMark, collect_leaf_geometry,
 };
 use gpui_kit::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::doc::Selection;
 use crate::edit::{CellDir, LiveDoc};
-use crate::projection::{Align, Block, BlockKind, Leaf, Projection, Style};
+use crate::projection::{Align, Block, BlockKind, Leaf, Marker, Projection, SegKind, Style};
 
 actions!(
     live_markdown,
@@ -49,11 +50,24 @@ actions!(
         Copy,
         Cut,
         Paste,
+        MoveWordLeft,
+        MoveWordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        ToggleBold,
+        ToggleItalic,
+        Indent,
+        Outdent,
     ]
 );
 
 /// The key context while the view has focus.
 pub const KEY_CONTEXT: &str = "LiveMarkdown";
+/// A read-only view leaves the editing chords to the app, as CodeMirror's
+/// commands decline them there (Ctrl+B, Ctrl+[ and Ctrl+] are app shortcuts
+/// too), and Ctrl+[ and Ctrl+] are the list's only with the caret in one.
+const EDITABLE: &str = "LiveMarkdown && !read_only";
+const IN_LIST: &str = "LiveMarkdown && in_list && !read_only";
 
 /// Document typography, as `.live-markdown` in Tauri's `styles.css`: it
 /// belongs to the page, not to the app's UI scale.
@@ -96,7 +110,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-right", MoveEnd, context),
         KeyBinding::new("cmd-shift-left", SelectHome, context),
         KeyBinding::new("cmd-shift-right", SelectEnd, context),
+        KeyBinding::new("alt-left", MoveWordLeft, context),
+        KeyBinding::new("alt-right", MoveWordRight, context),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, context),
+        KeyBinding::new("alt-shift-right", SelectWordRight, context),
+        KeyBinding::new("cmd-b", ToggleBold, Some(EDITABLE)),
+        KeyBinding::new("cmd-i", ToggleItalic, Some(EDITABLE)),
+        KeyBinding::new("cmd-]", Indent, Some(IN_LIST)),
+        KeyBinding::new("cmd-[", Outdent, Some(IN_LIST)),
     ]);
+    // As in Tauri, where CodeMirror took these first: a focused text field
+    // gets first refusal over the app's shortcuts (Ctrl+B, Ctrl+[ and Ctrl+]
+    // there toggle the sidebar and go back and forward).
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("ctrl-z", Undo, context),
@@ -106,6 +131,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-c", Copy, context),
         KeyBinding::new("ctrl-x", Cut, context),
         KeyBinding::new("ctrl-v", Paste, context),
+        KeyBinding::new("ctrl-left", MoveWordLeft, context),
+        KeyBinding::new("ctrl-right", MoveWordRight, context),
+        KeyBinding::new("ctrl-shift-left", SelectWordLeft, context),
+        KeyBinding::new("ctrl-shift-right", SelectWordRight, context),
+        KeyBinding::new("ctrl-b", ToggleBold, Some(EDITABLE)),
+        KeyBinding::new("ctrl-i", ToggleItalic, Some(EDITABLE)),
+        KeyBinding::new("ctrl-]", Indent, Some(IN_LIST)),
+        KeyBinding::new("ctrl-[", Outdent, Some(IN_LIST)),
     ]);
 }
 
@@ -132,6 +165,9 @@ pub enum LiveEvent {
     /// The source changed: the host takes the text when
     /// [`LiveView::take_edited`] says so.
     Edited,
+    /// A link was ⌘-clicked (Ctrl on Linux): its target, for the host to open
+    /// as it opens the preview's links.
+    Link(String),
 }
 
 /// Geometry reported by the last prepaint, read by caret placement and input.
@@ -139,6 +175,10 @@ pub enum LiveEvent {
 struct Frame {
     projection: Rc<Projection>,
     geometry: HashMap<u64, LeafGeometry>,
+    /// Home put the caret here, at a wrapped line's start, which is also the
+    /// end of the line above: draw it on the later line, as CodeMirror's
+    /// caret association does.
+    wrap_start: Option<usize>,
 }
 
 pub struct LiveView {
@@ -227,6 +267,7 @@ impl LiveView {
 
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.goal_x = None;
+        self.frame.borrow_mut().wrap_start = None;
         self.reveal.set(true);
         // Also after a commit by `unmark_text`, which changes no text.
         if self.live.edited() {
@@ -249,6 +290,12 @@ impl LiveView {
     }
 
     fn hit(&self, at: Point<Pixels>) -> Option<usize> {
+        self.hit_side(at).map(|(pos, _)| pos)
+    }
+
+    /// The source position nearest `at`, and whether `at` fell on the
+    /// character before it rather than the one after.
+    fn hit_side(&self, at: Point<Pixels>) -> Option<(usize, bool)> {
         let frame = self.frame.borrow();
         let projection = frame.projection.clone();
         let mut leaves: Vec<(Pixels, Pixels, usize, &LeafGeometry)> = Vec::new();
@@ -281,7 +328,9 @@ impl LiveView {
                     .partial_cmp(&(b.1, b.0))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })?;
-        Some(projection.from_display(i, geometry.index_for_position(at)))
+        let index = geometry.index_for_position(at);
+        let before = geometry.position_for_index(index).x > at.x;
+        Some((projection.from_display(i, index), before))
     }
 
     fn caret_rect(&self) -> Option<Bounds<Pixels>> {
@@ -330,6 +379,112 @@ impl LiveView {
         }
     }
 
+    /// Home and End: the edges of the visual line the caret is on.
+    fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
+        let target = self.visual_edge(end);
+        self.motion(cx, |l| match target {
+            Some(target) => l.move_to_line_edge(end, extend, target),
+            None => l.move_line_edge(end, extend),
+        });
+        if !end {
+            self.frame.borrow_mut().wrap_start = Some(self.live.selection().head);
+        }
+    }
+
+    fn visual_edge(&self, end: bool) -> Option<usize> {
+        let frame = self.frame.borrow();
+        let p = &frame.projection;
+        let (mut leaf, mut disp) = p.locate(self.live.selection().head)?;
+        // An ordered item's number is a leaf of its own beside the text; the
+        // two are one line, so Home goes before the number and End past the
+        // text, as in Tauri where the number is plain text.
+        let number = p
+            .blocks
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.kind,
+                    BlockKind::ListItem {
+                        marker: Some(_),
+                        ..
+                    }
+                ) && b.leaves.contains(&leaf)
+            })
+            .map(|b| b.leaves[0])
+            .filter(|&m| p.leaves[m].segs.iter().any(|s| s.kind == SegKind::Text));
+        if end && number == Some(leaf) {
+            (leaf, disp) = (leaf + 1, 0);
+        }
+        let geometry = frame.geometry.get(&frame.projection.leaves[leaf].key)?;
+        let caret = caret_origin(&frame, leaf, disp, self.live.selection().head)?;
+        let bounds = geometry.bounds();
+        let x = if end {
+            bounds.right() + px(1.)
+        } else {
+            bounds.left() - px(1.)
+        };
+        let mut index =
+            geometry.index_for_position(point(x, caret.y + geometry.line_height() / 2.));
+        // A wrapped line's end is the next line's start, where the caret
+        // would be drawn: stop before the character the line wraps after.
+        let text = &frame.projection.leaves[leaf].text;
+        if end && index < text.len() && geometry.position_for_index(index).y > caret.y {
+            index = text[..index]
+                .grapheme_indices(true)
+                .next_back()
+                .map_or(index, |(at, _)| at);
+        }
+        if !end
+            && index == 0
+            && let Some(number) = number
+        {
+            return Some(p.from_display(number, 0));
+        }
+        Some(p.from_display(leaf, index))
+    }
+
+    /// The task box under `at`: where its `[` is.
+    fn task_at(&self, at: Point<Pixels>) -> Option<usize> {
+        let frame = self.frame.borrow();
+        frame
+            .projection
+            .blocks
+            .iter()
+            .filter_map(|block| task_box(&frame, block))
+            .find(|(bounds, ..)| bounds.contains(&at))
+            .map(|(_, _, at)| at)
+    }
+
+    fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The box takes the click: the caret stays where it is.
+        if let Some(at) = self.task_at(event.position) {
+            self.edit(cx, |l| l.toggle_task(at));
+            self.reveal.set(false);
+            return;
+        }
+        window.focus(&self.focus, cx);
+        let Some((pos, before)) = self.hit_side(event.position) else {
+            return;
+        };
+        if event.modifiers.secondary(cx)
+            && let Some(href) = self.live.link_at(pos)
+        {
+            cx.emit(LiveEvent::Link(href));
+            return;
+        }
+        match event.click_count {
+            2 => self.live.select_word(pos, before),
+            3.. => self.live.select_block(pos),
+            _ if event.modifiers.shift => self.live.set_head(pos),
+            _ => self.live.set_caret(pos),
+        }
+        // A drag extends a single click only: one after a double or triple
+        // click would shrink the word or line to the pointer.
+        self.selecting = event.click_count <= 1;
+        self.changed(cx);
+        self.reveal.set(false);
+    }
+
     fn copy(&self, cx: &mut Context<Self>) {
         let text = self.live.selected_text();
         if !text.is_empty() {
@@ -338,11 +493,89 @@ impl LiveView {
     }
 }
 
+/// A task item's box, drawn over the space its marker leaf leaves for it:
+/// where, whether it is ticked, and where its `[` is.
+fn task_box(frame: &Frame, block: &Block) -> Option<(Bounds<Pixels>, bool, usize)> {
+    let BlockKind::ListItem {
+        marker: Some(Marker::Task { checked, at }),
+        ..
+    } = block.kind
+    else {
+        return None;
+    };
+    let leaf = &frame.projection.leaves[block.leaves[0]];
+    let space = leaf.segs.last()?.disp.start;
+    let geometry = frame.geometry.get(&leaf.key)?;
+    let origin = geometry.position_for_index(space);
+    let side = px(FONT_SIZE);
+    let top = origin.y + (geometry.line_height() - side) / 2.;
+    Some((
+        Bounds::new(point(origin.x, top), size(side, side)),
+        checked,
+        at,
+    ))
+}
+
+/// A checkbox, as the native one Tauri drew with the accent colour.
+fn paint_task(
+    bounds: Bounds<Pixels>,
+    checked: bool,
+    read_only: bool,
+    s: &LiveStyle,
+    window: &mut Window,
+) {
+    let fade = |color: Hsla| if read_only { color.opacity(0.5) } else { color };
+    let (fill, border) = if checked {
+        (s.accent, s.accent)
+    } else {
+        (s.background, s.dim)
+    };
+    window.paint_quad(quad(
+        bounds,
+        px(3.),
+        fade(fill),
+        px(1.),
+        fade(border),
+        BorderStyle::default(),
+    ));
+    if !checked {
+        return;
+    }
+    let at = |x: f32, y: f32| bounds.origin + point(bounds.size.width * x, bounds.size.height * y);
+    let mut check = PathBuilder::stroke(px(2.));
+    check.move_to(at(0.24, 0.52));
+    check.line_to(at(0.42, 0.7));
+    check.line_to(at(0.76, 0.32));
+    if let Ok(path) = check.build() {
+        // The page's own colour reads on the accent in either theme.
+        window.paint_path(path, s.background);
+    }
+}
+
 fn caret_bounds(frame: &Frame, head: usize) -> Option<Bounds<Pixels>> {
     let (leaf, disp) = frame.projection.locate(head)?;
     let geometry = frame.geometry.get(&frame.projection.leaves[leaf].key)?;
-    let origin = geometry.position_for_index(disp);
+    let origin = caret_origin(frame, leaf, disp, head)?;
     Some(Bounds::new(origin, size(px(1.5), geometry.caret_height())))
+}
+
+/// Where the caret at display offset `disp` of `leaf` is drawn: at a wrap
+/// that Home went to, the start of the later line.
+fn caret_origin(frame: &Frame, leaf: usize, disp: usize, head: usize) -> Option<Point<Pixels>> {
+    let geometry = frame.geometry.get(&frame.projection.leaves[leaf].key)?;
+    let origin = geometry.position_for_index(disp);
+    if frame.wrap_start == Some(head)
+        && let Some(g) = frame.projection.leaves[leaf]
+            .text
+            .get(disp..)
+            .and_then(|t| t.graphemes(true).next())
+    {
+        let next = geometry.position_for_index(disp + g.len());
+        if next.y > origin.y {
+            return Some(point(geometry.bounds().left(), next.y));
+        }
+    }
+    Some(origin)
 }
 
 fn text_mark(style: &Style) -> TextMark {
@@ -468,14 +701,13 @@ fn render_block(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let leaf = || paragraph(&p.leaves[block.leaves[0]]);
+    let leaf = |i: usize| paragraph(&p.leaves[block.leaves[i]]);
     let node = match &block.kind {
         BlockKind::Heading(level) => BlockNode::Heading {
             level: *level,
-            children: leaf(),
+            children: leaf(0),
             span: None,
         },
-        BlockKind::Rule { revealed: false } => BlockNode::HorizontalRule { span: None },
         BlockKind::Table { rows, aligns } => {
             let rows = rows
                 .iter()
@@ -491,7 +723,11 @@ fn render_block(
                 .collect();
             BlockNode::Table(Table::new(rows, aligns))
         }
-        _ => BlockNode::Paragraph(leaf()),
+        // The text; the marker is drawn in its own column below.
+        BlockKind::ListItem {
+            marker: Some(_), ..
+        } => BlockNode::Paragraph(leaf(1)),
+        _ => BlockNode::Paragraph(leaf(0)),
     };
     let nodes = [&node];
     let flow = FlowPosition::at(&nodes, 0, true).first(true).last(true);
@@ -508,11 +744,49 @@ fn render_block(
             .font_family(s.mono.clone())
             .text_size(px(FONT_SIZE * 0.875))
             .child(element),
-        BlockKind::ListItem { depth } => div().pl(px(32. * *depth as f32)).child(element),
-        // Centred in its line, as Tauri's `vertical-align: middle`.
-        BlockKind::Rule { revealed: false } => {
-            div().flex().flex_col().justify_center().child(element)
+        BlockKind::ListItem {
+            depth,
+            columns,
+            marker,
+        } => {
+            let indent = px(32. * *depth as f32);
+            let width = marker_width(*columns);
+            let Some(marker) = marker else {
+                // A later paragraph of an item, at the item's text.
+                let inner = div().pl(indent + width).min_h(line).child(element);
+                return quoted(block, s, inner);
+            };
+            // The marker column, so wrapped lines hang at the text
+            // (`cm-live-list`'s padding and negative text indent).
+            let column = div().flex_none().w(width);
+            let column = match marker {
+                Marker::Bullet => column.text_color(s.dim),
+                _ => column.text_right().pr(px(FONT_SIZE * 0.5)),
+            };
+            let marker = BlockNode::Paragraph(leaf(0)).render_with_id(
+                ElementId::NamedInteger("live-marker".into(), ix as u64),
+                flow,
+                rcx,
+                window,
+                cx,
+            );
+            div()
+                .pl(indent)
+                .flex()
+                .child(column.child(marker))
+                .child(div().flex_1().min_w_0().child(element))
         }
+        // An empty line, so the caret can stop on the rule, with the rule
+        // centred in it, as Tauri's `vertical-align: middle`.
+        BlockKind::Rule { revealed: false } => div().relative().child(element).child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(line / 2.)
+                .h(px(1.))
+                .bg(s.hairline),
+        ),
         BlockKind::Heading(level) => {
             let (top, bottom) = heading_padding(*level);
             let size = FONT_SIZE * heading_scale(*level);
@@ -524,7 +798,17 @@ fn render_block(
         _ => div().child(element),
     };
     // A blank line keeps its height, as an empty line does in the source.
-    let inner = inner.min_h(line);
+    quoted(block, s, inner.min_h(line))
+}
+
+/// A list's marker column: `max(1.5em, Nch)` for an ordered list's `N`
+/// columns, 1.5em for a bullet or a task.
+fn marker_width(columns: usize) -> Pixels {
+    // About a digit's width in the document face.
+    px((columns as f32 * 0.6 * FONT_SIZE).max(1.5 * FONT_SIZE))
+}
+
+fn quoted(block: &Block, s: &LiveStyle, inner: Div) -> AnyElement {
     if block.quote > 0 {
         div()
             .pl(px(18. * block.quote as f32))
@@ -547,6 +831,7 @@ struct LiveRoot {
     selection: Range<usize>,
     head: usize,
     show_caret: bool,
+    read_only: bool,
     reveal: Rc<Cell<bool>>,
     style: LiveStyle,
     view: Entity<LiveView>,
@@ -626,6 +911,14 @@ impl Element for LiveRoot {
         cx: &mut App,
     ) {
         self.child.as_mut().expect("child set").paint(window, cx);
+        {
+            let frame = self.frame.borrow();
+            for block in &frame.projection.blocks {
+                if let Some((bounds, checked, _)) = task_box(&frame, block) {
+                    paint_task(bounds, checked, self.read_only, &self.style, window);
+                }
+            }
+        }
         let caret = caret_bounds(&self.frame.borrow(), self.head);
         if let Some(rect) = caret {
             if self.show_caret {
@@ -661,6 +954,18 @@ impl Render for LiveView {
         self.live.focused = focused;
         let style = self.style.clone();
         let projection = self.live.projection();
+        let mut context = KeyContext::default();
+        context.add(KEY_CONTEXT);
+        if self.read_only {
+            context.add("read_only");
+        }
+        let in_list = projection
+            .locate(self.live.selection().head)
+            .and_then(|(leaf, _)| projection.blocks.iter().find(|b| b.leaves.contains(&leaf)))
+            .is_some_and(|b| matches!(b.kind, BlockKind::ListItem { .. }));
+        if in_list {
+            context.add("in_list");
+        }
         let rcx = RenderContext::new(text_style(&style))
             .with_body_font_size(px(FONT_SIZE))
             .on_link_click(|_, _, _, _| {});
@@ -685,6 +990,7 @@ impl Render for LiveView {
             selection: sel.range(),
             head: sel.head,
             show_caret: focused,
+            read_only: self.read_only,
             reveal: self.reveal.clone(),
             style: style.clone(),
             view: cx.entity(),
@@ -697,7 +1003,7 @@ impl Render for LiveView {
 
         div()
             .id("live-markdown")
-            .key_context(KEY_CONTEXT)
+            .key_context(context)
             .track_focus(&self.focus)
             .size_full()
             .bg(style.background)
@@ -722,17 +1028,39 @@ impl Render for LiveView {
             .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.vertical(true, false, cx)))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(false, true, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(true, true, cx)))
-            .on_action(cx.listener(|this, _: &MoveHome, _, cx| {
-                this.motion(cx, |l| l.move_line_edge(false, false))
+            .on_action(cx.listener(|this, _: &MoveHome, _, cx| this.line_edge(false, false, cx)))
+            .on_action(cx.listener(|this, _: &MoveEnd, _, cx| this.line_edge(true, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectHome, _, cx| this.line_edge(false, true, cx)))
+            .on_action(cx.listener(|this, _: &SelectEnd, _, cx| this.line_edge(true, true, cx)))
+            .on_action(cx.listener(|this, _: &MoveWordLeft, _, cx| {
+                this.motion(cx, |l| l.move_word(false, false))
             }))
-            .on_action(cx.listener(|this, _: &MoveEnd, _, cx| {
-                this.motion(cx, |l| l.move_line_edge(true, false))
+            .on_action(cx.listener(|this, _: &MoveWordRight, _, cx| {
+                this.motion(cx, |l| l.move_word(true, false))
             }))
-            .on_action(cx.listener(|this, _: &SelectHome, _, cx| {
-                this.motion(cx, |l| l.move_line_edge(false, true))
+            .on_action(cx.listener(|this, _: &SelectWordLeft, _, cx| {
+                this.motion(cx, |l| l.move_word(false, true))
             }))
-            .on_action(cx.listener(|this, _: &SelectEnd, _, cx| {
-                this.motion(cx, |l| l.move_line_edge(true, true))
+            .on_action(cx.listener(|this, _: &SelectWordRight, _, cx| {
+                this.motion(cx, |l| l.move_word(true, true))
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleBold, _, cx| this.edit(cx, |l| l.toggle_inline("**"))),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleItalic, _, cx| {
+                    this.edit(cx, |l| l.toggle_inline("*"))
+                }),
+            )
+            .on_action(cx.listener(|this, _: &Indent, _, cx| {
+                this.edit(cx, |l| {
+                    l.change_list_indent(false);
+                })
+            }))
+            .on_action(cx.listener(|this, _: &Outdent, _, cx| {
+                this.edit(cx, |l| {
+                    l.change_list_indent(true);
+                })
             }))
             .on_action(
                 cx.listener(|this, _: &SelectAll, _, cx| this.motion(cx, LiveDoc::select_all)),
@@ -742,16 +1070,20 @@ impl Render for LiveView {
                 cx.listener(|this, _: &Delete, _, cx| this.edit(cx, LiveDoc::delete_forward)),
             )
             .on_action(cx.listener(|this, _: &Enter, _, cx| this.edit(cx, LiveDoc::enter)))
-            // Tab moves between cells; list indent is T7.2's. Either way it
-            // stays in the document rather than moving focus.
+            // Tab moves between cells, or moves list items in and out. Either
+            // way it stays in the document rather than moving focus.
             .on_action(cx.listener(|this, _: &TabNext, _, cx| {
                 this.edit(cx, |l| {
-                    l.cell_navigate(CellDir::Next);
+                    if !l.cell_navigate(CellDir::Next) {
+                        l.change_list_indent(false);
+                    }
                 })
             }))
             .on_action(cx.listener(|this, _: &TabPrev, _, cx| {
                 this.edit(cx, |l| {
-                    l.cell_navigate(CellDir::Prev);
+                    if !l.cell_navigate(CellDir::Prev) {
+                        l.change_list_indent(true);
+                    }
                 })
             }))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.edit(cx, LiveDoc::undo)))
@@ -770,17 +1102,7 @@ impl Render for LiveView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    window.focus(&this.focus, cx);
-                    if let Some(pos) = this.hit(event.position) {
-                        if event.modifiers.shift {
-                            this.live.set_head(pos)
-                        } else {
-                            this.live.set_caret(pos)
-                        }
-                        this.selecting = true;
-                        this.changed(cx);
-                        this.reveal.set(false);
-                    }
+                    this.press(event, window, cx)
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
