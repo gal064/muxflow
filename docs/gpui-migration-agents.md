@@ -347,7 +347,7 @@ final sweep command returning only justified hits.
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
-| 6 | Done, owner Mac test pending | `f93e815` | Integrated QA passed; the owner runs the Mac test prompt |
+| 6 | Done, owner Mac test done | `f93e815` | Integrated QA passed. Mac test found bugs, now being fixed. Benchmark: `docs/gpui-benchmark.md`; the owner committed to GPUI |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
