@@ -310,9 +310,14 @@ Approved by the owner on 2026-11-11, to run through final QA.
 live view with a match count and replace, file sync and autosave, and IME. The Live mode
 sits beside Source, Preview and Split, with the default-view setting, as in Tauri.
 Images draw no picture: the alt text is styled like a link and the markup hides until the
-caret enters it. Not built: spellcheck, screen-reader text, a virtualized view, an
-incremental parser, a rope. Files above `LIVE_MARKDOWN_LIMIT_CHARS` (1 MiB) open as
-source, as today.
+caret enters it. Not built: spellcheck, screen-reader text, a general incremental parser,
+a rope. Files above `LIVE_MARKDOWN_LIMIT_CHARS` (1 MiB) open as source, as today.
+
+**Size (owner decision, 2026-11-12).** T7.1 measured typing smooth only to about 50 KB:
+every block is laid out each frame, every keystroke reparses the whole file, and the
+gpui-base 0.9.0 layout cache sweep goes quadratic past 4096 entries. T7.1 lands with a
+temporary 48 KiB limit. T7.5 draws only the blocks on screen and reparses only the edited
+block, then restores the 1 MiB limit. If 1 MiB is not smooth after T7.5, stop and report.
 
 **Isolation.** Everything lives in a new crate, `crates/live-markdown`. Its modules hold
 no GPUI types except one `view` module. The app registers the live view for Markdown tabs
@@ -325,10 +330,12 @@ buffer, so autosave, outside-change reconciliation and dirty state stay in
 | 1 | T7.1 `live-md-core` | Full, large, design | opus, high | New crate from the spike, editor seam, Live mode, size limit, sync, IME | |
 | 2 | T7.2 `live-md-blocks` | Full | opus, high | Projection parity, list commands and indent, task toggle, link click, word motion and clicks | T7.1 |
 | 2 | T7.3 `live-md-tables` | Full | opus, high | Full `liveTable` parity | T7.1 |
-| 2 | T7.4 `live-md-find` | Full | opus, high | ⌘F in the live view: highlights, count, replace | T7.1 |
+| 2 | T7.5 `live-md-viewport` | Full, large, design | opus, high | Draw only on-screen blocks, reparse only the edited block, restore the 1 MiB limit | T7.1 |
+| 3 | T7.4 `live-md-find` | Full | opus, high | ⌘F in the live view: highlights, count, replace | T7.5 |
 
 Each task ports the Tauri tests for its area and closes those ledger rows. Root merges
-wave 2 in the order T7.3, T7.4, T7.2. Then `gdev_qa_phase7` runs on Linux, local and
+wave 2 in the order T7.3, T7.2, T7.5, then runs T7.4 on top, because find and T7.5 both
+change how the view draws. Then `gdev_qa_phase7` runs on Linux, local and
 SSH, and the owner runs a Mac test for typing feel and IME.
 
 ## Phase 8: Packaging and CI
@@ -379,7 +386,7 @@ final sweep command returning only justified hits.
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
 | 6 | Done, owner Mac test done | `f93e815` | Integrated QA passed. Mac test found bugs, now being fixed. Benchmark: `docs/gpui-benchmark.md`; the owner committed to GPUI |
-| 7 | In progress, T7.1 dispatched | | Wave 2 after T7.1 merges |
+| 7 | In progress, T7.1 finishing at a temporary 48 KiB limit | | Wave 2 (T7.2, T7.3, T7.5) after T7.1 merges, then T7.4 |
 | 8 to 10 | After parity, owner decides | | |
 
 ### Task log
