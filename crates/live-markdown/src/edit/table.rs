@@ -7,6 +7,7 @@
 use std::ops::Range;
 
 use super::LiveDoc;
+use super::commands::wrapped_by;
 use crate::doc::{EditKind, Selection};
 use crate::projection::{Cell, Projection};
 use crate::table::{cell_change, cell_source, row_insertion, toggled_marker};
@@ -396,8 +397,17 @@ impl LiveDoc {
             return false;
         };
         let src = self.doc.text();
+        // Markers just outside the selection, as prose's toggle: the same key
+        // again after a wrap, with only the text selected, takes them off.
+        let size = marker.len();
+        let (range, result) = if wrapped_by(src, cell.from..cell.limit, &range, marker) {
+            let text = src[range.clone()].to_string();
+            (range.start - size..range.end + size, text)
+        } else {
+            let text = toggled_marker(&src[range.clone()], marker);
+            (range, text)
+        };
         let text = &src[range.clone()];
-        let result = toggled_marker(text, marker);
         let unwrapped = result.len() < text.len();
         let new = format!(
             "{}{}{}",
