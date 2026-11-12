@@ -21,10 +21,15 @@ the document.
 
 | Module | What it holds |
 |---|---|
-| `doc` | The source text, the selection, undo and redo, and whether the host has taken the latest text |
-| `projection` | Source to drawn leaves: which bytes show, hide or are replaced, and their styles. Pure |
+| `doc` | The source text, the selection, undo and redo (kept across an outside change), and whether the host has taken the latest text |
+| `projection` | Source to drawn leaves: which bytes show, hide or are replaced, and their styles. A list item's marker is a leaf of its own, drawn in a marker column. Pure |
+| `link` | The link under a source position, for ⌘-click |
+| `lists` | The parse as Tauri's lezer reads lists: inside a list, an empty item or one not numbered 1 may break into a paragraph (CommonMark refuses both) |
 | `edit/mod.rs` | `LiveDoc`: caret motion across hidden ranges, typing, Backspace and Delete, IME preedit, undo |
-| `edit/list.rs` | Enter in a list item |
+| `edit/list.rs` | List commands: Enter, Tab and Shift-Tab, renumbering |
+| `edit/commands.rs` | ⌘B and ⌘I, the task box, Enter before a heading |
+| `edit/motion.rs` | Word motion, double- and triple-click selection, Home and End |
+| `edit/changes.rs` | Several replacements made as one undo step |
 | `edit/table.rs` | Editing inside a rendered table |
 | `table` | Pure port of `liveTable.ts`'s source logic: cell spans and cell writes |
 | `view` | The GPUI view. The only module that uses GPUI types |

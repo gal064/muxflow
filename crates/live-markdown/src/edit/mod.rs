@@ -6,7 +6,10 @@
 //! the text or the selection changes. A question about one caret position (is
 //! it a stop, what marker is before it) projects only the blocks around it.
 
+mod changes;
+mod commands;
 mod list;
+mod motion;
 mod table;
 
 use std::ops::Range;
@@ -424,14 +427,26 @@ impl LiveDoc {
         let block = p
             .locate(caret)
             .and_then(|(leaf, _)| p.blocks.iter().find(|b| b.leaves.contains(&leaf)).cloned());
-        match block.map(|b| (b.kind, b.quote, b.src)) {
-            Some((BlockKind::ListItem { .. }, _, src)) => self.continue_list(src, caret),
-            Some((BlockKind::Paragraph, quote, _)) if quote > 0 => {
-                self.insert_plain(caret, "\n>\n> ")
-            }
-            Some((BlockKind::Paragraph, _, _)) => self.insert_plain(caret, "\n\n"),
-            _ => self.insert_plain(caret, "\n"),
+        let kind = block.as_ref().map(|b| &b.kind);
+        if let (Some(BlockKind::Heading(_)), Some(b)) = (kind, &block)
+            && self.break_before_heading(b.src.start, caret)
+        {
+            return;
         }
+        if let Some(BlockKind::ListItem {
+            marker: Some(_), ..
+        }) = kind
+        {
+            return self.continue_list(caret);
+        }
+        if self.continue_quote(caret) {
+            return;
+        }
+        if let Some(BlockKind::ListItem { marker: None, .. }) = kind {
+            return self.continue_list(caret);
+        }
+        let paragraph = matches!(kind, Some(BlockKind::Paragraph));
+        self.insert_plain(caret, if paragraph { "\n\n" } else { "\n" });
     }
 
     fn insert_plain(&mut self, at: usize, text: &str) {
@@ -464,5 +479,7 @@ impl LiveDoc {
     }
 }
 
+#[cfg(test)]
+mod blocks_tests;
 #[cfg(test)]
 mod tests;

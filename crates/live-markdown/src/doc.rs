@@ -125,12 +125,16 @@ impl Document {
 
     /// Replace `range` and leave the caret at `caret`.
     pub fn replace(&mut self, range: Range<usize>, inserted: &str, caret: usize, kind: EditKind) {
+        self.edit(range, inserted, Selection::caret(caret), kind);
+    }
+
+    /// Replace `range` and leave `after` selected.
+    pub fn edit(&mut self, range: Range<usize>, inserted: &str, after: Selection, kind: EditKind) {
         let removed = self.text[range.clone()].to_string();
         if removed.is_empty() && inserted.is_empty() {
             return;
         }
         let before = self.selection;
-        let after = Selection::caret(caret);
         self.splice(range.clone(), inserted);
         let edit = Edit {
             from: range.start,
@@ -188,35 +192,108 @@ impl Document {
 
     /// The text changed outside this editor (on disk, or in another view).
     /// Only the span that differs is replaced, so the caret stays where it was
-    /// in the unchanged text. The change is not undoable and empties the
-    /// history: undoing past it would bring back text the file no longer has,
-    /// and autosave would write it straight back. The host, where it came
-    /// from, is not told of it.
+    /// in the unchanged text. The host, where it came from, is not told of it.
+    ///
+    /// As CodeMirror's `addToHistory: false`: the change itself is not
+    /// undoable, and the user's own edits stay undoable, moved past it. Were
+    /// the change undoable, undoing it would bring back text the file no
+    /// longer has, and autosave would write it straight back. An edit the
+    /// change overlaps cannot be moved, and the history is dropped.
     pub fn reset_text(&mut self, text: &str) {
         let (start, old_end, new_end) = minimal_change(&self.text, text);
         if start == old_end && start == new_end {
             return;
         }
-        let shift = |at: usize| {
-            if at <= start {
-                at
-            } else if at >= old_end {
-                at - old_end + new_end
-            } else {
-                new_end
-            }
+        let change = Change {
+            from: start,
+            to: old_end,
+            len: new_end - start,
         };
         self.text
             .replace_range(start..old_end, &text[start..new_end]);
-        self.selection = Selection {
-            anchor: shift(self.selection.anchor),
-            head: shift(self.selection.head),
-        };
-        self.undo.clear();
-        self.redo.clear();
+        self.selection = change.map_selection(self.selection);
+        if !change.rebase_undo(&mut self.undo) || !change.rebase_redo(&mut self.redo) {
+            self.undo.clear();
+            self.redo.clear();
+        }
         self.unsent = false;
         self.break_coalescing = true;
         self.revision += 1;
+    }
+}
+
+/// An outside change: `from..to` of the text became `len` bytes.
+#[derive(Clone, Copy, Debug)]
+struct Change {
+    from: usize,
+    to: usize,
+    len: usize,
+}
+
+impl Change {
+    fn map(&self, at: usize) -> usize {
+        if at <= self.from {
+            at
+        } else if at >= self.to {
+            at - self.to + self.from + self.len
+        } else {
+            self.from + self.len
+        }
+    }
+
+    fn map_selection(&self, s: Selection) -> Selection {
+        Selection {
+            anchor: self.map(s.anchor),
+            head: self.map(s.head),
+        }
+    }
+
+    /// Whether `edit`, spanning `start..start + width` of the text the change
+    /// applies to, is clear of it. If so the edit moves past the change, and
+    /// the change moves to the other side of the edit, where the edit's
+    /// `width` bytes are `other` bytes.
+    fn pass(&mut self, edit: &mut Edit, start: usize, width: usize, other: usize) -> bool {
+        if self.to <= start {
+            edit.from = edit.from - (self.to - self.from) + self.len;
+        } else if self.from >= start + width {
+            self.from = self.from - width + other;
+            self.to = self.to - width + other;
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Moves the undo history past the change, newest edit first: each step
+    /// carries the change back to the text before that edit.
+    fn rebase_undo(mut self, entries: &mut [Entry]) -> bool {
+        for entry in entries.iter_mut().rev() {
+            entry.after = self.map_selection(entry.after);
+            for edit in entry.edits.iter_mut().rev() {
+                let (start, width, other) = (edit.from, edit.inserted.len(), edit.removed.len());
+                if !self.pass(edit, start, width, other) {
+                    return false;
+                }
+            }
+            entry.before = self.map_selection(entry.before);
+        }
+        true
+    }
+
+    /// Moves the redo history past the change, next redo first: each step
+    /// carries the change forward to the text after that edit.
+    fn rebase_redo(mut self, entries: &mut [Entry]) -> bool {
+        for entry in entries.iter_mut().rev() {
+            entry.before = self.map_selection(entry.before);
+            for edit in entry.edits.iter_mut() {
+                let (start, width, other) = (edit.from, edit.removed.len(), edit.inserted.len());
+                if !self.pass(edit, start, width, other) {
+                    return false;
+                }
+            }
+            entry.after = self.map_selection(entry.after);
+        }
+        true
     }
 }
 
@@ -299,6 +376,7 @@ mod tests {
     #[test]
     fn an_outside_change_keeps_the_caret_and_is_not_undoable_or_queued() {
         let mut d = Document::new("one\ntwo\n");
+        d.set_selection(Selection::caret(8));
         d.replace(8..8, "!", 9, EditKind::Typing);
         d.take_edited();
         d.set_selection(Selection::caret(6));
@@ -306,6 +384,45 @@ mod tests {
         assert_eq!(d.text(), "zero\none\ntwo\n!");
         assert_eq!(d.selection().head, 11);
         assert!(!d.take_edited());
+        // Undo takes back the user's edit, past the outside change, and never
+        // the outside change itself.
+        assert!(d.undo());
+        assert_eq!(d.text(), "zero\none\ntwo\n");
+        assert_eq!(d.selection().head, 13);
         assert!(!d.undo());
+        assert_eq!(d.text(), "zero\none\ntwo\n");
+    }
+
+    #[test]
+    fn undo_and_redo_survive_an_outside_change_on_either_side_of_them() {
+        let mut d = Document::new("a\nb\nc\n");
+        d.set_selection(Selection::caret(3));
+        d.replace(3..3, "X", 4, EditKind::Typing);
+        d.end_undo_group();
+        d.replace(4..4, "Y", 5, EditKind::Other);
+        d.undo();
+        assert_eq!(d.text(), "a\nbX\nc\n");
+        // Above both edits, then below them.
+        d.reset_text("top\na\nbX\nc\n");
+        d.reset_text("top\na\nbX\nc\nend\n");
+        d.redo();
+        assert_eq!(d.text(), "top\na\nbXY\nc\nend\n");
+        d.undo();
+        d.undo();
+        assert_eq!(d.text(), "top\na\nb\nc\nend\n");
+        assert_eq!(d.selection().head, 7);
+        d.redo();
+        d.redo();
+        assert_eq!(d.text(), "top\na\nbXY\nc\nend\n");
+    }
+
+    #[test]
+    fn an_outside_change_over_an_edit_drops_the_history() {
+        let mut d = Document::new("one two");
+        d.replace(3..3, "!", 4, EditKind::Typing);
+        d.reset_text("one");
+        assert!(!d.undo());
+        assert!(!d.redo());
+        assert_eq!(d.text(), "one");
     }
 }
