@@ -18,8 +18,8 @@ with the same scenarios. The SSH host is a 4 vCPU Debian 13 cloud VM about 29 ms
 | CPU, idle | 3.5% | 1.3% |
 | CPU, `seq 1 3000000` (CPU-seconds) | 4.17 | 0.87 |
 | CPU, 60 lines/s across 16 panes | 41% | 21% |
-| CPU, 3 Claude + 3 Codex replays | 22% | 22% before the spinner fix, about 17% after |
-| CPU, 6 agents working, window visible | 10.3% | 19.7% before the spinner fix, about 6.5% after |
+| CPU, 3 Claude + 3 Codex replays, local / SSH | 22% / 22.5% | 17% / 14% (22% before the spinner fix) |
+| CPU, 6 agents working, window visible | 10.3% | 1.6% (19.7% before the spinner fix) |
 | CPU, 6 agents working, window hidden | 10.6% | 1.0% |
 | Typing p95, local / SSH | 47 / 81 ms | 31 / 67 ms |
 | Package (tar.gz, app + helper) | 20.6 MB + 194 MB system WebKit/GTK | 36.1 MB, no web stack |
@@ -32,19 +32,30 @@ and no compositor time.
 
 ## The one regression found, and its fix
 
-The agent spinner and the tab pulse asked GPUI for a new frame on every vsync, so 6
-working agents cost 19.7% CPU against Tauri's 10.3%. Commit `3c42f6e` steps both on a
-shared 13 fps clock. The first post-fix runs (local and SSH, 2 of 3 runs) gave about 6.5%
-visible, 1.0% hidden, and 17% for the agent replay. Still to measure: the same 6 agents
-with no spinner at all. If the spinner costs more than about 1 point over that, it becomes
-a static "working" icon.
+The agent spinner and the pending-tab pulse asked GPUI for a new frame on every vsync, so
+the window redrew at 60 frames a second while any agent was working: 6 working agents cost
+19.7% CPU and 7.3% GPU against Tauri's 10.3% and 1.6%.
+
+| GPUI, 6 agents working, window visible (CPU / GPU) | Local | SSH |
+|---|---|---|
+| Spinner every frame (before) | 19.7% / 7.3% | 19.9% / 7.3% |
+| Spinner stepped at 13 fps (`3c42f6e`) | 6.5% / 4.3% | 6.5% / 4.3% |
+| Same rows with no motion at all (baseline) | 1.6% / 0.6% | 1.6% / 0.6% |
+| Still ring, shipped (`2f48319`) | 1.6% / 0.5% | 1.6% / 0.5% |
+
+Even at 13 fps the spinner cost about 5 points of CPU over no motion, so a working agent now
+shows Tauri's spinner ring held still. The 13 fps clock remains only for the pending-tab
+pulse, which lasts as long as a tab is loading.
+
+GPUI still uses more GPU time than Tauri whenever the window redraws (streaming output,
+agents printing), because it repaints the whole window. It costs no extra CPU.
 
 ## macOS
 
 Pending. The owner runs the same harness (`run-macos.sh`) on an Apple silicon Mac,
 local first and then against the same VM.
 
-## Full Linux results (before the spinner fix)
+## Full Linux results
 
 
 Run started 2026-11-11T18:49:19-0800; 3 runs per cell; steady windows 60.0 s after 15.0 s settle; compositor: private.
@@ -64,6 +75,34 @@ CPU in % of one core; GPU as % engine-busy time from DRM fdinfo; memory summed o
 - **Editor** only measures Quick Open plus opening a 5 MB file. Scrolling is not measured, because PageDown did not reach Tauri's editor after it opened and pointer input cannot be injected here. **Explorer is not measured**, because keyboard navigation did not reach the file tree in either app. The evidence screenshots are in `<host>/evidence/`.
 - **SSH** goes over the public internet to a cloud VM running Debian 13 with 4 vCPU and 16 GB, about 29 ms ping RTT. That latency dominates SSH typing and SSH heavy-output wall time.
 - The session bus (DBUS) of the desktop session was passed through to both apps. Everything else (HOME, helper runtime dir, tmux socket dir) was scratch.
+
+### GPUI fix: the working-agent spinner
+
+**Cause.** Kit's `Spinner` and the pending-tab pulse animate with `with_animation`, which calls `request_animation_frame` on every frame. That notifies the view that drew them. For the sidebar, agent list and tab strip that view is `Chrome`, and GPUI marks every ancestor of a notified view dirty. So each frame re-renders and re-lays-out the whole chrome. The terminal panes are already cached views and replay their last frame, but the GPU still redraws the whole scene. `frameprobe.py` measured this on the local host, with 6 agents working and silent panes, window visible, and the build at f2edd43:
+
+| GPUI | Frames/s (wl_surface commits) | App CPU (% core, all on the main thread) | App GPU (% busy) |
+|---|---|---|---|
+| Kit spinner (f2edd43) | 60.0 | 18.95 | 7.19 |
+| Same rows as static glyph dots | 1.6 | 1.35 | 0.51 |
+| Spinner on the shared 13 fps clock (3c42f6e) | 14.8 | 6.25 | 4.30 |
+| Same, window hidden, then shown again | 0, then 15.1 | 0.75, then 6.3 | 0, then 4.3 |
+
+At 60 fps the spinner cost about 3.0 ms of main-thread CPU and 1.1 ms of GPU per frame. At 13 fps the GPU time per frame was higher, about 2.9 ms. That is probably the GPU clocking down at the lower load. It is an inference, not a measurement.
+
+**Fix 1, 3c42f6e.** One shared clock steps every 75 ms, which is 13.3 fps. It wakes only the views that drew an indicator, and only while the window is shown. A hidden window gets no steps until it is shown again, and reduced motion stops the clock. The spinner is Tauri's ring, one turn every 0.9 s.
+
+**B0 and the spinner's cost.** B0 drives the same 6 rows working and then done through the same hooks, with the same silent panes and no motion. Done adds a "6" badge on the bell and attention borders on the panes; both are static. On the 3c42f6e build:
+
+| Host | B, 13 fps spinner: CPU / GPU | B0, no motion: CPU / GPU | Spinner cost, B − B0 |
+|---|---|---|---|
+| local | 6.5 / 4.3 | 1.6 / 0.6 | **+4.9 pp CPU, +3.7 pp GPU** |
+| ssh | 6.5 / 4.3 | 1.6 / 0.6 | **+4.9 pp CPU, +3.7 pp GPU** |
+
+**Fix 2, 2f48319.** The cost was above 1 point, so a working agent now shows the same ring held still, and it asks for no frames. With 6 agents working and the window visible, it measures 1.6% CPU and 0.5% GPU on both hosts, the same as B0. Hidden, it measures 0.9–1.0% CPU and no GPU. The 13 fps clock remains for the pending-tab pulse only.
+
+**View caching was not used.** A notify always re-renders the notified view's ancestors, so `AnyView::cached` around a spinner would still re-render `Chrome`. Caching `TerminalSurface` would skip only its own render, not the full-scene GPU redraw. It reads global state during render (drag marker, pane attention, focus, theme), so caching it safely would first need an audit of its notifications. That is not a small change.
+
+**How to read the tables below.** "GPUI before fix" is the f2edd43 build. "GPUI after fix" is the 13 fps build (3c42f6e) for idle, stream, recorded agents, spinner and B0. For the rows titled "static working icon" it is the 2f48319 build. Tauri was not re-run, because the machine, compositor, VM and measurement code were unchanged. In one local static-icon run, mean PSS fell to 67 MB and RSS to 78 MB while CPU did not change. That is the kernel reclaiming the app's pages under memory pressure, not the app.
 
 ### Sizes (Linux x86_64)
 
@@ -109,31 +148,31 @@ Installed size of the system web stack Tauri needs on this machine (context, not
 
 #### Idle, 1 workspace x 1 terminal
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 3.5 [3.4-3.5] | 1.3 [1.3-1.4] | 2.61x |
-| App GPU (all engines) (% busy) | 0.4 [0.4-0.4] | 0.5 [0.5-0.5] | 0.90x |
-| Local host helper CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
-| tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.80x |
-| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.73x |
-| App PSS (mean) (MB) | 417 [416-419] | 85 [85-85] | 4.91x |
-| App RSS (mean) (MB) | 603 [603-605] | 111 [110-111] | 5.45x |
-| Host helper PSS (mean) (MB) | 12 [12-12] | 12 [12-12] | 1.00x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 3.5 [3.4-3.5] | 1.3 [1.3-1.4] | 1.4 [1.4-1.4] | 2.50x |
+| App GPU (all engines) (% busy) | 0.4 [0.4-0.4] | 0.5 [0.5-0.5] | 0.5 [0.5-0.5] | 0.92x |
+| Local host helper CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.20x |
+| tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.80x |
+| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.73x |
+| App PSS (mean) (MB) | 417 [416-419] | 85 [85-85] | 98 [98-98] | 4.25x |
+| App RSS (mean) (MB) | 603 [603-605] | 111 [110-111] | 123 [122-123] | 4.92x |
+| Host helper PSS (mean) (MB) | 12 [12-12] | 12 [12-12] | 12 [12-12] | 1.04x |
 
 #### Idle, 8 tabs x 2 panes
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 3.0 [3.0-3.2] | 1.4 [1.4-1.5] | 2.12x |
-| App GPU (all engines) (% busy) | 0.4 [0.4-0.4] | 0.5 [0.5-0.6] | 0.78x |
-| Local host helper CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
-| tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
-| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
-| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.82x |
-| App PSS (mean) (MB) | 424 [423-427] | 96 [96-96] | 4.44x |
-| App RSS (mean) (MB) | 613 [612-615] | 122 [121-122] | 5.04x |
-| Host helper PSS (mean) (MB) | 12 [12-12] | 12 [12-12] | 0.98x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 3.0 [3.0-3.2] | 1.4 [1.4-1.5] | 1.5 [1.4-1.5] | 2.06x |
+| App GPU (all engines) (% busy) | 0.4 [0.4-0.4] | 0.5 [0.5-0.6] | 0.5 [0.5-0.6] | 0.78x |
+| Local host helper CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
+| tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.83x |
+| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.75x |
+| App PSS (mean) (MB) | 424 [423-427] | 96 [96-96] | 97 [97-97] | 4.39x |
+| App RSS (mean) (MB) | 613 [612-615] | 122 [121-122] | 121 [121-122] | 5.05x |
+| Host helper PSS (mean) (MB) | 12 [12-12] | 12 [12-12] | 12 [12-12] | 0.98x |
 
 #### Heavy output: seq 1 3000000
 
@@ -161,59 +200,115 @@ Installed size of the system web stack Tauri needs on this machine (context, not
 
 #### Agent-like line stream (60 lines/s, 8x2 layout)
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 41.1 [40.7-41.1] | 20.6 [20.3-20.8] | 2.00x |
-| App GPU (all engines) (% busy) | 4.7 [4.7-4.7] | 7.8 [7.8-7.8] | 0.60x |
-| Local host helper CPU (% core) | 1.9 [1.9-1.9] | 1.9 [1.9-1.9] | 1.02x |
-| tmux CPU (% core) | 1.2 [1.2-1.2] | 1.1 [1.1-1.1] | 1.11x |
-| Compositor CPU (% core) | 2.5 [2.5-2.5] | 2.3 [2.3-2.3] | 1.09x |
-| Compositor GPU (% busy) | 2.8 [2.8-2.8] | 2.8 [2.8-2.9] | 0.99x |
-| App PSS (mean) (MB) | 459 [457-460] | 108 [108-108] | 4.25x |
-| App RSS (mean) (MB) | 644 [642-646] | 134 [134-134] | 4.81x |
-| Host helper PSS (mean) (MB) | 11 [11-11] | 12 [11-12] | 0.98x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 41.1 [40.7-41.1] | 20.6 [20.3-20.8] | 20.6 [20.5-20.7] | 2.00x |
+| App GPU (all engines) (% busy) | 4.7 [4.7-4.7] | 7.8 [7.8-7.8] | 7.8 [7.8-7.8] | 0.60x |
+| Local host helper CPU (% core) | 1.9 [1.9-1.9] | 1.9 [1.9-1.9] | 1.8 [1.8-1.9] | 1.04x |
+| tmux CPU (% core) | 1.2 [1.2-1.2] | 1.1 [1.1-1.1] | 1.1 [1.1-1.1] | 1.12x |
+| Compositor CPU (% core) | 2.5 [2.5-2.5] | 2.3 [2.3-2.3] | 2.3 [2.3-2.3] | 1.11x |
+| Compositor GPU (% busy) | 2.8 [2.8-2.8] | 2.8 [2.8-2.9] | 2.8 [2.8-2.8] | 0.98x |
+| App PSS (mean) (MB) | 459 [457-460] | 108 [108-108] | 109 [109-110] | 4.21x |
+| App RSS (mean) (MB) | 644 [642-646] | 134 [134-134] | 134 [134-134] | 4.82x |
+| Host helper PSS (mean) (MB) | 11 [11-11] | 12 [11-12] | 12 [12-12] | 0.98x |
 
 #### Recorded agents: 3 Claude + 3 Codex replays, rows working/done
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 21.9 [21.9-22.3] | 21.7 [21.6-21.7] | 1.01x |
-| App GPU (all engines) (% busy) | 2.8 [2.7-2.8] | 7.3 [7.3-7.3] | 0.38x |
-| Local host helper CPU (% core) | 1.5 [1.5-1.6] | 1.5 [1.4-1.5] | 1.03x |
-| tmux CPU (% core) | 0.9 [0.9-0.9] | 0.9 [0.9-0.9] | 1.02x |
-| Compositor CPU (% core) | 2.5 [2.4-2.5] | 2.5 [2.5-2.5] | 1.01x |
-| Compositor GPU (% busy) | 2.9 [2.9-3.0] | 3.0 [3.0-3.0] | 0.98x |
-| App PSS (mean) (MB) | 491 [490-494] | 104 [104-104] | 4.73x |
-| App RSS (mean) (MB) | 680 [679-682] | 130 [130-130] | 5.23x |
-| Host helper PSS (mean) (MB) | 13 [13-14] | 14 [14-14] | 0.96x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 21.9 [21.9-22.3] | 21.7 [21.6-21.7] | 17.0 [17.0-17.0] | 1.29x |
+| App GPU (all engines) (% busy) | 2.8 [2.7-2.8] | 7.3 [7.3-7.3] | 5.8 [5.8-5.8] | 0.47x |
+| Local host helper CPU (% core) | 1.5 [1.5-1.6] | 1.5 [1.4-1.5] | 1.6 [1.6-1.6] | 0.96x |
+| tmux CPU (% core) | 0.9 [0.9-0.9] | 0.9 [0.9-0.9] | 0.9 [0.9-0.9] | 0.97x |
+| Compositor CPU (% core) | 2.5 [2.4-2.5] | 2.5 [2.5-2.5] | 1.9 [1.9-1.9] | 1.28x |
+| Compositor GPU (% busy) | 2.9 [2.9-3.0] | 3.0 [3.0-3.0] | 2.2 [2.2-2.2] | 1.32x |
+| App PSS (mean) (MB) | 491 [490-494] | 104 [104-104] | 105 [104-105] | 4.69x |
+| App RSS (mean) (MB) | 680 [679-682] | 130 [130-130] | 130 [130-130] | 5.24x |
+| Host helper PSS (mean) (MB) | 13 [13-14] | 14 [14-14] | 14 [14-14] | 0.96x |
 
 #### 6 agents working, no output, window visible
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 10.3 [9.9-10.3] | 19.7 [19.5-19.7] | 0.52x |
-| App GPU (all engines) (% busy) | 1.6 [1.6-1.7] | 7.3 [7.2-7.3] | 0.22x |
-| Local host helper CPU (% core) | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 1.00x |
-| tmux CPU (% core) | 0.0 [0.0-0.1] | 0.1 [0.0-0.1] | 0.60x |
-| Compositor CPU (% core) | 2.2 [2.2-2.2] | 2.5 [2.5-2.6] | 0.87x |
-| Compositor GPU (% busy) | 2.8 [2.8-2.9] | 2.9 [2.9-2.9] | 0.97x |
-| App PSS (mean) (MB) | 480 [480-483] | 104 [104-104] | 4.64x |
-| App RSS (mean) (MB) | 666 [666-668] | 130 [130-130] | 5.13x |
-| Host helper PSS (mean) (MB) | 13 [13-14] | 14 [13-14] | 0.95x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 10.3 [9.9-10.3] | 19.7 [19.5-19.7] | 6.5 [6.5-6.6] | 1.58x |
+| App GPU (all engines) (% busy) | 1.6 [1.6-1.7] | 7.3 [7.2-7.3] | 4.3 [4.3-4.3] | 0.38x |
+| Local host helper CPU (% core) | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 0.90x |
+| tmux CPU (% core) | 0.0 [0.0-0.1] | 0.1 [0.0-0.1] | 0.1 [0.0-0.1] | 0.60x |
+| Compositor CPU (% core) | 2.2 [2.2-2.2] | 2.5 [2.5-2.6] | 0.8 [0.8-0.8] | 2.69x |
+| Compositor GPU (% busy) | 2.8 [2.8-2.9] | 2.9 [2.9-2.9] | 1.1 [1.1-1.1] | 2.62x |
+| App PSS (mean) (MB) | 480 [480-483] | 104 [104-104] | 104 [104-105] | 4.60x |
+| App RSS (mean) (MB) | 666 [666-668] | 130 [130-130] | 129 [129-130] | 5.15x |
+| Host helper PSS (mean) (MB) | 13 [13-14] | 14 [13-14] | 14 [14-14] | 0.96x |
 
 #### 6 agents working, no output, window on another workspace
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 10.6 [10.2-10.6] | 1.0 [1.0-1.0] | 10.36x |
-| App GPU (all engines) (% busy) | 1.7 [1.6-1.7] | 0.0 [0.0-0.0] | n/a (GPUI 0) |
-| Local host helper CPU (% core) | 0.2 [0.1-0.2] | 0.2 [0.2-0.2] | 0.94x |
-| tmux CPU (% core) | 0.0 [0.0-0.1] | 0.0 [0.0-0.1] | 1.00x |
-| Compositor CPU (% core) | 0.7 [0.7-0.7] | 0.0 [0.0-0.0] | n/a (GPUI 0) |
-| Compositor GPU (% busy) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| App PSS (mean) (MB) | 469 [468-470] | 104 [104-104] | 4.53x |
-| App RSS (mean) (MB) | 655 [655-657] | 130 [130-130] | 5.04x |
-| Host helper PSS (mean) (MB) | 13 [13-14] | 14 [13-14] | 0.95x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 10.6 [10.2-10.6] | 1.0 [1.0-1.0] | 1.1 [1.1-1.1] | 9.88x |
+| App GPU (all engines) (% busy) | 1.7 [1.6-1.7] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | n/a (GPUI 0) |
+| Local host helper CPU (% core) | 0.2 [0.1-0.2] | 0.2 [0.2-0.2] | 0.2 [0.2-0.2] | 0.94x |
+| tmux CPU (% core) | 0.0 [0.0-0.1] | 0.0 [0.0-0.1] | 0.0 [0.0-0.0] | 1.50x |
+| Compositor CPU (% core) | 0.7 [0.7-0.7] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 35.00x |
+| Compositor GPU (% busy) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| App PSS (mean) (MB) | 469 [468-470] | 104 [104-104] | 104 [104-105] | 4.50x |
+| App RSS (mean) (MB) | 655 [655-657] | 130 [130-130] | 129 [129-130] | 5.06x |
+| Host helper PSS (mean) (MB) | 13 [13-14] | 14 [13-14] | 14 [14-14] | 0.96x |
+
+#### B0: the same 6 agent rows done (no animation), no output, window visible
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 1.6 [1.6-1.6] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 0.6 [0.6-0.6] | n/a |
+| Local host helper CPU (% core) | n/a | n/a | 0.2 [0.2-0.2] | n/a |
+| tmux CPU (% core) | n/a | n/a | 0.0 [0.0-0.1] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 103 [103-104] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 128 [128-129] | n/a |
+| Host helper PSS (mean) (MB) | n/a | n/a | 14 [14-14] | n/a |
+
+#### Recorded agents with a static working icon: 3 Claude + 3 Codex replays
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 17.2 [15.0-17.8] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 4.7 [4.7-4.8] | n/a |
+| Local host helper CPU (% core) | n/a | n/a | 1.8 [1.7-1.8] | n/a |
+| tmux CPU (% core) | n/a | n/a | 1.0 [1.0-1.0] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 1.8 [1.5-1.8] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 1.6 [1.6-1.6] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 105 [104-117] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 129 [127-130] | n/a |
+| Host helper PSS (mean) (MB) | n/a | n/a | 14 [14-14] | n/a |
+
+#### 6 agents working with a static working icon, no output, window visible
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 1.6 [1.4-1.6] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 0.5 [0.4-0.5] | n/a |
+| Local host helper CPU (% core) | n/a | n/a | 0.2 [0.2-0.2] | n/a |
+| tmux CPU (% core) | n/a | n/a | 0.0 [0.0-0.1] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 104 [67-116] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 127 [78-129] | n/a |
+| Host helper PSS (mean) (MB) | n/a | n/a | 13 [13-14] | n/a |
+
+#### 6 agents working with a static working icon, window on another workspace
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 0.9 [0.8-0.9] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Local host helper CPU (% core) | n/a | n/a | 0.2 [0.2-0.2] | n/a |
+| tmux CPU (% core) | n/a | n/a | 0.0 [0.0-0.1] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 104 [58-116] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 127 [69-129] | n/a |
+| Host helper PSS (mean) (MB) | n/a | n/a | 13 [13-14] | n/a |
 
 #### Editor: Quick Open and open a 5 MB file (no scrolling)
 
@@ -262,35 +357,35 @@ Compositor CPU 0.03 % core, GPU 0.0 % busy over 60.0 s.
 
 #### Idle, 1 workspace x 1 terminal
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 3.6 [3.5-3.6] | 1.4 [1.4-1.4] | 2.55x |
-| App GPU (all engines) (% busy) | 0.4 [0.4-0.5] | 0.5 [0.5-0.5] | 0.92x |
-| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.80x |
-| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.75x |
-| App PSS (mean) (MB) | 418 [413-424] | 85 [85-86] | 4.90x |
-| App RSS (mean) (MB) | 604 [600-610] | 111 [110-111] | 5.44x |
-| Remote helper CPU (% core) | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 1.00x |
-| Remote tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
-| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Remote helper RSS (mean) (MB) | 23 [22-23] | 23 [23-23] | 0.99x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 3.6 [3.5-3.6] | 1.4 [1.4-1.4] | 1.4 [1.3-1.4] | 2.68x |
+| App GPU (all engines) (% busy) | 0.4 [0.4-0.5] | 0.5 [0.5-0.5] | 0.5 [0.5-0.5] | 0.92x |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.80x |
+| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.82x |
+| App PSS (mean) (MB) | 418 [413-424] | 85 [85-86] | 98 [98-98] | 4.26x |
+| App RSS (mean) (MB) | 604 [600-610] | 111 [110-111] | 123 [123-123] | 4.91x |
+| Remote helper CPU (% core) | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 1.00x |
+| Remote tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 23 [22-23] | 23 [23-23] | 23 [23-24] | 0.99x |
 
 #### Idle, 8 tabs x 2 panes
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 3.5 [3.5-3.5] | 1.5 [1.5-1.5] | 2.36x |
-| App GPU (all engines) (% busy) | 0.4 [0.4-0.4] | 0.5 [0.5-0.5] | 0.76x |
-| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.00x |
-| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.67x |
-| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.75x |
-| App PSS (mean) (MB) | 434 [431-436] | 96 [96-96] | 4.53x |
-| App RSS (mean) (MB) | 623 [620-625] | 122 [121-122] | 5.13x |
-| Remote helper CPU (% core) | 0.3 [0.3-0.4] | 0.3 [0.3-0.3] | 1.00x |
-| Remote tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 1.00x |
-| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Remote helper RSS (mean) (MB) | 23 [23-23] | 23 [23-24] | 1.00x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 3.5 [3.5-3.5] | 1.5 [1.5-1.5] | 1.5 [1.4-1.5] | 2.38x |
+| App GPU (all engines) (% busy) | 0.4 [0.4-0.4] | 0.5 [0.5-0.5] | 0.5 [0.5-0.5] | 0.76x |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Compositor CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.80x |
+| Compositor GPU (% busy) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.82x |
+| App PSS (mean) (MB) | 434 [431-436] | 96 [96-96] | 96 [96-97] | 4.49x |
+| App RSS (mean) (MB) | 623 [620-625] | 122 [121-122] | 122 [121-122] | 5.12x |
+| Remote helper CPU (% core) | 0.3 [0.3-0.4] | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 1.00x |
+| Remote tmux CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 1.00x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 23 [23-23] | 23 [23-24] | 23 [23-23] | 0.99x |
 
 #### Heavy output: seq 1 3000000
 
@@ -320,67 +415,131 @@ Compositor CPU 0.03 % core, GPU 0.0 % busy over 60.0 s.
 
 #### Agent-like line stream (60 lines/s, 8x2 layout)
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 39.9 [39.0-40.9] | 20.0 [20.0-20.2] | 1.99x |
-| App GPU (all engines) (% busy) | 4.8 [4.8-4.9] | 7.6 [7.6-7.6] | 0.63x |
-| ssh client CPU (% core) | 0.7 [0.7-0.7] | 0.6 [0.6-0.6] | 1.20x |
-| Compositor CPU (% core) | 2.5 [2.5-2.5] | 2.2 [2.2-2.3] | 1.12x |
-| Compositor GPU (% busy) | 2.7 [2.7-2.8] | 2.8 [2.8-2.8] | 0.97x |
-| App PSS (mean) (MB) | 462 [460-464] | 110 [110-111] | 4.19x |
-| App RSS (mean) (MB) | 647 [645-650] | 136 [136-136] | 4.76x |
-| Remote helper CPU (% core) | 6.3 [6.2-6.5] | 6.3 [6.3-6.4] | 1.01x |
-| Remote tmux CPU (% core) | 2.9 [2.9-2.9] | 2.8 [2.8-2.8] | 1.02x |
-| Remote sshd CPU (% core) | 2.2 [2.1-2.2] | 2.1 [2.1-2.1] | 1.01x |
-| Remote helper RSS (mean) (MB) | 18 [18-19] | 19 [18-19] | 0.98x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 39.9 [39.0-40.9] | 20.0 [20.0-20.2] | 20.1 [19.9-20.1] | 1.99x |
+| App GPU (all engines) (% busy) | 4.8 [4.8-4.9] | 7.6 [7.6-7.6] | 7.6 [7.6-7.6] | 0.63x |
+| ssh client CPU (% core) | 0.7 [0.7-0.7] | 0.6 [0.6-0.6] | 0.6 [0.6-0.6] | 1.14x |
+| Compositor CPU (% core) | 2.5 [2.5-2.5] | 2.2 [2.2-2.3] | 2.2 [2.2-2.2] | 1.13x |
+| Compositor GPU (% busy) | 2.7 [2.7-2.8] | 2.8 [2.8-2.8] | 2.8 [2.8-2.8] | 0.98x |
+| App PSS (mean) (MB) | 462 [460-464] | 110 [110-111] | 111 [111-111] | 4.16x |
+| App RSS (mean) (MB) | 647 [645-650] | 136 [136-136] | 136 [136-136] | 4.76x |
+| Remote helper CPU (% core) | 6.3 [6.2-6.5] | 6.3 [6.3-6.4] | 6.4 [6.0-6.5] | 0.98x |
+| Remote tmux CPU (% core) | 2.9 [2.9-2.9] | 2.8 [2.8-2.8] | 2.9 [2.7-3.0] | 0.98x |
+| Remote sshd CPU (% core) | 2.2 [2.1-2.2] | 2.1 [2.1-2.1] | 2.1 [2.0-2.2] | 1.02x |
+| Remote helper RSS (mean) (MB) | 18 [18-19] | 19 [18-19] | 19 [19-19] | 0.98x |
 
 #### Recorded agents: 3 Claude + 3 Codex replays, rows working/done
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 22.5 [22.4-22.5] | 21.9 [21.6-22.0] | 1.03x |
-| App GPU (all engines) (% busy) | 2.8 [2.7-2.8] | 7.3 [7.3-7.3] | 0.38x |
-| ssh client CPU (% core) | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 1.06x |
-| Compositor CPU (% core) | 2.5 [2.4-2.5] | 2.5 [2.4-2.5] | 1.00x |
-| Compositor GPU (% busy) | 3.0 [3.0-3.0] | 3.0 [3.0-3.0] | 1.00x |
-| App PSS (mean) (MB) | 506 [500-507] | 104 [104-104] | 4.86x |
-| App RSS (mean) (MB) | 694 [688-696] | 130 [130-130] | 5.33x |
-| Remote helper CPU (% core) | 4.8 [4.8-4.8] | 4.9 [4.7-4.9] | 0.99x |
-| Remote tmux CPU (% core) | 3.3 [3.3-3.3] | 3.3 [3.3-3.4] | 1.00x |
-| Remote sshd CPU (% core) | 1.2 [1.2-1.2] | 1.2 [1.2-1.2] | 1.03x |
-| Remote helper RSS (mean) (MB) | 25 [24-25] | 24 [24-24] | 1.01x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 22.5 [22.4-22.5] | 21.9 [21.6-22.0] | 17.1 [16.9-17.2] | 1.31x |
+| App GPU (all engines) (% busy) | 2.8 [2.7-2.8] | 7.3 [7.3-7.3] | 5.8 [5.8-5.8] | 0.47x |
+| ssh client CPU (% core) | 0.3 [0.3-0.3] | 0.3 [0.3-0.3] | 0.4 [0.3-0.4] | 0.92x |
+| Compositor CPU (% core) | 2.5 [2.4-2.5] | 2.5 [2.4-2.5] | 2.0 [1.9-2.0] | 1.24x |
+| Compositor GPU (% busy) | 3.0 [3.0-3.0] | 3.0 [3.0-3.0] | 2.2 [2.2-2.2] | 1.35x |
+| App PSS (mean) (MB) | 506 [500-507] | 104 [104-104] | 105 [104-105] | 4.82x |
+| App RSS (mean) (MB) | 694 [688-696] | 130 [130-130] | 130 [130-130] | 5.33x |
+| Remote helper CPU (% core) | 4.8 [4.8-4.8] | 4.9 [4.7-4.9] | 5.0 [4.8-5.0] | 0.97x |
+| Remote tmux CPU (% core) | 3.3 [3.3-3.3] | 3.3 [3.3-3.4] | 3.4 [3.3-3.4] | 0.98x |
+| Remote sshd CPU (% core) | 1.2 [1.2-1.2] | 1.2 [1.2-1.2] | 1.2 [1.2-1.3] | 0.98x |
+| Remote helper RSS (mean) (MB) | 25 [24-25] | 24 [24-24] | 24 [24-25] | 1.01x |
 
 #### 6 agents working, no output, window visible
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 10.4 [10.4-10.5] | 19.9 [19.6-20.1] | 0.52x |
-| App GPU (all engines) (% busy) | 1.7 [1.7-1.7] | 7.3 [7.3-7.4] | 0.23x |
-| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Compositor CPU (% core) | 2.2 [2.2-2.3] | 2.5 [2.5-2.7] | 0.89x |
-| Compositor GPU (% busy) | 2.9 [2.9-2.9] | 2.9 [2.9-2.9] | 0.99x |
-| App PSS (mean) (MB) | 494 [488-497] | 105 [105-105] | 4.72x |
-| App RSS (mean) (MB) | 681 [674-683] | 131 [131-131] | 5.20x |
-| Remote helper CPU (% core) | 0.6 [0.5-0.6] | 0.6 [0.6-0.6] | 0.96x |
-| Remote tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
-| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Remote helper RSS (mean) (MB) | 21 [20-21] | 20 [20-20] | 1.01x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 10.4 [10.4-10.5] | 19.9 [19.6-20.1] | 6.5 [6.4-6.5] | 1.59x |
+| App GPU (all engines) (% busy) | 1.7 [1.7-1.7] | 7.3 [7.3-7.4] | 4.3 [4.1-4.3] | 0.39x |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Compositor CPU (% core) | 2.2 [2.2-2.3] | 2.5 [2.5-2.7] | 0.8 [0.8-0.8] | 2.74x |
+| Compositor GPU (% busy) | 2.9 [2.9-2.9] | 2.9 [2.9-2.9] | 1.0 [1.0-1.0] | 2.89x |
+| App PSS (mean) (MB) | 494 [488-497] | 105 [105-105] | 106 [105-106] | 4.68x |
+| App RSS (mean) (MB) | 681 [674-683] | 131 [131-131] | 131 [131-131] | 5.21x |
+| Remote helper CPU (% core) | 0.6 [0.5-0.6] | 0.6 [0.6-0.6] | 0.5 [0.5-0.6] | 1.04x |
+| Remote tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 21 [20-21] | 20 [20-20] | 20 [20-21] | 1.00x |
 
 #### 6 agents working, no output, window on another workspace
 
-| Metric | Tauri | GPUI | Tauri/GPUI |
-|---|---|---|---|
-| App CPU (% core) | 10.7 [10.3-10.9] | 1.1 [1.1-1.1] | 9.97x |
-| App GPU (all engines) (% busy) | 1.7 [1.7-1.8] | 0.0 [0.0-0.0] | n/a (GPUI 0) |
-| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Compositor CPU (% core) | 0.7 [0.7-0.7] | 0.0 [0.0-0.0] | 35.00x |
-| Compositor GPU (% busy) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| App PSS (mean) (MB) | 474 [474-477] | 105 [105-105] | 4.52x |
-| App RSS (mean) (MB) | 660 [660-664] | 131 [131-131] | 5.04x |
-| Remote helper CPU (% core) | 0.5 [0.5-0.5] | 0.5 [0.5-0.6] | 0.98x |
-| Remote tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
-| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
-| Remote helper RSS (mean) (MB) | 21 [20-21] | 20 [20-20] | 1.01x |
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | 10.7 [10.3-10.9] | 1.1 [1.1-1.1] | 1.0 [1.0-1.1] | 10.36x |
+| App GPU (all engines) (% busy) | 1.7 [1.7-1.8] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | n/a (GPUI 0) |
+| ssh client CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Compositor CPU (% core) | 0.7 [0.7-0.7] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 35.00x |
+| Compositor GPU (% busy) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| App PSS (mean) (MB) | 474 [474-477] | 105 [105-105] | 106 [106-106] | 4.48x |
+| App RSS (mean) (MB) | 660 [660-664] | 131 [131-131] | 131 [131-132] | 5.04x |
+| Remote helper CPU (% core) | 0.5 [0.5-0.5] | 0.5 [0.5-0.6] | 0.5 [0.5-0.5] | 1.00x |
+| Remote tmux CPU (% core) | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 0.1 [0.1-0.1] | 1.00x |
+| Remote sshd CPU (% core) | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | 0.0 [0.0-0.0] | = |
+| Remote helper RSS (mean) (MB) | 21 [20-21] | 20 [20-20] | 21 [20-21] | 1.00x |
+
+#### B0: the same 6 agent rows done (no animation), no output, window visible
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 1.6 [1.6-1.7] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 0.6 [0.6-0.6] | n/a |
+| ssh client CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 103 [101-104] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 129 [127-129] | n/a |
+| Remote helper CPU (% core) | n/a | n/a | 0.6 [0.6-0.6] | n/a |
+| Remote tmux CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Remote sshd CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Remote helper RSS (mean) (MB) | n/a | n/a | 24 [24-24] | n/a |
+
+#### Recorded agents with a static working icon: 3 Claude + 3 Codex replays
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 14.1 [14.0-14.1] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 5.0 [5.0-5.0] | n/a |
+| ssh client CPU (% core) | n/a | n/a | 0.4 [0.4-0.4] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 1.5 [1.5-1.5] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 1.6 [1.6-1.6] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 118 [117-119] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 129 [128-129] | n/a |
+| Remote helper CPU (% core) | n/a | n/a | 5.0 [4.9-5.1] | n/a |
+| Remote tmux CPU (% core) | n/a | n/a | 3.4 [3.4-3.4] | n/a |
+| Remote sshd CPU (% core) | n/a | n/a | 1.3 [1.2-1.3] | n/a |
+| Remote helper RSS (mean) (MB) | n/a | n/a | 25 [24-25] | n/a |
+
+#### 6 agents working with a static working icon, no output, window visible
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 1.6 [1.6-1.6] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 0.5 [0.5-0.5] | n/a |
+| ssh client CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 119 [117-119] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 130 [128-130] | n/a |
+| Remote helper CPU (% core) | n/a | n/a | 0.5 [0.5-0.6] | n/a |
+| Remote tmux CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Remote sshd CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Remote helper RSS (mean) (MB) | n/a | n/a | 20 [20-20] | n/a |
+
+#### 6 agents working with a static working icon, window on another workspace
+
+| Metric | Tauri | GPUI before fix | GPUI after fix | Tauri/GPUI (after) |
+|---|---|---|---|---|
+| App CPU (% core) | n/a | n/a | 1.0 [1.0-1.1] | n/a |
+| App GPU (all engines) (% busy) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| ssh client CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Compositor CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Compositor GPU (% busy) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| App PSS (mean) (MB) | n/a | n/a | 119 [117-119] | n/a |
+| App RSS (mean) (MB) | n/a | n/a | 130 [128-130] | n/a |
+| Remote helper CPU (% core) | n/a | n/a | 0.5 [0.5-0.6] | n/a |
+| Remote tmux CPU (% core) | n/a | n/a | 0.1 [0.1-0.1] | n/a |
+| Remote sshd CPU (% core) | n/a | n/a | 0.0 [0.0-0.0] | n/a |
+| Remote helper RSS (mean) (MB) | n/a | n/a | 20 [20-21] | n/a |
 
 #### Editor: Quick Open and open a 5 MB file (no scrolling)
 
