@@ -103,13 +103,14 @@ fn state_color(state: DisplayState, palette: &Palette) -> Rgba {
     }
 }
 
-/// One agent state, drawn the same way everywhere: motion means running, a dot
-/// means a state that is not going anywhere. With glyphs on, every state is a
-/// dot whose shape carries it. Idle keeps its slot and draws nothing.
+/// One agent state, drawn the same way everywhere: a ring means running (held
+/// still, see [`motion::WorkingIcon`]), a dot means a state that is not going
+/// anywhere. With glyphs on, every state is a dot whose shape carries it. Idle
+/// keeps its slot and draws nothing.
 pub fn state_indicator(state: DisplayState, glyphs: bool, size: f32, cx: &App) -> AnyElement {
     let palette = theme::palette(cx);
     if state == DisplayState::Working && !glyphs {
-        return motion::Spinner::new(size, palette.chrome_ink).into_any_element();
+        return motion::WorkingIcon::new(size, palette.chrome_ink).into_any_element();
     }
     let dot = div().flex_none().size(ui(size)).rounded_full();
     if state == DisplayState::Idle {
@@ -180,7 +181,7 @@ pub fn agent_mark(
         match state {
             DisplayState::Working => badge
                 .bg(ring)
-                .child(motion::Spinner::new(5., palette.chrome_ink)),
+                .child(motion::WorkingIcon::new(5., palette.chrome_ink)),
             DisplayState::Unknown => badge
                 .bg(ring)
                 .border_dashed()
