@@ -18,7 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::doc::{Document, EditKind, Selection};
 use crate::projection::{Active, BlockKind, Projection, parse, project, project_near};
 
-pub use table::CellDir;
+pub use table::TableKey;
 
 /// What the drawn projection was made for.
 #[derive(Clone, PartialEq)]
@@ -28,6 +28,8 @@ struct ProjectionKey {
     focused: bool,
     marked: Option<Range<usize>>,
     cell_typed_end: Option<usize>,
+    missing: Option<(usize, usize)>,
+    read_only: bool,
 }
 
 pub struct LiveDoc {
@@ -40,6 +42,10 @@ pub struct LiveDoc {
     marked: Option<Range<usize>>,
     /// Just past whitespace typed at the end of a table cell.
     cell_typed_end: Option<usize>,
+    /// The short row's missing cell the caret was put in.
+    missing: Option<table::Missing>,
+    /// Tables take no caret and no edit.
+    read_only: bool,
     drawn: Option<(ProjectionKey, Rc<Projection>)>,
 }
 
@@ -54,6 +60,8 @@ impl LiveDoc {
             focused: true,
             marked: None,
             cell_typed_end: None,
+            missing: None,
+            read_only: false,
             drawn: None,
         }
     }
@@ -98,6 +106,8 @@ impl LiveDoc {
             focused: self.focused,
             marked: self.marked.clone(),
             cell_typed_end: self.cell_typed_end,
+            missing: self.missing(),
+            read_only: self.read_only,
         };
         if let Some((drawn, projection)) = &self.drawn
             && *drawn == key
@@ -129,6 +139,8 @@ impl LiveDoc {
             },
             marked: self.marked.clone(),
             cell_typed_end: self.cell_typed_end,
+            missing: self.missing(),
+            read_only: self.read_only,
         }
     }
 
@@ -207,7 +219,12 @@ impl LiveDoc {
     }
 
     pub fn set_caret(&mut self, pos: usize) {
+        // Home or End in a missing cell keeps it: its row's end is no stop.
+        if self.missing().is_some_and(|(at, _)| at == pos) {
+            return;
+        }
         self.cell_typed_end = None;
+        self.missing = None;
         let pos = self.snap(pos);
         self.commit_composition();
         self.doc.set_selection(Selection::caret(pos));
@@ -318,6 +335,7 @@ impl LiveDoc {
     /// platform IME composes. `caret_in_text` is the composition caret as a
     /// byte offset within `text`.
     pub fn set_preedit(&mut self, text: &str, caret_in_text: Option<usize>) {
+        self.fill_missing(EditKind::Composition);
         let sel = self.doc.selection();
         let range = self.marked.clone().unwrap_or(sel.range());
         let start = range.start;
