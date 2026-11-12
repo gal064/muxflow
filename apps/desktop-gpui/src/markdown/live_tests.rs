@@ -327,3 +327,56 @@ fn an_edit_the_buffer_refuses_does_not_stay_on_screen(cx: &mut TestAppContext) {
     assert_eq!(fixture.buffer(cx), "ab");
     assert_eq!(fixture.shown(cx), "ab");
 }
+
+#[gpui_kit::test]
+fn edits_anywhere_reach_the_buffer_as_shown(cx: &mut TestAppContext) {
+    let (fixture, cx) = open("one\n\ntwo\n\nthree\n", cx);
+    for (at, text) in [(0, "a"), (16, "b"), (5, "\n\nmid"), (2, "é")] {
+        fixture.type_at(at, text, cx);
+        assert_eq!(
+            fixture.buffer(cx),
+            fixture.shown(cx),
+            "typed {text:?} at {at}"
+        );
+    }
+    assert_eq!(fixture.buffer(cx), "aoéne\n\n\nmid\ntwo\n\nthreeb\n");
+}
+
+#[gpui_kit::test]
+fn a_file_grown_past_the_limit_is_not_taken_until_it_shrinks(cx: &mut TestAppContext) {
+    let (fixture, cx) = open("small\n", cx);
+    let big = "x".repeat(live_markdown::LIMIT_BYTES as usize + 1);
+    fixture.rewrite(&big, cx);
+    assert_eq!(fixture.shown(cx), "small\n");
+    fixture.rewrite("small again\n", cx);
+    assert_eq!(fixture.shown(cx), "small again\n");
+}
+
+#[gpui_kit::test]
+fn a_crlf_file_stays_crlf_through_edits_and_rewrites(cx: &mut TestAppContext) {
+    let (fixture, cx) = open("a\r\nb\r\n", cx);
+    fixture.type_at(1, "1", cx);
+    fixture.type_at(4, "2", cx);
+    assert_eq!(fixture.buffer(cx), fixture.shown(cx));
+    assert_eq!(
+        fixture.saved_after_debounce(cx).last().unwrap(),
+        "a1\r\nb2\r\n"
+    );
+    fixture.rewrite("x\r\na1\r\nb2\r\n", cx);
+    fixture.type_at(1, "3", cx);
+    assert_eq!(fixture.buffer(cx), "x3\na1\nb2\n");
+    assert_eq!(
+        fixture.saved_after_debounce(cx).last().unwrap(),
+        "x3\r\na1\r\nb2\r\n"
+    );
+}
+
+#[gpui_kit::test]
+fn a_view_squeezed_to_nothing_still_draws(cx: &mut TestAppContext) {
+    let (fixture, cx) = open("para one\n\nmore text\n", cx);
+    for height in [0., 10., 30.] {
+        cx.simulate_resize(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(height)));
+        cx.run_until_parked();
+    }
+    assert_eq!(fixture.shown(cx), "para one\n\nmore text\n");
+}

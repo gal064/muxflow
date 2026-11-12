@@ -4,7 +4,7 @@
 //! The buffer stays the document's, so autosave, dirty state, changes on disk
 //! and reconnects are handled where the source editor's are. The view takes
 //! the buffer's text when it changes from anywhere else, and each of its edits
-//! goes into the buffer as one replacement of the span that differs. An IME
+//! goes into the buffer as one replacement of the span it changed. An IME
 //! preedit is never handed over until it is committed.
 
 use std::collections::HashMap;
@@ -106,13 +106,17 @@ struct Surface {
     synced: u64,
     /// The tab's session, which a followed link must still be in.
     session_id: String,
+    /// The buffer has CR line breaks, which the view does not: its offsets
+    /// are not the buffer's.
+    crlf: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Surface {
     fn new(document: &Entity<Document>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let buffer = document.read(cx).text().map(|text| text.to_string());
-        let text = normalized(buffer.as_deref().unwrap_or_default());
+        let buffer = buffer.unwrap_or_default();
+        let text = normalized(&buffer);
         let style = style(cx);
         let view = cx.new(|cx| LiveView::new(&text, style, window, cx));
         let subscriptions = vec![
@@ -129,6 +133,7 @@ impl Surface {
         Self {
             synced: document.read(cx).revision(),
             session_id: String::new(),
+            crlf: buffer.contains('\r'),
             document: document.downgrade(),
             view,
             _subscriptions: subscriptions,
@@ -145,11 +150,21 @@ impl Surface {
         if document.revision() == self.synced {
             return;
         }
+        // A file read past the limit shows as source: the kept view waits
+        // for it to come back under rather than take its text on every key.
+        if document
+            .read_bytes()
+            .is_some_and(|bytes| bytes > live_markdown::LIMIT_BYTES)
+        {
+            return;
+        }
         self.synced = document.revision();
         let Some(buffer) = document.text() else {
             return;
         };
-        let text = normalized(&buffer.to_string());
+        let buffer = buffer.to_string();
+        self.crlf = buffer.contains('\r');
+        let text = normalized(&buffer);
         self.view.update(cx, |view, cx| view.set_text(&text, cx));
     }
 
@@ -168,35 +183,48 @@ impl Surface {
         super::view::follow(&origin, href, window, cx);
     }
 
-    /// The view's edits, into the buffer: the one span where the buffer and
-    /// the view differ. A composition typed and cancelled is no edit. A CRLF
-    /// buffer differs from the view at every line break, so its first edit
-    /// writes the view's text whole and autosave restores the CRLFs.
+    /// The view's edits, into the buffer: the span the view changed since it
+    /// last pushed, as the buffer holds the view's text from before it. A
+    /// composition typed and cancelled is no edit. A CRLF buffer differs from
+    /// the view at every line break, so its first edit writes the view's text
+    /// whole and autosave restores the CRLFs; so does a buffer that changed
+    /// since the view took it.
     fn push(&mut self, cx: &mut Context<Self>) {
-        if !self.view.update(cx, |view, _| view.take_edited()) {
+        let Some(change) = self.view.update(cx, |view, _| view.take_edited()) else {
             return;
-        }
+        };
         let Some(document) = self.document.upgrade() else {
             return;
         };
-        let Some(buffer) = document.read(cx).text().map(|text| text.to_string()) else {
+        let Some(buffer) = document.read(cx).text() else {
             return;
         };
-        let text = self.view.read(cx).text().to_owned();
-        if normalized(&buffer) == text {
-            return;
-        }
-        let (start, old_end, new_end) = minimal_change(&buffer, &text);
+        let text = self.view.read(cx).text();
+        let whole = self.crlf || document.read(cx).revision() != self.synced;
+        let (range, new) = if whole {
+            let buffer = buffer.to_string();
+            if normalized(&buffer) == text {
+                return;
+            }
+            let (start, old_end, new_end) = minimal_change(&buffer, text);
+            (start..old_end, text[start..new_end].to_owned())
+        } else {
+            let new = &text[change.start..change.new_end];
+            if buffer.slice(change.start..change.old_end) == new {
+                return;
+            }
+            (change.start..change.old_end, new.to_owned())
+        };
         let revision = document.read(cx).revision();
-        document.update(cx, |document, cx| {
-            document.replace(start..old_end, &text[start..new_end], cx)
-        });
+        document.update(cx, |document, cx| document.replace(range, &new, cx));
         self.synced = document.read(cx).revision();
-        // Refused (read-only since the view last drew): the view shows the
-        // buffer again rather than text that will never be saved.
         if self.synced == revision {
-            let buffer = normalized(&buffer);
+            // Refused (read-only since the view last drew): the view shows
+            // the buffer again rather than text that will never be saved.
+            let buffer = normalized(&buffer.to_string());
             self.view.update(cx, |view, cx| view.set_text(&buffer, cx));
+        } else {
+            self.crlf = false;
         }
     }
 }

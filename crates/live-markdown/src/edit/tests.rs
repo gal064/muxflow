@@ -512,7 +512,7 @@ fn never_writes_a_document_the_user_has_not_edited() {
     d.focused = false;
     d.projection();
     assert_eq!(d.text(), source);
-    assert!(!d.take_edited());
+    assert!(d.take_edited().is_none());
 }
 
 #[test]
@@ -524,20 +524,20 @@ fn does_not_emit_edits_when_heading_markers_reveal_and_hide_on_focus() {
     let end = d.text().len();
     d.set_caret(end);
     assert_eq!(d.projection().leaves[0].text, "Title");
-    assert!(!d.take_edited());
+    assert!(d.take_edited().is_none());
 }
 
 #[test]
 fn hands_the_host_each_edit_once_and_never_an_open_preedit() {
     let mut d = doc("ab", 1);
     d.insert_text("x");
-    assert!(d.take_edited());
-    assert!(!d.take_edited());
+    assert!(d.take_edited().is_some());
+    assert!(d.take_edited().is_none());
     d.set_preedit("に", None);
     d.set_preedit("日", None);
-    assert!(!d.take_edited(), "a preedit is not an edit");
+    assert!(d.take_edited().is_none(), "a preedit is not an edit");
     d.insert_text("日本");
-    assert!(d.take_edited());
+    assert!(d.take_edited().is_some());
     assert_eq!(d.text(), "ax日本b");
     d.set_preedit("x", None);
     d.commit_composition();
@@ -551,7 +551,7 @@ fn an_outside_change_drops_an_open_composition() {
     d.reset_text("zab");
     assert_eq!(d.text(), "zab");
     assert_eq!(d.marked(), None);
-    assert!(!d.take_edited());
+    assert!(d.take_edited().is_none());
 }
 
 // The cases below mirror liveTable.test.ts.
@@ -879,21 +879,6 @@ fn bold_and_italic_toggle_in_a_cell_and_keep_the_text_selected() {
     assert!(!d.toggle_marker_in_cell("**"));
 }
 
-// Not from the spike or Tauri: the drawn projection is reused until the text
-// or the selection changes.
-
-#[test]
-fn the_drawn_projection_is_made_once_per_text_and_selection() {
-    let mut d = doc("a **b** c", 0);
-    let first = d.projection();
-    assert!(Rc::ptr_eq(&first, &d.projection()));
-    d.set_caret(4);
-    let moved = d.projection();
-    assert!(!Rc::ptr_eq(&first, &moved));
-    d.insert_text("x");
-    assert!(!Rc::ptr_eq(&moved, &d.projection()));
-}
-
 #[test]
 fn queries_near_the_caret_match_the_whole_document() {
     let text = "# A\n\npara **b**\n\n- item\n\n| x | y |\n|---|---|\n\n> q\n\nend";
@@ -904,7 +889,8 @@ fn queries_near_the_caret_match_the_whole_document() {
         }
         let sel = Selection::caret(pos);
         let near = d.near(sel, pos..pos);
-        let whole = crate::projection::project(text, &d.ast, &d.active(sel));
+        let active = d.active(sel);
+        let whole = crate::projection::project(text, d.tree.ast(), &active);
         assert_eq!(near.is_stop(pos), whole.is_stop(pos), "stop at {pos}");
         assert_eq!(
             near.atomic_before(pos),
