@@ -8,14 +8,84 @@
 //! break) are `Replaced` segs. Nothing here ever rewrites the source.
 
 use std::ops::Range;
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use markdown::mdast::{self, Node};
+use markdown::unist::Position;
 use markdown::{Constructs, ParseOptions};
 
 use crate::table::{TableLayout, table_layout};
 
+/// The tree as Tauri's parser has it; see [`crate::lists`]. The panics
+/// known in markdown-rs are fixed in `vendor/markdown`; should another one
+/// turn up, the source is drawn as its plain lines rather than taking the app
+/// down, and the next edit that parses goes back to normal.
 pub fn parse(src: &str) -> Node {
-    markdown::to_mdast(src, &ParseOptions::gfm()).expect("plain markdown cannot fail to parse")
+    parse_with(src, crate::lists::parse)
+}
+
+fn parse_with(src: &str, parser: impl FnOnce(&str) -> Node + std::panic::UnwindSafe) -> Node {
+    quiet_parse_panics();
+    PARSING.set(true);
+    let ast = std::panic::catch_unwind(|| parser(src));
+    PARSING.set(false);
+    match ast {
+        Ok(ast) => {
+            // Report the next stretch of unparsable text too.
+            PANIC_REPORTED.store(false, Ordering::Relaxed);
+            ast
+        }
+        Err(_) => plain_lines(src),
+    }
+}
+
+static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static PARSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Chains the panic hook once so a parse panic is reported once per stretch
+/// of unparsable text: while the text stays, every key would print it again.
+fn quiet_parse_panics() {
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !PARSING.get() || !PANIC_REPORTED.swap(true, Ordering::Relaxed) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+/// Each line with text as a raw block, drawn as written, with nothing hidden.
+fn plain_lines(src: &str) -> Node {
+    let mut children = Vec::new();
+    let mut at = 0;
+    for (n, line) in src.split('\n').enumerate() {
+        if !line.trim().is_empty() {
+            children.push(Node::Html(mdast::Html {
+                value: line.to_string(),
+                position: Some(Position::new(
+                    n + 1,
+                    1,
+                    at,
+                    n + 1,
+                    line.len() + 1,
+                    at + line.len(),
+                )),
+            }));
+        }
+        at += line.len() + 1;
+    }
+    let lines = src.split('\n').count();
+    let last = src.len() - src.rfind('\n').map_or(0, |i| i + 1);
+    Node::Root(mdast::Root {
+        children,
+        position: Some(Position::new(1, 1, 0, lines, last + 1, src.len())),
+    })
 }
 
 fn parse_inline(src: &str) -> Node {
@@ -86,12 +156,33 @@ pub enum Align {
     Right,
 }
 
+/// What a list item draws in its marker column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    Bullet,
+    /// An ordered item's number, which stays text and editable.
+    Number,
+    /// A checkbox, drawn by the view; `at` is the source offset of its `[`.
+    Task {
+        checked: bool,
+        at: usize,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockKind {
     Paragraph,
     Heading(u8),
+    /// An item's text beside its marker column, so wrapped lines hang at the
+    /// text, as Tauri's `cm-live-list` lines.
     ListItem {
         depth: usize,
+        /// The marker column in characters: an ordered list's widest marker
+        /// and a space, shared by its siblings; 0 for the default 1.5em.
+        columns: usize,
+        /// The item's first block holds the marker as its first leaf. `None`
+        /// is a later paragraph of the item, drawn at the item's text.
+        marker: Option<Marker>,
     },
     Code,
     Blank,
@@ -246,6 +337,8 @@ struct Builder<'a> {
     /// indentation).
     pending_prefix: Option<Range<usize>>,
     quote: usize,
+    /// The marker column of the list item being drawn, for its later paragraphs.
+    columns: usize,
     /// Set while drawing a cell the caret is not in: a selection passing over
     /// a table leaves it rendered.
     rendered_only: bool,
@@ -279,6 +372,7 @@ fn project_window(
         tables: Vec::new(),
         pending_prefix: None,
         quote: 0,
+        columns: 0,
         rendered_only: false,
     };
     let children = ast.children().map_or(&[][..], |c| &c[..]);
@@ -305,8 +399,16 @@ fn project_window(
     }
     if last == children.len() {
         b.gap_lines(cursor..src.len());
-        b.pending_prefix = None;
-        if src.is_empty() || src.ends_with('\n') {
+        // A last line of only indentation or quote markers (`> ` after Enter
+        // in a quote, `  ` after Enter ends a nested list) still takes the
+        // caret, past them.
+        let open_line = b.pending_prefix.as_ref().is_some_and(|r| {
+            r.end == src.len() && (r.start == 0 || src.as_bytes()[r.start - 1] == b'\n')
+        });
+        if !open_line {
+            b.pending_prefix = None;
+        }
+        if open_line || src.is_empty() || src.ends_with('\n') {
             b.point_block(src.len(), BlockKind::Blank, src.len()..src.len());
         }
     }
@@ -346,9 +448,16 @@ impl<'a> Builder<'a> {
         leaf
     }
 
-    fn finish_leaf(&mut self, mut l: LeafB, end: usize) -> usize {
+    fn finish_leaf(&mut self, l: LeafB, end: usize) -> usize {
+        self.finish(l, end, true)
+    }
+
+    /// `stop`: a leaf with no visible source still takes the caret at its end.
+    /// A bullet's or a task's marker leaf does not: the caret there belongs to
+    /// the item's text.
+    fn finish(&mut self, mut l: LeafB, end: usize, stop: bool) -> usize {
         l.leaf.src.end = end;
-        if !l.leaf.segs.iter().any(|s| s.kind == SegKind::Text) {
+        if stop && !l.leaf.segs.iter().any(|s| s.kind == SegKind::Text) {
             let at = l.leaf.text.len();
             l.leaf.segs.push(Seg {
                 src: end..end,
@@ -390,6 +499,15 @@ impl<'a> Builder<'a> {
         self.push_block(kind, vec![idx], src);
     }
 
+    /// Source before the next leaf, hidden at its front. A nested quote's
+    /// markers come in pieces, one per level.
+    fn prefix(&mut self, r: Range<usize>) {
+        self.pending_prefix = Some(match self.pending_prefix.take() {
+            Some(prev) if prev.end == r.start => prev.start..r.end,
+            _ => r,
+        });
+    }
+
     /// Blank and otherwise unclaimed whole lines inside `range`. The tail of a
     /// line before the next block is kept as that block's prefix.
     fn gap_lines(&mut self, range: Range<usize>) {
@@ -401,15 +519,23 @@ impl<'a> Builder<'a> {
         if p != 0 && src.as_bytes()[p - 1] != b'\n' {
             match src[p..range.end].find('\n') {
                 None => {
-                    self.pending_prefix = Some(p..range.end);
+                    self.prefix(p..range.end);
                     return;
                 }
                 Some(i) => p += i + 1,
             }
         }
         while p < range.end {
-            let Some(nl) = src[p..range.end].find('\n').map(|i| p + i) else {
-                self.pending_prefix = Some(p..range.end);
+            // A last line of indentation alone that the range stops just
+            // short of ending (Enter on an empty item between two others
+            // leaves one) is a blank line of its own, not the next leaf's.
+            let nl = src[p..range.end].find('\n').map(|i| p + i).or_else(|| {
+                (src[range.end..].starts_with('\n')
+                    && src[p..range.end].trim_matches([' ', '\t', '>']).is_empty())
+                .then_some(range.end)
+            });
+            let Some(nl) = nl else {
+                self.prefix(p..range.end);
                 return;
             };
             let line = &src[p..nl];
@@ -434,11 +560,15 @@ impl<'a> Builder<'a> {
         let mut cursor = range.start;
         for node in nodes {
             let p = pos(node);
+            // Text before `range` belongs to a marker (a task box's spaces).
+            if p.end <= range.start && !p.is_empty() {
+                continue;
+            }
             if p.start > cursor {
                 self.text(l, cursor..p.start, style);
             }
             match node {
-                Node::Text(_) => self.text(l, p.clone(), style),
+                Node::Text(_) => self.text(l, p.start.max(range.start)..p.end, style),
                 Node::Strong(n) => self.wrapped(
                     l,
                     p.clone(),
@@ -492,6 +622,17 @@ impl<'a> Builder<'a> {
                         style,
                     )
                 }
+                // `[text]` alone stays text, brackets and all, as in Tauri;
+                // what it holds is still drawn.
+                Node::LinkReference(n) => match (n.children.first(), n.children.last()) {
+                    (Some(first), Some(last)) => {
+                        let (first, last) = (pos(first).start, pos(last).end);
+                        l.visible(self.src, p.start..first, style);
+                        self.inlines(l, &n.children, first..last, style);
+                        l.visible(self.src, last..p.end, style);
+                    }
+                    _ => l.visible(self.src, p.clone(), style),
+                },
                 Node::Image(_) => self.image(l, p.clone(), style),
                 Node::ImageReference(n) if n.reference_kind != mdast::ReferenceKind::Shortcut => {
                     self.image(l, p.clone(), style)
@@ -513,6 +654,14 @@ impl<'a> Builder<'a> {
         let bytes = src.as_bytes();
         let mut run = range.start;
         let mut i = range.start;
+        // A line's indentation and quote markers after a hard break.
+        if i > 0 && bytes[i - 1] == b'\n' {
+            while i < range.end && matches!(bytes[i], b' ' | b'\t' | b'>') {
+                i += 1;
+            }
+            l.hidden(run..i);
+            run = i;
+        }
         while i < range.end {
             match bytes[i] {
                 b'\\' if i + 1 < range.end && bytes[i + 1].is_ascii_punctuation() => {
@@ -527,12 +676,20 @@ impl<'a> Builder<'a> {
                     run = i;
                 }
                 b'\n' => {
-                    l.visible(src, run..i, style);
+                    // A single trailing space goes with the break, as in Tauri,
+                    // unless the caret is just past it: CodeMirror leaves a
+                    // caret where typing put it, where this would move it on.
+                    let space = if self.touching(i, i) {
+                        i
+                    } else {
+                        run + src[run..i].trim_end_matches(' ').len()
+                    };
+                    l.visible(src, run..space, style);
                     let mut j = i + 1;
                     while j < range.end && matches!(bytes[j], b' ' | b'\t' | b'>') {
                         j += 1;
                     }
-                    l.replaced(i..j, " ", style);
+                    l.replaced(space..j, " ", style);
                     i = j;
                     run = i;
                 }
@@ -618,7 +775,11 @@ impl<'a> Builder<'a> {
                 self.inlines(&mut l, &n.children, p.clone(), &Style::default());
                 let idx = self.finish_leaf(l, p.end);
                 let kind = if depth > 0 {
-                    BlockKind::ListItem { depth: depth - 1 }
+                    BlockKind::ListItem {
+                        depth: depth - 1,
+                        columns: self.columns,
+                        marker: None,
+                    }
                 } else {
                     BlockKind::Paragraph
                 };
@@ -639,15 +800,38 @@ impl<'a> Builder<'a> {
             Node::Code(_) => self.code(p),
             Node::Table(n) => self.table(p, n),
             Node::List(n) => {
+                // Siblings share one marker column, wide enough for the
+                // longest number and a space.
+                let columns = if n.ordered {
+                    // A checkbox after a number takes about two more.
+                    let task = n
+                        .children
+                        .iter()
+                        .any(|item| matches!(item, Node::ListItem(i) if i.checked.is_some()));
+                    n.children
+                        .iter()
+                        .map(|item| {
+                            let at = pos(item).start;
+                            number_len(self.src, at + blank_len(&self.src[at..])) + 1
+                        })
+                        .max()
+                        .unwrap_or(0)
+                        + if task { 2 } else { 0 }
+                } else {
+                    0
+                };
+                let outer = self.columns;
                 let mut cursor = p.start;
                 for item in &n.children {
                     let ip = pos(item);
                     self.gap_lines(cursor..ip.start);
                     if let Node::ListItem(it) = item {
+                        self.columns = columns;
                         self.list_item(ip.clone(), it, n.ordered, depth);
                     }
                     cursor = ip.end;
                 }
+                self.columns = outer;
                 self.gap_lines(cursor..p.end);
             }
             Node::Blockquote(n) => {
@@ -673,6 +857,12 @@ impl<'a> Builder<'a> {
 
     fn heading(&mut self, p: Range<usize>, n: &mdast::Heading) {
         let active = touches(self.active, p.start, p.end);
+        let underline = line_start(self.src, p.end);
+        if underline > p.start
+            && let Some(last) = n.children.last()
+        {
+            return self.setext(p, n, pos(last).end, underline, active);
+        }
         let mut l = self.start_leaf(p.start);
         match (n.children.first(), n.children.last()) {
             (Some(f), Some(e)) => {
@@ -685,6 +875,38 @@ impl<'a> Builder<'a> {
         }
         let idx = self.finish_leaf(l, p.end);
         self.push_block(BlockKind::Heading(n.depth), vec![idx], p);
+    }
+
+    /// A setext heading's underline is a line of its own: hidden away from
+    /// the caret, and shown as plain text while the heading is edited, as in
+    /// Tauri, rather than drawn as a second heading line.
+    fn setext(
+        &mut self,
+        p: Range<usize>,
+        n: &mdast::Heading,
+        text_end: usize,
+        underline: usize,
+        active: bool,
+    ) {
+        let mut l = self.start_leaf(p.start);
+        self.inlines(&mut l, &n.children, p.start..text_end, &Style::default());
+        if !active {
+            l.hidden(text_end..p.end);
+            let idx = self.finish_leaf(l, p.end);
+            return self.push_block(BlockKind::Heading(n.depth), vec![idx], p);
+        }
+        let idx = self.finish_leaf(l, text_end);
+        self.push_block(BlockKind::Heading(n.depth), vec![idx], p.start..text_end);
+        // Quote markers before the underline stay hidden, as on any line.
+        let rule = underline
+            + self.src[underline..p.end]
+                .find(|c: char| !matches!(c, ' ' | '\t' | '>'))
+                .unwrap_or(0);
+        let mut l = self.start_leaf(underline);
+        l.hidden(underline..rule);
+        l.visible(self.src, rule..p.end, &Style::default());
+        let idx = self.finish_leaf(l, p.end);
+        self.push_block(BlockKind::Raw, vec![idx], underline..p.end);
     }
 
     fn code(&mut self, p: Range<usize>) {
@@ -739,44 +961,71 @@ impl<'a> Builder<'a> {
         let src = self.src;
         let marker_end = n.children.first().map_or(p.end, |c| pos(c).start);
         let plain = Style::default();
-        let mut l = self.start_leaf(p.start);
-        match n.checked {
-            Some(checked) => {
-                // The list marker and the checkbox are separate atomic stretches, so
-                // Backspace takes the checkbox first, then the bullet (today's behavior).
-                let shown = if checked { "\u{2611} " } else { "\u{2610} " };
-                let bracket = src[p.start..marker_end]
-                    .find('[')
-                    .map_or(p.start, |i| p.start + i);
-                l.replaced(p.start..bracket, "", &plain);
-                l.replaced(bracket..marker_end, shown, &plain);
+        // The marker is a leaf of its own, drawn in the marker column.
+        let mut m = self.start_leaf(p.start);
+        // A top-level item's range takes its indentation.
+        let mark = p.start + blank_len(&src[p.start..marker_end]);
+        let bracket = match n.checked {
+            Some(_) => src[p.start..marker_end]
+                .find('[')
+                .map_or(p.start, |i| p.start + i),
+            None => marker_end,
+        };
+        // As Tauri's task widget, the box takes the spaces after it.
+        let text_start = match n.checked {
+            Some(_) => (bracket + 3 + blank_len(&src[(bracket + 3).min(p.end)..p.end])).min(p.end),
+            None => marker_end,
+        };
+        if ordered {
+            // The number is text; the spaces after it are one atomic
+            // stretch, so the caret has a stop at each side of it.
+            let number = mark + number_len(src, mark);
+            m.hidden(p.start..mark);
+            m.visible(src, mark..number, &plain);
+            if number < bracket {
+                m.replaced(number..bracket, "", &plain);
             }
-            None if ordered => l.visible(src, p.start..marker_end, &plain),
-            None => l.replaced(p.start..marker_end, "\u{2022} ", &plain),
+        } else if n.checked.is_some() {
+            m.replaced(p.start..bracket, "", &plain);
+        } else {
+            m.replaced(p.start..marker_end, "\u{2022}", &plain);
         }
+        // The list marker and the checkbox are separate atomic stretches, so
+        // Backspace takes the checkbox first, then the bullet (today's
+        // behavior). The view draws the box over the space left for it.
+        let marker = match n.checked {
+            Some(checked) => {
+                m.replaced(bracket..text_start, TASK_SPACE, &plain);
+                Marker::Task {
+                    checked,
+                    at: bracket,
+                }
+            }
+            None if ordered => Marker::Number,
+            None => Marker::Bullet,
+        };
+        let marker_leaf = self.finish(m, text_start, ordered);
+        let kind = BlockKind::ListItem {
+            depth,
+            columns: self.columns,
+            marker: Some(marker),
+        };
+        let mut l = self.start_leaf(text_start);
         let mut rest = &n.children[..];
         if let Some(Node::Paragraph(para)) = n.children.first() {
             let para_range = pos(&n.children[0]);
             self.inlines(
                 &mut l,
                 &para.children,
-                para_range.clone(),
+                text_start.max(para_range.start)..para_range.end,
                 &Style::default(),
             );
             let idx = self.finish_leaf(l, para_range.end);
-            self.push_block(
-                BlockKind::ListItem { depth },
-                vec![idx],
-                p.start..para_range.end,
-            );
+            self.push_block(kind, vec![marker_leaf, idx], p.start..para_range.end);
             rest = &n.children[1..];
         } else {
-            let idx = self.finish_leaf(l, marker_end);
-            self.push_block(
-                BlockKind::ListItem { depth },
-                vec![idx],
-                p.start..marker_end,
-            );
+            let idx = self.finish_leaf(l, text_start);
+            self.push_block(kind, vec![marker_leaf, idx], p.start..text_start);
         }
         let mut cursor = rest.first().map_or(p.end, |c| {
             let start = pos(c).start;
@@ -791,6 +1040,10 @@ impl<'a> Builder<'a> {
             self.block(child, depth + 1);
             cursor = pos(child).end;
         }
+        // An item can end in a line of its indentation alone (Enter on an
+        // empty nested item leaves one), which takes the caret.
+        let last = n.children.last().map_or(text_start, |c| pos(c).end);
+        self.gap_lines(last.max(text_start)..p.end);
     }
 
     fn table(&mut self, p: Range<usize>, n: &mdast::Table) {
@@ -938,6 +1191,25 @@ impl<'a> Builder<'a> {
             self.rendered_only = false;
         }
         self.finish_leaf(l, limit.max(from))
+    }
+}
+
+/// What a task's marker leaf shows: an em space, as wide as the box the view
+/// draws over it, so the box has a place in the text's geometry.
+pub const TASK_SPACE: &str = "\u{2003}";
+
+/// Leading spaces and tabs.
+fn blank_len(text: &str) -> usize {
+    text.len() - text.trim_start_matches([' ', '\t']).len()
+}
+
+/// The length of an ordered marker (`12.` or `3)`) at `at`; 0 for a bullet.
+fn number_len(src: &str, at: usize) -> usize {
+    let digits = src[at..].bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 && matches!(src.as_bytes().get(at + digits), Some(b'.' | b')')) {
+        digits + 1
+    } else {
+        0
     }
 }
 
@@ -1129,6 +1401,18 @@ impl Projection {
 mod tests {
     use super::*;
 
+    // Should markdown-rs panic again, the source is drawn as written, with
+    // a caret stop on each line, instead of the panic reaching the app.
+    #[test]
+    fn a_source_the_parser_panics_on_draws_as_plain_lines() {
+        let src = "  - a\n\n> b";
+        let ast = parse_with(src, |_| panic!("a parser bug"));
+        let p = project(src, &ast, &Active::default());
+        let drawn: Vec<_> = p.leaves.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(drawn, ["  - a", "", "> b"]);
+        assert!(p.is_stop(0) && p.is_stop(src.len()));
+    }
+
     fn at(src: &str, caret: Option<usize>) -> Projection {
         let active = Active {
             ranges: caret.map(|c| c..c).into_iter().collect(),
@@ -1248,30 +1532,110 @@ mod tests {
     fn draws_lists_with_bullets_and_keeps_numbers_as_text() {
         let src = "- one\n  - nested\n\n1. first\n2. second\n- [x] done\n- [ ] todo";
         let p = at(src, None);
+        // Each item is its marker, drawn in the marker column, then its text.
         assert_eq!(
             displays(&p),
             vec![
-                "\u{2022} one",
-                "\u{2022} nested",
-                "",
-                "1. first",
-                "2. second",
-                "\u{2611} done",
-                "\u{2610} todo"
+                "\u{2022}", "one", "\u{2022}", "nested", "", "1.", "first", "2.", "second",
+                TASK_SPACE, "done", TASK_SPACE, "todo"
             ]
         );
-        let depths: Vec<_> = p
+        let items: Vec<_> = p
             .blocks
             .iter()
             .filter_map(|b| match b.kind {
-                BlockKind::ListItem { depth } => Some(depth),
+                BlockKind::ListItem { depth, marker, .. } => Some((depth, marker)),
                 _ => None,
             })
             .collect();
-        assert_eq!(depths, vec![0, 1, 0, 0, 0, 0]);
-        // The bullet is atomic: not a caret stop.
+        let task = |checked, at| Some(Marker::Task { checked, at });
+        assert_eq!(
+            items,
+            vec![
+                (0, Some(Marker::Bullet)),
+                (1, Some(Marker::Bullet)),
+                (0, Some(Marker::Number)),
+                (0, Some(Marker::Number)),
+                (0, task(true, src.find("[x]").unwrap())),
+                (0, task(false, src.find("[ ]").unwrap())),
+            ]
+        );
+        // The bullet is atomic: not a caret stop, and the text's start is
+        // drawn in the text, not after the bullet.
         assert!(!p.is_stop(0));
-        assert!(p.is_stop(2));
+        assert_eq!(p.locate(2), Some((1, 0)));
+        // A number is text, with a stop on each side of its spacing.
+        let first = src.find("1.").unwrap();
+        assert!(p.is_stop(first) && p.is_stop(first + 2) && p.is_stop(first + 3));
+        assert_eq!(p.jump_over(first + 2, true), Some(first + 3));
+    }
+
+    // Mirrors liveMarkdown.test.ts "shares an ordered marker column across
+    // digit boundaries and continuation lines".
+    #[test]
+    fn ordered_siblings_share_a_marker_column_and_later_paragraphs_align_with_it() {
+        let src =
+            "8. eight  \n   continued\n9. nine\n10. ten\n\nOutside\n\n99. another\n100. hundred";
+        let p = at(src, None);
+        let columns: Vec<_> = p
+            .blocks
+            .iter()
+            .filter_map(|b| match b.kind {
+                BlockKind::ListItem { columns, .. } => Some(columns),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(columns, vec![4, 4, 4, 5, 5]);
+        // Nested lists size their own column.
+        let src = "9. parent\n   99. nested\n   100. nested\n10. sibling";
+        let kinds: Vec<_> = at(src, None)
+            .blocks
+            .iter()
+            .filter_map(|b| match b.kind {
+                BlockKind::ListItem { depth, columns, .. } => Some((depth, columns)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec![(0, 4), (1, 5), (1, 5), (0, 4)]);
+        // A later paragraph of an item is drawn at the item's text.
+        let src = "- item\n\n  later";
+        let p = at(src, None);
+        assert_eq!(
+            p.blocks.last().unwrap().kind,
+            BlockKind::ListItem {
+                depth: 0,
+                columns: 0,
+                marker: None
+            }
+        );
+    }
+
+    // Mirrors liveMarkdown.test.ts "includes task separator spaces in the
+    // checkbox's layout column".
+    #[test]
+    fn a_task_box_takes_its_separator_spaces() {
+        let src = "- [ ]   task  \n  continued";
+        let p = at(src, Some(src.len()));
+        assert_eq!(displays(&p), vec![TASK_SPACE, "task\ncontinued"]);
+        assert_eq!(hidden(src, None), vec!["- ", "[ ]   ", "  ", "  "]);
+    }
+
+    #[test]
+    fn an_ordered_task_keeps_its_number_beside_the_box() {
+        let src = "1. [x] done";
+        let p = at(src, None);
+        assert_eq!(displays(&p), vec![format!("1.{TASK_SPACE}"), "done".into()]);
+        assert_eq!(
+            p.blocks[0].kind,
+            BlockKind::ListItem {
+                depth: 0,
+                columns: 5,
+                marker: Some(Marker::Task {
+                    checked: true,
+                    at: 3
+                })
+            }
+        );
     }
 
     #[test]
@@ -1491,13 +1855,86 @@ mod tests {
         assert_eq!(
             shown,
             vec![
-                "\u{2022} one",
-                "\u{2610} open",
-                "\u{2611} done",
-                "1. first",
-                ""
+                "\u{2022}", "one", TASK_SPACE, "open", TASK_SPACE, "done", "1.", "first", ""
             ]
         );
+        assert_eq!(
+            hidden(src, None),
+            vec!["- ", "- ", "[ ] ", "- ", "[x] ", " "]
+        );
+    }
+
+    // The cases below are T7.2's: parity with Tauri's rendering beyond T7.1.
+
+    #[test]
+    fn a_setext_heading_hides_its_underline_and_shows_it_as_its_own_line_when_edited() {
+        let src = "Title\n===\n\nbody";
+        let p = at(src, Some(src.len()));
+        assert_eq!(displays(&p), vec!["Title", "", "body"]);
+        assert!(matches!(p.blocks[0].kind, BlockKind::Heading(1)));
+        assert_eq!(hidden(src, Some(src.len())), vec!["\n==="]);
+        for caret in [2, 7] {
+            let p = at(src, Some(caret));
+            assert_eq!(displays(&p), vec!["Title", "===", "", "body"]);
+            assert!(matches!(p.blocks[0].kind, BlockKind::Heading(1)));
+            assert!(matches!(p.blocks[1].kind, BlockKind::Raw));
+            assert!(p.is_stop(caret));
+        }
+        // In a quote the underline's marker stays hidden.
+        let src = "> Sub\n> ---";
+        assert_eq!(displays(&at(src, Some(3))), vec!["Sub", "---"]);
+        assert!(matches!(
+            at(src, None).blocks[0].kind,
+            BlockKind::Heading(2)
+        ));
+    }
+
+    #[test]
+    fn nested_quotes_hide_every_marker_and_keep_their_depth() {
+        let src = "> a\n> > b\n> > c\n>\n> d";
+        let p = at(src, None);
+        assert_eq!(displays(&p), vec!["a", "b c", "", "d"]);
+        let quotes: Vec<_> = p.blocks.iter().map(|b| b.quote).collect();
+        assert_eq!(quotes, vec![1, 2, 1, 1]);
+        assert_eq!(hidden(src, None), vec!["> ", "> > ", "\n> > ", ">", "> "]);
+    }
+
+    #[test]
+    fn autolinks_hide_their_brackets_until_the_caret_enters() {
+        let src = "x <https://a.dev> https://b.dev www.c.dev";
+        let p = at(src, None);
+        assert_eq!(
+            displays(&p),
+            vec!["x https://a.dev https://b.dev www.c.dev"]
+        );
+        for url in ["https://a.dev", "https://b.dev", "www.c.dev"] {
+            assert!(marked(&p, url, |s| s.link), "{url}");
+        }
+        assert_eq!(displays(&at(src, Some(4))), vec![src]);
+    }
+
+    #[test]
+    fn a_shortcut_reference_stays_text_and_its_emphasis_still_hides() {
+        let src = "see [**note**] here\n\n[**note**]: ./a.md";
+        let p = at(src, Some(src.len()));
+        assert_eq!(p.leaves[0].text, "see [note] here");
+        assert!(!p.leaves[0].marks.iter().any(|(_, s)| s.link));
+        // A collapsed reference is a link.
+        let src = "[a][]\n\n[a]: ./a.md";
+        assert!(marked(&at(src, None), "a", |s| s.link));
+    }
+
+    #[test]
+    fn a_rule_is_a_caret_stop_and_shows_its_source_there() {
+        let src = "a\n\n---\n\nb";
+        let rule = src.find("---").unwrap();
+        let p = at(src, None);
+        assert_eq!(p.blocks[2].kind, BlockKind::Rule { revealed: false });
+        // An empty leaf at the rule's end, which the view draws the rule over.
+        assert_eq!(p.locate(rule + 3), Some((2, 0)));
+        let p = at(src, Some(rule + 3));
+        assert_eq!(p.blocks[2].kind, BlockKind::Rule { revealed: true });
+        assert_eq!(p.leaves[2].text, "---");
     }
 
     #[test]
@@ -1552,5 +1989,66 @@ mod tests {
         let src = "a\n\nb\n";
         let p = project_near(src, &parse(src), &Active::default(), src.len()..src.len());
         assert!(p.is_stop(src.len()));
+    }
+    // Mirrors liveMarkdown.test.ts "finds the soft line breaks a paragraph
+    // flows across, and only those".
+    #[test]
+    fn finds_the_soft_line_breaks_a_paragraph_flows_across_and_only_those() {
+        let joined = |src: &str| -> Vec<String> {
+            at(src, None)
+                .leaves
+                .iter()
+                .flat_map(|l| &l.segs)
+                .filter(|s| s.kind == SegKind::Replaced && src[s.src.clone()].contains('\n'))
+                .map(|s| src[s.src.clone()].to_string())
+                .collect()
+        };
+        assert_eq!(
+            joined("one\ntwo\nthree\n\nnext\npara"),
+            vec!["\n", "\n", "\n"]
+        );
+        // A list item's continuation takes its indentation with the break.
+        assert_eq!(joined("- item that\n  wraps"), vec!["\n  "]);
+        // Hard breaks, separate blocks and code stay as they are.
+        assert!(joined("hard  \nbreak\\\nhere").is_empty());
+        assert!(joined("# Title\ntext\n```\ncode\nmore\n```").is_empty());
+        // The quote marker goes with the break, hidden as it is on any line.
+        assert_eq!(joined("> quoted\n> on two"), vec!["\n> "]);
+        // A single trailing space goes with the break; an escaped backslash is
+        // text, not a hard break.
+        assert_eq!(joined("one \ntwo"), vec![" \n"]);
+        assert_eq!(displays(&at("one \ntwo", None)), vec!["one two"]);
+        assert_eq!(joined("one \\\\\ntwo"), vec!["\n"]);
+    }
+
+    // Mirrors liveMarkdown.test.ts "aligns visible continuation lines with
+    // their nested item's content".
+    #[test]
+    fn continuation_lines_hang_at_their_items_text() {
+        let src = "- parent\n  - item  \n    continued\n\n    another paragraph";
+        let p = at(src, Some(src.len()));
+        assert_eq!(
+            displays(&p),
+            vec![
+                "\u{2022}",
+                "parent",
+                "\u{2022}",
+                "item\ncontinued",
+                "",
+                "another paragraph"
+            ]
+        );
+        let last = p.blocks.last().unwrap();
+        assert_eq!(
+            last.kind,
+            BlockKind::ListItem {
+                depth: 1,
+                columns: 0,
+                marker: None
+            }
+        );
+        let src = "1. parent\n\n   2. item\\\n      continued";
+        let p = at(src, Some(src.len()));
+        assert!(p.leaves.iter().any(|l| l.text == "item\ncontinued"));
     }
 }
