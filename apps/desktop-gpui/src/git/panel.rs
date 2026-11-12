@@ -11,8 +11,9 @@ use std::{collections::HashMap, rc::Rc};
 
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
-    Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
+    FontWeight, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
+    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Window,
     base::TestSupportExt,
     component::{
         Disableable, Icon, Sizable,
@@ -49,6 +50,23 @@ use super::{
     },
     store::{GitRepositories, RepositoryState},
 };
+
+/// Key context around the commit message box.
+const COMMIT_CONTEXT: &str = "GitCommit";
+
+/// Tauri commits on Ctrl+Enter or Meta+Enter. The Kit gives the box only one
+/// of them per platform (Cmd+Enter on macOS), so Ctrl+Enter is added here,
+/// for this box alone; on Linux it repeats the Kit's own binding.
+pub(super) fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-enter",
+        Enter {
+            secondary: true,
+            shift: false,
+        },
+        Some(&format!("{COMMIT_CONTEXT} > Input")),
+    )]);
+}
 
 /// `box-shadow: inset 1px 0 0 color-mix(in srgb, var(--shadow) 22%, transparent)`.
 fn split_hairline(palette: &Palette) -> gpui_kit::Hsla {
@@ -1396,6 +1414,7 @@ impl GitPanel {
             .border_color(palette.chrome_hairline)
             .child(
                 div()
+                    .key_context(COMMIT_CONTEXT)
                     .capture_action(cx.listener(move |this, action: &Enter, window, cx| {
                         if !action.secondary {
                             return;

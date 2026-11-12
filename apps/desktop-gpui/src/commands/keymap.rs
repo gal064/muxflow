@@ -59,11 +59,14 @@ pub fn is_safe_shortcut(shortcut: &str) -> bool {
     has_command_modifier && !key.is_empty() && !["Control", "Alt", "Shift", "Meta"].contains(&key)
 }
 
+/// Unsafe, or naming a key GPUI has no name for, such as `Meta+Shift+BMeta+B`:
+/// that one would never match a press and would drop out of the menus.
 pub fn unsafe_shortcut_bindings(overrides: &ShortcutOverrides) -> Vec<CommandId> {
     COMMANDS
         .iter()
         .filter(|command| {
-            matches!(overrides.get(command.id), Some(Some(value)) if !is_safe_shortcut(value))
+            matches!(overrides.get(command.id), Some(Some(value))
+                if !is_safe_shortcut(value) || crate::menus::gpui_keystroke(value).is_none())
         })
         .map(|command| command.id)
         .collect()
@@ -173,7 +176,8 @@ pub enum ShortcutDisposition {
 }
 
 /// `available` is the caller's answer for one command. `text_field` is a focused
-/// Kit input; the terminal surface is not one, so it keeps its shortcuts.
+/// Kit input that keeps this chord for itself; the terminal surface is not one,
+/// so it keeps its shortcuts.
 pub fn shortcut_disposition(
     pressed: &str,
     overlay_open: bool,
@@ -427,6 +431,17 @@ mod tests {
         assert_eq!(unsafe_shortcut_bindings(&bad), vec!["session.new"]);
         // An unsafe override never fires as its literal text.
         assert!(command_for_shortcut("A", Platform::Linux, &bad).is_none());
+    }
+
+    #[test]
+    fn rejects_bindings_to_keys_without_a_name() {
+        let typed = overrides(&[("session.new", Some("Meta+Shift+BMeta+B"))]);
+        assert_eq!(unsafe_shortcut_bindings(&typed), vec!["session.new"]);
+        let captured = overrides(&[
+            ("session.new", Some("Ctrl+Insert")),
+            ("commands.show", Some("Meta+Shift+ArrowLeft")),
+        ]);
+        assert_eq!(unsafe_shortcut_bindings(&captured), Vec::<CommandId>::new());
     }
 
     #[test]

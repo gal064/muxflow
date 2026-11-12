@@ -53,9 +53,11 @@ pub fn translate_terminal_key(keystroke: &Keystroke, context: KeyContext) -> Opt
     // Command-Arrow always means line start/end; the screen only picks the
     // encoding. Normal-screen shells and wrappers read the readline Control-A
     // and Control-E, while full-screen programs, including the agent composers
-    // on the alternate screen, read Home/End: SS3 when the program asked for
-    // application cursor keys (DECCKM), CSI otherwise. A process-name
-    // allowlist made an ordinary wrapper silently lose the shortcut.
+    // on the alternate screen, read Home/End. Those are tmux's own Home/End
+    // (`khome`/`kend` in tmux-256color), whatever DECCKM says: the host writes
+    // these bytes with `send-keys -H`, so tmux never re-encodes them, and vim
+    // reads xterm's SS3 Home as Escape, `O`, `H`. A process-name allowlist made
+    // an ordinary wrapper silently lose the shortcut.
     if context.platform != Platform::Mac
         || !modifiers.platform
         || modifiers.shift
@@ -64,12 +66,11 @@ pub fn translate_terminal_key(keystroke: &Keystroke, context: KeyContext) -> Opt
     {
         return None;
     }
-    let ss3 = context.application_cursor_keys;
     match (key, context.alternate_screen) {
         ("left", false) => Some(b"\x01"),
         ("right", false) => Some(b"\x05"),
-        ("left", true) => Some(if ss3 { b"\x1bOH" } else { b"\x1b[H" }),
-        ("right", true) => Some(if ss3 { b"\x1bOF" } else { b"\x1b[F" }),
+        ("left", true) => Some(b"\x1b[1~"),
+        ("right", true) => Some(b"\x1b[4~"),
         _ => None,
     }
 }
@@ -218,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn command_arrows_send_home_end_on_the_alternate_screen_in_the_cursor_key_mode() {
+    fn command_arrows_send_tmux_home_end_on_the_alternate_screen_in_either_cursor_key_mode() {
         let alternate = KeyContext {
             alternate_screen: true,
             ..context()
@@ -227,22 +228,13 @@ mod tests {
             application_cursor_keys: true,
             ..alternate
         };
-        assert_eq!(
-            translate(&key("left", CMD), application),
-            Some(&b"\x1bOH"[..])
-        );
-        assert_eq!(
-            translate(&key("right", CMD), application),
-            Some(&b"\x1bOF"[..])
-        );
-        assert_eq!(
-            translate(&key("left", CMD), alternate),
-            Some(&b"\x1b[H"[..])
-        );
-        assert_eq!(
-            translate(&key("right", CMD), alternate),
-            Some(&b"\x1b[F"[..])
-        );
+        for context in [alternate, application] {
+            assert_eq!(translate(&key("left", CMD), context), Some(&b"\x1b[1~"[..]));
+            assert_eq!(
+                translate(&key("right", CMD), context),
+                Some(&b"\x1b[4~"[..])
+            );
+        }
     }
 
     #[test]

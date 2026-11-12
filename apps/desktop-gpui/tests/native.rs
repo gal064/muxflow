@@ -180,6 +180,17 @@ fn the_menus_follow_the_platform_and_never_close_the_window(cx: &mut TestAppCont
                 .count()
         });
         assert_eq!(closes, 0, "{platform:?}");
+        // AppKit adds its own full-screen item on macOS.
+        let full_screen = cx.update(|cx| {
+            menus::app_menus(cx.global::<Commands>(), platform)
+                .into_iter()
+                .flat_map(|menu| menu.items)
+                .any(|item| {
+                    matches!(item, gpui_kit::MenuItem::Action { name, .. }
+                        if name == "Toggle Full Screen")
+                })
+        });
+        assert_eq!(full_screen, platform == Platform::Linux, "{platform:?}");
     }
     // The installed menus are the current platform's.
     let installed: Vec<String> = cx.update(|cx| {

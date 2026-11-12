@@ -61,6 +61,12 @@ pub fn encode_key(
         "right" => cursor('C'),
         "up" => cursor('A'),
         "down" => cursor('B'),
+        // Unmodified Home/End are tmux's (`khome`/`kend` in tmux-256color), not
+        // xterm's: the host writes these bytes with `send-keys -H`, so tmux
+        // never re-encodes them, and vim reads xterm's SS3 Home as Escape, `O`,
+        // `H`. Modified ones already match tmux's `kHOM*`/`kEND*`.
+        "home" if code == 0 => b"\x1b[1~".to_vec(),
+        "end" if code == 0 => b"\x1b[4~".to_vec(),
         "home" => cursor('H'),
         "end" => cursor('F'),
         // Ctrl- and Shift-Insert are copy and paste on some systems.
@@ -199,11 +205,8 @@ mod tests {
         assert_eq!(linux("down"), bytes("\x1b[B"));
         assert_eq!(linux("right"), bytes("\x1b[C"));
         assert_eq!(linux("left"), bytes("\x1b[D"));
-        assert_eq!(linux("home"), bytes("\x1b[H"));
-        assert_eq!(linux("end"), bytes("\x1b[F"));
         let application = |spec| encode_key(&press(spec), true, Platform::Linux);
         assert_eq!(application("up"), bytes("\x1bOA"));
-        assert_eq!(application("home"), bytes("\x1bOH"));
         // A modified key is the same in either mode.
         assert_eq!(application("ctrl-left"), bytes("\x1b[1;5D"));
         assert_eq!(linux("shift-up"), bytes("\x1b[1;2A"));
@@ -211,6 +214,16 @@ mod tests {
         assert_eq!(linux("ctrl-shift-end"), bytes("\x1b[1;6F"));
         // Command-Arrow is the policy's, or an app shortcut's.
         assert_eq!(mac("cmd-left"), None);
+    }
+
+    #[test]
+    fn home_and_end_are_tmux_keys_in_either_cursor_key_mode() {
+        for application_cursor in [false, true] {
+            let encode = |spec| encode_key(&press(spec), application_cursor, Platform::Linux);
+            assert_eq!(encode("home"), bytes("\x1b[1~"));
+            assert_eq!(encode("end"), bytes("\x1b[4~"));
+        }
+        assert_eq!(linux("shift-home"), bytes("\x1b[1;2H"));
     }
 
     #[test]

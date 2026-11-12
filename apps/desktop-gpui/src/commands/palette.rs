@@ -248,7 +248,7 @@ impl Render for CommandPalette {
                         div().flex_1().min_w_0().child(
                             Input::new(&self.input)
                                 .id("command-palette-input")
-                                .role(Role::ComboBox)
+                                .role(Role::EditableComboBox)
                                 .aria_label("Search commands")
                                 .appearance(false)
                                 // `.palette-input input { padding: 0 }`: the line, with no
