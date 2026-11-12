@@ -372,11 +372,11 @@ mod tests {
             AppTabKind::Markdown,
             ("/repo", "t"),
             OpenOptions {
-                view_mode: Some(AppTabViewMode::Source),
+                view_mode: Some(AppTabViewMode::Live),
                 ..OpenOptions::default()
             },
         );
-        assert_eq!(state.app_tabs[0].view_mode, Some(AppTabViewMode::Source));
+        assert_eq!(state.app_tabs[0].view_mode, Some(AppTabViewMode::Live));
         open(&mut state, "/repo/a.rs", false);
         assert_eq!(state.app_tabs[1].view_mode, None);
     }

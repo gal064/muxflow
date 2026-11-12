@@ -271,6 +271,14 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_live_default_is_kept() {
+        let prefs = Prefs::from_state(&state_from(serde_json::json!({
+            "defaultMarkdownView": "live",
+        })));
+        assert_eq!(prefs.default_markdown_view, AppTabViewMode::Live);
+    }
+
+    #[test]
     fn a_size_the_dialog_does_not_offer_falls_back_or_clamps() {
         assert_eq!(clamped_terminal_font_size(f64::NAN), 13);
         assert_eq!(clamped_terminal_font_size(3.), 10);

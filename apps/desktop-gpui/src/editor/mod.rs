@@ -2,7 +2,8 @@
 //! autosave a host file, find and replace, go to line, and grammar
 //! highlighting on the Kit code editor. Also the routing of every document
 //! tab's surface (`AppTabSurface.tsx`), which the diff view and the Markdown
-//! preview join through [`set_diff_surface`] and [`set_markdown_preview`].
+//! preview and Live views join through [`set_diff_surface`],
+//! [`set_markdown_preview`] and [`set_live_markdown`].
 //!
 //! A file tab's buffer lives in a [`DocumentPane`] kept for the most recently
 //! shown tabs, as Tauri kept the last four mounted. A pane that leaves saves
@@ -55,6 +56,18 @@ pub type DiffSurface = Rc<dyn Fn(&AppTabRecord, &mut Window, &mut App) -> AnyEle
 /// Draws a Markdown tab's rendered view from its document's live buffer.
 pub type MarkdownPreview =
     Rc<dyn Fn(&AppTabRecord, &Entity<Document>, &mut Window, &mut App) -> AnyElement>;
+/// Draws a Markdown tab's Live view, which edits its document's buffer, and
+/// gives the handle that takes its keyboard.
+pub type LiveSurface = Rc<
+    dyn Fn(&AppTabRecord, &Entity<Document>, &mut Window, &mut App) -> (AnyElement, FocusHandle),
+>;
+/// The Live view a Markdown tab offers.
+#[derive(Clone)]
+pub struct LiveMarkdown {
+    pub surface: LiveSurface,
+    /// A file larger than this as read, in bytes, shows as source instead.
+    pub limit_bytes: u64,
+}
 /// Starts the download of a file tab's file.
 pub type Download = Rc<dyn Fn(&AppTabRecord, &Root, &mut Window, &mut App)>;
 /// What a document's watch needs: the directory (or, for a terminal file
@@ -81,6 +94,7 @@ struct Editors {
     retiring: Vec<Entity<Document>>,
     diff: Option<DiffSurface>,
     preview: Option<MarkdownPreview>,
+    live: Option<LiveMarkdown>,
     download: Option<Download>,
     watcher: Option<Watcher>,
     observing: Option<Subscription>,
@@ -130,6 +144,10 @@ pub fn set_markdown_preview(preview: MarkdownPreview, cx: &mut App) {
     cx.global_mut::<Editors>().preview = Some(preview);
 }
 
+pub fn set_live_markdown(live: LiveMarkdown, cx: &mut App) {
+    cx.global_mut::<Editors>().live = Some(live);
+}
+
 pub fn set_download(download: Download, cx: &mut App) {
     cx.global_mut::<Editors>().download = Some(download);
 }
@@ -140,6 +158,10 @@ pub fn set_watcher(watcher: Watcher, cx: &mut App) {
 
 pub(crate) fn preview(cx: &App) -> Option<MarkdownPreview> {
     cx.try_global::<Editors>()?.preview.clone()
+}
+
+pub(crate) fn live_markdown(cx: &App) -> Option<LiveMarkdown> {
+    cx.try_global::<Editors>()?.live.clone()
 }
 
 pub(crate) fn download(cx: &App) -> Option<Download> {
@@ -243,8 +265,8 @@ pub fn shown(
                 .filter(|(id, _)| Some(id) != selected.as_ref() && Some(id) != docked.as_ref())
                 .any(|(_, pane)| {
                     pane.read(cx)
-                        .editor(cx)
-                        .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
+                        .input_focus(cx)
+                        .is_some_and(|handle| handle.is_focused(window))
                 });
             let lost = editors.focus_lost || hidden || window.focused(cx).is_none();
             selected.clone().filter(|_| lost)
@@ -269,8 +291,8 @@ pub fn shown(
     });
 }
 
-/// The handle that takes the keyboard in document `id`: its editor, or the
-/// pane itself while it has none.
+/// The handle that takes the keyboard in document `id`: its editor or Live
+/// view, or the pane itself while it has neither.
 fn input_focus(id: &str, cx: &App) -> Option<FocusHandle> {
     let (_, pane) = cx
         .try_global::<Editors>()?
@@ -278,10 +300,7 @@ fn input_focus(id: &str, cx: &App) -> Option<FocusHandle> {
         .iter()
         .find(|(pane_id, _)| pane_id == id)?;
     let pane = pane.read(cx);
-    Some(match pane.editor(cx) {
-        Some(editor) => editor.read(cx).focus_handle(cx),
-        None => pane.focus.clone(),
-    })
+    Some(pane.input_focus(cx).unwrap_or_else(|| pane.focus.clone()))
 }
 
 /// The docked document's tab id, while one is on screen.
@@ -519,6 +538,7 @@ fn retire(pane: Entity<DocumentPane>, cx: &mut App) {
             .editor(cx)
             .map(|editor| editor.read(cx).focus_handle(cx)),
     );
+    handles.extend(pane.read(cx).input_focus(cx));
     drop(pane);
     cx.defer(move |cx| {
         for window in cx.windows() {

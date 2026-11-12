@@ -250,6 +250,7 @@ through the T2.1 seam.
 | `gdev_qa_phase6` | fresh QA | `gpui/integration` | Passed | `f93e815` | Release build, local and SSH journeys, relaunch restore, both perf scripts, all Rust and frontend gates, CI green on Linux and macOS. Acceptance lanes needing Docker-published ports, 25 GiB scratch or a Tauri package build not run. Pre-existing on `main`, not the port: the source scan looked for a README line that moved to `docs/setup.md` (fixed here), and the `phase6-ssh` agents lane fails on a renamed field and a lifecycle expectation (not run in CI) |
 | T6.9 `mac-fixes` | opus, high, full cycle | `gpui/mac-fixes` | Committed | | The owner's Mac test. Fixed: Home/End sent as tmux's keys, Ctrl+Enter commits on macOS, the agent row's host letter and full width with its actions over it, the test notification button, the notification prompt at launch, the palette search field role, no "Disconnected" strip while the first tmux server is adopted, the Replace All tooltip, unknown key names refused in the shortcut editor, one full-screen item in the macOS View menu, app shortcuts from text fields (except the field's own chords), a named Settings section list. The blank diff tab after a commit did not reproduce on Linux; chasing it found a host bug that staged an untracked file's hunk as the file's absolute path (Git read the pinned `/proc/self/fd` path as a symlink), fixed by passing the content on stdin. Accepted: while the bridge reattaches to the first tmux server, a real drop shows only once that attempt fails; a server started during the handshake still flashes the strip |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
+| T7.1 `live-md-core` | opus, high, full cycle, large, design | `gpui/live-md-core` | Committed | | Crate `live-markdown` from the spike; Live mode through `editor::set_live_markdown`, editing the tab's document buffer. Live limit is a temporary 48 KiB (Tauri 1 MiB; T7.5 restores it). Measured, release, software rendering, table-heavy Markdown, key and frame p95: 25 KB 8.3 and 3.1 ms, 50 KB 21.6 and 11.7 ms, 75 KB 41.4 and 23.6 ms, 100 KB 60.6 and 35.1 ms, 150 KB 319 and 246 ms, 250 KB 1268 and 1089 ms, 500 KB about 2.9 and 2.55 s. Causes: every block laid out each frame, a whole-file reparse per key (about 0.17 ms per KB), and `gpui-base` 0.9.0's retained-layout sweep going quadratic past 4096 entries (`src/text/inline.rs:480`). 2 code and 2 invariant review rounds, 2 design rounds. Fixed: Live edits lost when the source editor was made later, an IME commit by unmarking, a cancelled composition dirtying the file, a refused edit staying on screen, Live's view and undo dropped on a tab switch, app shortcuts taking Copy, Paste and Find from a focused Live view, heading padding, the closing fence's row, inline-code backticks, the rule's position, the Settings hint. QA PASS local and SSH, recheck PASS. For T7.2: a drawn task box (font fallback draws the checked one as emoji), undo across an outside change, double-click word selection, a caret stop on a rule |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel
@@ -312,7 +313,7 @@ sits beside Source, Preview and Split, with the default-view setting, as in Taur
 Images draw no picture: the alt text is styled like a link and the markup hides until the
 caret enters it. Not built: spellcheck, screen-reader text, a virtualized view, an
 incremental parser, a rope. Files above `LIVE_MARKDOWN_LIMIT_CHARS` (1 MiB) open as
-source, as today.
+source, as today. T7.1 measured a lower smooth size, so the limit is 48 KiB until T7.5.
 
 **Isolation.** Everything lives in a new crate, `crates/live-markdown`. Its modules hold
 no GPUI types except one `view` module. The app registers the live view for Markdown tabs
@@ -326,6 +327,7 @@ buffer, so autosave, outside-change reconciliation and dirty state stay in
 | 2 | T7.2 `live-md-blocks` | Full | opus, high | Projection parity, list commands and indent, task toggle, link click, word motion and clicks | T7.1 |
 | 2 | T7.3 `live-md-tables` | Full | opus, high | Full `liveTable` parity | T7.1 |
 | 2 | T7.4 `live-md-find` | Full | opus, high | ⌘F in the live view: highlights, count, replace | T7.1 |
+| 3 | T7.5 `live-md-scale` | Full | opus, high | On-screen-only drawing and block-scoped reparse; restore the 1 MiB Live limit | T7.1 |
 
 Each task ports the Tauri tests for its area and closes those ledger rows. Root merges
 wave 2 in the order T7.3, T7.4, T7.2. Then `gdev_qa_phase7` runs on Linux, local and

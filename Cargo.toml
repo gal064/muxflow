@@ -9,6 +9,7 @@ members = [
   "crates/tmux-control",
   "crates/phase0-core",
   "crates/terminal-engine",
+  "crates/live-markdown",
 ]
 # Vendored crates keep their own upstream formatting and are not linted here.
 exclude = ["vendor/gpui-pre-macos"]
