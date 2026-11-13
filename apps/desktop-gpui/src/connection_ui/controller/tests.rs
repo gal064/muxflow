@@ -17,7 +17,7 @@ use futures::{
     channel::oneshot,
     future::{BoxFuture, FutureExt},
 };
-use gpui_kit::{AppContext, Entity, TestAppContext};
+use gpui_kit::{AppContext, Entity, TestAppContext, WindowVisibility};
 use serde_json::{Value, json};
 
 use super::*;
@@ -25,7 +25,8 @@ use crate::connection_ui::{
     backend::{EngineChannel, TerminalBackend, inline::InlineEngine},
     helper_upgrade::RemoteHelperProbe,
 };
-use crate::terminal::link::POLL_IDLE;
+use crate::terminal::link::{POLL_HIDDEN, POLL_IDLE};
+use crate::ui::visibility::tests::open_tracked_window;
 
 struct Bridge {
     client_id: String,
@@ -1472,6 +1473,52 @@ fn credit_waits_for_the_engine_to_consume_the_frame(cx: &mut TestAppContext) {
     cx.executor().advance_clock(POLL_IDLE);
     cx.run_until_parked();
     assert_eq!(harness.fake.state().acks.len(), before + 1);
+}
+
+#[gpui_kit::test]
+fn a_hidden_window_drains_the_engine_at_the_hidden_pace(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    harness.publish(cx, 0, vec![epoch_frame(7)]);
+    let window = open_tracked_window(cx);
+    let acks = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        harness.fake.state().acks.len()
+    };
+
+    cx.simulate_window_visibility_change(window, WindowVisibility::Hidden);
+    // The drain already waiting keeps its shown pace once.
+    cx.executor().advance_clock(POLL_IDLE);
+    let before = acks(cx);
+    harness.fake.publish(0, state_frame("connected"));
+    cx.executor().advance_clock(POLL_IDLE);
+    assert_eq!(acks(cx), before, "hidden: not drained a frame later");
+    cx.executor().advance_clock(POLL_HIDDEN - POLL_IDLE);
+    assert_eq!(acks(cx), before + 1, "hidden: drained at its own pace");
+
+    // Heavy output keeps the shown pace: the host's credit returns only on a
+    // drain, and tmux pauses a pane held back too long.
+    let before = acks(cx);
+    for _ in 0..300 {
+        harness.fake.publish(0, state_frame("connected"));
+    }
+    cx.executor().advance_clock(POLL_HIDDEN);
+    assert!(acks(cx) > before, "the heavy batch is drained");
+    let before = acks(cx);
+    harness.fake.publish(0, state_frame("connected"));
+    cx.executor().advance_clock(POLL_IDLE);
+    assert_eq!(
+        acks(cx),
+        before + 1,
+        "hidden but busy: drained within a frame"
+    );
+
+    // That drain was light, so the next one waits at the hidden pace, and
+    // showing the window cuts the wait short.
+    let before = acks(cx);
+    harness.fake.publish(0, state_frame("connected"));
+    assert_eq!(acks(cx), before, "hidden: the drain waits");
+    cx.simulate_window_visibility_change(window, WindowVisibility::Visible);
+    assert_eq!(acks(cx), before + 1, "shown: drained at once");
 }
 
 #[gpui_kit::test]
