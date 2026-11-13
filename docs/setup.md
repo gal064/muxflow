@@ -2,7 +2,8 @@
 
 ## Supported environment
 
-The validated Linux V1 package is x86-64 with GTK 3 and WebKitGTK 4.1. An
+The validated Linux V1 package is x86-64 with glibc 2.39 or newer, xkbcommon
+(with its X11 library), ALSA and the Vulkan loader (`libvulkan.so.1`) installed. An
 ARM64-native build lane is defined, but no retained native runner artifact or
 ARM64 hardware result exists for this release, so ARM64 is not release-claimed.
 The attached host may be local Linux or a remote Linux machine reachable
