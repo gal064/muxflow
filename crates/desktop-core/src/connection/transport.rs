@@ -223,7 +223,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     // The banner this produces is the only thing the user sees, so it names the
     // path that was checked and the command that fills it (P12-U004).
     Err(format!(
-        "muxflow-host helper is not installed beside the desktop{}. Rebuild the app with `pnpm --dir apps/desktop tauri build --bundles app`, which stages the helper, or run `release/macos/build-package.sh` for the packaged flow.",
+        "muxflow-host helper is not installed beside the desktop{}. Build it with `cargo build -p muxflow-host`, or install a package with `release/linux/build-and-install.sh` or `release/macos/build-and-install.sh`.",
         sibling_path
             .map(|path| format!(" (looked for {})", path.display()))
             .unwrap_or_default()

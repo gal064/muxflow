@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Builds the package twice and exercises install, upgrade and uninstall.
+# Run it on the release baseline (Ubuntu 24.04): verify-package.sh refuses a
+# desktop that needs a newer glibc, so on a newer distribution the build step
+# passes and verification fails. CI's `linux-package` job covers that check;
+# release/linux/build-and-install.sh is the local build for a newer machine.
+
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root"
 source tests/release/storage.sh
@@ -35,8 +41,6 @@ mkdir -p "$source_b"
 # build product even in a new all-untracked development checkout.
 git ls-files --cached --others --exclude-standard -z \
   | tar --null --verbatim-files-from -T - -cf - | tar -xf - -C "$source_b"
-ln -s "$repo_root/node_modules" "$source_b/node_modules"
-ln -s "$repo_root/apps/desktop/node_modules" "$source_b/apps/desktop/node_modules"
 mkdir -p "$source_b/tmp"
 (
   cd "$source_b"
