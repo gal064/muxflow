@@ -55,7 +55,24 @@ if [[ -f "$mac_helper" ]]; then
     exit 1
   }
 fi
-strings "$package_root/bin/muxflow" | grep -F "default-src 'self' customprotocol: asset:" >/dev/null
+# The desktop is the GPUI app: its panic locations name the app's sources, and
+# it links no WebKitGTK or GTK. This catches a package assembled from the old
+# Tauri binary.
+grep -aF 'apps/desktop-gpui/src/' "$package_root/bin/muxflow" >/dev/null || {
+  echo "desktop is not the GPUI app" >&2
+  exit 1
+}
+if readelf -d "$package_root/bin/muxflow" | grep -E 'NEEDED.*(webkit|gtk)' >/dev/null; then
+  echo "desktop links WebKitGTK or GTK" >&2
+  exit 1
+fi
+# The desktop is built on ubuntu-24.04 (glibc 2.39). A build on a newer
+# distribution would install but fail to start on that baseline.
+newest_glibc=$(readelf -V "$package_root/bin/muxflow" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -n 1)
+[[ "$(printf '%s\n2.39\n' "$newest_glibc" | sort -V | tail -n 1)" == 2.39 ]] || {
+  echo "desktop needs glibc $newest_glibc; the baseline is 2.39" >&2
+  exit 1
+}
 if strings "$package_root/bin/muxflow-host" | grep -E 'phase0-lanes|phase0-ssh|phase1-client' >/dev/null; then
   echo "release host contains development-only phase drivers" >&2
   exit 1
