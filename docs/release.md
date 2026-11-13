@@ -4,7 +4,7 @@
 every push to `main`, uses no secrets, and holds only checks that are
 deterministic on a hosted runner: the privacy scan, version agreement,
 formatting, warning-free Clippy, the Rust workspace tests on Linux and macOS,
-the test-only crates outside the workspace, a bounded parser fuzz smoke, the
+the Linux and macOS package builds, the test-only crates outside the workspace, a bounded parser fuzz smoke, the
 TypeScript checks and tests, committed generated code, and the voice sidecar
 contracts. The Docker SSH suites, the transfer and scale matrices, performance,
 and packaged desktop journeys are not part of it; they are the manual
@@ -181,6 +181,11 @@ SOURCE_DATE_EPOCH=1704067200 release/linux/build-package.sh x86_64
 release/linux/verify-package.sh tmp/release/muxflow-*-linux-x86_64.tar.gz
 ```
 
+On a machine with a newer glibc than the release runner, `verify-package.sh`
+refuses the desktop on purpose. For a local build, run
+`release/linux/build-and-install.sh`: it builds the package and installs it
+into `~/.local` (or `ADE_INSTALL_PREFIX`) without that check.
+
 ARM64 is built natively on an ARM64 runner with the same packages. Building it
 on another host uses `aarch64-unknown-linux-gnu` and requires the Rust target,
 an ARM64 linker, and ARM64 copies of the libraries above. If those are absent,
@@ -216,7 +221,7 @@ SHA-256 sums.
 # macOS release
 
 Run `release/macos/build-package.sh` on an Apple-Silicon Mac with Xcode,
-Node 24, pnpm 11, Rust 1.97.1, and Docker. The script creates an arm64 `.app`
+Node 24, Rust 1.97.1, uv, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
 ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
 `MUXFLOW_LINUX_HELPERS_DIR`, which needs no Docker), and runs
@@ -246,6 +251,6 @@ Published releases currently use the ad-hoc seal. The Developer ID path is
 ready but unexercised until the Apple credentials exist; adding them to the
 `release` environment is all it takes.
 
-No entitlements are requested: the app loads no unsigned code, WebKit runs
-JIT in its own processes, and the desktop does not use the microphone. The
+No entitlements are requested: the app loads no unsigned code and does not JIT,
+and the desktop does not use the microphone. The
 package remains `APPLE_SILICON_ONLY`.
