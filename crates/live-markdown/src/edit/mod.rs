@@ -222,8 +222,20 @@ impl LiveDoc {
         }
     }
 
+    /// `pos` in the text: a pointer hit from the frame drawn before an edit
+    /// can be past the end or inside a character.
+    pub fn clamp(&self, pos: usize) -> usize {
+        let text = self.doc.text();
+        let mut pos = pos.min(text.len());
+        while !text.is_char_boundary(pos) {
+            pos -= 1;
+        }
+        pos
+    }
+
     /// `pos` if it is a stop, else the nearest stop forward, else backward.
     pub fn snap(&mut self, pos: usize) -> usize {
+        let pos = self.clamp(pos);
         if self.is_stop(pos) {
             return pos;
         }
@@ -319,6 +331,16 @@ impl LiveDoc {
         };
         if extend {
             self.set_head(target)
+        } else {
+            self.set_caret(target)
+        }
+    }
+
+    /// Ctrl+Home and Ctrl+End (⌘↑ and ⌘↓): the document's start or end.
+    pub fn move_doc_edge(&mut self, end: bool, extend: bool) {
+        let target = if end { self.doc.text().len() } else { 0 };
+        if extend {
+            self.extend_to(target, end)
         } else {
             self.set_caret(target)
         }

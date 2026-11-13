@@ -73,14 +73,16 @@ header's width are not drawn. In a read-only document no cell takes the caret.
 
 A wide table wraps its columns to fit, as Tauri's does. Past gpui-base's 4 rem
 column floor (about 11 columns at full width) it scrolls sideways inside its
-frame (`view/wide.rs`): it is drawn at the width of its columns' floors and
-moved inside the column by a sideways wheel or swipe, or Shift and the wheel.
+frame (`view/wide.rs`): it is drawn just wide enough that no column is
+narrower than its longest word, as in Tauri, and moved inside the column by a
+sideways wheel or swipe, Shift and the wheel, or the bar drawn under it.
+gpui-base grows all columns alike from their floors, so a column with short
+words but long text can be drawn wider than Tauri's.
 The caret's cell is brought into view whenever the caret moves or the view
 edits the text, so a match the find bar selects shows too. Each table's scroll is kept in `LiveDoc` by where the table starts,
 so it moves with the table on an edit, and is dropped with the table; a
 change that spans the table's start (an outside change above and below it)
-scrolls it back to its left edge. No scrollbar is drawn under it, as
-gpui-base draws none. gpui-base's own scrolling table is not used: it keeps
+scrolls it back to its left edge. gpui-base's own scrolling table is not used: it keeps
 its scroll position to itself, and it scrolls from 160 px columns on, well
 before Tauri.
 
