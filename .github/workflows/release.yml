@@ -26,8 +26,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # vite's production build of the desktop (Monaco included) can exceed
-  # Node's default heap on the 7 GB macOS runners.
+  # Production JavaScript builds (the Android job's) can exceed Node's default
+  # heap on the 7 GB runners.
   NODE_OPTIONS: --max-old-space-size=6144
 
 jobs:
@@ -86,14 +86,13 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: Install system packages
         timeout-minutes: 14
-        run: .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
-      - uses: pnpm/action-setup@v4
+        # Build files for the GPUI app: X11 and xkb input, ALSA sounds, fontconfig.
+        run: .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev
+      # The package scripts read the version with `node`.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
       - run: rustup show active-toolchain || rustup toolchain install
-      - run: pnpm install --frozen-lockfile
       - name: Build and verify the package
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
@@ -159,13 +158,10 @@ jobs:
       MUXFLOW_NOTARY_ISSUER: ${{ secrets.MUXFLOW_NOTARY_ISSUER }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
       - run: rustup show active-toolchain || rustup toolchain install
-      - run: pnpm install --frozen-lockfile
       # build-package.sh lays out the DMG window with dmgbuild through uvx.
       - uses: astral-sh/setup-uv@v10.2.0
       - uses: actions/download-artifact@v4
