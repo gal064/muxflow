@@ -19,7 +19,7 @@ use gpui_kit::base::text::editor_host::{
     BlockNode, ColumnAlign, FlowPosition, InlineNode, LinkMark, Paragraph, RenderContext, Table,
     TextMark,
 };
-use gpui_kit::base::{Scrollbar, TextViewStyle};
+use gpui_kit::base::{Scrollbar, ScrollbarHandle, TextViewStyle};
 use gpui_kit::component::input::{Escape, Replace, Search};
 use gpui_kit::*;
 use regex::Regex;
@@ -49,6 +49,10 @@ actions!(
         MoveEnd,
         SelectHome,
         SelectEnd,
+        MoveDocStart,
+        MoveDocEnd,
+        SelectDocStart,
+        SelectDocEnd,
         Backspace,
         Delete,
         Enter,
@@ -137,6 +141,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-right", MoveEnd, context),
         KeyBinding::new("cmd-shift-left", SelectHome, context),
         KeyBinding::new("cmd-shift-right", SelectEnd, context),
+        KeyBinding::new("cmd-up", MoveDocStart, context),
+        KeyBinding::new("cmd-down", MoveDocEnd, context),
+        KeyBinding::new("cmd-shift-up", SelectDocStart, context),
+        KeyBinding::new("cmd-shift-down", SelectDocEnd, context),
         KeyBinding::new("alt-left", MoveWordLeft, context),
         KeyBinding::new("alt-right", MoveWordRight, context),
         KeyBinding::new("alt-shift-left", SelectWordLeft, context),
@@ -162,6 +170,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-right", MoveWordRight, context),
         KeyBinding::new("ctrl-shift-left", SelectWordLeft, context),
         KeyBinding::new("ctrl-shift-right", SelectWordRight, context),
+        KeyBinding::new("ctrl-home", MoveDocStart, context),
+        KeyBinding::new("ctrl-end", MoveDocEnd, context),
+        KeyBinding::new("ctrl-shift-home", SelectDocStart, context),
+        KeyBinding::new("ctrl-shift-end", SelectDocEnd, context),
         KeyBinding::new("ctrl-b", ToggleBold, Some(EDITABLE)),
         KeyBinding::new("ctrl-i", ToggleItalic, Some(EDITABLE)),
         KeyBinding::new("ctrl-]", Indent, Some(IN_LIST)),
@@ -197,6 +209,14 @@ pub enum LiveEvent {
     Link(String),
 }
 
+/// A scrollbar thumb the view drags, with where along it it is held: the
+/// page's, or the wide table's that starts at this source position.
+#[derive(Clone, Copy)]
+enum Thumb {
+    Page(Pixels),
+    Table(usize, Pixels),
+}
+
 pub struct LiveView {
     live: LiveDoc,
     style: LiveStyle,
@@ -206,6 +226,8 @@ pub struct LiveView {
     /// The x a run of Up and Down keeps to.
     goal_x: Option<Pixels>,
     selecting: bool,
+    /// The scrollbar thumb the view took the press for.
+    thumb: Option<Thumb>,
     /// The caret moved by key: scroll it into view at the next layout.
     reveal: Rc<Cell<bool>>,
     /// The source position whose cell a wide table scrolls to show at the
@@ -245,6 +267,7 @@ impl LiveView {
             frame: Rc::default(),
             goal_x: None,
             selecting: false,
+            thumb: None,
             reveal: Rc::default(),
             follow: None,
             scroll: LiveScroll::default(),
@@ -414,7 +437,8 @@ impl LiveView {
             })?;
         let index = geometry.index_for_position(at);
         let before = geometry.position_for_index(index).x > at.x;
-        let pos = projection.from_display(i, index);
+        // The frame can predate an edit that shortened the text.
+        let pos = self.live.clamp(projection.from_display(i, index));
         Some((projection.clone(), i, pos, before))
     }
 
@@ -443,10 +467,13 @@ impl LiveView {
             let Some(pos) = self.hit(point(goal, y)) else {
                 return;
             };
-            if pos == head {
+            // Judged where the caret would stop: a hit on the bullet beside
+            // the caret's own line is the caret's line.
+            let stop = self.live.snap(pos);
+            if stop == head {
                 continue;
             }
-            let moved = caret_bounds(&self.frame.borrow(), pos).is_none_or(|c| {
+            let moved = caret_bounds(&self.frame.borrow(), stop).is_none_or(|c| {
                 if down {
                     c.top() > rect.top() + step
                 } else {
@@ -546,6 +573,14 @@ impl LiveView {
     }
 
     fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The page's scrollbar, though it is not showing yet, or a wide
+        // table's.
+        let table = self.frame.borrow().table_bar_at(event.position);
+        self.thumb = (self.scroll.on_bar(event.position).map(Thumb::Page))
+            .or(table.map(|(start, grab)| Thumb::Table(start, grab)));
+        if self.thumb.is_some() {
+            return self.drag_thumb(event.position, cx);
+        }
         // The box takes the click: the caret stays where it is.
         if let Some(at) = self.task_at(event.position) {
             self.edit(cx, |l| l.toggle_task(at));
@@ -613,6 +648,9 @@ impl LiveView {
     /// A drag that selects, wherever the pointer is: past the top or bottom,
     /// the view follows it.
     fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.thumb.is_some() && event.pressed_button == Some(MouseButton::Left) {
+            return self.drag_thumb(event.position, cx);
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -624,6 +662,26 @@ impl LiveView {
         let viewport = self.scroll.viewport();
         let outside = event.position.y < viewport.top() || event.position.y > viewport.bottom();
         self.reveal.set(outside);
+    }
+
+    fn drag_thumb(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        match self.thumb {
+            Some(Thumb::Page(grab)) => self.scroll.drag_thumb_to(at.y, grab),
+            Some(Thumb::Table(start, grab)) => {
+                if let Some(x) = self.frame.borrow().table_x_for(start, at.x, grab) {
+                    self.live.table_x().borrow_mut().insert(start, x);
+                }
+            }
+            None => return,
+        }
+        cx.notify();
+    }
+
+    fn release(&mut self) {
+        self.selecting = false;
+        if let Some(Thumb::Page(_)) = self.thumb.take() {
+            self.scroll.end_drag();
+        }
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
@@ -1004,8 +1062,10 @@ fn render_block(
                 .pb(px(bottom * size))
                 .child(element)
         }
+        // Room below for the bar `viewport` draws, as Tauri's scrollbar.
         BlockKind::Table { .. } if let Some((track, x)) = wide => div()
             .overflow_hidden()
+            .pb(px(viewport::TABLE_BAR))
             .child(div().w(track).ml(-x).child(element)),
         _ => div().child(element),
     };
@@ -1126,6 +1186,18 @@ impl Render for LiveView {
             .on_action(cx.listener(|this, _: &MoveEnd, _, cx| this.line_edge(true, false, cx)))
             .on_action(cx.listener(|this, _: &SelectHome, _, cx| this.line_edge(false, true, cx)))
             .on_action(cx.listener(|this, _: &SelectEnd, _, cx| this.line_edge(true, true, cx)))
+            .on_action(cx.listener(|this, _: &MoveDocStart, _, cx| {
+                this.motion(cx, |l| l.move_doc_edge(false, false))
+            }))
+            .on_action(cx.listener(|this, _: &MoveDocEnd, _, cx| {
+                this.motion(cx, |l| l.move_doc_edge(true, false))
+            }))
+            .on_action(cx.listener(|this, _: &SelectDocStart, _, cx| {
+                this.motion(cx, |l| l.move_doc_edge(false, true))
+            }))
+            .on_action(cx.listener(|this, _: &SelectDocEnd, _, cx| {
+                this.motion(cx, |l| l.move_doc_edge(true, true))
+            }))
             .on_action(cx.listener(|this, _: &MoveWordLeft, _, cx| {
                 this.motion(cx, |l| l.move_word(false, false))
             }))
@@ -1210,11 +1282,11 @@ impl Render for LiveView {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| this.selecting = false),
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.release()),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| this.selecting = false),
+                cx.listener(|this, _: &MouseUpEvent, _, _| this.release()),
             )
             .child(root)
             .child(Scrollbar::vertical(&self.scroll))
@@ -1323,7 +1395,10 @@ impl EntityInputHandler for LiveView {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let start = to_byte(self.live.text(), range.start);
-        caret_bounds(&self.frame.borrow(), start)
+        // The start's block is laid out only near the screen; the caret's is
+        // always, and the input method's window goes beside it.
+        let frame = self.frame.borrow();
+        caret_bounds(&frame, start).or_else(|| caret_bounds(&frame, self.live.selection().head))
     }
 
     fn character_index_for_point(
