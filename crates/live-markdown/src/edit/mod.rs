@@ -14,6 +14,8 @@ mod list;
 mod motion;
 mod table;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -47,6 +49,9 @@ pub struct LiveDoc {
     next_key: u64,
     /// For the next segment an edit reaches.
     next_id: u64,
+    /// Each wide table's sideways scroll in pixels, by where the table
+    /// starts: the view's, kept here so it moves with its table on an edit.
+    table_x: Rc<RefCell<HashMap<usize, f32>>>,
 }
 
 impl LiveDoc {
@@ -64,6 +69,7 @@ impl LiveDoc {
             drawn: drawn::Drawn::default(),
             next_key: 1,
             next_id: 0,
+            table_x: Rc::default(),
         }
     }
 
@@ -117,7 +123,17 @@ impl LiveDoc {
         if let Some(change) = self.doc.take_change() {
             let splice = self.tree.update(self.doc.text(), change);
             self.drawn.splice(&splice, change);
+            let mut x = self.table_x.borrow_mut();
+            if change.delta() != 0 && !x.is_empty() {
+                *x = x.drain().map(|(at, x)| (change.map(at), x)).collect();
+            }
         }
+    }
+
+    /// Each wide table's sideways scroll, by where the table starts, for the
+    /// view to read and set. Edits move the keys with their tables.
+    pub fn table_x(&self) -> Rc<RefCell<HashMap<usize, f32>>> {
+        self.table_x.clone()
     }
 
     fn active(&self, sel: Selection) -> Active {
