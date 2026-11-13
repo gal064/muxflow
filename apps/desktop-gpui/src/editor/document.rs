@@ -360,6 +360,15 @@ impl Document {
                 self.attempted = None;
             }
             Some(scope) if self.attempted.as_ref() != Some(&scope) => {
+                // A save that failed while away is tried again, or the tab
+                // says "Save failed" until the next edit.
+                if let Some(autosave) = self.autosave.as_mut()
+                    && autosave.current().state == SaveState::Error
+                    && !autosave.saving()
+                    && let Some(request) = autosave.flush()
+                {
+                    self.start_save(request, cx);
+                }
                 if !self.loaded {
                     self.load(None, cx);
                     self.paint
