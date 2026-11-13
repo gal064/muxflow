@@ -5510,7 +5510,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "muxflow"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "desktop-core",
  "objc2-app-kit 0.3.2",
@@ -5551,7 +5551,7 @@ dependencies = [
 
 [[package]]
 name = "muxflow-host"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "anyhow",
  "blake3",

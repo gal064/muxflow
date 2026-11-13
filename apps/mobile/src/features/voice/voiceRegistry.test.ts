@@ -97,6 +97,47 @@ describe("VoiceRegistry", () => {
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
   });
 
+  it("forgets a closed pane's session locally so it stops re-registering", async () => {
+    const h = harness();
+    h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps }).focus();
+    const left = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
+    left.focus();
+    await settle();
+    left.blur();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%1", "%2"]);
+
+    // A transient empty snapshot or another server's panes prove nothing.
+    h.registry.reconcilePanes("server-a", new Set());
+    h.registry.reconcilePanes("server-b", new Set(["%1"]));
+    expect(h.registry.get("%2")).toBeDefined();
+
+    h.registry.reconcilePanes("server-a", new Set(["%1", "%3"]));
+    expect(h.registry.get("%1")).toBeDefined();
+    expect(h.registry.get("%2")).toBeUndefined();
+    expect(Object.keys(h.store.getState().sessions)).toEqual(["%1"]);
+    expect(h.logs).toContain("[muxflow] voice pane=%2 forgotten (pane gone)");
+    // Forgetting is local: no connection-wide clear goes out...
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(2);
+    // ...and a reconnect re-registers only the live pane.
+    h.registry.onConnected("server-a");
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%1", "%2", "%1"]);
+  });
+
+  it("keeps the on-screen pane's transcript until its screen leaves", () => {
+    const h = harness();
+    const shown = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    shown.focus();
+    h.registry.reconcilePanes("server-a", new Set(["%9"]));
+    expect(h.registry.get("%1")).toBe(shown);
+    expect(h.store.getState().sessions["%1"]).toBeDefined();
+
+    shown.blur();
+    h.registry.reconcilePanes("server-a", new Set(["%9"]));
+    expect(h.registry.get("%1")).toBeUndefined();
+    expect(h.store.getState().sessions).toEqual({});
+  });
+
   it("does not carry a pane conversation across a tmux server replacement", () => {
     const h = harness();
     h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
