@@ -188,6 +188,7 @@ impl LiveFind for NoFind {
     fn replace(&self, _: Range<usize>, _: &str, _: &mut App) {}
     fn replace_all(&self, _: &str, _: &mut App) {}
     fn highlight(&self, _: Option<regex::Regex>, _: &mut App) {}
+    fn set_top_inset(&self, _: gpui_kit::Pixels, _: &mut App) {}
     fn observe(&self, _: Box<dyn Fn(&mut App)>, _: &mut App) -> Subscription {
         Subscription::new(|| {})
     }

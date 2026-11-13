@@ -341,6 +341,9 @@ pub(super) struct Viewport {
     pub(super) head: usize,
     /// The find bar's matcher, while it is open.
     pub(super) find: Option<Rc<regex::Regex>>,
+    /// Covered by the host's find bar at the top: reveal stops below it, and
+    /// the top of the document can scroll down past it.
+    pub(super) top_inset: Pixels,
     /// Where the preedit starts.
     pub(super) marked: Option<usize>,
     pub(super) show_caret: bool,
@@ -416,6 +419,8 @@ impl Element for Viewport {
         let width = (column - self.gutter * 2.).max(px(1.));
         let w = f32::from(width);
         let page = bounds.size.height;
+        // The space above the first block, and the find bar's over it.
+        let pad = px(PAD_TOP) + self.top_inset;
         // A table that went away takes its scroll with it.
         self.table_x
             .borrow_mut()
@@ -448,9 +453,8 @@ impl Element for Viewport {
         let mut offset = anchor.offset;
         if let Some(fraction) = state.jump.take() {
             // The scrollbar: walk the summed heights to the point it names.
-            let content =
-                px(PAD_TOP) + between(segments, first, (segments.len(), 0), w) + self.bottom;
-            let mut y = content * fraction - px(PAD_TOP);
+            let content = pad + between(segments, first, (segments.len(), 0), w) + self.bottom;
+            let mut y = content * fraction - pad;
             at = first;
             while let Some(n) = next(segments, at) {
                 let h = height(segments, at, w);
@@ -485,7 +489,7 @@ impl Element for Viewport {
                         at = p;
                     }
                     None => {
-                        offset = offset.max(px(-PAD_TOP));
+                        offset = offset.max(-pad);
                         break;
                     }
                 }
@@ -518,7 +522,7 @@ impl Element for Viewport {
             let short = bounds.bottom() - (y + self.bottom);
             if block.is_some()
                 || short <= px(0.)
-                || (prev(segments, at).is_none() && offset <= px(-PAD_TOP))
+                || (prev(segments, at).is_none() && offset <= -pad)
             {
                 break;
             }
@@ -627,8 +631,8 @@ impl Element for Viewport {
             let into = |y: Pixels| y - caret_top;
             let to = if rect.bottom() > bounds.bottom() {
                 Some(into(rect.bottom()) + margin - page)
-            } else if rect.top() < bounds.top() {
-                Some(into(rect.top()) - margin)
+            } else if rect.top() < bounds.top() + self.top_inset {
+                Some(into(rect.top()) - margin - self.top_inset)
             } else {
                 None
             };
@@ -651,8 +655,8 @@ impl Element for Viewport {
         let rest = between(segments, at, (segments.len(), 0), w);
         state.anchor = anchor;
         state.viewport = bounds;
-        state.top = px(PAD_TOP) + top + offset;
-        state.content = px(PAD_TOP) + top + rest + self.bottom;
+        state.top = pad + top + offset;
+        state.content = pad + top + rest + self.bottom;
         let column = Bounds::new(point(left, bounds.top()), size(width, bounds.size.height));
         Prepainted {
             hitbox,

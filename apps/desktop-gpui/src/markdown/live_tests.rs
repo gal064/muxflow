@@ -380,3 +380,58 @@ fn a_view_squeezed_to_nothing_still_draws(cx: &mut TestAppContext) {
     }
     assert_eq!(fixture.shown(cx), "para one\n\nmore text\n");
 }
+
+/// Where `range` of the view's text is drawn, after the frames a reveal takes.
+fn drawn_at(
+    view: &Entity<LiveView>,
+    range: std::ops::Range<usize>,
+    cx: &mut VisualTestContext,
+) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    for _ in 0..3 {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.bounds_for_range(range, gpui_kit::Bounds::default(), window, cx)
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn finding_in_a_wide_table_scrolls_it_to_the_match_and_replaces_there(cx: &mut TestAppContext) {
+    let cells = |f: &dyn Fn(usize) -> String| (0..30).map(f).collect::<Vec<_>>().join(" | ");
+    let source = format!(
+        "# wide\n\n| {} |\n| {} |\n| {} |\n",
+        cells(&|i| format!("col{i}")),
+        cells(&|_| "---".into()),
+        cells(&|i| if i == 28 {
+            "needle".into()
+        } else {
+            format!("c{i}")
+        }),
+    );
+    let (fixture, cx) = open(&source, cx);
+    let width = gpui_kit::px(800.);
+    cx.simulate_resize(gpui_kit::size(width, gpui_kit::px(600.)));
+    let view = fixture.view(cx);
+    let find = cx.update(|_, cx| fixture.surface.read(cx).find.clone());
+    let at = source.find("needle").unwrap();
+    let before = drawn_at(&view, at..at + 6, cx);
+    assert!(
+        before.is_none_or(|b| b.left() > width),
+        "the match starts off the side: {before:?}"
+    );
+    cx.update(|_, cx| find.select(at..at + 6, cx));
+    let shown = drawn_at(&view, at..at + 6, cx).expect("the match is drawn");
+    assert!(
+        shown.left() >= gpui_kit::px(0.) && shown.right() <= width,
+        "the table scrolled to the match: {shown:?}"
+    );
+    // Replace there: the cell stays in view and the file is saved.
+    cx.update(|_, cx| find.replace(at..at + 6, "pin", cx));
+    let replaced = drawn_at(&view, at..at + 3, cx).expect("the cell is drawn");
+    assert!(replaced.left() >= gpui_kit::px(0.) && replaced.right() <= width);
+    let saved = fixture.saved_after_debounce(cx);
+    assert!(saved.last().unwrap().contains("| pin |"));
+}
