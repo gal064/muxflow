@@ -214,6 +214,9 @@ pub struct LiveView {
     scroll: LiveScroll,
     /// The find bar's matcher while it is open: its matches are marked.
     find: Option<Rc<Regex>>,
+    /// How far the host's find bar reaches down over the view: a match is
+    /// revealed below it.
+    top_inset: Pixels,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -246,6 +249,7 @@ impl LiveView {
             follow: None,
             scroll: LiveScroll::default(),
             find: None,
+            top_inset: px(0.),
             _subscriptions: subscriptions,
         }
     }
@@ -270,6 +274,15 @@ impl LiveView {
         cx.notify();
     }
 
+    /// How far the host's find bar covers the top of the view, so what is
+    /// revealed comes into view below it; zero once the bar closes.
+    pub fn set_top_inset(&mut self, inset: Pixels, cx: &mut Context<Self>) {
+        if self.top_inset != inset {
+            self.top_inset = inset;
+            cx.notify();
+        }
+    }
+
     /// Selects a match of the find bar and scrolls it into view.
     pub fn select_match(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.motion(cx, |l| l.select_match(range));
@@ -281,10 +294,11 @@ impl LiveView {
     }
 
     /// The find bar's Replace All, as one undo step. The view stays where it
-    /// is, as CodeMirror's does.
+    /// is, as CodeMirror's does, wide tables too.
     pub fn replace_all(&mut self, text: &str, cx: &mut Context<Self>) {
         self.edit(cx, |l| l.replace_all(text));
         self.reveal.set(false);
+        self.follow = None;
     }
 
     /// The text changed outside the view. The caret stays where it was in the
@@ -316,15 +330,6 @@ impl LiveView {
             self.style = style;
             cx.notify();
         }
-    }
-
-    /// Scrolls the wide table holding source position `pos` sideways until
-    /// that cell shows, at the next layout, as the caret's cell follows the
-    /// caret. It does not scroll the page; a caret move in the same update
-    /// takes over.
-    pub fn reveal_in_table(&mut self, pos: usize, cx: &mut Context<Self>) {
-        self.follow = Some(pos);
-        cx.notify();
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -1064,6 +1069,7 @@ impl Render for LiveView {
             selection: sel.range(),
             head: sel.head,
             find: self.find.clone(),
+            top_inset: self.top_inset,
             marked: self.live.marked().map(|m| m.start),
             show_caret: focused,
             read_only: self.read_only,
