@@ -6,6 +6,10 @@
 //! its scroll position to itself, so the caret's cell could not be kept in
 //! view, and it starts to scroll at 160 px columns.
 //!
+//! Its columns stay as wide as their longest word, as Tauri's do: gpui-base
+//! grows every column alike from its floor, so the table is drawn just wide
+//! enough for the column with the longest word to reach it.
+//!
 //! Each table's scroll is kept in `LiveDoc`, by where the table starts.
 
 use gpui_kit::*;
@@ -54,20 +58,30 @@ pub(super) fn measure(
     let size = px(super::FONT_SIZE * 14. / 15.);
     let mono = base::Theme::global(cx).tokens.typography.mono;
     let mut widths = vec![CELL_MIN; count];
+    let mut word = 0f32;
     for (row, leaves) in rows.iter().enumerate() {
         let style = if row == 0 { &head } else { &body };
         for (col, &leaf) in leaves.iter().enumerate() {
-            let text = text_width(&p.leaves[leaf], style, size, &mono, window);
+            let [text, longest] = [false, true]
+                .map(|words| text_width(&p.leaves[leaf], style, size, &mono, window, words));
             widths[col] = widths[col].max(text + CELL_PAD + divider(col));
+            word = word.max(longest + CELL_PAD);
         }
     }
     // Rounded up to device pixels, as gpui-base rounds them.
     let scale = window.scale_factor();
     let ceil = |w: f32| (w * scale).ceil() / scale;
+    // And the space after the word, which would otherwise start the next
+    // line rather than end this one.
+    let space = window
+        .text_system()
+        .layout_line(" ", size, &[body.to_run(1)], None);
+    let word = ceil(word + f32::from(space.width));
     let mut x = BORDER;
     let mut columns = Vec::with_capacity(count);
     for (col, &w) in widths.iter().enumerate() {
-        let cell = ceil(w.min(floor) - divider(col)).min(ceil(w - divider(col)));
+        let max = ceil(w - divider(col));
+        let cell = word.clamp(ceil(w.min(floor) - divider(col)).min(max), max);
         columns.push((px(x - 1.), px(x + cell + 1.)));
         x += cell + divider(col);
     }
@@ -77,20 +91,21 @@ pub(super) fn measure(
 
 /// The widest line of a cell, trimmed, as gpui-base measures it: bold and
 /// italic runs in their faces, inline code in the mono face at 7/8 of the
-/// size with 4px either side.
+/// size with 4px either side. With `words`, the widest word.
 fn text_width(
     leaf: &Leaf,
     style: &TextStyle,
     size: Pixels,
     mono: &SharedString,
     window: &Window,
+    words: bool,
 ) -> f32 {
     let has = |run: &[usize], what: fn(&Style) -> bool| {
         (leaf.marks.iter()).any(|(r, s)| what(s) && r.start <= run[0] && r.end >= run[1])
     };
     let mut widest = 0f32;
     let mut start = 0;
-    for line in leaf.text.split('\n') {
+    for line in (leaf.text).split(|c| c == '\n' || (words && (c == ' ' || c == '\t'))) {
         let from = start + (line.len() - line.trim_start().len());
         start += line.len() + 1;
         let to = from + line.trim().len();

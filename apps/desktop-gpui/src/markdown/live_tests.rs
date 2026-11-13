@@ -388,7 +388,11 @@ fn drawn_at(
     cx: &mut VisualTestContext,
 ) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
     for _ in 0..3 {
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // As the frame a reveal asks for: the test platform draws no frames.
+        cx.update(|window, cx| {
+            view.update(cx, |_, cx| cx.notify());
+            window.draw(cx).clear(cx)
+        });
         cx.run_until_parked();
     }
     cx.update(|window, cx| {
@@ -434,4 +438,215 @@ fn finding_in_a_wide_table_scrolls_it_to_the_match_and_replaces_there(cx: &mut T
     assert!(replaced.left() >= gpui_kit::px(0.) && replaced.right() <= width);
     let saved = fixture.saved_after_debounce(cx);
     assert!(saved.last().unwrap().contains("| pin |"));
+}
+
+/// The view focused and drawn, with the selection at `range`.
+fn focus_at(view: &Entity<LiveView>, range: std::ops::Range<usize>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.focus(&view.focus_handle(cx), cx);
+        view.update(cx, |view, cx| view.select_match(range, cx));
+    });
+    drawn_at(view, 0..0, cx);
+}
+
+/// Keys typed into the view, each after a drawn frame, as a person types.
+fn press(view: &Entity<LiveView>, keys: &str, cx: &mut VisualTestContext) -> usize {
+    for key in keys.split(' ') {
+        cx.simulate_keystrokes(key);
+        drawn_at(view, 0..0, cx);
+    }
+    cx.update(|_, cx| view.read(cx).selection().head)
+}
+
+#[gpui_kit::test]
+fn down_and_up_walk_a_lists_items_from_left_of_their_text(cx: &mut TestAppContext) {
+    // From a paragraph's start, the goal is left of the items' text, over
+    // their bullets.
+    let source = "intro\n\n- a\n- b\n- c\n\nend\n";
+    let (fixture, cx) = open(source, cx);
+    let view = fixture.view(cx);
+    focus_at(&view, 0..0, cx);
+    let heads: Vec<usize> = (0..5).map(|_| press(&view, "down", cx)).collect();
+    assert_eq!(heads, [6, 9, 13, 17, 19]);
+    assert_eq!(press(&view, "up", cx), 17);
+    assert_eq!(press(&view, "up", cx), 13);
+    // Into a nested item and on past it.
+    let source = "# T\n\n- a\n  - b\n  - c\n- d\n\nend\n";
+    let (fixture, cx) = open(source, cx);
+    let view = fixture.view(cx);
+    focus_at(&view, 7..7, cx);
+    let heads: Vec<usize> = (0..3).map(|_| press(&view, "down", cx)).collect();
+    assert_eq!(heads, [13, 19, 23]);
+}
+
+#[gpui_kit::test]
+fn down_enters_an_item_that_starts_with_a_code_fence(cx: &mut TestAppContext) {
+    let source = "9. nine\n10. ten\n11. ```\n    code\n    ```\n\nend\n";
+    let (fixture, cx) = open(source, cx);
+    let view = fixture.view(cx);
+    let ten = source.find("ten").unwrap();
+    focus_at(&view, ten..ten, cx);
+    let head = press(&view, "down", cx);
+    let fence = source.find("```").unwrap();
+    let code_end = source.find("\n\nend").unwrap();
+    assert!(
+        (fence..=code_end).contains(&head),
+        "Down from {ten} went to {head}"
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_home_and_end_reach_the_ends_of_a_long_document(cx: &mut TestAppContext) {
+    let source: String = (0..400).map(|i| format!("paragraph {i}\n\n")).collect();
+    let (fixture, cx) = open(&source, cx);
+    let view = fixture.view(cx);
+    focus_at(&view, 20..20, cx);
+    #[cfg(target_os = "macos")]
+    let (start, end, select_start) = ("cmd-up", "cmd-down", "cmd-shift-up");
+    #[cfg(not(target_os = "macos"))]
+    let (start, end, select_start) = ("ctrl-home", "ctrl-end", "ctrl-shift-home");
+    assert_eq!(press(&view, end, cx), source.len());
+    assert!(drawn_at(&view, source.len()..source.len(), cx).is_some());
+    assert_eq!(press(&view, select_start, cx), 0);
+    let sel = cx.update(|_, cx| view.read(cx).selection());
+    assert_eq!(sel.anchor, source.len());
+    assert_eq!(press(&view, start, cx), 0);
+}
+
+#[gpui_kit::test]
+fn the_input_method_is_placed_at_the_caret_when_the_selection_starts_off_screen(
+    cx: &mut TestAppContext,
+) {
+    let source: String = (0..400).map(|i| format!("paragraph {i}\n\n")).collect();
+    let (fixture, cx) = open(&source, cx);
+    let view = fixture.view(cx);
+    focus_at(&view, 0..source.len() - 2, cx);
+    let start = drawn_at(&view, 0..0, cx);
+    let caret = drawn_at(&view, source.len() - 2..source.len() - 2, cx);
+    assert!(caret.is_some());
+    assert_eq!(start, caret, "the start is off screen: the caret's place");
+}
+
+#[gpui_kit::test]
+fn a_click_from_a_frame_drawn_before_the_text_shrank_does_not_panic(cx: &mut TestAppContext) {
+    let (fixture, cx) = open("abc def ghi\n", cx);
+    let view = fixture.view(cx);
+    focus_at(&view, 11..11, cx);
+    let end = drawn_at(&view, 11..11, cx).expect("drawn");
+    // Cut everything, then click where the text was before a frame is drawn.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.replace_text_in_range(Some(0..12), "", window, cx)
+        })
+    });
+    cx.simulate_click(end.center(), gpui_kit::Modifiers::default());
+    cx.simulate_mouse_move(end.center(), None, gpui_kit::Modifiers::default());
+    assert_eq!(fixture.shown(cx), "");
+    assert_eq!(cx.update(|_, cx| view.read(cx).selection().head), 0);
+}
+
+#[gpui_kit::test]
+fn the_scrollbar_takes_a_press_before_any_hover_has_shown_it(cx: &mut TestAppContext) {
+    let source: String = (0..400).map(|i| format!("paragraph {i}\n\n")).collect();
+    let (fixture, cx) = open(&source, cx);
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)));
+    let view = fixture.view(cx);
+    focus_at(&view, 0..0, cx);
+    let modifiers = gpui_kit::Modifiers::default();
+    let left = gpui_kit::MouseButton::Left;
+    // No move first: the pointer was already there.
+    let bar = |y: f32| gpui_kit::point(gpui_kit::px(796.), gpui_kit::px(y));
+    cx.simulate_mouse_down(bar(300.), left, modifiers);
+    // The caret's block is laid out wherever it is: above the view now.
+    let top = drawn_at(&view, 0..0, cx).expect("the caret's block");
+    assert!(
+        top.bottom() < gpui_kit::px(0.),
+        "the view scrolled: {top:?}"
+    );
+    cx.simulate_mouse_move(bar(590.), left, modifiers);
+    cx.simulate_mouse_up(bar(590.), left, modifiers);
+    let end = source.len() - 2;
+    assert!(drawn_at(&view, end..end, cx).is_some_and(|b| b.bottom() <= gpui_kit::px(600.)));
+    let sel = cx.update(|_, cx| view.read(cx).selection());
+    assert_eq!((sel.anchor, sel.head), (0, 0), "the press selected text");
+}
+
+#[gpui_kit::test]
+fn a_scrolled_tables_columns_keep_their_longest_word_on_one_line(cx: &mut TestAppContext) {
+    let word = "supercalifragilisticexpialidocious";
+    let cells = |f: &dyn Fn(usize) -> String| (0..30).map(f).collect::<Vec<_>>().join(" | ");
+    let source = format!(
+        "| {} |\n| {} |\n| {} |\n",
+        cells(&|i| format!("c{i}")),
+        cells(&|_| "---".into()),
+        cells(&|i| if i == 1 {
+            format!("a {word} b")
+        } else {
+            "x".into()
+        }),
+    );
+    let (fixture, cx) = open(&source, cx);
+    cx.simulate_resize(gpui_kit::size(gpui_kit::px(800.), gpui_kit::px(600.)));
+    let view = fixture.view(cx);
+    let at = source.find(word).unwrap();
+    // Past its first letter: a caret where a line wraps is drawn on the
+    // line above.
+    let first = drawn_at(&view, at + 1..at + 1, cx).expect("drawn");
+    let end = at + word.len();
+    let last = drawn_at(&view, end - 1..end - 1, cx).expect("drawn");
+    // The space after it stays at the end of its line: the next starts at
+    // the cell's edge, as the word's line does.
+    let after = drawn_at(&view, end + 2..end + 2, cx).expect("drawn");
+    assert!(after.top() > last.top(), "{after:?} {last:?}");
+    let indent = (after.left() - first.left()).abs();
+    assert!(
+        indent < gpui_kit::px(0.5),
+        "a space starts the line: {indent:?}"
+    );
+    assert_eq!(
+        first.top(),
+        last.top(),
+        "the word broke: {first:?} {last:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_wide_tables_bar_scrolls_it_when_pressed_and_dragged(cx: &mut TestAppContext) {
+    let cells = |f: &dyn Fn(usize) -> String| (0..30).map(f).collect::<Vec<_>>().join(" | ");
+    let source = format!(
+        "| {} |\n| {} |\n| {} |\n\nafter\n",
+        cells(&|i| format!("h{i}")),
+        cells(&|_| "---".into()),
+        cells(&|i| format!("c{i}")),
+    );
+    let (fixture, cx) = open(&source, cx);
+    let width = gpui_kit::px(800.);
+    cx.simulate_resize(gpui_kit::size(width, gpui_kit::px(600.)));
+    let view = fixture.view(cx);
+    let first = source.find("c0").unwrap();
+    let last = source.find("c29").unwrap();
+    // The blank line under the table.
+    let after = source.find("\n\nafter").unwrap() + 1;
+    assert!(drawn_at(&view, first..first, cx).is_some());
+    assert!(drawn_at(&view, last..last, cx).is_none_or(|b| b.left() > width));
+    // The bar's strip ends the table's block, just above the blank line.
+    let y = drawn_at(&view, after..after, cx).expect("drawn").top() - gpui_kit::px(5.);
+    let at = |x: f32| gpui_kit::point(gpui_kit::px(x), y);
+    let (left, modifiers) = (gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+    // A click on the thumb, near its right end, holds it where it was
+    // pressed: the table stays at its left edge (the column starts at 40).
+    cx.simulate_mouse_down(at(370.), left, modifiers);
+    cx.simulate_mouse_up(at(370.), left, modifiers);
+    let kept = drawn_at(&view, first..first, cx).expect("drawn");
+    assert!(kept.left() > gpui_kit::px(40.), "{kept:?}");
+    cx.simulate_mouse_down(at(400.), left, modifiers);
+    cx.simulate_mouse_move(at(790.), left, modifiers);
+    cx.simulate_mouse_up(at(790.), left, modifiers);
+    let shown = drawn_at(&view, last..last, cx).expect("drawn");
+    assert!(
+        shown.left() >= gpui_kit::px(0.) && shown.right() <= width,
+        "{shown:?}"
+    );
+    let sel = cx.update(|_, cx| view.read(cx).selection());
+    assert_eq!((sel.anchor, sel.head), (0, 0), "the press moved the caret");
 }

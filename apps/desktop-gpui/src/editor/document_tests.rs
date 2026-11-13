@@ -612,6 +612,21 @@ fn a_save_without_a_connection_fails_and_says_so(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn a_save_that_failed_while_disconnected_is_tried_again_on_reconnect(cx: &mut TestAppContext) {
+    let fixture = open(cx, true);
+    fixture.read(0, text("a", "1"), cx);
+    fixture.edit("ab", cx);
+    *fixture.scope.borrow_mut() = None;
+    saved_after_debounce(cx);
+    fixture.reconnect(None, cx);
+    assert_eq!(fixture.state(cx), Some(SaveState::Error));
+    fixture.reconnect(Some(scope(2)), cx);
+    assert_eq!(fixture.writes(), 1, "the failed save is tried again");
+    fixture.write(0, Ok("2".into()), cx);
+    assert_eq!(fixture.state(cx), Some(SaveState::Saved));
+}
+
 /// Port of `editorFlushRegistry.test.ts`: the close barrier waits for every
 /// editor's save, including one whose tab already left, and fails when one
 /// does not save.
