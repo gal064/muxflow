@@ -4,8 +4,8 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root"
 
-# This script produces a Linux desktop package and links against WebKitGTK, so
-# it can only run on Linux. The guard matters beyond a clearer message: the
+# This script produces a Linux desktop package, so it can only run on Linux.
+# The guard matters beyond a clearer message: the
 # native-build branch below is chosen by comparing the requested architecture to
 # `uname -m`, which on an Apple Silicon Mac reports arm64/aarch64. Requesting
 # aarch64 there would take that branch, build a Darwin binary, and publish it
@@ -54,6 +54,9 @@ target_root=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/linux-$arch"}
 [[ "$target_root" == /* ]] || target_root="$repo_root/$target_root"
 export CARGO_TARGET_DIR="$target_root"
 mkdir -p "$target_root"
+# ahash's compile-time-rng (pulled in by zed-xim) draws random constants at every
+# build unless the seed is fixed, which makes the desktop binary differ per build.
+export CONST_RANDOM_SEED=muxflow-release
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$repo_root=/workspace/muxflow --remap-path-prefix=$target_root=/workspace/target"
 
 native_arch=$(uname -m)
@@ -62,31 +65,8 @@ case "$native_arch" in
   arm64) native_arch=aarch64 ;;
 esac
 
-build_frontend_reproducibly() {
-  rm -rf apps/desktop/dist
-  (
-    cd apps/desktop
-    ./node_modules/.bin/tsc -b
-    ./node_modules/.bin/vite build
-  )
-  # Tauri's embedded-asset context observes directory enumeration order. Vite
-  # writes chunks concurrently, so identical content can otherwise produce a
-  # different CSP-hash order in the final ELF. Re-extract a sorted archive to
-  # give the embedder a stable directory order.
-  local frontend_tar="$build_root/frontend.tar"
-  tar --sort=name -C apps/desktop/dist -cf "$frontend_tar" .
-  rm -rf apps/desktop/dist
-  mkdir -p apps/desktop/dist
-  tar -xf "$frontend_tar" -C apps/desktop/dist
-}
-
 if [[ "$arch" == "$native_arch" ]]; then
-  build_frontend_reproducibly
-  # This flow assembles a tarball directly instead of asking Tauri to create an
-  # app bundle. The compatible helper built below is installed beside the
-  # desktop in that tarball, so Tauri's bundle-only sidecar placeholder must not
-  # make the desktop compilation depend on a stale staged source-tree artifact.
-  TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo build --locked --release -p muxflow
+  cargo build --locked --release -p muxflow-gpui
   binary_dir="$target_root/release"
 else
   target_libdir=$(rustc --print target-libdir --target "$rust_target" 2>/dev/null || true)
@@ -96,12 +76,11 @@ else
   fi
   linker=${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-aarch64-linux-gnu-gcc}
   if ! command -v "$linker" >/dev/null 2>&1; then
-    echo "ARM64_BLOCKER: cross linker $linker and an ARM64 WebKitGTK/GTK sysroot are required" >&2
+    echo "ARM64_BLOCKER: cross linker $linker and ARM64 xkbcommon, ALSA and fontconfig development libraries are required" >&2
     exit 69
   fi
   export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker"
-  build_frontend_reproducibly
-  TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo build --locked --release --target "$rust_target" -p muxflow
+  cargo build --locked --release --target "$rust_target" -p muxflow-gpui
   binary_dir="$target_root/$rust_target/release"
 fi
 
@@ -114,7 +93,7 @@ fi
 package_name="muxflow-$version-linux-$arch"
 package_root="$build_root/$package_name"
 mkdir -p "$package_root/bin" "$package_root/share/applications" "$package_root/share/icons/hicolor/256x256/apps"
-install -m 0755 "$binary_dir/muxflow" "$package_root/bin/muxflow"
+install -m 0755 "$binary_dir/muxflow-gpui" "$package_root/bin/muxflow"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host-linux-$arch"
 if [[ "$arch" == x86_64 && -n "${ADE_HOST_HELPER_AARCH64_OVERRIDE:-}" ]]; then
