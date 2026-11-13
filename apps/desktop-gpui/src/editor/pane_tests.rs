@@ -18,7 +18,7 @@ use super::*;
 use crate::{
     app::{self, Core},
     editor::{
-        LiveMarkdown,
+        LiveMarkdown, LiveShown,
         autosave::{LineEnding, SAVE_DELAY, SaveRequest},
         io::{FileScope, Opened, Reply, Slot, TEXT_FILE_LIMIT_BYTES, TextFile},
     },
@@ -86,6 +86,17 @@ fn open_tab(
     file: Option<Opened>,
     connected: bool,
 ) -> (Entity<DocumentPane>, Rc<Host>, &mut VisualTestContext) {
+    open_with(cx, record, file, connected, false)
+}
+
+/// A tab drawn with the real Live view, or with a stub.
+fn open_with(
+    cx: &mut TestAppContext,
+    record: AppTabRecord,
+    file: Option<Opened>,
+    connected: bool,
+    real_live: bool,
+) -> (Entity<DocumentPane>, Rc<Host>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
@@ -113,6 +124,7 @@ fn open_tab(
     cx.update(|cx| {
         let host = host.clone();
         let focus = cx.focus_handle();
+        let find: Rc<dyn LiveFind> = Rc::new(NoFind);
         crate::editor::set_live_markdown(
             LiveMarkdown {
                 surface: Rc::new(move |_, _, _, _| {
@@ -122,13 +134,20 @@ fn open_tab(
                         .track_focus(&focus)
                         .size_full()
                         .into_any_element();
-                    (element, focus.clone())
+                    LiveShown {
+                        element,
+                        focus: focus.clone(),
+                        find: find.clone(),
+                    }
                 }),
                 limit_bytes: LIVE_LIMIT,
             },
             cx,
         );
     });
+    if real_live {
+        cx.update(crate::markdown::init);
+    }
     let io: Rc<dyn FileIo> = Rc::new(Io(host.clone()));
     let live = Rc::new(Live {
         scope: Box::new(move |_| {
@@ -150,6 +169,28 @@ fn open_tab(
     cx.run_until_parked();
     draw(cx);
     (pane, host, cx)
+}
+
+/// The stub Live view has nothing to find.
+struct NoFind;
+
+impl LiveFind for NoFind {
+    fn text(&self, _: &App) -> String {
+        String::new()
+    }
+    fn revision(&self, _: &App) -> u64 {
+        0
+    }
+    fn selection(&self, _: &App) -> Range<usize> {
+        0..0
+    }
+    fn select(&self, _: Range<usize>, _: &mut App) {}
+    fn replace(&self, _: Range<usize>, _: &str, _: &mut App) {}
+    fn replace_all(&self, _: &str, _: &mut App) {}
+    fn highlight(&self, _: Option<regex::Regex>, _: &mut App) {}
+    fn observe(&self, _: Box<dyn Fn(&mut App)>, _: &mut App) -> Subscription {
+        Subscription::new(|| {})
+    }
 }
 
 /// The Live view's limit: a file longer than this shows as source.
@@ -665,4 +706,232 @@ fn the_live_view_takes_the_keyboard_and_gives_it_to_the_editor_on_leaving(cx: &m
 fn the_live_limit_is_written_as_tauri_writes_it() {
     assert_eq!(size_label(1024 * 1024), "1 MiB");
     assert_eq!(size_label(48 * 1024), "48 KiB");
+}
+
+/// Prose, a heading, bold text, a link (whose hidden URL holds the word too),
+/// a table and a code block, each with "cat".
+const LIVE_CATS: &str = "# cat title\n\nA **cat** and [cat](./cat.md).\n\n\
+    | a | cat |\n|---|---|\n| cat | x |\n\n```\ncat\n```\n";
+
+fn open_live<'a>(
+    content: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<DocumentPane>, Rc<Host>, &'a mut VisualTestContext) {
+    let (pane, host, cx) = open_with(
+        cx,
+        markdown_tab(AppTabViewMode::Live),
+        Some(text(content)),
+        true,
+        true,
+    );
+    let live = cx
+        .update(|_, cx| pane.read(cx).input_focus(cx))
+        .expect("the Live view takes the keyboard");
+    cx.update(|window, cx| window.focus(&live, cx));
+    draw(cx);
+    (pane, host, cx)
+}
+
+fn live_focused(pane: &Entity<DocumentPane>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        let live = pane.read(cx).live.clone().expect("Live is shown");
+        live.0.is_focused(window)
+    })
+}
+
+/// The Live view's selection, and the count the bar shows for it.
+fn live_state(pane: &Entity<DocumentPane>, cx: &mut VisualTestContext) -> (Range<usize>, String) {
+    cx.update(|_, cx| {
+        let pane = pane.read(cx);
+        let find = pane.find.as_ref().expect("the bar is open");
+        let selection = find.target.selection(cx);
+        let label = find::count_label(&find.matches, &selection);
+        (selection, label)
+    })
+}
+
+fn type_query(pane: &Entity<DocumentPane>, query: &str, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        let input = pane.read(cx).find.as_ref().unwrap().query.clone();
+        input.update(cx, |input, cx| input.set_value(query, window, cx));
+        pane.update(cx, |pane, cx| pane.typed(cx));
+    });
+    draw(cx);
+}
+
+fn written(host: &Host, cx: &mut VisualTestContext) -> Option<String> {
+    cx.executor().advance_clock(SAVE_DELAY);
+    cx.run_until_parked();
+    host.writes.borrow().last().cloned()
+}
+
+#[gpui_kit::test]
+fn ctrl_f_finds_in_the_live_view_and_steps_through_every_match(cx: &mut TestAppContext) {
+    let (pane, _, cx) = open_live(LIVE_CATS, cx);
+    cx.simulate_keystrokes("ctrl-f");
+    draw(cx);
+    assert!(
+        cx.update(|_, cx| pane.read(cx).find.is_some()),
+        "Ctrl+F opens the bar"
+    );
+    assert!(
+        cx.update(|_, cx| pane.read(cx).editor(cx).is_none()),
+        "no source editor"
+    );
+    type_query(&pane, "cat", cx);
+    let starts: Vec<usize> = LIVE_CATS.match_indices("cat").map(|(at, _)| at).collect();
+    assert_eq!(starts.len(), 7);
+    let (selection, label) = live_state(&pane, cx);
+    assert_eq!(
+        (selection, label.as_str()),
+        (starts[0]..starts[0] + 3, "1 of 7")
+    );
+    for (n, at) in starts.iter().enumerate().skip(1) {
+        cx.update(|_, cx| pane.update(cx, |pane, cx| pane.step(true, cx)));
+        draw(cx);
+        let (selection, label) = live_state(&pane, cx);
+        assert_eq!(selection, *at..at + 3);
+        assert_eq!(label, format!("{} of 7", n + 1));
+    }
+    cx.update(|_, cx| pane.update(cx, |pane, cx| pane.step(true, cx)));
+    assert_eq!(live_state(&pane, cx).1, "1 of 7", "Enter wraps to the top");
+    cx.update(|_, cx| pane.update(cx, |pane, cx| pane.step(false, cx)));
+    assert_eq!(
+        live_state(&pane, cx).1,
+        "7 of 7",
+        "Shift+Enter wraps to the end"
+    );
+    // The bar's toggles: case and whole word.
+    cx.update(|_, cx| pane.update(cx, |pane, cx| pane.toggle(|q| q.match_case = true, cx)));
+    type_query(&pane, "CAT", cx);
+    assert_eq!(live_state(&pane, cx).1, "No results");
+    cx.update(|_, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.toggle(|q| (q.match_case, q.regex) = (false, true), cx)
+        })
+    });
+    type_query(&pane, r"c.t\.md", cx);
+    assert_eq!(live_state(&pane, cx).1, "1 of 1");
+}
+
+#[gpui_kit::test]
+fn the_find_bar_is_seeded_from_the_live_selection_and_escape_returns_to_it(
+    cx: &mut TestAppContext,
+) {
+    let (pane, _, cx) = open_live("one cat two cat\n", cx);
+    // A double click's word, as the source editor seeds from its selection.
+    cx.update(|_, cx| {
+        let pane = pane.read(cx);
+        let (_, live) = pane.live.clone().unwrap();
+        live.select(4..7, cx);
+    });
+    cx.simulate_keystrokes("ctrl-f");
+    draw(cx);
+    let query = cx.update(|_, cx| {
+        let find = pane.read(cx).find.as_ref().unwrap();
+        find.query.read(cx).value().to_string()
+    });
+    assert_eq!(query, "cat");
+    assert_eq!(live_state(&pane, cx), (4..7, "1 of 2".into()));
+    assert!(!live_focused(&pane, cx), "the query field has the keyboard");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(cx.update(|_, cx| pane.read(cx).find.is_none()));
+    assert!(
+        live_focused(&pane, cx),
+        "Escape gives the keyboard back to Live"
+    );
+    // Escape in the Live view closes it too, and keeps the keyboard there.
+    cx.simulate_keystrokes("ctrl-f");
+    draw(cx);
+    cx.update(|window, cx| {
+        let live = pane.read(cx).live.clone().unwrap();
+        window.focus(&live.0, cx);
+    });
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(cx.update(|_, cx| pane.read(cx).find.is_none()));
+    assert!(live_focused(&pane, cx));
+}
+
+#[gpui_kit::test]
+fn replace_and_replace_all_in_live_are_one_undo_step_each_and_autosave(cx: &mut TestAppContext) {
+    let (pane, host, cx) = open_live("a cat, a **cat**, a cat\n", cx);
+    cx.update(|window, cx| pane.update(cx, |pane, cx| pane.open_find(true, window, cx)));
+    type_query(&pane, "cat", cx);
+    let set_replacement = |with: &str, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            let input = pane.read(cx).find.as_ref().unwrap().replacement.clone();
+            input.update(cx, |input, cx| input.set_value(with, window, cx));
+        })
+    };
+    set_replacement("dog", cx);
+    cx.update(|window, cx| pane.update(cx, |pane, cx| pane.replace_one(window, cx)));
+    draw(cx);
+    assert_eq!(
+        live_state(&pane, cx),
+        (11..14, "1 of 2".into()),
+        "on to the next"
+    );
+    assert_eq!(
+        written(&host, cx).as_deref(),
+        Some("a dog, a **cat**, a cat\n")
+    );
+
+    cx.update(|window, cx| pane.update(cx, |pane, cx| pane.replace_all(window, cx)));
+    draw(cx);
+    assert_eq!(live_state(&pane, cx).1, "No results");
+    assert_eq!(
+        written(&host, cx).as_deref(),
+        Some("a dog, a **dog**, a dog\n")
+    );
+
+    let live = cx.update(|_, cx| pane.read(cx).live.clone().unwrap());
+    cx.update(|window, cx| window.focus(&live.0, cx));
+    cx.simulate_keystrokes("ctrl-z");
+    draw(cx);
+    assert_eq!(
+        written(&host, cx).as_deref(),
+        Some("a dog, a **cat**, a cat\n")
+    );
+    cx.simulate_keystrokes("ctrl-z");
+    draw(cx);
+    assert_eq!(
+        written(&host, cx).as_deref(),
+        Some("a cat, a **cat**, a cat\n")
+    );
+}
+
+#[gpui_kit::test]
+fn the_live_find_bar_closes_when_the_tab_leaves_live(cx: &mut TestAppContext) {
+    let (pane, _, cx) = open_live("one cat\n", cx);
+    cx.simulate_keystrokes("ctrl-f");
+    type_query(&pane, "cat", cx);
+    cx.update(|_, cx| {
+        pane.update(cx, |pane, _| {
+            pane.record.view_mode = Some(AppTabViewMode::Source)
+        })
+    });
+    draw(cx);
+    assert!(cx.update(|_, cx| pane.read(cx).find.is_none()));
+    // The source editor's find opens on the query Live's closed with.
+    cx.update(|window, cx| pane.update(cx, |pane, cx| pane.open_find(false, window, cx)));
+    draw(cx);
+    assert_eq!(label(&pane, cx), "? of 1");
+}
+
+#[gpui_kit::test]
+fn a_click_on_the_find_bar_stays_out_of_the_live_view_under_it(cx: &mut TestAppContext) {
+    let (pane, _, cx) = open_live(LIVE_CATS, cx);
+    cx.simulate_keystrokes("ctrl-f");
+    type_query(&pane, "cat", cx);
+    assert_eq!(live_state(&pane, cx).1, "1 of 7");
+    let next = cx.update(|window, _| window.find_by_label("Next Match (Enter)").bounds().center());
+    cx.simulate_click(next, gpui_kit::Modifiers::none());
+    draw(cx);
+    assert_eq!(live_state(&pane, cx).1, "2 of 7", "stepped from the match");
+    assert!(
+        !live_focused(&pane, cx),
+        "the click did not land in the view"
+    );
 }

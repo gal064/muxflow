@@ -19,7 +19,9 @@ use gpui_kit::base::text::editor_host::{
     TextMark,
 };
 use gpui_kit::base::{Scrollbar, TextViewStyle};
+use gpui_kit::component::input::{Escape, Replace, Search};
 use gpui_kit::*;
+use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::doc::{Change, Selection};
@@ -51,7 +53,6 @@ actions!(
         Enter,
         TabNext,
         TabPrev,
-        Escape,
         ToggleBold,
         ToggleItalic,
         Undo,
@@ -110,6 +111,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", TabNext, context),
         KeyBinding::new("shift-tab", TabPrev, context),
         KeyBinding::new("escape", Escape, context),
+    ]);
+    // The host's find bar, as CodeMirror's search keymap and the source
+    // editor bind it; Escape above also closes it.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-f", Search, context),
+        KeyBinding::new("cmd-shift-f", Replace, context),
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-f", Search, context),
+        KeyBinding::new("ctrl-h", Replace, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -195,6 +208,8 @@ pub struct LiveView {
     /// The caret moved by key: scroll it into view at the next layout.
     reveal: Rc<Cell<bool>>,
     scroll: LiveScroll,
+    /// The find bar's matcher while it is open: its matches are marked.
+    find: Option<Rc<Regex>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -225,6 +240,7 @@ impl LiveView {
             selecting: false,
             reveal: Rc::default(),
             scroll: LiveScroll::default(),
+            find: None,
             _subscriptions: subscriptions,
         }
     }
@@ -235,6 +251,35 @@ impl LiveView {
 
     pub fn selection(&self) -> Selection {
         self.live.selection()
+    }
+
+    /// Moves on with every change to the text.
+    pub fn revision(&self) -> u64 {
+        self.live.revision()
+    }
+
+    /// Marks the matches of the find bar's `matcher` where the view draws,
+    /// the selected one apart; none once the bar closes.
+    pub fn set_find(&mut self, matcher: Option<Regex>, cx: &mut Context<Self>) {
+        self.find = matcher.map(Rc::new);
+        cx.notify();
+    }
+
+    /// Selects a match of the find bar and scrolls it into view.
+    pub fn select_match(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.motion(cx, |l| l.select_match(range));
+    }
+
+    /// The find bar's Replace, as one undo step.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.edit(cx, |l| l.replace(range, text));
+    }
+
+    /// The find bar's Replace All, as one undo step. The view stays where it
+    /// is, as CodeMirror's does.
+    pub fn replace_all(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.edit(cx, |l| l.replace_all(text));
+        self.reveal.set(false);
     }
 
     /// The text changed outside the view. The caret stays where it was in the
@@ -979,6 +1024,7 @@ impl Render for LiveView {
             bottom: window.viewport_size().height * 0.4,
             selection: sel.range(),
             head: sel.head,
+            find: self.find.clone(),
             marked: self.live.marked().map(|m| m.start),
             show_caret: focused,
             read_only: self.read_only,
@@ -1087,7 +1133,8 @@ impl Render for LiveView {
                     }
                 })
             }))
-            // Escape leaves a table; elsewhere it is the app's.
+            // Escape leaves a table; elsewhere it is the host's, which closes
+            // its find bar with it.
             .on_action(cx.listener(|this, _: &Escape, _, cx| {
                 if !this.read_only && this.live.table_key(TableKey::Escape) {
                     this.changed(cx);

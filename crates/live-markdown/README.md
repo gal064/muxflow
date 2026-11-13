@@ -36,8 +36,23 @@ the document.
 | `table` | Pure port of `liveTable.ts`'s source logic: cell spans and cell writes |
 | `view` | The GPUI view. The only module that uses GPUI types |
 | `view/viewport.rs` | Draws only the blocks on screen: the scroll anchor, the height estimates, the scrollbar |
+| `find` | What the view marks where it draws: the find bar's matches and the selection's other occurrences, as CodeMirror's search and `highlightSelectionMatches` |
 
-A `find` module (⌘F) goes beside these, at `src/find.rs`.
+## Find
+
+Ctrl+F (⌘F) opens the app's find bar, the one the source editor has, over
+the Live view: the host matches, counts, steps and replaces through
+`LiveView::select_match`, `replace` and `replace_all` (each one undo step),
+and hands the view its matcher to mark. The view searches only the blocks it
+draws, so marks cost nothing for the rest of a large file and are right on
+any block drawn later. A match in syntax hidden while the bar has focus (a
+link's URL) is counted and selected but not marked, as in Tauri; where the
+hidden markup starts is scrolled into view, and the syntax shows once the
+view has focus again. At 1 MiB of prose, opening find on a common word (counting to
+the limit, selecting, marking, two frames) takes about 7 ms, a step about
+3.5 ms (p95) and a jump to a block never drawn about 10 ms; a key typed with
+the bar open costs as one typed without it, plus a count (`--find` in the
+benchmark below).
 
 A change parses again only a window of top-level blocks around it, and only
 the blocks a change or the selection reaches are projected again. The view
