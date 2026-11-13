@@ -9,12 +9,6 @@ if [[ -f "$repo/.env" ]]; then
   source "$repo/.env"
   set +a
 fi
-# This script owns signing and notarization: tauri's own would sign before the
-# Info.plist edit below and so be invalidated by it. Keep tauri's credential
-# variables away from `tauri build` whatever the environment or .env holds.
-unset APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
-  APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
-
 # MUXFLOW_MACOS_SIGNING_IDENTITY selects the code identity. Unset or `-` is an
 # ad-hoc seal for local builds; a "Developer ID Application: …" identity in the
 # keychain produces a distributable build, which also requires the notary API
@@ -34,34 +28,19 @@ fi
 [[ $(uname -s) == Darwin ]] || { echo "macOS packaging requires Darwin" >&2; exit 69; }
 [[ $(uname -m) == arm64 ]] || { echo "this internal package is Apple Silicon only" >&2; exit 69; }
 
-helpers="$repo/apps/desktop/src-tauri/binaries/linux-helpers"
 work_root=${ADE_WORK_ROOT:-"$repo/tmp/work"}
 work_dir="$work_root/macos-package"
-mkdir -p "$helpers" "$work_dir"
+mkdir -p "$work_dir"
 release/check-disk-space.sh "$repo" "$work_root"
 release_target=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/macos"}
 [[ "$release_target" == /* ]] || release_target="$repo/$release_target"
 export CARGO_TARGET_DIR="$release_target"
 mkdir -p "$CARGO_TARGET_DIR"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-package_targets="$work_dir/.package-targets-$run_id"
-cleanup() {
-  [[ "$package_targets" == "$work_dir/.package-targets-$run_id" ]] || return
-  # Finder can create .DS_Store concurrently in browsed directories. The
-  # hidden per-run parent avoids that normal path and bounded retries keep an
-  # exact late write from making an otherwise successful package build fail.
-  for _ in 1 2 3; do
-    rm -rf "$package_targets"
-    [[ ! -e "$package_targets" ]] && return
-  done
-  echo "failed to clean package target $package_targets" >&2
-  return 1
-}
-trap cleanup EXIT
 
 # MUXFLOW_PERF_BUILD=1 compiles the switch-timing instrumentation into this
-# package: the host writes `timing.log` and the app answers `perf_log_enabled`
-# when launched with `ADE_PERF_LOG` set. Both are compiled out otherwise, so an
+# package: the host writes `timing.log` and the app records its probes when
+# launched with `ADE_PERF_LOG` set. Both are compiled out otherwise, so an
 # ordinary package is unchanged. One knob covers the helper, both Linux
 # helpers, and the app.
 perf_features=()
@@ -71,8 +50,29 @@ if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
 fi
 export MUXFLOW_PERF_BUILD
 
+# Two builds, not one: built together, the app's dependencies would unify
+# features into the helper's (gpui turns on serde_json's `preserve_order`), and
+# the shipped helper must stay the one `-p muxflow-host` builds everywhere else.
+# The app is built for the bundle's LSMinimumSystemVersion, as `tauri build`
+# did; the helper keeps the toolchain default it always had.
 CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host \
   ${perf_features[@]+"${perf_features[@]}"}
+CARGO_INCREMENTAL=0 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p muxflow-gpui \
+  ${perf_features[@]+"${perf_features[@]}"}
+
+# The bundle is laid out by hand with the names the Tauri bundle used, so an
+# install over it keeps its identity: the GPUI binary ships as `muxflow`, the
+# helper beside it, and the Linux helpers, icon and owner marker in Resources.
+app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
+version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
+dmg="$CARGO_TARGET_DIR/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
+resources="$app/Contents/Resources"
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$resources"
+install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-gpui" "$app/Contents/MacOS/muxflow"
+install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-host" "$app/Contents/MacOS/muxflow-host"
+install -m 0644 apps/desktop/src-tauri/icons/icon.icns release/macos/package-owner "$resources/"
+sed "s/@VERSION@/$version/g" release/macos/Info.plist > "$app/Contents/Info.plist"
 
 # The shipped Linux helpers are produced by release/linux/build-compatible-host.sh,
 # the same builder every Phase 8/9 gate validates. They previously had their own
@@ -86,8 +86,8 @@ CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host \
 build_linux_helper() {
   local helper_arch=$1
   release/linux/build-compatible-host.sh "$helper_arch" \
-    "$helpers/muxflow-host-linux-$helper_arch" >/dev/null
-  chmod 0755 "$helpers/muxflow-host-linux-$helper_arch"
+    "$resources/muxflow-host-linux-$helper_arch" >/dev/null
+  chmod 0755 "$resources/muxflow-host-linux-$helper_arch"
 }
 
 # MUXFLOW_LINUX_HELPERS_DIR supplies helpers that build-compatible-host.sh
@@ -96,27 +96,12 @@ build_linux_helper() {
 if [[ -n ${MUXFLOW_LINUX_HELPERS_DIR:-} ]]; then
   for helper_arch in aarch64 x86_64; do
     install -m 0755 "$MUXFLOW_LINUX_HELPERS_DIR/muxflow-host-linux-$helper_arch" \
-      "$helpers/muxflow-host-linux-$helper_arch"
+      "$resources/muxflow-host-linux-$helper_arch"
   done
 elif [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} != 1 ]]; then
   build_linux_helper aarch64
   build_linux_helper x86_64
 fi
-
-# The helper is staged by the build hook and copied into Contents/MacOS by
-# tauri's own externalBin handling, so this flow and a plain `tauri build` ship
-# the same sidecar by the same mechanism. It used to be installed and re-signed
-# by hand here, which left the bundler's path exercised only by the bare flow.
-# `--features` is the tauri CLI's own flag for the app crate's cargo features,
-# which is why the feature is named here rather than passed through after `--`.
-if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
-  pnpm --dir apps/desktop tauri build --bundles app --features perf-log
-else
-  pnpm --dir apps/desktop tauri build --bundles app
-fi
-app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
-version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
-dmg="$CARGO_TARGET_DIR/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
 
 # Submit one file to Apple's notary service and wait. notarytool exits 0 for a
 # finished submission whatever its verdict, so the verdict is read explicitly
@@ -135,17 +120,16 @@ notarize() {
   fi
 }
 
-# macOS UserNotifications requires a stable application identity, and the
-# plist edit breaks the bundler's seal, so the bundle is always re-signed here.
-/usr/libexec/PlistBuddy -c 'Delete :LSRequiresCarbon' "$app/Contents/Info.plist" 2>/dev/null || true
-if [[ "$identity" == - ]]; then
-  codesign --force --sign - "$app"
-else
-  # Inside out: the nested helper first, then the bundle that seals it. The
-  # hardened runtime needs no entitlements; the app loads no unsigned code and
-  # JIT runs in WebKit's own processes.
-  codesign --force --options runtime --timestamp --sign "$identity" "$app/Contents/MacOS/muxflow-host"
-  codesign --force --options runtime --timestamp --sign "$identity" "$app"
+# Inside out: the nested helper first, then the bundle that seals it.
+# macOS UserNotifications requires a stable application identity, so even a
+# local build is sealed as a bundle (ad hoc) rather than left linker-signed.
+# The hardened runtime needs no entitlements: the app neither JITs nor loads
+# unsigned code.
+sign=(codesign --force --sign "$identity")
+[[ "$identity" == - ]] || sign+=(--options runtime --timestamp)
+"${sign[@]}" "$app/Contents/MacOS/muxflow-host"
+"${sign[@]}" "$app"
+if [[ "$identity" != - ]]; then
   app_zip="$work_dir/Muxflow-$run_id.zip"
   ditto -c -k --keepParent "$app" "$app_zip"
   notarize "$app_zip"
@@ -167,8 +151,6 @@ if [[ "$identity" != - ]]; then
   "$repo/release/macos/stapler.sh" validate "$dmg"
 fi
 
-cleanup
-trap - EXIT
 if [[ "$identity" == - ]]; then
   echo "MACOS_PACKAGE_READY ad-hoc apple-silicon-only app=$app dmg=$dmg"
 else
