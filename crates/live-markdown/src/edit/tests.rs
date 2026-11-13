@@ -922,3 +922,39 @@ fn a_tables_sideways_scroll_moves_with_it_through_edits() {
     d.refresh();
     assert_eq!(d.table_x().borrow().get(&(start + 5)), Some(&40.));
 }
+
+#[test]
+fn a_stale_position_past_the_end_or_inside_a_character_is_clamped() {
+    // A pointer hit from the frame drawn before the text got shorter.
+    let mut d = LiveDoc::new("abc\n");
+    d.select_all();
+    d.backspace();
+    d.set_head(3);
+    assert_eq!(d.selection(), Selection::caret(0));
+    d.set_caret(9);
+    assert_eq!(head(&d), 0);
+    // Inside a character: down to its start.
+    let mut d = LiveDoc::new("é\n");
+    d.set_caret(1);
+    assert_eq!(head(&d), 0);
+    d.extend_to(1, true);
+    assert_eq!(head(&d), 0);
+}
+
+#[test]
+fn ctrl_home_and_end_go_to_the_documents_ends_and_shift_selects() {
+    let text = "# Title\n\none\n\ntwo";
+    let mut d = doc(text, 10);
+    d.move_doc_edge(true, false);
+    assert_eq!(d.selection(), Selection::caret(text.len()));
+    d.move_doc_edge(false, true);
+    assert_eq!(
+        d.selection(),
+        Selection {
+            anchor: text.len(),
+            head: 0
+        }
+    );
+    d.move_doc_edge(false, false);
+    assert_eq!(d.selection(), Selection::caret(0));
+}
