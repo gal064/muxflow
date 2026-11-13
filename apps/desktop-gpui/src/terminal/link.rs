@@ -6,14 +6,18 @@
 //! drains on a timer: a thread outside GPUI waking a GPUI task is what GPUI's
 //! test scheduler rejects, and it would make this path unrunnable under test.
 //! The poll is fast while there is output or input and one frame while idle,
-//! which costs less than a keystroke's wait and nothing a user can see.
+//! which costs less than a keystroke's wait and nothing a user can see. While
+//! the window is hidden it is slow unless output is heavy: the engine thread
+//! still reads every byte into the terminal, and showing the window drains at
+//! once and redraws from there.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Context, Entity, EventEmitter, SharedString, Task, WeakEntity};
+use gpui_kit::{App, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity};
 use terminal_engine::{Command, EngineOutput, GridSize};
 
 use crate::connection_ui::backend::{EngineChannel, TerminalBackend};
@@ -29,6 +33,14 @@ pub const POLL_ACTIVE: Duration = Duration::from_millis(4);
 pub const POLL_IDLE: Duration = Duration::from_millis(16);
 /// How long a burst of activity keeps the fast poll.
 const ACTIVE_FOR: Duration = Duration::from_millis(500);
+/// How often while the window is hidden and output is light: what the poll
+/// hands on is repaints nobody sees.
+pub const POLL_HIDDEN: Duration = Duration::from_millis(100);
+/// A hidden drain that hands back more credit than this keeps [`POLL_IDLE`].
+/// The host's credit (2 MiB or 1024 records) returns only on a drain, and a
+/// pane held back for 5 s is paused by tmux, which drops its output.
+const HIDDEN_BUSY_BYTES: usize = 512 * 1024;
+const HIDDEN_BUSY_FRAMES: usize = 256;
 
 /// What a link owes the connection controller.
 pub enum LinkEvent {
@@ -69,8 +81,12 @@ pub struct TerminalLink {
     connection_epoch: u64,
     panes: HashMap<String, WeakEntity<TerminalPane>>,
     active_until: Instant,
+    /// The last drain handed back much of the host's credit.
+    busy: bool,
     probes: SharedProbes,
+    drained: Rc<Receiver<EngineOutput>>,
     _poll: Task<()>,
+    _shown: Subscription,
 }
 
 impl TerminalLink {
@@ -81,6 +97,12 @@ impl TerminalLink {
     ) -> Self {
         let (outputs, drained) = channel();
         let engine: Arc<dyn EngineChannel> = backend.spawn_engine(outputs).into();
+        let drained = Rc::new(drained);
+        // A drain waiting at the hidden pace would hold back a pane mounted
+        // while hidden, and the echo of the first key after showing.
+        let shown = crate::ui::visibility::on_shown(cx, |link: &mut Self, cx| {
+            link._poll = start_poll(link.drained.clone(), cx);
+        });
         Self {
             profile_id,
             engine,
@@ -89,8 +111,11 @@ impl TerminalLink {
             connection_epoch: 0,
             panes: HashMap::new(),
             active_until: Instant::now(),
+            busy: false,
             probes: Arc::default(),
-            _poll: start_poll(drained, cx),
+            _poll: start_poll(drained.clone(), cx),
+            drained,
+            _shown: shown,
         }
     }
 
@@ -175,8 +200,10 @@ impl TerminalLink {
         self.active_until = Instant::now() + ACTIVE_FOR;
     }
 
-    fn poll_interval(&self, now: Instant) -> Duration {
-        if now < self.active_until {
+    fn poll_interval(&self, now: Instant, cx: &App) -> Duration {
+        if !crate::ui::visibility::shown(cx) {
+            if self.busy { POLL_IDLE } else { POLL_HIDDEN }
+        } else if now < self.active_until {
             POLL_ACTIVE
         } else {
             POLL_IDLE
@@ -204,6 +231,7 @@ impl TerminalLink {
 
     /// Runs what the engine produced, in order.
     fn apply(&mut self, outputs: Vec<EngineOutput>, cx: &mut Context<Self>) {
+        self.busy = false;
         if outputs.is_empty() {
             return;
         }
@@ -220,6 +248,8 @@ impl TerminalLink {
                 other => self.apply_one(other, cx),
             }
         }
+        let bytes: usize = consumed.iter().map(|(length, _)| length).sum();
+        self.busy = bytes > HIDDEN_BUSY_BYTES || consumed.len() > HIDDEN_BUSY_FRAMES;
         if !consumed.is_empty() {
             cx.emit(LinkEvent::FramesConsumed(consumed));
         }
@@ -381,7 +411,7 @@ pub fn lock(probes: &SharedProbes) -> std::sync::MutexGuard<'_, LinkProbes> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn start_poll(drained: Receiver<EngineOutput>, cx: &mut Context<TerminalLink>) -> Task<()> {
+fn start_poll(drained: Rc<Receiver<EngineOutput>>, cx: &mut Context<TerminalLink>) -> Task<()> {
     cx.spawn(async move |this, cx| {
         let mut last = Instant::now();
         let mut interval = POLL_IDLE;
@@ -394,7 +424,7 @@ fn start_poll(drained: Receiver<EngineOutput>, cx: &mut Context<TerminalLink>) -
                 lock(&link.probes).tail.note_stall(stall, now);
                 link.apply(outputs, cx);
                 link.flush_probes(now);
-                link.poll_interval(now)
+                link.poll_interval(now, cx)
             });
             let Ok(next) = updated else {
                 return;
