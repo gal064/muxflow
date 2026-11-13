@@ -904,3 +904,21 @@ fn queries_near_the_caret_match_the_whole_document() {
         );
     }
 }
+
+#[test]
+fn a_tables_sideways_scroll_moves_with_it_through_edits() {
+    let text = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let start = text.find('|').unwrap();
+    let mut d = doc(text, 0);
+    d.table_x().borrow_mut().insert(start, 40.);
+    // Typed above, the table moves down and its scroll with it.
+    d.insert_text("more ");
+    d.refresh();
+    assert_eq!(d.table_x().borrow().get(&(start + 5)), Some(&40.));
+    // Typed in a cell, the table stays where it starts.
+    let cell = d.text().find("| 1").unwrap() + 2;
+    d.select_range(cell..cell);
+    d.insert_text("x");
+    d.refresh();
+    assert_eq!(d.table_x().borrow().get(&(start + 5)), Some(&40.));
+}
