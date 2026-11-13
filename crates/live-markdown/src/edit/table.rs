@@ -67,6 +67,7 @@ impl LiveDoc {
 
     /// Puts the caret in a short row's missing cell (a click on it).
     pub fn set_caret_in_missing(&mut self, at: usize, col: usize) {
+        let at = self.clamp(at);
         if self.read_only {
             return self.set_caret(at);
         }
