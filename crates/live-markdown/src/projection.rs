@@ -996,7 +996,13 @@ impl<'a> Builder<'a> {
 
     fn list_item(&mut self, p: Range<usize>, n: &mdast::ListItem, ordered: bool, depth: usize) {
         let src = self.src;
-        let marker_end = n.children.first().map_or(p.end, |c| pos(c).start);
+        // markdown-rs can end an empty nested item past its line break, over
+        // the blank lines after it. The marker stops at its own line, so the
+        // caret after it stays there and those blank lines draw as rows.
+        let marker_end = n
+            .children
+            .first()
+            .map_or(line_end(src, p.start).min(p.end), |c| pos(c).start);
         let plain = Style::default();
         // The marker is a leaf of its own, drawn in the marker column.
         let mut m = self.start_leaf(p.start);
