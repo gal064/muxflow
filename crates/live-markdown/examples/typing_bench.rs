@@ -4,7 +4,7 @@
 //! unless `--shot` asks for one):
 //!
 //!   typing_bench <file.md | prose:<bytes> | tables:<bytes>> [--at top|middle|end]
-//!                [--fonts <dir>] [--keys <n>] [--shot <out.png>]
+//!                [--fonts <dir>] [--keys <n>] [--shot <out.png>] [--find <word>]
 //!
 //! It opens the view in a headless window with the platform's real text
 //! system, puts the caret at the top, middle or end of the document, and for
@@ -13,6 +13,11 @@
 //! scrolls with the wheel. Prints p50, p95 and max of each. `prose:` and
 //! `tables:` make a document of about that size: prose-heavy Markdown, or
 //! Markdown with many tables.
+//!
+//! `--find` opens find on a word as the app's find bar does (count the matches
+//! up to its limit, select the first, mark them), then steps through matches
+//! one by one and by jumps to blocks never drawn, and types with the bar open
+//! (each key also counts again, as the bar does).
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -168,6 +173,7 @@ fn main() {
     let mut keys = 60usize;
     let mut shot = None;
     let mut at_place = "middle".to_owned();
+    let mut find = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--fonts" => fonts = args.next().map(PathBuf::from),
@@ -179,6 +185,7 @@ fn main() {
             }
             "--shot" => shot = args.next().map(PathBuf::from),
             "--at" => at_place = args.next().expect("--at top|middle|end"),
+            "--find" => find = args.next(),
             other => file = Some(other.to_owned()),
         }
     }
@@ -317,6 +324,82 @@ fn main() {
         scrolls.push(start.elapsed().as_secs_f64() * 1000. + draw(&mut cx));
     }
     report("scroll", scrolls);
+    if let Some(word) = find {
+        // The find bar's matcher for a plain query, case not matched.
+        let matcher = regex::RegexBuilder::new(&regex::escape(&word))
+            .case_insensitive(true)
+            .multi_line(true)
+            .build()
+            .expect("a pattern");
+        // What the bar does on a step or a key: takes the text, counts up to
+        // its limit, and finds the next match from the selection or `from`.
+        let search = |cx: &mut HeadlessAppContext, from: Option<usize>| {
+            cx.update(|cx| {
+                let view = view.read(cx);
+                let text = view.text().to_owned();
+                let count = matcher.find_iter(&text).take(1001).count();
+                let from = from.unwrap_or(view.selection().range().end);
+                let found = (matcher.find_at(&text, from))
+                    .or_else(|| matcher.find(&text))
+                    .map(|found| found.range());
+                (count, found)
+            })
+        };
+        let select = |cx: &mut HeadlessAppContext, found: Option<std::ops::Range<usize>>| {
+            cx.update_window(handle, |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.set_find(Some(matcher.clone()), cx);
+                    if let Some(found) = found {
+                        view.select_match(found, cx);
+                    }
+                })
+            })
+            .expect("select");
+            // The match is scrolled into view on the frame after.
+            draw(cx) + draw(cx)
+        };
+        let start = Instant::now();
+        let (count, found) = search(&mut cx, Some(0));
+        let open = start.elapsed().as_secs_f64() * 1000. + select(&mut cx, found);
+        let count = if count > 1000 {
+            "1000+".to_owned()
+        } else {
+            count.to_string()
+        };
+        println!("find {word:?}: {count} matches, open {open:.1} ms");
+        let mut steps = Vec::new();
+        for _ in 0..keys {
+            let start = Instant::now();
+            let (_, found) = search(&mut cx, None);
+            steps.push(start.elapsed().as_secs_f64() * 1000. + select(&mut cx, found));
+        }
+        report("step", steps);
+        // Down the file in jumps, to blocks never drawn.
+        let len = cx.update(|cx| view.read(cx).text().len());
+        let mut jumps = Vec::new();
+        for k in 0..keys {
+            let start = Instant::now();
+            let (_, found) = search(&mut cx, Some(len * k / keys));
+            jumps.push(start.elapsed().as_secs_f64() * 1000. + select(&mut cx, found));
+        }
+        report("jump", jumps);
+        // Typing at the match the bar is on, its matches marked.
+        let end = cx.update(|cx| view.read(cx).selection().range().end);
+        select(&mut cx, Some(end..end));
+        let mut typed = Vec::new();
+        for _ in 0..keys {
+            let start = Instant::now();
+            cx.update_window(handle, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.replace_text_in_range(None, "x", window, cx)
+                })
+            })
+            .expect("type");
+            search(&mut cx, None);
+            typed.push(start.elapsed().as_secs_f64() * 1000. + draw(&mut cx));
+        }
+        report("key", typed);
+    }
     if let Some(path) = shot {
         let image = cx.capture_screenshot(handle).expect("capture");
         image.save(path).expect("save the screenshot");
