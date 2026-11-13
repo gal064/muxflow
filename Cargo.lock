@@ -5161,6 +5161,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "markdown",
+ "regex",
  "unicode-segmentation",
 ]
 
