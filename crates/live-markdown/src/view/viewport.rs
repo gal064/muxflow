@@ -24,6 +24,7 @@ use super::{
     heading_scale, paint_task, task_box, wide,
 };
 use crate::edit::Segment;
+use crate::find;
 use crate::projection::{BlockKind, Projection};
 
 /// A table drawn wider than its column, as the last layout placed it.
@@ -338,6 +339,11 @@ pub(super) struct Viewport {
     pub(super) bottom: Pixels,
     pub(super) selection: Range<usize>,
     pub(super) head: usize,
+    /// The find bar's matcher, while it is open.
+    pub(super) find: Option<Rc<regex::Regex>>,
+    /// Covered by the host's find bar at the top: reveal stops below it, and
+    /// the top of the document can scroll down past it.
+    pub(super) top_inset: Pixels,
     /// Where the preedit starts.
     pub(super) marked: Option<usize>,
     pub(super) show_caret: bool,
@@ -413,6 +419,8 @@ impl Element for Viewport {
         let width = (column - self.gutter * 2.).max(px(1.));
         let w = f32::from(width);
         let page = bounds.size.height;
+        // The space above the first block, and the find bar's over it.
+        let pad = px(PAD_TOP) + self.top_inset;
         // A table that went away takes its scroll with it.
         self.table_x
             .borrow_mut()
@@ -445,9 +453,8 @@ impl Element for Viewport {
         let mut offset = anchor.offset;
         if let Some(fraction) = state.jump.take() {
             // The scrollbar: walk the summed heights to the point it names.
-            let content =
-                px(PAD_TOP) + between(segments, first, (segments.len(), 0), w) + self.bottom;
-            let mut y = content * fraction - px(PAD_TOP);
+            let content = pad + between(segments, first, (segments.len(), 0), w) + self.bottom;
+            let mut y = content * fraction - pad;
             at = first;
             while let Some(n) = next(segments, at) {
                 let h = height(segments, at, w);
@@ -482,7 +489,7 @@ impl Element for Viewport {
                         at = p;
                     }
                     None => {
-                        offset = offset.max(px(-PAD_TOP));
+                        offset = offset.max(-pad);
                         break;
                     }
                 }
@@ -515,7 +522,7 @@ impl Element for Viewport {
             let short = bounds.bottom() - (y + self.bottom);
             if block.is_some()
                 || short <= px(0.)
-                || (prev(segments, at).is_none() && offset <= px(-PAD_TOP))
+                || (prev(segments, at).is_none() && offset <= -pad)
             {
                 break;
             }
@@ -569,22 +576,9 @@ impl Element for Viewport {
         }
         placed.sort_by_key(|(a, _)| *a);
 
-        let mut decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
         let mut drawn: Vec<usize> = placed.iter().map(|((i, _), _)| *i).collect();
         drawn.dedup();
-        if !self.selection.is_empty() {
-            for &i in &drawn {
-                let p = &segments[i].projection;
-                for (l, leaf) in p.leaves.iter().enumerate() {
-                    if let Some(range) = p.leaf_selection(l, &self.selection) {
-                        decorations
-                            .entry(leaf.key)
-                            .or_default()
-                            .push((range, self.style.selection));
-                    }
-                }
-            }
-        }
+        let decorations = self.decorations(segments, &drawn, &placed, cx);
         let mut blocks = Vec::with_capacity(placed.len());
         let mut wide = Vec::new();
         for (a, top) in &placed {
@@ -617,16 +611,28 @@ impl Element for Viewport {
 
         // Keep a caret moved by key in view, next frame; the pointer scrolls freely.
         if self.reveal.take()
-            && let Some(rect) = caret_bounds(&self.frame.borrow(), self.head)
             && let Some(&(caret_at, caret_top)) =
                 block_at(segments, self.head).and_then(|a| placed.iter().find(|(p, _)| *p == a))
         {
+            // A match the find bar selected can end in markup hidden while the
+            // bar has focus: then where that markup starts comes into view, else
+            // the first line of its block.
+            let frame = self.frame.borrow();
+            let before = (frame.segments.iter()).find_map(|p| p.jump_over(self.head, false));
+            let rect = caret_bounds(&frame, self.head)
+                .or_else(|| before.and_then(|at| caret_bounds(&frame, at)))
+                .unwrap_or_else(|| {
+                    Bounds::new(
+                        point(left, caret_top),
+                        size(width, px(FONT_SIZE * LINE_HEIGHT)),
+                    )
+                });
             let margin = px(FONT_SIZE * LINE_HEIGHT);
             let into = |y: Pixels| y - caret_top;
             let to = if rect.bottom() > bounds.bottom() {
                 Some(into(rect.bottom()) + margin - page)
-            } else if rect.top() < bounds.top() {
-                Some(into(rect.top()) - margin)
+            } else if rect.top() < bounds.top() + self.top_inset {
+                Some(into(rect.top()) - margin - self.top_inset)
             } else {
                 None
             };
@@ -649,8 +655,8 @@ impl Element for Viewport {
         let rest = between(segments, at, (segments.len(), 0), w);
         state.anchor = anchor;
         state.viewport = bounds;
-        state.top = px(PAD_TOP) + top + offset;
-        state.content = px(PAD_TOP) + top + rest + self.bottom;
+        state.top = pad + top + offset;
+        state.content = pad + top + rest + self.bottom;
         let column = Bounds::new(point(left, bounds.top()), size(width, bounds.size.height));
         Prepainted {
             hitbox,
@@ -760,5 +766,80 @@ impl Element for Viewport {
             ElementInputHandler::new(bounds, self.view.clone()),
             cx,
         );
+    }
+}
+
+impl Viewport {
+    /// What is painted behind the drawn text, in Tauri's colours: the
+    /// selection's other occurrences, the find bar's matches with the selected
+    /// one apart, then the selection. A match inside hidden markup paints
+    /// nothing, as CodeMirror's marks do not show under its hidden syntax.
+    fn decorations(
+        &self,
+        segments: &[Segment],
+        drawn: &[usize],
+        placed: &[(At, Pixels)],
+        cx: &App,
+    ) -> HashMap<u64, Vec<(Range<usize>, Hsla)>> {
+        // The drawn blocks, not their whole top-level nodes (one long list is
+        // one node), as runs of source.
+        let mut blocks: Vec<Range<usize>> = (placed.iter())
+            .map(|((i, j), _)| segments[*i].projection.blocks[*j].src.clone())
+            .collect();
+        blocks.sort_by_key(|src| src.start);
+        let mut spans: Vec<Range<usize>> = Vec::new();
+        for src in blocks {
+            match spans.last_mut() {
+                Some(last) if src.start <= last.end => last.end = last.end.max(src.end),
+                _ => spans.push(src),
+            }
+        }
+        let text = self.view.read(cx).text();
+        let (accent, selection) = (self.style.accent, self.style.selection);
+        let found =
+            (self.find.as_ref()).map_or_else(Vec::new, |m| find::matches_in(text, m, &spans));
+        let layers: [Vec<(Range<usize>, Hsla)>; 3] = [
+            find::selection_matches(text, &self.selection, &spans)
+                .into_iter()
+                .map(|r| (r, accent.opacity(0.12)))
+                .collect(),
+            found
+                .into_iter()
+                .map(|r| {
+                    let current = r == self.selection;
+                    (
+                        r,
+                        if current {
+                            accent.opacity(0.38)
+                        } else {
+                            selection
+                        },
+                    )
+                })
+                .collect(),
+            (!self.selection.is_empty())
+                .then(|| (self.selection.clone(), selection))
+                .into_iter()
+                .collect(),
+        ];
+        let mut out: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
+        for &i in drawn {
+            let p = &segments[i].projection;
+            for (l, leaf) in p.leaves.iter().enumerate() {
+                for layer in &layers {
+                    // Each layer is sorted and its ranges do not overlap.
+                    let first = layer.partition_point(|(r, _)| r.end <= leaf.src.start);
+                    let near = layer[first..]
+                        .iter()
+                        .take_while(|(r, _)| r.start < leaf.src.end);
+                    for (range, color) in near {
+                        if let Some(shown) = p.leaf_selection(l, range) {
+                            out.entry(leaf.key).or_default().push((shown, *color));
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }

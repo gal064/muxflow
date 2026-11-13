@@ -8,11 +8,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# Exact pins, as the app's: the view renders through gpui-base's `editor_host`.
+# Exact pins, as the app's, but for `regex`: the view renders through gpui-base's `editor_host`.
 gpui-kit = { version = "=0.9.0", default-features = true }
 # Both already resolved through gpui-base; `markdown` gives source offsets.
 markdown = "=1.0.0"
 unicode-segmentation = "=1.13.3"
+# Find's matcher, compiled by the host (the app's find bar); as the app's.
+regex = "1"
 
 [dev-dependencies]
 # `HeadlessAppContext` for the typing benchmark in `examples/`.

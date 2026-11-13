@@ -20,7 +20,9 @@ use gpui_kit::base::text::editor_host::{
     TextMark,
 };
 use gpui_kit::base::{Scrollbar, TextViewStyle};
+use gpui_kit::component::input::{Escape, Replace, Search};
 use gpui_kit::*;
+use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::doc::{Change, Selection};
@@ -52,7 +54,6 @@ actions!(
         Enter,
         TabNext,
         TabPrev,
-        Escape,
         ToggleBold,
         ToggleItalic,
         Undo,
@@ -111,6 +112,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", TabNext, context),
         KeyBinding::new("shift-tab", TabPrev, context),
         KeyBinding::new("escape", Escape, context),
+    ]);
+    // The host's find bar, as CodeMirror's search keymap and the source
+    // editor bind it; Escape above also closes it.
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-f", Search, context),
+        KeyBinding::new("cmd-shift-f", Replace, context),
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-f", Search, context),
+        KeyBinding::new("ctrl-h", Replace, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -199,6 +212,11 @@ pub struct LiveView {
     /// next layout.
     follow: Option<usize>,
     scroll: LiveScroll,
+    /// The find bar's matcher while it is open: its matches are marked.
+    find: Option<Rc<Regex>>,
+    /// How far the host's find bar reaches down over the view: a match is
+    /// revealed below it.
+    top_inset: Pixels,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -230,6 +248,8 @@ impl LiveView {
             reveal: Rc::default(),
             follow: None,
             scroll: LiveScroll::default(),
+            find: None,
+            top_inset: px(0.),
             _subscriptions: subscriptions,
         }
     }
@@ -240,6 +260,45 @@ impl LiveView {
 
     pub fn selection(&self) -> Selection {
         self.live.selection()
+    }
+
+    /// Moves on with every change to the text.
+    pub fn revision(&self) -> u64 {
+        self.live.revision()
+    }
+
+    /// Marks the matches of the find bar's `matcher` where the view draws,
+    /// the selected one apart; none once the bar closes.
+    pub fn set_find(&mut self, matcher: Option<Regex>, cx: &mut Context<Self>) {
+        self.find = matcher.map(Rc::new);
+        cx.notify();
+    }
+
+    /// How far the host's find bar covers the top of the view, so what is
+    /// revealed comes into view below it; zero once the bar closes.
+    pub fn set_top_inset(&mut self, inset: Pixels, cx: &mut Context<Self>) {
+        if self.top_inset != inset {
+            self.top_inset = inset;
+            cx.notify();
+        }
+    }
+
+    /// Selects a match of the find bar and scrolls it into view.
+    pub fn select_match(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.motion(cx, |l| l.select_match(range));
+    }
+
+    /// The find bar's Replace, as one undo step.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.edit(cx, |l| l.replace(range, text));
+    }
+
+    /// The find bar's Replace All, as one undo step. The view stays where it
+    /// is, as CodeMirror's does, wide tables too.
+    pub fn replace_all(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.edit(cx, |l| l.replace_all(text));
+        self.reveal.set(false);
+        self.follow = None;
     }
 
     /// The text changed outside the view. The caret stays where it was in the
@@ -271,15 +330,6 @@ impl LiveView {
             self.style = style;
             cx.notify();
         }
-    }
-
-    /// Scrolls the wide table holding source position `pos` sideways until
-    /// that cell shows, at the next layout, as the caret's cell follows the
-    /// caret. It does not scroll the page; a caret move in the same update
-    /// takes over.
-    pub fn reveal_in_table(&mut self, pos: usize, cx: &mut Context<Self>) {
-        self.follow = Some(pos);
-        cx.notify();
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -1018,6 +1068,8 @@ impl Render for LiveView {
             bottom: window.viewport_size().height * 0.4,
             selection: sel.range(),
             head: sel.head,
+            find: self.find.clone(),
+            top_inset: self.top_inset,
             marked: self.live.marked().map(|m| m.start),
             show_caret: focused,
             read_only: self.read_only,
@@ -1128,7 +1180,8 @@ impl Render for LiveView {
                     }
                 })
             }))
-            // Escape leaves a table; elsewhere it is the app's.
+            // Escape leaves a table; elsewhere it is the host's, which closes
+            // its find bar with it.
             .on_action(cx.listener(|this, _: &Escape, _, cx| {
                 if !this.read_only && this.live.table_key(TableKey::Escape) {
                     this.changed(cx);

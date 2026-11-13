@@ -27,12 +27,12 @@ mod pane;
 pub mod save_status;
 pub mod tabs;
 
-use std::{any::Any, rc::Rc, sync::Arc};
+use std::{any::Any, ops::Range, rc::Rc, sync::Arc};
 
 use desktop_core::app_state::{AppTabKind, AppTabRecord};
 use gpui_kit::{
     AnyElement, App, AppContext, Entity, FocusHandle, Focusable, Global, InteractiveElement,
-    IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
+    IntoElement, ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Task, Window, div,
 };
 
@@ -56,11 +56,40 @@ pub type DiffSurface = Rc<dyn Fn(&AppTabRecord, &mut Window, &mut App) -> AnyEle
 /// Draws a Markdown tab's rendered view from its document's live buffer.
 pub type MarkdownPreview =
     Rc<dyn Fn(&AppTabRecord, &Entity<Document>, &mut Window, &mut App) -> AnyElement>;
-/// Draws a Markdown tab's Live view, which edits its document's buffer, and
-/// gives the handle that takes its keyboard.
-pub type LiveSurface = Rc<
-    dyn Fn(&AppTabRecord, &Entity<Document>, &mut Window, &mut App) -> (AnyElement, FocusHandle),
->;
+/// Draws a Markdown tab's Live view, which edits its document's buffer.
+pub type LiveSurface =
+    Rc<dyn Fn(&AppTabRecord, &Entity<Document>, &mut Window, &mut App) -> LiveShown>;
+/// The Live view as a tab draws it.
+pub struct LiveShown {
+    pub element: AnyElement,
+    /// Takes the view's keyboard.
+    pub focus: FocusHandle,
+    /// What the find bar searches while the view is shown: the same one for
+    /// as long as the view is kept.
+    pub find: Rc<dyn LiveFind>,
+}
+/// The Live view as the tab's find bar drives it, the way it drives the
+/// source editor. Its offsets are in the view's own text, whose line breaks
+/// are `\n` whatever the buffer's are.
+pub trait LiveFind {
+    fn text(&self, cx: &App) -> String;
+    /// Moves on with every change to the text.
+    fn revision(&self, cx: &App) -> u64;
+    fn selection(&self, cx: &App) -> Range<usize>;
+    /// Selects a match and scrolls it into view.
+    fn select(&self, range: Range<usize>, cx: &mut App);
+    /// One undo step, into the buffer.
+    fn replace(&self, range: Range<usize>, with: &str, cx: &mut App);
+    /// The whole text made `text`, as one undo step, into the buffer.
+    fn replace_all(&self, text: &str, cx: &mut App);
+    /// Marks the matches of `matcher` in the view, or none.
+    fn highlight(&self, matcher: Option<regex::Regex>, cx: &mut App);
+    /// How far the bar covers the top of the view, so a match is revealed
+    /// below it; zero once it closes.
+    fn set_top_inset(&self, inset: Pixels, cx: &mut App);
+    /// Calls `changed` after every change to the text or the selection.
+    fn observe(&self, changed: Box<dyn Fn(&mut App)>, cx: &mut App) -> Subscription;
+}
 /// The Live view a Markdown tab offers.
 #[derive(Clone)]
 pub struct LiveMarkdown {
