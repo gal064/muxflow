@@ -167,18 +167,23 @@ The `release` environment holds these secrets:
 ## Architectures and artifacts
 
 `release/linux/build-package.sh` creates a deterministic rootless archive for
-the requested architecture. The archive contains the desktop, a Debian 12
+the requested architecture. The archive contains the GPUI desktop (installed
+as `bin/muxflow`), a Debian 12
 baseline remote helper, desktop integration, installer/uninstaller, and a
 SHA-256 manifest. Docker is required for the conservative helper build unless a
-separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied.
+separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied. The desktop builds
+on ubuntu-24.04 (glibc 2.39, which `verify-package.sh` enforces) with
+`pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev` installed. At run time it needs
+`libxkbcommon-x11-0`, `libasound2t64` and `libvulkan1` plus a Vulkan driver.
 
 ```sh
 SOURCE_DATE_EPOCH=1704067200 release/linux/build-package.sh x86_64
 release/linux/verify-package.sh tmp/release/muxflow-*-linux-x86_64.tar.gz
 ```
 
-ARM64 uses `aarch64-unknown-linux-gnu` and requires the Rust target, an ARM64
-linker, and an ARM64 GTK/WebKitGTK sysroot. If those prerequisites are absent,
+ARM64 is built natively on an ARM64 runner with the same packages. Building it
+on another host uses `aarch64-unknown-linux-gnu` and requires the Rust target,
+an ARM64 linker, and ARM64 copies of the libraries above. If those are absent,
 the script exits 69 with an `ARM64_BLOCKER` message. Until a verified artifact
 exists, ARM64 remains an unverified release lane; an x86-only environment must
 never relabel x86 output.
@@ -187,8 +192,7 @@ never relabel x86 output.
 
 Set `SOURCE_DATE_EPOCH` to a fixed release epoch. The package uses sorted paths,
 fixed mtimes, numeric ownership, deterministic gzip headers, Rust path remapping,
-and an internal file manifest. The builder also reorders Vite's concurrently
-written asset tree before Tauri embedding. `tests/release/run-package.sh` builds
+and an internal file manifest. `tests/release/run-package.sh` builds
 from two different checkout and target paths, requires identical archive
 digests, runs the packaged helper on Debian 12, and then exercises confined
 clean install, upgrade, rollback, and uninstall from an isolated home/prefix.

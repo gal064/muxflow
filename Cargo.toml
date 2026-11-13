@@ -12,7 +12,7 @@ members = [
   "crates/live-markdown",
 ]
 # Vendored crates keep their own upstream formatting and are not linted here.
-exclude = ["vendor/gpui-pre-macos", "vendor/markdown"]
+exclude = ["vendor/gpui-pre-macos", "vendor/markdown", "vendor/multiversion-macros"]
 resolver = "2"
 
 # GPUI's macOS backend at gpui-kit's pin (gpui-pre-macos 0.3.11, and still in
@@ -24,9 +24,14 @@ resolver = "2"
 # unclosed fenced code followed by another item, which typing in Live or
 # opening such a file in Preview reaches. Remove when a released markdown
 # fixes it. See vendor/markdown/VENDORED.md.
+#
+# multiversion-macros 0.8.1 (exr's dependency on x86) expands in a random order,
+# so two builds of the Linux package differ. Remove when a release fixes it.
+# See vendor/multiversion-macros/VENDORED.md.
 [patch.crates-io]
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 markdown = { path = "vendor/markdown" }
+multiversion-macros = { path = "vendor/multiversion-macros" }
 
 [workspace.package]
 edition = "2024"
