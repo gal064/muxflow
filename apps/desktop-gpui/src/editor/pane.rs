@@ -5,6 +5,7 @@
 
 use std::{
     any::Any,
+    cell::Cell,
     ops::Range,
     rc::Rc,
     sync::Arc,
@@ -14,11 +15,12 @@ use std::{
 use desktop_core::app_state::{AppTabKind, AppTabRecord, AppTabViewMode};
 use gpui_kit::{
     AnyElement, App, AppContext, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    Image, ImageFormat, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, Role,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task, Window,
-    actions,
+    Image, ImageFormat, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render,
+    Role, SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task,
+    Window, actions,
     assets::IconName,
     base::TestSupportExt,
+    canvas,
     component::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -117,6 +119,8 @@ struct FindBar {
     /// The match the selection is on, marked apart from the others: the
     /// editor paints its selection only while it has focus.
     current: Option<(Option<Range<usize>>, RangeDecorationCollection)>,
+    /// How tall it was drawn, for the Live view to reveal matches below it.
+    height: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -494,6 +498,7 @@ impl DocumentPane {
                 error: None,
                 highlights: None,
                 current: None,
+                height: Rc::default(),
                 _subscriptions: subscriptions,
             });
             self.refresh_matches(cx);
@@ -542,6 +547,7 @@ impl DocumentPane {
         }
         if let Target::Live(_, live) = &find.target {
             live.highlight(None, cx);
+            live.set_top_inset(Pixels::ZERO, cx);
         }
         cx.notify();
         Some(find.target)
@@ -1175,6 +1181,12 @@ impl DocumentPane {
             self.refresh_matches(cx);
         }
         let mut find_bar = self.find_bar(can_write, cx);
+        // As drawn last frame: the Live view reveals a match below the bar.
+        if let Some(find) = &self.find
+            && let Target::Live(_, live) = &find.target
+        {
+            live.set_top_inset(find.height.get(), cx);
+        }
         let source = editor.map(|editor| {
             let find_bar = find_bar.take();
             let go_to = self.go_to_box(&editor, cx);
@@ -1251,6 +1263,7 @@ impl DocumentPane {
         let palette = theme::palette(cx);
         self.mark_current(cx);
         let find = self.find.as_ref()?;
+        let height = find.height.clone();
         let selection = find.target.selection(cx);
         let has_query = !find.query.read(cx).value().is_empty();
         let label = match &find.error {
@@ -1438,6 +1451,14 @@ impl DocumentPane {
                 .flex()
                 .justify_end()
                 .child(widget)
+                .child(
+                    canvas(
+                        move |bounds, _, _| height.set(bounds.size.height),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
                 .into_any_element(),
         )
     }

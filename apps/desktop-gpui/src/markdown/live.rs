@@ -270,6 +270,10 @@ impl LiveFind for Find {
         self.0.update(cx, |view, cx| view.set_find(matcher, cx));
     }
 
+    fn set_top_inset(&self, inset: gpui_kit::Pixels, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.set_top_inset(inset, cx));
+    }
+
     fn observe(&self, changed: Box<dyn Fn(&mut App)>, cx: &mut App) -> Subscription {
         cx.observe(&self.0, move |_, cx| changed(cx))
     }
