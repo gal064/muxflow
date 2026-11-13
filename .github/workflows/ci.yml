@@ -177,3 +177,51 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Rust tests
         run: cargo test --locked --workspace --all-targets --no-fail-fast
+
+  # Builds the ad-hoc GPUI package, launches it from the bundle and keeps the
+  # plist and logs: the only Mac the migration's agents can reach (T8.2).
+  macos-package:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        # pipefail, so the build's exit status survives `tee`.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install tmux
+      - run: rustup show active-toolchain || rustup toolchain install
+      # build-package.sh lays out the DMG window with dmgbuild through uvx.
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Build and verify the package
+        run: |
+          out=$RUNNER_TEMP/package
+          mkdir -p "$out"
+          ADE_MACOS_PACKAGE_SMOKE=1 release/macos/build-package.sh 2>&1 | tee "$out/build.log"
+          app=$(sed -n 's/^MACOS_PACKAGE_READY .* app=\(.*\) dmg=.*/\1/p' "$out/build.log")
+          ADE_MACOS_PACKAGE_SMOKE=1 release/macos/verify-package.sh "$app"
+          cp "$app/Contents/Info.plist" "$out/"
+          echo "APP=$app" >> "$GITHUB_ENV"
+      - name: Launch the app from the bundle
+        run: |
+          out=$RUNNER_TEMP/package
+          open -n --stdout "$out/app.log" --stderr "$out/app.log" "$APP"
+          sleep 20
+          pgrep -fl "$APP/Contents/MacOS/muxflow" | tee "$out/processes.txt" || true
+          pgrep -qf "^$APP/Contents/MacOS/muxflow\$" || { echo 'the app did not stay up' >&2; cat "$out/app.log"; exit 1; }
+          cat "$out/app.log"
+          ! grep -Ei 'panic|fatal|abort|segmentation' "$out/app.log" || { echo 'the app logged a failure' >&2; exit 1; }
+          if ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i muxflow; then
+            echo 'the app left a crash report' >&2
+            exit 1
+          fi
+      - name: Stop the app
+        if: always() && env.APP != ''
+        run: |
+          pkill -f "^$APP/Contents/MacOS/muxflow\$" || true
+          "$APP/Contents/MacOS/muxflow-host" daemon-stop || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-package
+          path: ${{ runner.temp }}/package
