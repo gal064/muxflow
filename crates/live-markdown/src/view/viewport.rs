@@ -34,9 +34,34 @@ struct WideTable {
     start: usize,
     /// What of it shows.
     clip: Bounds<Pixels>,
-    /// How far it scrolls.
+    /// How far it scrolls, and how far it is scrolled.
     max: Pixels,
+    x: Pixels,
 }
+
+impl WideTable {
+    /// Its scrollbar's thumb, under it: as long as what shows of it, and as
+    /// far along as it is scrolled.
+    fn thumb(&self) -> Bounds<Pixels> {
+        let w = self.clip.size.width;
+        let len = w * (w / (w + self.max));
+        let left = self.clip.left() + (w - len) * (self.x / self.max);
+        Bounds::new(point(left, self.clip.bottom() - px(7.)), size(len, px(4.)))
+    }
+}
+
+/// Where along a thumb from `start`, `len` long, a press at `at` holds it:
+/// where it was pressed, or its middle for a press beside it.
+fn grab(at: Pixels, start: Pixels, len: Pixels) -> Pixels {
+    if at >= start && at <= start + len {
+        at - start
+    } else {
+        len / 2.
+    }
+}
+
+/// The space under a wide table for its scrollbar.
+pub(super) const TABLE_BAR: f32 = 10.;
 
 /// Space above the first block, as Tauri's padding.
 pub(super) const PAD_TOP: f32 = 48.;
@@ -97,7 +122,36 @@ impl LiveScroll {
     pub(super) fn viewport(&self) -> Bounds<Pixels> {
         self.0.borrow().viewport
     }
+
+    /// Where the scrollbar's thumb is held, if `at` is on its strip with
+    /// anything to scroll. gpui-base's bar takes a press only once a hover
+    /// has shown it.
+    pub(super) fn on_bar(&self, at: Point<Pixels>) -> Option<Pixels> {
+        let state = self.0.borrow();
+        let v = state.viewport;
+        let h = v.size.height;
+        let on = v.contains(&at) && at.x >= v.right() - px(BAR_WIDTH) && state.content > h;
+        on.then(|| {
+            grab(
+                at.y,
+                v.top() + h * (state.top / state.content),
+                h * (h / state.content),
+            )
+        })
+    }
+
+    /// Scrolls so the thumb, held `grab` from its top, is at height `y`.
+    pub(super) fn drag_thumb_to(&self, y: Pixels, grab: Pixels) {
+        let mut state = self.0.borrow_mut();
+        let v = state.viewport;
+        let content = state.dragged.unwrap_or(state.content);
+        state.dragged = Some(content);
+        state.jump = Some(((y - grab - v.top()) / v.size.height).clamp(0., 1.));
+    }
 }
+
+/// gpui-base's scrollbar strip (its `WIDTH`).
+const BAR_WIDTH: f32 = 16.;
 
 impl ScrollbarHandle for LiveScroll {
     fn viewport_bounds(&self) -> Bounds<Pixels> {
@@ -156,6 +210,24 @@ impl Frame {
             let (leaf, disp) = p.locate(pos).filter(|&(leaf, _)| geometry(p, leaf))?;
             Some((p.as_ref(), leaf, disp))
         })
+    }
+
+    /// The wide table whose scrollbar is under `at`: where it starts, and
+    /// where its thumb is held.
+    pub(super) fn table_bar_at(&self, at: Point<Pixels>) -> Option<(usize, Pixels)> {
+        let t = (self.wide.iter())
+            .find(|t| t.clip.contains(&at) && at.y >= t.clip.bottom() - px(TABLE_BAR))?;
+        let thumb = t.thumb();
+        Some((t.start, grab(at.x, thumb.left(), thumb.size.width)))
+    }
+
+    /// How far to scroll the wide table at `start` for its thumb, held
+    /// `grab` from its left, to be at `x`.
+    pub(super) fn table_x_for(&self, start: usize, x: Pixels, grab: Pixels) -> Option<f32> {
+        let t = self.wide.iter().find(|t| t.start == start)?;
+        let (w, len) = (t.clip.size.width, t.thumb().size.width);
+        let at = ((x - t.clip.left() - grab) / (w - len)).clamp(0., 1.);
+        Some(f32::from(t.max) * at)
     }
 
     /// What shows of the wide table at height `y`, if one is there.
@@ -263,8 +335,9 @@ struct Layout<'a> {
     table_x: &'a RefCell<HashMap<usize, f32>>,
     /// The source position whose table cell to scroll into view.
     follow: Option<usize>,
-    /// The wide tables laid out: where each starts and how far it scrolls.
-    wide: HashMap<At, (usize, Pixels)>,
+    /// The wide tables laid out: where each starts, how far it scrolls and
+    /// how far it is scrolled.
+    wide: HashMap<At, (usize, Pixels, Pixels)>,
 }
 
 impl Layout<'_> {
@@ -323,7 +396,7 @@ impl Layout<'_> {
         let max = wide.track - avail;
         x = x.clamp(px(0.), max);
         table_x.insert(start, f32::from(x));
-        self.wide.insert(at, (start, max));
+        self.wide.insert(at, (start, max, x));
         Some((wide.track, x))
     }
 }
@@ -584,11 +657,12 @@ impl Element for Viewport {
         for (a, top) in &placed {
             let (element, height) = layout.laid.remove(a).expect("laid out above");
             let at = Bounds::new(point(left, *top), size(width, height));
-            if let Some(&(start, max)) = layout.wide.get(a) {
+            if let Some(&(start, max, x)) = layout.wide.get(a) {
                 wide.push(WideTable {
                     start,
                     clip: at,
                     max,
+                    x,
                 });
             }
             blocks.push((element, at));
@@ -727,6 +801,11 @@ impl Element for Viewport {
                 }
             }
             let frame = self.frame.borrow();
+            // A wide table's bar: how much of it shows, and where.
+            for t in &frame.wide {
+                let bar = fill(t.thumb(), self.style.dim.opacity(0.5));
+                window.paint_quad(bar.corner_radii(px(2.)));
+            }
             for p in &frame.segments {
                 for block in &p.blocks {
                     if let Some((bounds, checked, _)) = task_box(&frame, p, block) {
