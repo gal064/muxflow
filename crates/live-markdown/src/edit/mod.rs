@@ -75,6 +75,11 @@ impl LiveDoc {
         self.doc.selection()
     }
 
+    /// Moves on with every change to the text.
+    pub fn revision(&self) -> u64 {
+        self.doc.revision()
+    }
+
     pub fn marked(&self) -> Option<Range<usize>> {
         self.marked.clone()
     }
@@ -475,6 +480,47 @@ impl LiveDoc {
         self.commit_composition();
         self.doc.redo();
         self.settle();
+    }
+
+    /// Selects a match of the find bar exactly, inside hidden markup too:
+    /// reveal follows the selection, as when CodeMirror's search selects one.
+    pub fn select_match(&mut self, range: Range<usize>) {
+        self.cell_typed_end = None;
+        self.missing = None;
+        self.commit_composition();
+        self.select_range(range);
+    }
+
+    /// The find bar's Replace: `text` written over `range` as given, in a
+    /// table cell too, as one undo step, with the caret after it.
+    pub fn replace(&mut self, range: Range<usize>, text: &str) {
+        self.cell_typed_end = None;
+        self.missing = None;
+        self.commit_composition();
+        let caret = range.start + text.len();
+        self.doc.replace(range, text, caret, EditKind::Other);
+        self.settle();
+    }
+
+    /// The find bar's Replace All: the source made `text` in one undo step.
+    /// The selection stays where it was outside the replaced stretch, and goes
+    /// to its start inside it (CodeMirror maps it through each replacement).
+    pub fn replace_all(&mut self, text: &str) {
+        self.cell_typed_end = None;
+        self.missing = None;
+        self.commit_composition();
+        let (start, old_end, new_end) = crate::doc::minimal_change(self.doc.text(), text);
+        let change = Change {
+            start,
+            old_end,
+            new_end,
+        };
+        let sel = self.doc.selection();
+        let after = Selection {
+            anchor: change.map(sel.anchor),
+            head: change.map(sel.head),
+        };
+        self.set_source(text, after);
     }
 
     /// Selects source bytes exactly, as the platform input handler names

@@ -7,11 +7,11 @@
 //! goes into the buffer as one replacement of the span it changed. An IME
 //! preedit is never handed over until it is committed.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range, rc::Rc};
 
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext, Context, Entity, EntityId, FocusHandle, Focusable,
-    Global, IntoElement, Render, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    AnyView, App, AppContext, Context, Entity, EntityId, Focusable, Global, IntoElement, Render,
+    StyleRefinement, Styled, Subscription, WeakEntity, Window,
 };
 use live_markdown::{
     doc::minimal_change,
@@ -19,7 +19,7 @@ use live_markdown::{
 };
 
 use crate::{
-    editor::{Document, LiveMarkdown},
+    editor::{Document, LiveFind, LiveMarkdown, LiveShown},
     fonts,
 };
 
@@ -33,7 +33,7 @@ impl Global for Surfaces {}
 /// The seam the editor draws Live through.
 pub fn live_markdown() -> LiveMarkdown {
     LiveMarkdown {
-        surface: std::rc::Rc::new(surface),
+        surface: Rc::new(surface),
         limit_bytes: live_markdown::LIMIT_BYTES,
     }
 }
@@ -44,14 +44,21 @@ fn surface(
     document: &Entity<Document>,
     window: &mut Window,
     cx: &mut App,
-) -> (AnyElement, FocusHandle) {
+) -> LiveShown {
     let surface = kept(document, window, cx);
     // The tab record is replaced as the tab is moved; links resolve against its session.
     surface.update(cx, |surface, _| {
         surface.session_id = record.session_id.clone()
     });
-    let focus = surface.read(cx).view.focus_handle(cx);
-    (surface.into_any_element(), focus)
+    let (focus, find) = {
+        let surface = surface.read(cx);
+        (surface.view.focus_handle(cx), surface.find.clone())
+    };
+    LiveShown {
+        element: surface.into_any_element(),
+        focus,
+        find,
+    }
 }
 
 /// The document's Live surface, made the first time it is shown.
@@ -102,6 +109,7 @@ struct Surface {
     /// Weak: the surface is kept until the document is released.
     document: WeakEntity<Document>,
     view: Entity<LiveView>,
+    find: Rc<dyn LiveFind>,
     /// The document revision the view shows.
     synced: u64,
     /// The tab's session, which a followed link must still be in.
@@ -135,6 +143,7 @@ impl Surface {
             session_id: String::new(),
             crlf: buffer.contains('\r'),
             document: document.downgrade(),
+            find: Rc::new(Find(view.clone())),
             view,
             _subscriptions: subscriptions,
         }
@@ -226,6 +235,43 @@ impl Surface {
         } else {
             self.crlf = false;
         }
+    }
+}
+
+/// The view as the tab's find bar drives it.
+struct Find(Entity<LiveView>);
+
+impl LiveFind for Find {
+    fn text(&self, cx: &App) -> String {
+        self.0.read(cx).text().to_owned()
+    }
+
+    fn revision(&self, cx: &App) -> u64 {
+        self.0.read(cx).revision()
+    }
+
+    fn selection(&self, cx: &App) -> Range<usize> {
+        self.0.read(cx).selection().range()
+    }
+
+    fn select(&self, range: Range<usize>, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.select_match(range, cx));
+    }
+
+    fn replace(&self, range: Range<usize>, with: &str, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.replace(range, with, cx));
+    }
+
+    fn replace_all(&self, text: &str, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.replace_all(text, cx));
+    }
+
+    fn highlight(&self, matcher: Option<regex::Regex>, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.set_find(matcher, cx));
+    }
+
+    fn observe(&self, changed: Box<dyn Fn(&mut App)>, cx: &mut App) -> Subscription {
+        cx.observe(&self.0, move |_, cx| changed(cx))
     }
 }
 
