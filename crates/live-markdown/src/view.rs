@@ -9,6 +9,7 @@
 //! when told ([`LiveEvent::Edited`], [`LiveView::take_edited`]).
 
 mod viewport;
+mod wide;
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -207,6 +208,9 @@ pub struct LiveView {
     selecting: bool,
     /// The caret moved by key: scroll it into view at the next layout.
     reveal: Rc<Cell<bool>>,
+    /// The source position whose cell a wide table scrolls to show at the
+    /// next layout.
+    follow: Option<usize>,
     scroll: LiveScroll,
     /// The find bar's matcher while it is open: its matches are marked.
     find: Option<Rc<Regex>>,
@@ -239,6 +243,7 @@ impl LiveView {
             goal_x: None,
             selecting: false,
             reveal: Rc::default(),
+            follow: None,
             scroll: LiveScroll::default(),
             find: None,
             _subscriptions: subscriptions,
@@ -313,10 +318,22 @@ impl LiveView {
         }
     }
 
+    /// Scrolls the wide table holding source position `pos` sideways until
+    /// that cell shows, at the next layout, as the caret's cell follows the
+    /// caret. It does not scroll the page; a caret move in the same update
+    /// takes over.
+    pub fn reveal_in_table(&mut self, pos: usize, cx: &mut Context<Self>) {
+        self.follow = Some(pos);
+        cx.notify();
+    }
+
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.goal_x = None;
         self.frame.borrow_mut().wrap_start = None;
         self.reveal.set(true);
+        // The pointer too: a click on a cell half shown brings it in, as
+        // focusing Tauri's cell does.
+        self.follow = Some(self.live.selection().head);
         // Also after a commit by `unmark_text`, which changes no text.
         if self.live.edited() {
             cx.emit(LiveEvent::Edited);
@@ -358,6 +375,14 @@ impl LiveView {
                 continue;
             };
             let bounds = geometry.bounds();
+            // A wide table's cell scrolled out of sight takes no click; one
+            // showing only its padding (`px_3`) still does.
+            let pad = px(12.);
+            if let Some(clip) = frame.clip_at(bounds.center().y)
+                && (bounds.right() + pad <= clip.left() || bounds.left() - pad >= clip.right())
+            {
+                continue;
+            }
             let distance = |at: Pixels, low: Pixels, high: Pixels| {
                 if at < low {
                     low - at
@@ -699,7 +724,9 @@ fn caret_origin(
 /// gpui-base draws each cell as wide as its column's widest text plus
 /// padding (`px_3`, 7px) and shares a table's spare width out to the
 /// columns in proportion to those widths, beside or around the cell as the
-/// column aligns. `table` is the table's frame, the width of the page.
+/// column aligns. `table` is the table's frame, the width of the page; a
+/// wide table's is where it shows, and its columns sit at their floors with
+/// no spare width.
 fn cell_ring(
     frame: &Frame,
     head: usize,
@@ -725,6 +752,7 @@ fn cell_ring(
         .map(|k| extent(&|c| c.col == k).map(|b| (b.left() - pad, b.right() + pad)))
         .collect::<Option<Vec<_>>>()?;
     let row = extent(&|c| c.row == cell.row)?;
+    let table = frame.clip_at(row.center().y).unwrap_or(table);
     // Inside the frame's 1px border; a 1px divider follows each column.
     let (left, right) = (table.left() + px(1.), table.right() - px(1.));
     let content = boxes.iter().fold(px(0.), |sum, (l, r)| sum + (*r - *l));
@@ -740,10 +768,13 @@ fn cell_ring(
             x += width + px(1.);
         }
     }
-    Some(Bounds::from_corners(
-        point(x0.max(left), row.top() - px(7.)),
-        point(x1.min(right), row.bottom() + px(7.)),
-    ))
+    let (x0, x1) = (x0.max(left), x1.min(right));
+    (x0 < x1).then(|| {
+        Bounds::from_corners(
+            point(x0, row.top() - px(7.)),
+            point(x1, row.bottom() + px(7.)),
+        )
+    })
 }
 
 fn text_mark(style: &Style) -> TextMark {
@@ -830,6 +861,8 @@ fn heading_padding(level: u8) -> (f32, f32) {
     }
 }
 
+/// `wide.rs` measures tables as these draw them: a change to the table's,
+/// its head's or its cells' text, or to inline code, must be made there too.
 fn text_style(s: &LiveStyle) -> TextViewStyle {
     let strong = s.ink_strong;
     TextViewStyle::default()
@@ -860,12 +893,15 @@ fn text_style(s: &LiveStyle) -> TextViewStyle {
         .with_dark(s.dark)
 }
 
+/// `wide` is a wide table's width and how far it is scrolled.
+#[allow(clippy::too_many_arguments)]
 fn render_block(
     ix: usize,
     block: &Block,
     p: &Projection,
     s: &LiveStyle,
     rcx: &RenderContext,
+    wide: Option<(Pixels, Pixels)>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -963,6 +999,9 @@ fn render_block(
                 .pb(px(bottom * size))
                 .child(element)
         }
+        BlockKind::Table { .. } if let Some((track, x)) = wide => div()
+            .overflow_hidden()
+            .child(div().w(track).ml(-x).child(element)),
         _ => div().child(element),
     };
     // A blank line keeps its height, as an empty line does in the source.
@@ -1032,6 +1071,8 @@ impl Render for LiveView {
             reveal: self.reveal.clone(),
             frame: self.frame.clone(),
             scroll: self.scroll.clone(),
+            table_x: self.live.table_x(),
+            follow: self.follow.take(),
             view: cx.entity(),
             focus: self.focus.clone(),
         };
