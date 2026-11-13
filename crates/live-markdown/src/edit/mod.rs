@@ -2,12 +2,14 @@
 //! caret motion across hidden ranges, typing, Backspace and Delete across
 //! markers, IME preedit, undo. Lists and tables have their own files.
 //!
-//! The source is parsed once per change and the drawn projection is kept until
-//! the text or the selection changes. A question about one caret position (is
-//! it a stop, what marker is before it) projects only the blocks around it.
+//! The tree is parsed again only around each change (`reparse`), and what is
+//! drawn is projected again only where an edit or the selection reaches
+//! (`drawn`). A question about one caret position (is it a stop, what marker
+//! is before it) projects only the blocks around it.
 
 mod changes;
 mod commands;
+mod drawn;
 mod list;
 mod motion;
 mod table;
@@ -15,30 +17,21 @@ mod table;
 use std::ops::Range;
 use std::rc::Rc;
 
-use markdown::mdast::Node;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::doc::{Document, EditKind, Selection};
-use crate::projection::{Active, BlockKind, Projection, parse, project, project_near};
+use crate::doc::{Change, Document, EditKind, Selection};
+use crate::projection::{Active, BlockKind, Projection, project, project_children, window};
+use crate::reparse::Tree;
+
+pub use drawn::Segment;
 
 pub use table::TableKey;
 
-/// What the drawn projection was made for.
-#[derive(Clone, PartialEq)]
-struct ProjectionKey {
-    revision: u64,
-    selection: Selection,
-    focused: bool,
-    marked: Option<Range<usize>>,
-    cell_typed_end: Option<usize>,
-    missing: Option<(usize, usize)>,
-    read_only: bool,
-}
-
 pub struct LiveDoc {
     doc: Document,
-    ast: Node,
-    ast_revision: u64,
+    tree: Tree,
+    /// The revision the tree was brought up to.
+    parsed: u64,
     /// Markers reveal only while the editor has focus.
     pub focused: bool,
     /// The IME preedit, which lives in the source until it is committed.
@@ -49,23 +42,28 @@ pub struct LiveDoc {
     missing: Option<table::Missing>,
     /// Tables take no caret and no edit.
     read_only: bool,
-    drawn: Option<(ProjectionKey, Rc<Projection>)>,
+    drawn: drawn::Drawn,
+    /// For the next projected leaf: unique among everything drawn.
+    next_key: u64,
+    /// For the next segment an edit reaches.
+    next_id: u64,
 }
 
 impl LiveDoc {
     pub fn new(text: impl Into<String>) -> Self {
         let doc = Document::new(text);
-        let ast = parse(doc.text());
         Self {
-            ast_revision: doc.revision(),
+            tree: Tree::new(doc.text()),
+            parsed: doc.revision(),
             doc,
-            ast,
             focused: true,
             marked: None,
             cell_typed_end: None,
             missing: None,
             read_only: false,
-            drawn: None,
+            drawn: drawn::Drawn::default(),
+            next_key: 1,
+            next_id: 0,
         }
     }
 
@@ -88,8 +86,11 @@ impl LiveDoc {
     }
 
     /// [`Self::edited`], and the host takes the text now.
-    pub fn take_edited(&mut self) -> bool {
-        self.marked.is_none() && self.doc.take_edited()
+    pub fn take_edited(&mut self) -> Option<Change> {
+        if self.marked.is_some() {
+            return None;
+        }
+        self.doc.take_edited()
     }
 
     /// The text changed outside the editor. An open composition is dropped
@@ -100,36 +101,22 @@ impl LiveDoc {
         self.doc.reset_text(text);
     }
 
-    /// The projection to draw, made once per text and selection.
+    /// The whole document as it is drawn, projected afresh: for tests and
+    /// tools. The view draws [`Self::segments`].
     pub fn projection(&mut self) -> Rc<Projection> {
         self.refresh();
-        let key = ProjectionKey {
-            revision: self.doc.revision(),
-            selection: self.doc.selection(),
-            focused: self.focused,
-            marked: self.marked.clone(),
-            cell_typed_end: self.cell_typed_end,
-            missing: self.missing(),
-            read_only: self.read_only,
-        };
-        if let Some((drawn, projection)) = &self.drawn
-            && *drawn == key
-        {
-            return projection.clone();
-        }
-        let projection = Rc::new(project(
-            self.doc.text(),
-            &self.ast,
-            &self.active(key.selection),
-        ));
-        self.drawn = Some((key, projection.clone()));
-        projection
+        let active = self.active(self.doc.selection());
+        Rc::new(project(self.doc.text(), self.tree.ast(), &active))
     }
 
     fn refresh(&mut self) {
-        if self.ast_revision != self.doc.revision() {
-            self.ast = parse(self.doc.text());
-            self.ast_revision = self.doc.revision();
+        if self.parsed == self.doc.revision() {
+            return;
+        }
+        self.parsed = self.doc.revision();
+        if let Some(change) = self.doc.take_change() {
+            let splice = self.tree.update(self.doc.text(), change);
+            self.drawn.splice(&splice, change);
         }
     }
 
@@ -150,7 +137,10 @@ impl LiveDoc {
     /// The blocks around `around`, as a selection `sel` would draw them.
     fn near(&mut self, sel: Selection, around: Range<usize>) -> Projection {
         self.refresh();
-        project_near(self.doc.text(), &self.ast, &self.active(sel), around)
+        let active = self.active(sel);
+        let range = window(self.tree.root(), &around);
+        let ast = self.tree.settled(range.clone());
+        project_children(self.doc.text(), ast, &active, range)
     }
 
     /// The blocks around the caret, as they are drawn now.
