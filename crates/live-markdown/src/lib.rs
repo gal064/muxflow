@@ -6,6 +6,7 @@
 
 pub mod doc;
 pub mod edit;
+pub mod find;
 pub mod link;
 mod lists;
 pub mod projection;

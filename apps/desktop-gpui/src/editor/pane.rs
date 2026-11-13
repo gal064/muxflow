@@ -5,6 +5,7 @@
 
 use std::{
     any::Any,
+    cell::Cell,
     ops::Range,
     rc::Rc,
     sync::Arc,
@@ -14,11 +15,12 @@ use std::{
 use desktop_core::app_state::{AppTabKind, AppTabRecord, AppTabViewMode};
 use gpui_kit::{
     AnyElement, App, AppContext, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    Image, ImageFormat, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, Role,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task, Window,
-    actions,
+    Image, ImageFormat, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render,
+    Role, SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task,
+    Window, actions,
     assets::IconName,
     base::TestSupportExt,
+    canvas,
     component::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -35,7 +37,7 @@ use gpui_kit::{
 };
 
 use super::{
-    Root, WatchTarget, Watcher,
+    LiveFind, Root, WatchTarget, Watcher,
     document::{Content, Document, DocumentEvent, Live},
     find::{self, Query},
     io::{BinaryFile, FileIo, IMAGE_PREVIEW_LIMIT_BYTES},
@@ -102,6 +104,8 @@ pub fn init(cx: &mut App) {
 
 /// The find widget's state while it is open.
 struct FindBar {
+    /// What it searches, for as long as it is open.
+    target: Target,
     query: Entity<InputState>,
     replacement: Entity<InputState>,
     replacing: bool,
@@ -110,11 +114,86 @@ struct FindBar {
     searched: Option<(u64, Query)>,
     matches: Vec<Range<usize>>,
     error: Option<String>,
+    /// The source editor's marks; the Live view marks its own.
     highlights: Option<RangeDecorationCollection>,
     /// The match the selection is on, marked apart from the others: the
     /// editor paints its selection only while it has focus.
     current: Option<(Option<Range<usize>>, RangeDecorationCollection)>,
+    /// How tall it was drawn, for the Live view to reveal matches below it.
+    height: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the find bar searches: the source editor, or the Live view through
+/// its seam. Offsets are each one's own.
+#[derive(Clone)]
+enum Target {
+    Source(Entity<EditorState>),
+    Live(FocusHandle, Rc<dyn LiveFind>),
+}
+
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Source(a), Self::Source(b)) => a == b,
+            (Self::Live(_, a), Self::Live(_, b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Target {
+    fn text(&self, cx: &App) -> String {
+        match self {
+            Self::Source(editor) => editor.read(cx).text().to_string(),
+            Self::Live(_, live) => live.text(cx),
+        }
+    }
+
+    fn selection(&self, cx: &App) -> Range<usize> {
+        match self {
+            Self::Source(editor) => editor.read(cx).selected_range(),
+            Self::Live(_, live) => live.selection(cx),
+        }
+    }
+
+    fn select(&self, range: Range<usize>, cx: &mut App) {
+        match self {
+            Self::Source(editor) => {
+                editor.update(cx, |editor, cx| editor.set_selected_range(range, cx))
+            }
+            Self::Live(_, live) => live.select(range, cx),
+        }
+    }
+
+    fn replace(&self, range: Range<usize>, with: String, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Source(editor) => editor.update(cx, |editor, cx| {
+                editor.set_selected_range(range, cx);
+                editor.replace(with, window, cx);
+            }),
+            Self::Live(_, live) => live.replace(range, &with, cx),
+        }
+    }
+
+    /// One edit, so one undo puts it all back.
+    fn replace_all(&self, text: String, len: usize, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Source(editor) => editor.update(cx, |editor, cx| {
+                editor.set_selected_range(0..len, cx);
+                editor.replace(text, window, cx);
+                editor.set_selected_range(0..0, cx);
+            }),
+            Self::Live(_, live) => live.replace_all(&text, cx),
+        }
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Source(editor) => editor.update(cx, |editor, cx| editor.focus(window, cx)),
+            Self::Live(focus, _) => window.focus(focus, cx),
+        }
+    }
 }
 
 struct GoTo {
@@ -133,8 +212,9 @@ pub struct DocumentPane {
     loading_wake: Option<Task<()>>,
     /// The decoded image preview, kept while the file's generation is shown.
     image: Option<(String, Arc<Image>)>,
-    /// The Live view's keyboard, while the tab shows it.
-    live: Option<FocusHandle>,
+    /// The Live view's keyboard and what find searches in it, while the
+    /// tab shows it.
+    live: Option<(FocusHandle, Rc<dyn LiveFind>)>,
     find: Option<FindBar>,
     go_to: Option<GoTo>,
     /// The last query and toggles, for the next time find opens.
@@ -223,10 +303,13 @@ impl DocumentPane {
 
     /// Where typing goes: the Live view while it is shown, else the editor.
     pub(super) fn input_focus(&self, cx: &App) -> Option<FocusHandle> {
-        self.live.clone().or_else(|| {
-            self.editor(cx)
-                .map(|editor| editor.read(cx).focus_handle(cx))
-        })
+        self.live
+            .as_ref()
+            .map(|(focus, _)| focus.clone())
+            .or_else(|| {
+                self.editor(cx)
+                    .map(|editor| editor.read(cx).focus_handle(cx))
+            })
     }
 
     /// The calm save status, and a wake-up for when it may change on its own.
@@ -321,23 +404,44 @@ impl DocumentPane {
         )
     }
 
+    /// What find searches: the Live view while it is shown, else the source
+    /// editor unless the preview hides it.
+    fn target(&self, cx: &App) -> Option<Target> {
+        if let Some((focus, live)) = &self.live {
+            return Some(Target::Live(focus.clone(), live.clone()));
+        }
+        self.editor(cx)
+            .filter(|_| !self.source_hidden(cx))
+            .map(Target::Source)
+    }
+
+    fn query(&self, cx: &App) -> Option<Query> {
+        let find = self.find.as_ref()?;
+        Some(Query {
+            text: find.query.read(cx).value().to_string(),
+            ..find.toggles.clone()
+        })
+    }
+
     fn open_find(&mut self, replacing: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor(cx).filter(|_| !self.source_hidden(cx)) else {
+        let Some(target) = self.target(cx) else {
             return;
         };
         self.go_to = None;
         // What is selected seeds the query, unless it spans lines.
         let selected = {
-            let editor = editor.read(cx);
-            let range = editor.selected_range();
-            let text = editor.text().slice(range).to_string();
+            let range = target.selection(cx);
+            let text = target.text(cx)[range].to_owned();
             (!text.is_empty() && !text.contains('\n')).then_some(text)
         };
         let writable = self.document.read(cx).can_write(cx);
+        if self.find.as_ref().is_some_and(|find| find.target != target) {
+            self.drop_find(cx);
+        }
         if self.find.is_none() {
             let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
             let replacement = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
-            let subscriptions = vec![
+            let mut subscriptions = vec![
                 cx.subscribe_in(&query, window, |this, _, event: &InputEvent, window, cx| {
                     match event {
                         InputEvent::Change => this.typed(cx),
@@ -360,16 +464,28 @@ impl DocumentPane {
                         }
                     },
                 ),
-                // The count follows the selection as the user moves through
-                // the buffer, and the matches follow its edits.
-                cx.observe(&editor, |_, _, cx| cx.notify()),
             ];
+            // The count follows the selection as the user moves through
+            // the buffer, and the matches follow its edits.
+            subscriptions.push(match &target {
+                Target::Source(editor) => cx.observe(editor, |_, _, cx| cx.notify()),
+                Target::Live(_, live) => {
+                    let pane = cx.entity().downgrade();
+                    live.observe(
+                        Box::new(move |cx| {
+                            pane.update(cx, |_, cx| cx.notify()).ok();
+                        }),
+                        cx,
+                    )
+                }
+            });
             // Find opens on the query it closed with, as Monaco's does.
             let remembered = self.remembered.clone();
             query.update(cx, |input, cx| {
                 input.set_value(remembered.text.clone(), window, cx)
             });
             self.find = Some(FindBar {
+                target,
                 query,
                 replacement,
                 replacing: false,
@@ -382,6 +498,7 @@ impl DocumentPane {
                 error: None,
                 highlights: None,
                 current: None,
+                height: Rc::default(),
                 _subscriptions: subscriptions,
             });
             self.refresh_matches(cx);
@@ -414,82 +531,110 @@ impl DocumentPane {
         cx.notify();
     }
 
-    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(find) = self.find.take() {
-            self.remembered = Query {
-                text: find.query.read(cx).value().to_string(),
-                ..find.toggles
-            };
-            if let Some(highlights) = find.highlights {
-                highlights.dispose(cx);
-            }
-            if let Some((_, current)) = find.current {
-                current.dispose(cx);
-            }
+    /// Closes the bar, keeping its query for the next time, and clears its
+    /// marks.
+    fn drop_find(&mut self, cx: &mut Context<Self>) -> Option<Target> {
+        let find = self.find.take()?;
+        self.remembered = Query {
+            text: find.query.read(cx).value().to_string(),
+            ..find.toggles
+        };
+        if let Some(highlights) = find.highlights {
+            highlights.dispose(cx);
         }
-        if let Some(editor) = self.editor(cx) {
-            editor.update(cx, |editor, cx| editor.focus(window, cx));
+        if let Some((_, current)) = find.current {
+            current.dispose(cx);
+        }
+        if let Target::Live(_, live) = &find.target {
+            live.highlight(None, cx);
+            live.set_top_inset(Pixels::ZERO, cx);
         }
         cx.notify();
+        Some(find.target)
     }
 
-    /// The query as typed with the toggles, matched against the buffer as it
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = self.drop_find(cx).or_else(|| self.target(cx)) {
+            target.focus(window, cx);
+        }
+    }
+
+    /// The query as typed with the toggles, matched against the text as it
     /// stands, and highlighted.
     fn refresh_matches(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor(cx) else {
+        let Some(query) = self.query(cx) else {
             return;
         };
-        let revision = self.document.read(cx).revision();
         let Some(find) = &mut self.find else {
             return;
         };
-        let query = Query {
-            text: find.query.read(cx).value().to_string(),
-            ..find.toggles.clone()
+        let revision = match &find.target {
+            Target::Source(_) => self.document.read(cx).revision(),
+            Target::Live(_, live) => live.revision(cx),
         };
         if find.searched.as_ref() == Some(&(revision, query.clone())) {
             return;
         }
+        // The Live view finds its marks in the text it draws: it needs the
+        // matcher again only for a new query, not after each edit.
+        let new_query = find
+            .searched
+            .as_ref()
+            .is_none_or(|(_, searched)| *searched != query);
         find.searched = Some((revision, query.clone()));
-        let (matches, error) = match query.compile() {
-            None => (Vec::new(), None),
-            Some(Err(error)) => (Vec::new(), Some(error)),
+        let (matches, error, matcher) = match query.compile() {
+            None => (Vec::new(), None, None),
+            Some(Err(error)) => (Vec::new(), Some(error), None),
             Some(Ok(matcher)) => (
-                find::matches(&matcher, &editor.read(cx).text().to_string()),
+                find::matches(&matcher, &find.target.text(cx)),
                 None,
+                Some(matcher),
             ),
         };
-        let palette = theme::palette(cx);
-        // Monaco's amber match wash, so the current match, which also carries
-        // the selection's accent wash, reads apart from the others.
-        let wash = Hsla::from(palette.warn).opacity(0.3);
-        let decorations: Vec<RangeDecoration> = matches
-            .iter()
-            .take(find::SEARCH_COUNT_LIMIT)
-            .map(|found| {
-                RangeDecoration::new(found.clone())
-                    .with_style(RangeDecorationStyle::Fill)
-                    .with_color(wash)
-            })
-            .collect();
-        match &find.highlights {
-            Some(highlights) => highlights.set(decorations, cx),
-            None => {
-                find.highlights = Some(editor.update(cx, |editor, cx| {
-                    editor.create_range_decorations_collection(decorations, cx)
-                }));
+        match &find.target {
+            Target::Source(editor) => {
+                let palette = theme::palette(cx);
+                // Monaco's amber match wash, so the current match, which also
+                // carries the selection's accent wash, reads apart from the
+                // others.
+                let wash = Hsla::from(palette.warn).opacity(0.3);
+                let decorations: Vec<RangeDecoration> = matches
+                    .iter()
+                    .take(find::SEARCH_COUNT_LIMIT)
+                    .map(|found| {
+                        RangeDecoration::new(found.clone())
+                            .with_style(RangeDecorationStyle::Fill)
+                            .with_color(wash)
+                    })
+                    .collect();
+                match &find.highlights {
+                    Some(highlights) => highlights.set(decorations, cx),
+                    None => {
+                        find.highlights = Some(editor.update(cx, |editor, cx| {
+                            editor.create_range_decorations_collection(decorations, cx)
+                        }));
+                    }
+                }
             }
+            // The view marks what it draws itself, as CodeMirror marks only
+            // what is on screen, past the count's limit too.
+            Target::Live(_, live) if new_query => live.highlight(matcher, cx),
+            Target::Live(..) => {}
         }
         find.matches = matches;
         find.error = error;
     }
 
-    /// Marks the match the selection is on, when that changed.
-    fn mark_current(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
-        let selection = editor.read(cx).selected_range();
+    /// Marks the match the source editor's selection is on, when that
+    /// changed. The Live view marks its own.
+    fn mark_current(&mut self, cx: &mut Context<Self>) {
         let Some(find) = &mut self.find else {
             return;
         };
+        let Target::Source(editor) = &find.target else {
+            return;
+        };
+        let selection = editor.read(cx).selected_range();
         let on = find
             .matches
             .iter()
@@ -530,18 +675,18 @@ impl DocumentPane {
     /// starts, as Monaco does.
     fn typed(&mut self, cx: &mut Context<Self>) {
         self.refresh_matches(cx);
-        let Some(editor) = self.editor(cx) else {
+        let Some(find) = &self.find else {
             return;
         };
-        let from = editor.read(cx).selected_range().start;
+        let from = find.target.selection(cx).start;
         self.select_match(from, true, cx);
     }
 
     fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor(cx) else {
+        let Some(find) = &self.find else {
             return;
         };
-        let selection = editor.read(cx).selected_range();
+        let selection = find.target.selection(cx);
         let at = if forward {
             selection.end
         } else {
@@ -552,24 +697,20 @@ impl DocumentPane {
 
     fn select_match(&mut self, at: usize, forward: bool, cx: &mut Context<Self>) {
         self.refresh_matches(cx);
-        let (Some(editor), Some(find)) = (self.editor(cx), &self.find) else {
+        let (Some(find), Some(query)) = (&self.find, self.query(cx)) else {
             return;
-        };
-        let query = Query {
-            text: find.query.read(cx).value().to_string(),
-            ..find.toggles.clone()
         };
         let Some(Ok(matcher)) = query.compile() else {
             return;
         };
-        let text = editor.read(cx).text().to_string();
+        let text = find.target.text(cx);
         let found = if forward {
             find::next(&matcher, &text, at)
         } else {
             find::previous(&matcher, &text, at)
         };
         if let Some(found) = found {
-            editor.update(cx, |editor, cx| editor.set_selected_range(found, cx));
+            find.target.clone().select(found, cx);
         }
         cx.notify();
     }
@@ -582,24 +723,18 @@ impl DocumentPane {
     }
 
     fn replace_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(editor), Some(find)) = (self.editor(cx), &self.find) else {
+        let (Some(find), Some(query)) = (&self.find, self.query(cx)) else {
             return;
         };
         if !self.document.read(cx).can_write(cx) {
             return;
         }
-        let query = Query {
-            text: find.query.read(cx).value().to_string(),
-            ..find.toggles.clone()
-        };
         let with = find.replacement.read(cx).value().to_string();
         let Some(Ok(matcher)) = query.compile() else {
             return;
         };
-        let (text, selection) = {
-            let editor = editor.read(cx);
-            (editor.text().to_string(), editor.selected_range())
-        };
+        let target = find.target.clone();
+        let (text, selection) = (target.text(cx), target.selection(cx));
         // The match under the selection is replaced; otherwise the first
         // press only finds the next one.
         // Asked of the selection itself: the counted matches stop at a limit.
@@ -610,10 +745,7 @@ impl DocumentPane {
         if on_match {
             let replaced = find::replacement(&matcher, &query, &text, &selection, &with);
             let end = selection.start + replaced.len();
-            editor.update(cx, |editor, cx| {
-                editor.set_selected_range(selection, cx);
-                editor.replace(replaced, window, cx);
-            });
+            target.replace(selection, replaced, window, cx);
             self.select_match(end, true, cx);
         } else {
             self.select_match(selection.start, true, cx);
@@ -621,31 +753,23 @@ impl DocumentPane {
     }
 
     fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(editor), Some(find)) = (self.editor(cx), &self.find) else {
+        let (Some(find), Some(query)) = (&self.find, self.query(cx)) else {
             return;
         };
         if !self.document.read(cx).can_write(cx) {
             return;
         }
-        let query = Query {
-            text: find.query.read(cx).value().to_string(),
-            ..find.toggles.clone()
-        };
         let with = find.replacement.read(cx).value().to_string();
         let Some(Ok(matcher)) = query.compile() else {
             return;
         };
-        let text = editor.read(cx).text().to_string();
+        let target = find.target.clone();
+        let text = target.text(cx);
         let (replaced, count) = find::replace_all(&matcher, &query, &text, &with);
         if count == 0 {
             return;
         }
-        // One edit over the whole buffer, so one undo puts it all back.
-        editor.update(cx, |editor, cx| {
-            editor.set_selected_range(0..text.len(), cx);
-            editor.replace(replaced, window, cx);
-            editor.set_selected_range(0..0, cx);
-        });
+        target.replace_all(replaced, text.len(), window, cx);
         cx.notify();
     }
 
@@ -1021,12 +1145,13 @@ impl DocumentPane {
             .map(|live| (live.surface)(&self.record, &self.document, window, cx));
         let was_live = std::mem::replace(
             &mut self.live,
-            live.as_ref().map(|(_, focus)| focus.clone()),
-        );
+            (live.as_ref()).map(|shown| (shown.focus.clone(), shown.find.clone())),
+        )
+        .map(|(focus, _)| focus);
         let typing = editor
             .as_ref()
             .map(|editor| editor.read(cx).focus_handle(cx))
-            .or_else(|| self.live.clone());
+            .or_else(|| self.live.as_ref().map(|(focus, _)| focus.clone()));
         // Focus given to the tab before its editor existed goes on to it.
         if let Some(target) = typing.clone()
             && self.focus.is_focused(window)
@@ -1044,11 +1169,26 @@ impl DocumentPane {
             let target = typing.clone().unwrap_or_else(|| self.focus.clone());
             window.defer(cx, move |window, cx| window.focus(&target, cx));
         }
+        // A bar opened on a view the tab now shows another in place of closes;
+        // under the preview it waits, as the source editor's always has.
+        let target = self.target(cx);
+        if let (Some(find), Some(target)) = (&self.find, &target)
+            && find.target != *target
+        {
+            self.drop_find(cx);
+        }
         if self.find.is_some() {
             self.refresh_matches(cx);
         }
+        let mut find_bar = self.find_bar(can_write, cx);
+        // As drawn last frame: the Live view reveals a match below the bar.
+        if let Some(find) = &self.find
+            && let Target::Live(_, live) = &find.target
+        {
+            live.set_top_inset(find.height.get(), cx);
+        }
         let source = editor.map(|editor| {
-            let find_bar = self.find_bar(&editor, can_write, cx);
+            let find_bar = find_bar.take();
             let go_to = self.go_to_box(&editor, cx);
             div()
                 .id("editor-host")
@@ -1069,14 +1209,16 @@ impl DocumentPane {
                 .children(find_bar)
                 .children(go_to)
         });
-        let live = live.map(|(element, _)| {
+        let live = live.map(|shown| {
             div()
                 .id("live-markdown-host")
+                .relative()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .overflow_hidden()
-                .child(element)
+                .child(shown.element)
+                .children(find_bar.take())
         });
         let preview = matches!(mode, AppTabViewMode::Preview | AppTabViewMode::Split)
             .then(|| super::preview(cx))
@@ -1117,16 +1259,12 @@ impl DocumentPane {
             )
     }
 
-    fn find_bar(
-        &mut self,
-        editor: &Entity<EditorState>,
-        can_write: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn find_bar(&mut self, can_write: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let palette = theme::palette(cx);
-        self.mark_current(editor, cx);
+        self.mark_current(cx);
         let find = self.find.as_ref()?;
-        let selection = editor.read(cx).selected_range();
+        let height = find.height.clone();
+        let selection = find.target.selection(cx);
         let has_query = !find.query.read(cx).value().is_empty();
         let label = match &find.error {
             Some(_) => "Invalid pattern".to_owned(),
@@ -1271,6 +1409,8 @@ impl DocumentPane {
         }));
         let widget = h_flex()
             .id("find-widget")
+            // Over the Live view, whose own mouse-down would take the click.
+            .occlude()
             .key_context(FIELD_CONTEXT)
             .role(Role::Search)
             .aria_label("Find")
@@ -1311,6 +1451,14 @@ impl DocumentPane {
                 .flex()
                 .justify_end()
                 .child(widget)
+                .child(
+                    canvas(
+                        move |bounds, _, _| height.set(bounds.size.height),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
                 .into_any_element(),
         )
     }

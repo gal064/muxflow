@@ -37,8 +37,25 @@ the document.
 | `view` | The GPUI view. The only module that uses GPUI types |
 | `view/viewport.rs` | Draws only the blocks on screen: the scroll anchor, the height estimates, the scrollbar |
 | `view/wide.rs` | A table wider than its column: the width it is drawn at, from its columns' floors |
+| `find` | What the view marks where it draws: the find bar's matches and the selection's other occurrences, as CodeMirror's search and `highlightSelectionMatches` |
 
-A `find` module (⌘F) goes beside these, at `src/find.rs`.
+## Find
+
+Ctrl+F (⌘F) opens the app's find bar, the one the source editor has, over
+the Live view: the host matches, counts, steps and replaces through
+`LiveView::select_match`, `replace` and `replace_all` (each one undo step),
+and hands the view its matcher to mark. The view searches only the blocks it
+draws, so marks cost nothing for the rest of a large file and are right on
+any block drawn later. A match in syntax hidden while the bar has focus (a
+link's URL) is counted and selected but not marked, as in Tauri; where the
+hidden markup starts is scrolled into view, and the syntax shows once the
+view has focus again. While the bar is open, a match is revealed below it (the
+host gives its height, `LiveView::set_top_inset`), and one in a wide table
+scrolls the table sideways to it. At 1 MiB of prose, opening find on a common word (counting to
+the limit, selecting, marking, two frames) takes about 7 ms, a step about
+3.5 ms (p95) and a jump to a block never drawn about 10 ms; a key typed with
+the bar open costs as one typed without it, plus a count (`--find` in the
+benchmark below).
 
 A change parses again only a window of top-level blocks around it, and only
 the blocks a change or the selection reaches are projected again. The view
@@ -59,8 +76,7 @@ column floor (about 11 columns at full width) it scrolls sideways inside its
 frame (`view/wide.rs`): it is drawn at the width of its columns' floors and
 moved inside the column by a sideways wheel or swipe, or Shift and the wheel.
 The caret's cell is brought into view whenever the caret moves or the view
-edits the text, and `LiveView::reveal_in_table` does the same for any source
-position. Each table's scroll is kept in `LiveDoc` by where the table starts,
+edits the text, so a match the find bar selects shows too. Each table's scroll is kept in `LiveDoc` by where the table starts,
 so it moves with the table on an edit, and is dropped with the table; a
 change that spans the table's start (an outside change above and below it)
 scrolls it back to its left edge. No scrollbar is drawn under it, as
