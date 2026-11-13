@@ -91,10 +91,7 @@ impl TerminalPane {
         let subscriptions = vec![
             cx.on_focus(&focus, window, Self::focus_changed),
             cx.on_blur(&focus, window, Self::focus_changed),
-            cx.observe_window_activation(window, |pane, window, cx| {
-                input::report_focus(pane, window, cx);
-                cx.notify();
-            }),
+            cx.observe_window_activation(window, Self::focus_changed),
             // A row's colors are resolved when it is built.
             cx.observe_global::<theme::Appearance>(|pane, cx| pane.repaint_all(cx)),
         ];
@@ -278,17 +275,20 @@ impl TerminalPane {
     fn focus_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         input::report_focus(self, window, cx);
         self.cursor_on = true;
-        self._blink = self.focus.is_focused(window).then(|| {
-            cx.spawn_in(window, async move |this, cx| {
+        // Only a focused pane in the active window blinks; any other keeps no
+        // timer, so a minimized window wakes nothing for it.
+        let blinking = self.focus.is_focused(window) && window.is_window_active();
+        self._blink = blinking.then(|| {
+            cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(CURSOR_BLINK).await;
-                    let toggled = this.update_in(cx, |pane, window, cx| {
+                    let toggled = this.update(cx, |pane, cx| {
                         // A steady cursor has nothing to redraw.
                         let blinks = pane
                             .terminal
                             .as_ref()
                             .is_some_and(|terminal| terminal.lock().cursor_style().blinking);
-                        if !window.is_window_active() || !blinks {
+                        if !blinks {
                             pane.cursor_on = true;
                             return;
                         }

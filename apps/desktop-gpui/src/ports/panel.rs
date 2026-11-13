@@ -26,7 +26,7 @@ use desktop_core::{
     platform::{EventBody, EventSink},
 };
 use futures::future::BoxFuture;
-use gpui_kit::{Context, Entity, Task};
+use gpui_kit::{Context, Entity, Subscription, Task};
 
 use super::model::{Detection, PortsHost, chosen_host, forward_ports, local_url, orphaned_hosts};
 
@@ -113,6 +113,9 @@ impl PortsTransport for NativePorts {
 
 /// How often the native side is asked whether a forward changed.
 const POLL: Duration = Duration::from_millis(200);
+/// The same while the window is hidden: the list only feeds the panel, and an
+/// orphaned forward can wait a second to be stopped.
+const POLL_HIDDEN: Duration = Duration::from_secs(1);
 
 pub struct PortsPanel {
     transport: Rc<dyn PortsTransport>,
@@ -127,7 +130,8 @@ pub struct PortsPanel {
     /// overwritten by the request it replaced.
     detect_epoch: u64,
     _detect: Option<Task<()>>,
-    _poll: Option<Task<()>>,
+    /// The poll, and its check when the window is shown again.
+    _poll: Option<(Task<()>, Subscription)>,
     /// The inputs, made with the first frame: they need a window.
     pub(super) fields: Option<super::view::Fields>,
 }
@@ -152,21 +156,32 @@ impl PortsPanel {
 
     /// Follows the native side's change flag for as long as the panel lives.
     pub fn start_polling(&mut self, cx: &mut Context<Self>) {
-        self._poll = Some(cx.spawn(async move |this, cx| {
+        let poll = cx.spawn(async move |this, cx| {
+            let mut wait = POLL;
             loop {
-                cx.background_executor().timer(POLL).await;
-                let live = this
-                    .update(cx, |this, cx| {
-                        if this.transport.changed() {
-                            this.refresh(cx);
-                        }
-                    })
-                    .is_ok();
-                if !live {
+                cx.background_executor().timer(wait).await;
+                let next = this.update(cx, |this, cx| {
+                    this.check(cx);
+                    if crate::ui::visibility::shown(cx) {
+                        POLL
+                    } else {
+                        POLL_HIDDEN
+                    }
+                });
+                let Ok(next) = next else {
                     break;
-                }
+                };
+                wait = next;
             }
-        }));
+        });
+        let shown = crate::ui::visibility::on_shown(cx, Self::check);
+        self._poll = Some((poll, shown));
+    }
+
+    fn check(&mut self, cx: &mut Context<Self>) {
+        if self.transport.changed() {
+            self.refresh(cx);
+        }
     }
 
     pub fn hosts(&self) -> &[PortsHost] {
