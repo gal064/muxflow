@@ -37,20 +37,6 @@ release_target=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/macos"}
 export CARGO_TARGET_DIR="$release_target"
 mkdir -p "$CARGO_TARGET_DIR"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-package_targets="$work_dir/.package-targets-$run_id"
-cleanup() {
-  [[ "$package_targets" == "$work_dir/.package-targets-$run_id" ]] || return
-  # Finder can create .DS_Store concurrently in browsed directories. The
-  # hidden per-run parent avoids that normal path and bounded retries keep an
-  # exact late write from making an otherwise successful package build fail.
-  for _ in 1 2 3; do
-    rm -rf "$package_targets"
-    [[ ! -e "$package_targets" ]] && return
-  done
-  echo "failed to clean package target $package_targets" >&2
-  return 1
-}
-trap cleanup EXIT
 
 # MUXFLOW_PERF_BUILD=1 compiles the switch-timing instrumentation into this
 # package: the host writes `timing.log` and the app records its probes when
@@ -64,7 +50,14 @@ if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
 fi
 export MUXFLOW_PERF_BUILD
 
-CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host -p muxflow-gpui \
+# Two builds, not one: built together, the app's dependencies would unify
+# features into the helper's (gpui turns on serde_json's `preserve_order`), and
+# the shipped helper must stay the one `-p muxflow-host` builds everywhere else.
+# The app is built for the bundle's LSMinimumSystemVersion, as `tauri build`
+# did; the helper keeps the toolchain default it always had.
+CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host \
+  ${perf_features[@]+"${perf_features[@]}"}
+CARGO_INCREMENTAL=0 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p muxflow-gpui \
   ${perf_features[@]+"${perf_features[@]}"}
 
 # The bundle is laid out by hand with the names the Tauri bundle used, so an
@@ -158,8 +151,6 @@ if [[ "$identity" != - ]]; then
   "$repo/release/macos/stapler.sh" validate "$dmg"
 fi
 
-cleanup
-trap - EXIT
 if [[ "$identity" == - ]]; then
   echo "MACOS_PACKAGE_READY ad-hoc apple-silicon-only app=$app dmg=$dmg"
 else
