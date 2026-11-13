@@ -205,12 +205,14 @@ jobs:
       - name: Launch the app from the bundle
         run: |
           out=$RUNNER_TEMP/package
-          open -n --stdout "$out/app.log" --stderr "$out/app.log" "$APP"
+          open -n --stdout "$out/app.out" --stderr "$out/app.err" "$APP"
           sleep 20
           pgrep -fl "$APP/Contents/MacOS/muxflow" | tee "$out/processes.txt" || true
-          pgrep -qf "^$APP/Contents/MacOS/muxflow\$" || { echo 'the app did not stay up' >&2; cat "$out/app.log"; exit 1; }
-          cat "$out/app.log"
-          ! grep -Ei 'panic|fatal|abort|segmentation' "$out/app.log" || { echo 'the app logged a failure' >&2; exit 1; }
+          pgrep -qf "^$APP/Contents/MacOS/muxflow\$" || { echo 'the app did not stay up' >&2; cat "$out"/app.*; exit 1; }
+          cat "$out"/app.*
+          # The app installs no logger, so macOS's unified log is kept as well.
+          log show --last 5m --predicate 'process == "muxflow"' > "$out/unified.log" || true
+          ! grep -Ei 'panic|fatal|abort|segmentation' "$out"/app.* || { echo 'the app logged a failure' >&2; exit 1; }
           if ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i muxflow; then
             echo 'the app left a crash report' >&2
             exit 1
