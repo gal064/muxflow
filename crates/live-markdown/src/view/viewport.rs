@@ -21,10 +21,21 @@ use gpui_kit::*;
 
 use super::{
     FONT_SIZE, LINE_HEIGHT, LiveStyle, LiveView, caret_bounds, cell_ring, heading_padding,
-    heading_scale, paint_task, task_box,
+    heading_scale, paint_task, task_box, wide,
 };
 use crate::edit::Segment;
 use crate::projection::{BlockKind, Projection};
+
+/// A table drawn wider than its column, as the last layout placed it.
+#[derive(Clone)]
+struct WideTable {
+    /// Where the table starts in the source: its key in the scroll map.
+    start: usize,
+    /// What of it shows.
+    clip: Bounds<Pixels>,
+    /// How far it scrolls.
+    max: Pixels,
+}
 
 /// Space above the first block, as Tauri's padding.
 pub(super) const PAD_TOP: f32 = 48.;
@@ -132,6 +143,7 @@ pub(super) struct Frame {
     /// end of the line above: draw it on the later line, as CodeMirror's
     /// caret association does.
     pub(super) wrap_start: Option<usize>,
+    wide: Vec<WideTable>,
 }
 
 impl Frame {
@@ -144,6 +156,19 @@ impl Frame {
             Some((p.as_ref(), leaf, disp))
         })
     }
+
+    /// What shows of the wide table at height `y`, if one is there.
+    pub(super) fn clip_at(&self, y: Pixels) -> Option<Bounds<Pixels>> {
+        (self.wide.iter())
+            .find(|t| t.clip.top() <= y && y < t.clip.bottom())
+            .map(|t| t.clip)
+    }
+}
+
+/// Whether a table starts at source position `at`.
+fn table_at(segments: &[Segment], at: usize) -> bool {
+    let i = segments.partition_point(|s| s.src.end <= at);
+    (segments.get(i)).is_some_and(|s| s.projection.tables.iter().any(|t| t.src.start == at))
 }
 
 fn next(segments: &[Segment], (i, j): At) -> Option<At> {
@@ -234,6 +259,11 @@ struct Layout<'a> {
     rcx: &'a RenderContext,
     width: Pixels,
     laid: HashMap<At, (AnyElement, Pixels)>,
+    table_x: &'a RefCell<HashMap<usize, f32>>,
+    /// The source position whose table cell to scroll into view.
+    follow: Option<usize>,
+    /// The wide tables laid out: where each starts and how far it scrolls.
+    wide: HashMap<At, (usize, Pixels)>,
 }
 
 impl Layout<'_> {
@@ -249,7 +279,11 @@ impl Layout<'_> {
             .leaves
             .first()
             .map_or(0, |&l| p.leaves[l].key as usize);
-        let block = super::render_block(ix, block, p, self.style, self.rcx, window, cx);
+        let wide = match &block.kind {
+            BlockKind::Table { rows, .. } => self.wide(at, p, block.src.start, rows, window, cx),
+            _ => None,
+        };
+        let block = super::render_block(ix, block, p, self.style, self.rcx, wide, window, cx);
         // The column's width, as a block in a full-width column has: a rule
         // has no width of its own.
         let mut element = div().w(self.width).child(block).into_any_element();
@@ -261,6 +295,35 @@ impl Layout<'_> {
         segment.heights[at.1].set(f32::from(height));
         self.laid.insert(at, (element, height));
         height
+    }
+
+    /// A table too wide for the column: the width it is drawn at and how far
+    /// it is scrolled, its cell with `follow` brought into view.
+    fn wide(
+        &mut self,
+        at: At,
+        p: &Projection,
+        start: usize,
+        rows: &[Vec<usize>],
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<(Pixels, Pixels)> {
+        // A table in a quote or a list is drawn as source, never this wide.
+        let avail = self.width;
+        let wide = wide::measure(p, rows, avail, window, cx)?;
+        let mut table_x = self.table_x.borrow_mut();
+        let mut x = px(table_x.get(&start).copied().unwrap_or(0.));
+        if let Some((t, _, cell)) = self.follow.and_then(|pos| p.cell_at(pos))
+            && p.tables[t].src.start == start
+            && let Some(&(left, right)) = wide.columns.get(cell.col)
+        {
+            x = x.max(right - avail).min(left);
+        }
+        let max = wide.track - avail;
+        x = x.clamp(px(0.), max);
+        table_x.insert(start, f32::from(x));
+        self.wide.insert(at, (start, max));
+        Some((wide.track, x))
     }
 }
 
@@ -284,6 +347,9 @@ pub(super) struct Viewport {
     pub(super) reveal: Rc<Cell<bool>>,
     pub(super) frame: Rc<RefCell<Frame>>,
     pub(super) scroll: LiveScroll,
+    /// Each wide table's sideways scroll, from `LiveDoc`.
+    pub(super) table_x: Rc<RefCell<HashMap<usize, f32>>>,
+    pub(super) follow: Option<usize>,
     pub(super) view: Entity<LiveView>,
     pub(super) focus: FocusHandle,
 }
@@ -347,12 +413,19 @@ impl Element for Viewport {
         let width = (column - self.gutter * 2.).max(px(1.));
         let w = f32::from(width);
         let page = bounds.size.height;
+        // A table that went away takes its scroll with it.
+        self.table_x
+            .borrow_mut()
+            .retain(|&at, _| table_at(segments, at));
         let mut layout = Layout {
             segments,
             style: &self.style,
             rcx: &self.rcx,
             width,
             laid: HashMap::new(),
+            table_x: &self.table_x,
+            follow: self.follow,
+            wide: HashMap::new(),
         };
         let mut state = self.scroll.0.borrow_mut();
         let first = (0, 0);
@@ -468,10 +541,12 @@ impl Element for Viewport {
         let caret = block_at(segments, self.head);
         let beside = caret.map(|a| [prev(segments, a), Some(a), next(segments, a)]);
         let marked = self.marked.and_then(|pos| block_at(segments, pos));
+        // And the table asked to show a cell, off screen too.
+        let follow = self.follow.and_then(|pos| block_at(segments, pos));
         let around: Vec<At> = beside
             .into_iter()
             .flatten()
-            .chain([marked])
+            .chain([marked, follow])
             .flatten()
             .collect();
         let (&(first_at, first_top), &(last_at, last_top)) = (
@@ -511,9 +586,18 @@ impl Element for Viewport {
             }
         }
         let mut blocks = Vec::with_capacity(placed.len());
+        let mut wide = Vec::new();
         for (a, top) in &placed {
             let (element, height) = layout.laid.remove(a).expect("laid out above");
-            blocks.push((element, Bounds::new(point(left, *top), size(width, height))));
+            let at = Bounds::new(point(left, *top), size(width, height));
+            if let Some(&(start, max)) = layout.wide.get(a) {
+                wide.push(WideTable {
+                    start,
+                    clip: at,
+                    max,
+                });
+            }
+            blocks.push((element, at));
         }
         let ((), geometry) = collect_leaf_geometry(decorations, || {
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -528,6 +612,7 @@ impl Element for Viewport {
                 .map(|&i| segments[i].projection.clone())
                 .collect();
             frame.geometry = geometry;
+            frame.wide = wide;
         }
 
         // Keep a caret moved by key in view, next frame; the pointer scrolls freely.
@@ -596,9 +681,32 @@ impl Element for Viewport {
                 dragged.update(cx, |view, cx| view.drag(event, cx));
             }
         });
+        let wide = self.frame.borrow().wide.clone();
+        let table_x = self.table_x.clone();
         window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                let delta = event.delta.pixel_delta(line);
+                let mut delta = event.delta.pixel_delta(line);
+                let table = wide.iter().find(|t| t.clip.contains(&event.position));
+                if let Some(table) = table {
+                    // Shift turns the wheel sideways over a table, where the
+                    // platform does not already (X11 does).
+                    if event.modifiers.shift && delta.x == px(0.) {
+                        delta = point(delta.y, px(0.));
+                    }
+                    // One axis at a time: a swipe down the page wanders
+                    // sideways a little, and must not move the table.
+                    if delta.x.abs() > delta.y.abs() {
+                        delta.y = px(0.);
+                    } else {
+                        delta.x = px(0.);
+                    }
+                    if delta.x != px(0.) {
+                        let mut table_x = table_x.borrow_mut();
+                        let x = table_x.entry(table.start).or_default();
+                        *x = (*x - f32::from(delta.x)).clamp(0., f32::from(table.max));
+                        cx.notify(view);
+                    }
+                }
                 if delta.y != px(0.) {
                     scroll.scroll_by(-delta.y);
                     cx.notify(view);
@@ -638,7 +746,13 @@ impl Element for Viewport {
             if self.show_caret
                 && let Some(rect) = caret_bounds(&frame, self.head)
             {
-                window.paint_quad(fill(rect, self.style.ink_strong));
+                // In a wide table, only where the table shows.
+                let mask = frame
+                    .clip_at(rect.center().y)
+                    .map(|bounds| ContentMask { bounds });
+                window.with_content_mask(mask, |window| {
+                    window.paint_quad(fill(rect, self.style.ink_strong))
+                });
             }
         });
         window.handle_input(
