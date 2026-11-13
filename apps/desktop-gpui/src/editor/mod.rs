@@ -32,7 +32,7 @@ use std::{any::Any, ops::Range, rc::Rc, sync::Arc};
 use desktop_core::app_state::{AppTabKind, AppTabRecord};
 use gpui_kit::{
     AnyElement, App, AppContext, Entity, FocusHandle, Focusable, Global, InteractiveElement,
-    IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
+    IntoElement, ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement, Styled,
     Subscription, Task, Window, div,
 };
 
@@ -84,6 +84,9 @@ pub trait LiveFind {
     fn replace_all(&self, text: &str, cx: &mut App);
     /// Marks the matches of `matcher` in the view, or none.
     fn highlight(&self, matcher: Option<regex::Regex>, cx: &mut App);
+    /// How far the bar covers the top of the view, so a match is revealed
+    /// below it; zero once it closes.
+    fn set_top_inset(&self, inset: Pixels, cx: &mut App);
     /// Calls `changed` after every change to the text or the selection.
     fn observe(&self, changed: Box<dyn Fn(&mut App)>, cx: &mut App) -> Subscription;
 }
