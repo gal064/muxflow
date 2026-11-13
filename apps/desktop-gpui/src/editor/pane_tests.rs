@@ -769,7 +769,7 @@ fn written(host: &Host, cx: &mut VisualTestContext) -> Option<String> {
 #[gpui_kit::test]
 fn ctrl_f_finds_in_the_live_view_and_steps_through_every_match(cx: &mut TestAppContext) {
     let (pane, _, cx) = open_live(LIVE_CATS, cx);
-    cx.simulate_keystrokes("ctrl-f");
+    cx.simulate_keystrokes("secondary-f");
     draw(cx);
     assert!(
         cx.update(|_, cx| pane.read(cx).find.is_some()),
@@ -826,7 +826,7 @@ fn the_find_bar_is_seeded_from_the_live_selection_and_escape_returns_to_it(
         let (_, live) = pane.live.clone().unwrap();
         live.select(4..7, cx);
     });
-    cx.simulate_keystrokes("ctrl-f");
+    cx.simulate_keystrokes("secondary-f");
     draw(cx);
     let query = cx.update(|_, cx| {
         let find = pane.read(cx).find.as_ref().unwrap();
@@ -843,7 +843,7 @@ fn the_find_bar_is_seeded_from_the_live_selection_and_escape_returns_to_it(
         "Escape gives the keyboard back to Live"
     );
     // Escape in the Live view closes it too, and keeps the keyboard there.
-    cx.simulate_keystrokes("ctrl-f");
+    cx.simulate_keystrokes("secondary-f");
     draw(cx);
     cx.update(|window, cx| {
         let live = pane.read(cx).live.clone().unwrap();
@@ -889,13 +889,13 @@ fn replace_and_replace_all_in_live_are_one_undo_step_each_and_autosave(cx: &mut 
 
     let live = cx.update(|_, cx| pane.read(cx).live.clone().unwrap());
     cx.update(|window, cx| window.focus(&live.0, cx));
-    cx.simulate_keystrokes("ctrl-z");
+    cx.simulate_keystrokes("secondary-z");
     draw(cx);
     assert_eq!(
         written(&host, cx).as_deref(),
         Some("a dog, a **cat**, a cat\n")
     );
-    cx.simulate_keystrokes("ctrl-z");
+    cx.simulate_keystrokes("secondary-z");
     draw(cx);
     assert_eq!(
         written(&host, cx).as_deref(),
@@ -906,7 +906,7 @@ fn replace_and_replace_all_in_live_are_one_undo_step_each_and_autosave(cx: &mut 
 #[gpui_kit::test]
 fn the_live_find_bar_closes_when_the_tab_leaves_live(cx: &mut TestAppContext) {
     let (pane, _, cx) = open_live("one cat\n", cx);
-    cx.simulate_keystrokes("ctrl-f");
+    cx.simulate_keystrokes("secondary-f");
     type_query(&pane, "cat", cx);
     cx.update(|_, cx| {
         pane.update(cx, |pane, _| {
@@ -924,7 +924,7 @@ fn the_live_find_bar_closes_when_the_tab_leaves_live(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_click_on_the_find_bar_stays_out_of_the_live_view_under_it(cx: &mut TestAppContext) {
     let (pane, _, cx) = open_live(LIVE_CATS, cx);
-    cx.simulate_keystrokes("ctrl-f");
+    cx.simulate_keystrokes("secondary-f");
     type_query(&pane, "cat", cx);
     assert_eq!(live_state(&pane, cx).1, "1 of 7");
     let next = cx.update(|window, _| window.find_by_label("Next Match (Enter)").bounds().center());
