@@ -811,3 +811,24 @@ fn ctrl_b_or_i_twice_in_a_cell_or_in_prose_gives_the_text_back() {
     d.toggle_inline("*");
     assert_eq!(d.text(), "| a |\n|---|\n| ***2*** |\n");
 }
+
+#[test]
+fn tab_keeps_the_caret_in_an_emptied_nested_item_before_a_paragraph() {
+    for (text, nested) in [
+        (
+            "- bullet three\n- \n\nPara after list.",
+            "- bullet three\n  - x\n\nPara after list.",
+        ),
+        ("- bullet three\n- ", "- bullet three\n  - x"),
+        (
+            "1. item three\n2. \n\nPara after list.",
+            "1. item three\n   1. x\n\nPara after list.",
+        ),
+    ] {
+        let caret = text.find("\n\n").unwrap_or(text.len());
+        let mut d = doc(text, caret);
+        assert!(d.change_list_indent(false));
+        d.insert_text("x");
+        assert_eq!(d.text(), nested, "{text:?}");
+    }
+}
