@@ -3,12 +3,16 @@
 //! available (the QA sandbox's lavapipe is enough; nothing is rasterized
 //! unless `--shot` asks for one):
 //!
-//!   typing_bench <file.md> [--fonts <dir>] [--keys <n>] [--shot <out.png>]
+//!   typing_bench <file.md | prose:<bytes> | tables:<bytes>> [--at top|middle|end]
+//!                [--fonts <dir>] [--keys <n>] [--shot <out.png>]
 //!
 //! It opens the view in a headless window with the platform's real text
-//! system, puts the caret in the middle of the document, and for each key
-//! times the edit through the platform input handler and the frame that
-//! follows (layout, prepaint and paint). Prints p50, p95 and max of each.
+//! system, puts the caret at the top, middle or end of the document, and for
+//! each key times the edit through the platform input handler and the frame
+//! that follows (layout, prepaint and paint). Then it moves the caret, and
+//! scrolls with the wheel. Prints p50, p95 and max of each. `prose:` and
+//! `tables:` make a document of about that size: prose-heavy Markdown, or
+//! Markdown with many tables.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -16,8 +20,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::{
-    AnyWindowHandle, AppContext, EntityInputHandler, Focusable, HeadlessAppContext, Hsla, Window,
-    assets::Assets, hsla, px, size,
+    AnyWindowHandle, AppContext, EntityInputHandler, Focusable, HeadlessAppContext, Hsla,
+    PlatformInput, ScrollDelta, ScrollEvent, Window, assets::Assets, hsla, point, px, size,
 };
 use live_markdown::view::{LiveStyle, LiveView};
 
@@ -42,6 +46,107 @@ fn style() -> LiveStyle {
     }
 }
 
+/// A fixed pseudo-random sequence, so the same size gives the same document.
+struct Words(u64);
+
+impl Words {
+    fn next(&mut self, n: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) as usize % n
+    }
+
+    fn sentence(&mut self) -> String {
+        let count = 6 + self.next(14);
+        let mut out = String::new();
+        for i in 0..count {
+            let word = WORDS[self.next(WORDS.len())];
+            if i > 0 {
+                out.push(' ');
+            }
+            match self.next(14) {
+                0 => out.push_str(&format!("**{word}**")),
+                1 => out.push_str(&format!("*{word}*")),
+                2 => out.push_str(&format!("`{word}`")),
+                3 => out.push_str(&format!("[{word}](./docs/{word}.md)")),
+                4 => out.push_str(&format!("[{word}][{word}]")),
+                _ => out.push_str(word),
+            }
+        }
+        out.push('.');
+        out
+    }
+}
+
+const WORDS: [&str; 16] = [
+    "the",
+    "session",
+    "host",
+    "terminal",
+    "window",
+    "reconnects",
+    "after",
+    "a",
+    "change",
+    "to",
+    "layout",
+    "file",
+    "keeps",
+    "its",
+    "state",
+    "when",
+];
+
+/// Prose-heavy Markdown, or Markdown with many tables, of about `bytes`.
+fn generate(kind: &str, bytes: usize) -> String {
+    let mut words = Words(1);
+    let mut out = String::new();
+    let mut section = 0;
+    while out.len() < bytes {
+        section += 1;
+        out.push_str(&format!("## Section {section}\n\n"));
+        if kind == "tables" {
+            out.push_str(&words.sentence());
+            out.push_str("\n\n| Name | Kind | State | Owner | Notes |\n|---|:---:|---|---:|---|\n");
+            for row in 0..12 {
+                let notes = words.sentence();
+                out.push_str(&format!(
+                    "| item {row} | `kind` | **ok** | {} | {notes} |\n",
+                    words.next(1000)
+                ));
+            }
+            out.push('\n');
+            continue;
+        }
+        for _ in 0..3 {
+            for _ in 0..3 + words.next(4) {
+                out.push_str(&words.sentence());
+                out.push(' ');
+            }
+            out.push_str("\n\n");
+        }
+        match words.next(4) {
+            0 => {
+                for _ in 0..4 {
+                    out.push_str(&format!("- {}\n", words.sentence()));
+                }
+                out.push('\n');
+            }
+            1 => out.push_str("```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\n"),
+            2 => out.push_str(&format!("> {}\n\n", words.sentence())),
+            _ => {}
+        }
+    }
+    if kind != "tables" {
+        for word in WORDS {
+            out.push_str(&format!("[{word}]: ./docs/{word}.md\n"));
+        }
+    }
+    out
+}
+
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
@@ -62,6 +167,7 @@ fn main() {
     let mut fonts = None;
     let mut keys = 60usize;
     let mut shot = None;
+    let mut at_place = "middle".to_owned();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--fonts" => fonts = args.next().map(PathBuf::from),
@@ -72,13 +178,18 @@ fn main() {
                     .expect("--keys <n>")
             }
             "--shot" => shot = args.next().map(PathBuf::from),
-            other => file = Some(PathBuf::from(other)),
+            "--at" => at_place = args.next().expect("--at top|middle|end"),
+            other => file = Some(other.to_owned()),
         }
     }
-    let text = std::fs::read_to_string(
-        file.expect("usage: typing_bench <file.md> [--fonts dir] [--keys n] [--shot png]"),
-    )
-    .expect("read the file");
+    let file =
+        file.expect("usage: typing_bench <file.md | prose:N | tables:N> [--at top|middle|end]");
+    let text = match file.split_once(':') {
+        Some((kind @ ("prose" | "tables"), bytes)) => {
+            generate(kind, bytes.parse().expect("a size in bytes"))
+        }
+        _ => std::fs::read_to_string(&file).expect("read the file"),
+    };
     {
         use live_markdown::projection::{Active, parse, project};
         let start = Instant::now();
@@ -140,15 +251,23 @@ fn main() {
         text.len(),
         opened.elapsed().as_secs_f64() * 1000.
     );
-    // The middle of the document, at the end of a line of text.
-    let middle = text[..text.len() / 2].rfind('\n').unwrap_or(0);
-    let at = text[..middle].encode_utf16().count();
+    // At the end of a line of text: near the top, in the middle, or the last.
+    let fraction = match at_place.as_str() {
+        "top" => 0.02,
+        "end" => 1.,
+        _ => 0.5,
+    };
+    let near = ((text.len() as f64 * fraction) as usize).min(text.len().saturating_sub(1));
+    let line_end = text[..near].rfind('\n').unwrap_or(0);
+    let at = text[..line_end].encode_utf16().count();
     cx.update_window(handle, |_, window, cx| {
         view.update(cx, |view, cx| {
             view.replace_text_in_range(Some(at..at), "", window, cx)
         })
     })
     .expect("place the caret");
+    // The caret is scrolled into view on the frame after it moves.
+    draw(&mut cx);
     draw(&mut cx);
     let (mut edits, mut frames, mut totals) = (Vec::new(), Vec::new(), Vec::new());
     for key in 0..keys {
@@ -168,7 +287,7 @@ fn main() {
     }
     report("edit", edits);
     report("frame", frames);
-    report("total", totals);
+    report("key", totals);
     let mut moves = Vec::new();
     for _ in 0..keys {
         let start = Instant::now();
@@ -179,6 +298,25 @@ fn main() {
         moves.push(start.elapsed().as_secs_f64() * 1000. + draw(&mut cx));
     }
     report("left", moves);
+    let mut scrolls = Vec::new();
+    for step in 0..keys * 2 {
+        // Down, then back up.
+        let down = step < keys;
+        let start = Instant::now();
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::Scroll(ScrollEvent {
+                    position: point(px(800.), px(500.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(if down { -120. } else { 120. }))),
+                    ..ScrollEvent::default()
+                }),
+                cx,
+            );
+        })
+        .expect("scroll");
+        scrolls.push(start.elapsed().as_secs_f64() * 1000. + draw(&mut cx));
+    }
+    report("scroll", scrolls);
     if let Some(path) = shot {
         let image = cx.capture_screenshot(handle).expect("capture");
         image.save(path).expect("save the screenshot");

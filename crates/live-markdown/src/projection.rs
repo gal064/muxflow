@@ -25,19 +25,27 @@ pub fn parse(src: &str) -> Node {
     parse_with(src, crate::lists::parse)
 }
 
+/// As [`parse`], but `None` where markdown-rs panics: a piece of a text can
+/// panic where the whole parses.
+pub(crate) fn try_parse(src: &str) -> Option<Node> {
+    try_parse_with(src, crate::lists::parse)
+}
+
 fn parse_with(src: &str, parser: impl FnOnce(&str) -> Node + std::panic::UnwindSafe) -> Node {
+    try_parse_with(src, parser).unwrap_or_else(|| plain_lines(src))
+}
+
+fn try_parse_with(
+    src: &str,
+    parser: impl FnOnce(&str) -> Node + std::panic::UnwindSafe,
+) -> Option<Node> {
     quiet_parse_panics();
     PARSING.set(true);
     let ast = std::panic::catch_unwind(|| parser(src));
     PARSING.set(false);
-    match ast {
-        Ok(ast) => {
-            // Report the next stretch of unparsable text too.
-            PANIC_REPORTED.store(false, Ordering::Relaxed);
-            ast
-        }
-        Err(_) => plain_lines(src),
-    }
+    // Report the next stretch of unparsable text too.
+    ast.inspect(|_| PANIC_REPORTED.store(false, Ordering::Relaxed))
+        .ok()
 }
 
 static PANIC_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -242,7 +250,7 @@ pub struct Projection {
 }
 
 /// What the projection needs to know about the editor state.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Active {
     /// The selection; empty while the editor does not have focus, so
     /// everything renders.
@@ -362,8 +370,28 @@ fn project_window(
     src: &str,
     ast: &Node,
     active: &Active,
-    window: Option<Range<usize>>,
+    around: Option<Range<usize>>,
 ) -> Projection {
+    let range = match &around {
+        Some(around) => window(ast, around),
+        None => 0..ast.children().map_or(0, Vec::len),
+    };
+    project_children(src, ast, active, range)
+}
+
+/// The top-level nodes [`project_near`] projects for `around`. Reads only their
+/// own positions.
+pub fn window(ast: &Node, around: &Range<usize>) -> Range<usize> {
+    let children = ast.children().map_or(&[][..], |c| &c[..]);
+    children
+        .partition_point(|node| pos(node).end < around.start)
+        .saturating_sub(1)
+        ..(children.partition_point(|node| pos(node).start <= around.end) + 1).min(children.len())
+}
+
+/// The top-level nodes `range` of `ast`, each with the blank lines before it,
+/// and when the range reaches the end, the lines after the last node.
+pub fn project_children(src: &str, ast: &Node, active: &Active, range: Range<usize>) -> Projection {
     let mut b = Builder {
         src,
         active,
@@ -376,25 +404,24 @@ fn project_window(
         rendered_only: false,
     };
     let children = ast.children().map_or(&[][..], |c| &c[..]);
-    let (first, last) = match &window {
-        Some(window) => (
-            children
-                .partition_point(|node| pos(node).end < window.start)
-                .saturating_sub(1),
-            (children.partition_point(|node| pos(node).start <= window.end) + 1)
-                .min(children.len()),
-        ),
-        None => (0, children.len()),
-    };
+    let (first, last) = (range.start, range.end);
     let mut cursor = if first == 0 {
         0
     } else {
         pos(&children[first - 1]).end
     };
+    let start = cursor;
     for node in &children[first..last] {
         let p = pos(node);
         b.gap_lines(cursor..p.start);
         b.block(node, 0);
+        // A quote's last bare `>` line is left as a prefix: it is the node's
+        // own, so it is drawn with it, hidden, as a line of the quote.
+        if let Some(prefix) = b.pending_prefix.clone() {
+            b.quote = src[prefix.clone()].matches('>').count();
+            b.point_block(prefix.end, BlockKind::Blank, prefix);
+            b.quote = 0;
+        }
         cursor = p.end;
     }
     if last == children.len() {
@@ -418,6 +445,16 @@ fn project_window(
             table.cells.iter().position(found).map(|c| (t, c))
         })
     });
+    if b.blocks.is_empty() {
+        // Every run of nodes draws something, for the caret and the viewport.
+        let end = if last == children.len() {
+            src.len()
+        } else {
+            cursor
+        };
+        b.pending_prefix = Some(start..end);
+        b.point_block(end, BlockKind::Blank, start..end);
+    }
     Projection {
         blocks: b.blocks,
         leaves: b.leaves,
@@ -1395,6 +1432,51 @@ impl Projection {
         }
         None
     }
+
+    /// Moves every source position by `delta`, for blocks after an edit:
+    /// cheaper than projecting them again. A new position field must be
+    /// moved here too (`shifted_matches_projecting_later` checks it).
+    pub fn shift(&mut self, delta: isize) {
+        let at = |p: &mut usize| *p = p.wrapping_add_signed(delta);
+        let range = |r: &mut Range<usize>| {
+            at(&mut r.start);
+            at(&mut r.end);
+        };
+        for block in &mut self.blocks {
+            range(&mut block.src);
+            if let BlockKind::ListItem {
+                marker: Some(Marker::Task { at: task, .. }),
+                ..
+            } = &mut block.kind
+            {
+                at(task);
+            }
+        }
+        for leaf in &mut self.leaves {
+            range(&mut leaf.src);
+            for seg in &mut leaf.segs {
+                range(&mut seg.src);
+            }
+        }
+        for table in &mut self.tables {
+            range(&mut table.src);
+            at(&mut table.layout.delimiter_end);
+            for row in &mut table.layout.rows {
+                at(&mut row.from);
+                at(&mut row.to);
+                at(&mut row.end);
+                for cell in &mut row.cells {
+                    at(&mut cell.from);
+                    at(&mut cell.to);
+                }
+            }
+            for cell in &mut table.cells {
+                at(&mut cell.from);
+                at(&mut cell.to);
+                at(&mut cell.limit);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1975,6 +2057,31 @@ mod tests {
                 at(src, caret);
             }
         }
+    }
+
+    #[test]
+    fn shifted_matches_projecting_later() {
+        let src = "# T **b**\n\n- [ ] a\n\n| a | `b` |\n|---|---|\n| 1 |  2 |\n\n```\nx\n```\n";
+        let caret = src.find("1 |").unwrap();
+        let prefix = "intro\n";
+        let later = format!("{prefix}{src}");
+        let at = |caret: usize| Active {
+            ranges: vec![Range {
+                start: caret,
+                end: caret,
+            }],
+            cell_typed_end: Some(caret + 2),
+            ..Active::default()
+        };
+        let mut shifted = project(src, &parse(src), &at(caret));
+        shifted.shift(prefix.len() as isize);
+        let whole = project(&later, &parse(&later), &at(caret + prefix.len()));
+        // The intro paragraph comes first.
+        let mut moved = project_children(&later, &parse(&later), &at(caret + prefix.len()), 1..5);
+        moved.leaves.iter_mut().for_each(|l| l.key = 0);
+        shifted.leaves.iter_mut().for_each(|l| l.key = 0);
+        assert_eq!(whole.blocks.len(), shifted.blocks.len() + 1);
+        assert_eq!(moved, shifted);
     }
 
     #[test]

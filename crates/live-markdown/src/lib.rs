@@ -9,10 +9,11 @@ pub mod edit;
 pub mod link;
 mod lists;
 pub mod projection;
+pub mod reparse;
 pub mod table;
 pub mod view;
 
-/// Files larger than this, in bytes as read, open as source (Tauri's
-/// `LIVE_MARKDOWN_LIMIT_CHARS` is 1 MiB). See the README's size limit note.
-// Temporary; T7.5 (on-screen-only drawing + block-scoped reparse) restores Tauri's 1 MiB.
-pub const LIMIT_BYTES: u64 = 48 * 1024;
+/// Files larger than this, in bytes as read, open as source: Tauri's
+/// `LIVE_MARKDOWN_LIMIT_CHARS`, which counts UTF-16 units. See the README's
+/// size limit note.
+pub const LIMIT_BYTES: u64 = 1024 * 1024;
