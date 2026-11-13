@@ -18,6 +18,7 @@ use crate::{
 pub struct Shell {
     chrome: Entity<Chrome>,
     _appearance: Subscription,
+    _visibility: Subscription,
 }
 
 impl Shell {
@@ -30,6 +31,7 @@ impl Shell {
         Self {
             chrome: Chrome::new(window, cx),
             _appearance: appearance,
+            _visibility: crate::ui::visibility::track(window, cx),
         }
     }
 
