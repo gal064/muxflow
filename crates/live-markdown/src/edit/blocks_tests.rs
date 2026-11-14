@@ -503,7 +503,7 @@ fn home_and_end_go_to_the_edge_the_view_found_and_stay_in_a_cell() {
     let text = "| ab     | cd |\n|---|---|\n";
     let a = text.find("ab").unwrap();
     let mut d = doc(text, a + 1);
-    d.move_to_line_edge(true, false, 0);
+    d.move_to_line_edge(true, false, text.len());
     assert_eq!(head(&d), a + 2);
 }
 

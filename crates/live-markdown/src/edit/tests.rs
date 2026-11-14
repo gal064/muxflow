@@ -199,10 +199,9 @@ fn enter_in_a_cell_above_a_short_row_never_splits_it() {
     let text = "| a | b |\n|---|---|\n| 1 |\n| 3 | 4 |\n";
     let mut d = doc(text, text.find('b').unwrap());
     d.enter();
-    assert_eq!(d.text(), text);
-    // The short row's missing cell, drawn as GFM draws it, has the caret.
-    let end = text.find("| 1 |").unwrap() + 5;
-    assert_eq!((head(&d), d.missing()), (end, Some((end, 1))));
+    assert_eq!(d.text(), text.replacen("b", "<br>b", 1));
+    assert_eq!(head(&d), text.find('b').unwrap() + 4);
+    assert!(d.missing().is_none());
 }
 
 #[test]
@@ -280,7 +279,7 @@ fn up_and_down_in_a_table_keep_the_column_and_leave_at_its_edges() {
 }
 
 #[test]
-fn shift_tab_and_enter_move_by_cell() {
+fn shift_tab_moves_by_cell_and_enter_inserts_a_break() {
     let text = "| a | b |\n|---|---|\n| 1 | 2 |\n";
     let two = text.find('2').unwrap();
     let mut d = doc(text, two);
@@ -294,7 +293,8 @@ fn shift_tab_and_enter_move_by_cell() {
     assert_eq!(head(&d), text.find('b').unwrap() + 1, "and up a row");
     let mut d = doc(text, text.find('b').unwrap() + 1);
     assert!(d.table_key(TableKey::Enter));
-    assert_eq!(head(&d), two, "Enter goes down to the start of the cell");
+    assert_eq!(head(&d), text.find('b').unwrap() + 5);
+    assert_eq!(d.text(), text.replacen("b", "b<br>", 1));
 }
 
 #[test]
@@ -638,7 +638,7 @@ fn adds_a_row_from_the_last_cell_and_removes_an_empty_one_with_backspace() {
     assert_eq!(d.text(), text);
     assert_eq!(head(&d), text.find('1').unwrap() + 1);
     d.enter();
-    assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1 | 2 |\n|  |  |");
+    assert_eq!(d.text(), "| a | b |\n|---|---|\n| 1<br> | 2 |");
 }
 
 #[test]
@@ -839,9 +839,194 @@ fn alignment_rows_survive_cell_edits_and_new_rows() {
     let text = "| a | b |\n|:--|--:|\n| 1 | 2 |";
     let mut d = doc(text, text.find('2').unwrap() + 1);
     d.insert_text("0");
-    d.enter();
+    d.table_key(TableKey::Tab);
+    d.table_key(TableKey::Tab);
     d.insert_text("x");
     assert_eq!(d.text(), "| a | b |\n|:--|--:|\n| 1 | 20 |\n|  | x |");
+}
+
+#[test]
+fn editing_whitespace_never_sends_typing_to_another_cell() {
+    for col in [0, 1] {
+        let text = if col == 0 {
+            "| a | b |\n|---|---|\n| hello x | other |\n| next | row |"
+        } else {
+            "| a | b |\n|---|---|\n| other | hello x |\n| next | row |"
+        };
+        let x = text.find("hello x").unwrap() + 6;
+        for selected in [false, true] {
+            let mut d = doc(text, x + 1);
+            if selected {
+                d.select_range(x..x + 1);
+            }
+            d.backspace();
+            assert_eq!(head(&d), x);
+            d.undo();
+            assert_eq!(d.text(), text);
+            d.redo();
+            assert_eq!(head(&d), x);
+            d.insert_text("z");
+            assert_eq!(d.text(), text.replace("hello x", "hello z"));
+            let p = d.projection();
+            assert_eq!(p.cell_at(head(&d)).unwrap().2.col, col);
+        }
+        let mut d = doc(text, x);
+        d.delete_forward();
+        assert_eq!(head(&d), x);
+        d.insert_text("z");
+        assert_eq!(d.text(), text.replace("hello x", "hello z"));
+    }
+}
+
+#[test]
+fn normalized_whitespace_and_composition_keep_the_cell_caret() {
+    let text = "| a | b |\n|---|---|\n| hello | other |";
+    let at = text.find("hello").unwrap() + 5;
+    for tail in [" ", "\u{a0}", "\t"] {
+        let mut d = doc(text, at);
+        d.insert_text(tail);
+        assert_eq!(head(&d), at + 1);
+        d.move_horizontal(false, false);
+        d.move_horizontal(true, false);
+        assert_eq!(head(&d), at + 1);
+        d.insert_text("z");
+        assert!(
+            d.text()
+                .contains(if tail == "\t" { "hello\tz" } else { "hello z" })
+        );
+    }
+    let mut d = doc(text, at);
+    d.set_preedit("\u{a0}", Some(2));
+    assert_eq!(head(&d), at + 1);
+    d.insert_text(" ");
+    d.insert_text("z");
+    assert!(d.text().contains("hello z"));
+}
+
+#[test]
+fn editing_before_typed_spaces_preserves_the_editable_suffix() {
+    let text = "| a | b |\n|---|---|\n| hello | other |";
+    let at = text.find("hello").unwrap() + 5;
+    let mut d = doc(text, at);
+    d.insert_text("  ");
+    d.move_horizontal(false, false);
+    d.insert_text("x");
+    d.undo();
+    assert!(!d.table_key(TableKey::Right));
+    d.move_horizontal(true, false);
+    assert_eq!(head(&d), at + 2);
+    d.redo();
+    assert!(!d.table_key(TableKey::Right));
+    d.move_horizontal(true, false);
+    assert_eq!(head(&d), at + 3);
+    d.backspace();
+    assert_eq!(d.text(), text.replace("hello", "hello x"));
+}
+
+#[test]
+fn breaks_split_inline_code_without_creating_empty_code_spans() {
+    for (inside, insert, expected) in [
+        (1, "\n", "<br>`one`"),
+        (2, "\n", "`o`<br>`ne`"),
+        (4, "\n", "`one`<br>"),
+        (2, "a\r\nb", "`oa`<br>`bne`"),
+    ] {
+        let text = "| a | b |\n|---|---|\n| `one` | other |";
+        let at = text.find('`').unwrap();
+        let mut d = doc(text, at + inside);
+        d.insert_text(insert);
+        assert_eq!(d.text(), text.replace("`one`", expected));
+        let p = d.projection();
+        assert!(p.leaves[p.tables[0].cells[2].leaf].text.contains('\n'));
+        d.undo();
+        assert_eq!(d.text(), text);
+    }
+}
+
+#[test]
+fn splitting_code_next_to_literal_backticks_preserves_the_rendered_text() {
+    for (offset, expected) in [(3, "a\n`b"), (4, "a`\nb")] {
+        let text = "| a | b |\n|---|---|\n| ``a`b`` | other |";
+        let at = text.find("``").unwrap();
+        let mut d = doc(text, at + offset);
+        d.enter();
+        d.focused = false;
+        let p = d.projection();
+        assert_eq!(p.leaves[p.tables[0].cells[2].leaf].text, expected);
+        d.focused = true;
+        d.insert_text("z");
+        d.focused = false;
+        let p = d.projection();
+        assert_eq!(
+            p.leaves[p.tables[0].cells[2].leaf].text,
+            expected.replace('\n', "\nz")
+        );
+    }
+}
+
+#[test]
+fn enter_after_a_literal_backslash_still_draws_a_break() {
+    let text = "| a | b |\n|---|---|\n| one\\ | other |";
+    let at = text.find("one").unwrap() + 4;
+    let mut d = doc(text, at);
+    d.enter();
+    assert!(d.text().contains("one\\\\<br>"));
+    let p = d.projection();
+    assert!(p.leaves[p.tables[0].cells[2].leaf].text.ends_with('\n'));
+    d.focused = false;
+    let p = d.projection();
+    assert_eq!(p.leaves[p.tables[0].cells[2].leaf].text, "one\\\n");
+}
+
+#[test]
+fn cell_breaks_round_trip_and_delete_as_one_character() {
+    let text = "| a | b |\n|---|---|\n| one | two |";
+    let at = text.find("one").unwrap() + 3;
+    let mut d = doc(text, at);
+    d.enter();
+    assert_eq!(head(&d), at + 4);
+    assert_eq!(d.text(), text.replace("one", "one<br>"));
+    let p = d.projection();
+    let cell = &p.tables[0].cells[2];
+    assert_eq!(p.leaves[cell.leaf].text, "one\n");
+    for pos in at + 1..at + 4 {
+        assert!(!p.is_stop(pos));
+    }
+    d.move_horizontal(false, false);
+    assert_eq!(head(&d), at);
+    d.move_horizontal(true, false);
+    assert_eq!(head(&d), at + 4);
+    d.backspace();
+    assert_eq!(d.text(), text);
+    d.undo();
+    d.set_caret(at);
+    d.delete_forward();
+    assert_eq!(d.text(), text);
+
+    d.insert_text("\r\nsecond\n\nthird");
+    let saved = text.replace("one", "one<br>second<br><br>third");
+    assert_eq!(d.text(), saved);
+    let mut reopened = LiveDoc::new(saved);
+    let p = reopened.projection();
+    assert_eq!(
+        p.leaves[p.tables[0].cells[2].leaf].text,
+        "one\nsecond\n\nthird"
+    );
+}
+
+#[test]
+fn enter_replaces_a_selection_and_fills_a_missing_cell() {
+    let text = "| a | b |\n|---|---|\n| one |";
+    let at = text.find("one").unwrap();
+    let mut d = doc(text, at);
+    d.select_range(at..at + 3);
+    d.enter();
+    assert_eq!(d.text(), text.replace("one", "<br>"));
+    assert_eq!(head(&d), at + 4);
+    d.table_key(TableKey::Tab);
+    d.enter();
+    assert_eq!(d.text(), "| a | b |\n|---|---|\n| <br> | <br> |");
+    assert_eq!(d.projection().cell_at(head(&d)).unwrap().2.col, 1);
 }
 
 #[test]

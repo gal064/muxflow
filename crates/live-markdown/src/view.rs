@@ -447,7 +447,40 @@ impl LiveView {
     }
 
     fn vertical(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
-        // By cell inside a table, Shift or not, as today's widget.
+        // Use this cell's own geometry first, including wrapped lines. Only
+        // its first/last visual line hands the arrow to cell navigation.
+        let within = {
+            let frame = self.frame.borrow();
+            frame
+                .locate(self.live.selection().head)
+                .and_then(|(p, leaf, disp)| {
+                    let (_, _, cell) = p.cell_at(self.live.selection().head)?;
+                    let geometry = frame.geometry.get(&p.leaves[leaf].key)?;
+                    let origin = geometry.position_for_index(disp);
+                    let height = geometry.line_height();
+                    let goal = self.goal_x.unwrap_or(origin.x);
+                    let y = origin.y + if down { height * 1.5 } else { -height * 0.5 };
+                    let index = geometry.index_for_position(point(goal, y));
+                    let next = geometry.position_for_index(index);
+                    let moved = if down {
+                        next.y > origin.y
+                    } else {
+                        next.y < origin.y
+                    };
+                    let pos = p.from_display(leaf, index);
+                    (moved && pos >= cell.from && pos <= cell.limit).then_some((pos, goal))
+                })
+        };
+        if let Some((pos, goal)) = within {
+            if extend {
+                self.live.extend_to(pos, down);
+            } else {
+                self.live.set_caret(pos);
+            }
+            self.changed(cx);
+            self.goal_x = Some(goal);
+            return;
+        }
         let key = if down { TableKey::Down } else { TableKey::Up };
         if self.live.table_key(key) {
             self.changed(cx);
