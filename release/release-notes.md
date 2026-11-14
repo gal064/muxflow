@@ -4,9 +4,9 @@ The desktop app is now native, built with GPUI instead of a web view. It
 installs over the previous version in place: saved hosts, settings and
 workspaces carry over, and hosts and phones need no change.
 
-On Linux it draws with the GPU through Vulkan, so it needs the Vulkan loader and
-a driver (`libvulkan1` and `mesa-vulkan-drivers` on Debian and Ubuntu). The
-installer checks for the loader. If the window does not open, see
+On Linux it draws with the GPU, through Vulkan or, without a Vulkan driver,
+OpenGL. The installer checks for the Vulkan loader (`libvulkan1` on Debian and
+Ubuntu); `mesa-vulkan-drivers` provides drivers for most GPUs. If the window does not open, see
 [troubleshooting](https://github.com/gal064/muxflow/blob/{{TAG}}/docs/troubleshooting.md#the-window-does-not-open-on-linux).
 
 ## Install

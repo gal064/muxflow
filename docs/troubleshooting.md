@@ -101,14 +101,14 @@ unaffected.
 
 # The window does not open on Linux
 
-The desktop draws with the GPU through Vulkan. Without a working Vulkan driver it
-exits at start; run `muxflow` from a terminal to see the error. Check the driver
-with `vulkaninfo --summary` (from `vulkan-tools`). Install the loader and your
-GPU's driver: on Debian and Ubuntu `libvulkan1` and `mesa-vulkan-drivers`, on
-Fedora `vulkan-loader` and `mesa-vulkan-drivers`, on Arch `vulkan-icd-loader` and
-the driver for your GPU. A virtual machine or an old GPU without Vulkan can use
-Mesa's software driver (lavapipe, in `mesa-vulkan-drivers`); it works, but
-draws more slowly and uses more CPU.
+The desktop draws with the GPU: through Vulkan, or through OpenGL when no Vulkan
+driver works. If neither works it cannot open a window; run `muxflow` from a
+terminal to see the error. Check Vulkan with `vulkaninfo --summary` (from
+`vulkan-tools`). Install the loader and your GPU's driver: on Debian and Ubuntu
+`libvulkan1` and `mesa-vulkan-drivers`, on Fedora `vulkan-loader` and
+`mesa-vulkan-drivers`, on Arch `vulkan-icd-loader` and the driver for your GPU.
+A virtual machine or an old GPU can use Mesa's software drivers (lavapipe for
+Vulkan, llvmpipe for OpenGL); they work, but draw more slowly and use more CPU.
 
 # macOS package and permissions
 
