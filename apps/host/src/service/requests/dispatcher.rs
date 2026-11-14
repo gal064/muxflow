@@ -180,7 +180,8 @@ pub(crate) async fn handle_request(
         }
 
         (Handler::History, Some(_)) => {
-            let response = super::history_dispatch::handle(request.history);
+            let response =
+                super::history_dispatch::handle(request.history, generation, topology_baseline);
             send_response(control_tx, request_id, response).await;
             pending.lock().unwrap().remove(&request_id);
             return;

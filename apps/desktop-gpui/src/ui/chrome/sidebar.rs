@@ -777,6 +777,16 @@ impl RenderOnce for Sidebar {
             ))
             .child(context_menu::anchor(&ordering_focus));
 
+        // The session history, beside the ordering as the mock draws it.
+        let history = sort_toggle(
+            "agents-history",
+            with_shortcut("Session history", "agents.history", cx),
+            "History",
+            palette.accent,
+        )
+        .tooltip(with_shortcut("Session history", "agents.history", cx))
+        .on_click(|_, window, cx| commands::run("agents.history", window, cx));
+
         let quiet = |text: &'static str| {
             div()
                 .px(ui(12.))
@@ -948,7 +958,12 @@ impl RenderOnce for Sidebar {
                     .h(relative(self.agents_ratio))
                     .child(section_head(
                         section_label("sidebar-agents-label", "Agents", cx).into_any_element(),
-                        ordering.into_any_element(),
+                        h_flex()
+                            .items_center()
+                            .gap(ui(4.))
+                            .child(history)
+                            .child(ordering)
+                            .into_any_element(),
                     ))
                     .child(agents_list),
             )
