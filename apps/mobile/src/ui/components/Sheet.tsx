@@ -6,14 +6,16 @@ import { colors, radii, typeScale } from "../tokens";
 export interface SheetProps {
   visible: boolean;
   onDismiss: () => void;
+  /** Called once the sheet has finished closing (the Modal's `onDismiss`). */
+  onClosed?: (() => void) | undefined;
   title?: string;
   children: ReactNode;
 }
 
 /** A bottom sheet: 12 dp corners (§10.1), tap outside to dismiss. */
-export function Sheet({ visible, onDismiss, title, children }: SheetProps) {
+export function Sheet({ visible, onDismiss, onClosed, title, children }: SheetProps) {
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onDismiss} statusBarTranslucent>
+    <Modal visible={visible} transparent animationType="slide" onDismiss={onClosed} onRequestClose={onDismiss} statusBarTranslucent>
       <Pressable style={styles.backdrop} onPress={onDismiss} accessibilityLabel="Close" />
       <View style={styles.sheet}>
         <View style={styles.grabber} />

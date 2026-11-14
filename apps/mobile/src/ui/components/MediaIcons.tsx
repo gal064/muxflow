@@ -91,3 +91,12 @@ export function SettingsIcon({ size = 22, color }: { size?: number; color: strin
     </Svg>
   );
 }
+
+/** History: a clock face. */
+export function ClockIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M12 3a9 9 0 1 0 0 18 9 9 0 1 0 0-18M12 7.5V12l3 2" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}

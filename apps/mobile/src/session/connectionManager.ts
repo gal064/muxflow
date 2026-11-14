@@ -19,6 +19,8 @@ import { notificationAttention } from "../features/notifications/attention";
 import type { AndroidConnectionServices } from "./AndroidConnectionServices";
 import { backgroundTimer } from "./backgroundTimer";
 import { voiceRegistry } from "../features/voice/voiceRegistry";
+import { bindChat, chatClient } from "../features/chat/chatRuntime";
+import { bindHistory, historyClient } from "../features/history/historyRuntime";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
@@ -40,6 +42,9 @@ let suspended = false;
 let bulk: { epoch: bigint; connection: HostConnection; store: SessionStore; ready: Promise<HostConnection> } | null = null;
 const listeners = new Set<(transition: AgentTransition) => void>();
 const toasts = new Set<(message: string) => void>();
+
+bindChat(() => control, (message) => toast(message));
+bindHistory(() => control, (message) => toast(message));
 
 /** The SSH module (§6.1) plugs in here; QA uses a dev TCP pipe. */
 export function setTransportFactory(f: TransportFactory): void {
@@ -150,6 +155,9 @@ export async function connectHost(host: SavedHost): Promise<void> {
       dropBulk();
       terminalRegistry.onConnected();
       voiceRegistry.onConnected(connection.serverIdentity);
+      // Chat subscriptions are per connection: every open chat is opened again.
+      chatClient.onConnected();
+      historyClient.onConnected();
     },
     onAgentTransition: (transition) => {
       for (const listener of listeners) listener(transition);
@@ -161,14 +169,22 @@ export async function connectHost(host: SavedHost): Promise<void> {
     },
     // A tmux server can be replaced without dropping the SSH lane. Pane IDs
     // may then be reused, so no Voice controller may survive that boundary.
-    onServerIdentityChanged: (serverIdentity) => voiceRegistry.onServerChanged(serverIdentity),
+    onServerIdentityChanged: (serverIdentity) => {
+      voiceRegistry.onServerChanged(serverIdentity);
+      chatClient.onServerChanged(serverIdentity);
+    },
     // A closed pane's Voice controller is unreachable (no screen can End it)
     // and would keep re-registering it with the host forever.
-    onPanesChanged: (serverIdentity, paneIds) => voiceRegistry.reconcilePanes(serverIdentity, paneIds),
+    onPanesChanged: (serverIdentity, paneIds) => {
+      voiceRegistry.reconcilePanes(serverIdentity, paneIds);
+      chatClient.reconcilePanes(serverIdentity, paneIds);
+    },
     // §7.4 routes ACTIVE_ROOT / directory / file-stream events to the files feature.
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
     // VOICE_PROVISION / VOICE_REPLY (voice-mode-plan.md §3) go to whichever voice session they name.
     onVoiceEvent: (event) => voiceRegistry.onVoiceEvent(event),
+    onChatEvent: (event) => chatClient.onEvent(event),
+    onHistoryEvent: (event) => historyClient.onEvent(event),
     onToast: toast,
     log,
     reconnectTimer: backgroundTimer(),
@@ -277,7 +293,11 @@ function closeHostConnection({ keepVoiceSessions = false, keepHostState = false 
   filesStore.getState().clearAll();
   // Voice sessions are registered per connection on the host; without one (or on another host) they are dead weight.
   if (!keepVoiceSessions) voiceRegistry.disposeAll();
-  if (!keepHostState) sessionStore.getState().clearHostState();
+  if (!keepHostState) {
+    sessionStore.getState().clearHostState();
+    chatClient.reset();
+    historyClient.reset();
+  }
   sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, ...(keepHostState ? {} : { host: undefined }) });
 }
 

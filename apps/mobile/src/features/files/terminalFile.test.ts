@@ -75,7 +75,7 @@ describe("terminal file resolution", () => {
     state.topologyGeneration = 41n;
     state.panes["%7"] = {
       id: "%7", sessionId: "$2", windowId: "@5", currentPath: "/work/src",
-      index: 0, active: true, width: 80, height: 24, left: 0, top: 0, currentCommand: "bash",
+      index: 0, active: true, width: 80, height: 24, left: 0, top: 0, currentCommand: "bash", chatAdapterId: "",
     };
     expect(terminalFileCaptureIsCurrent(capture, state, 41n)).toBe(true);
     state.panes["%7"]!.currentPath = "/moved";
