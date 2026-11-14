@@ -667,9 +667,8 @@ fn wheel(
     let Some(terminal) = pane.terminal().cloned() else {
         return;
     };
-    let cell = pane.metrics().cell_height;
-    let pixels = f32::from(event.delta.pixel_delta(cell).y);
-    let lines = scroll::wheel_lines(&mut pane.reading.wheel_carry, pixels, f32::from(cell));
+    let rows = scroll::wheel_rows(event.delta, f32::from(pane.metrics().cell_height));
+    let lines = scroll::wheel_lines(&mut pane.reading.wheel_carry, rows);
     if lines == 0 {
         return;
     }
