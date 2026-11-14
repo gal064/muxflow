@@ -36,12 +36,9 @@ use crate::{
     fonts,
     theme::{
         self,
-        metrics::{BAR_HEIGHT, NARROW_TERMINAL, TYPE_META, narrower_than, ui},
+        metrics::{BAR_HEIGHT, NARROW_TERMINAL, TYPE_MENU, TYPE_META, narrower_than, ui},
     },
-    ui::{
-        chrome::sidebar::pin_glyph,
-        title_bar::{bar_button, disabled_ink},
-    },
+    ui::title_bar::{bar_button, disabled_ink},
     workspaces::{
         ShellView, Target, Workspaces,
         actions::RelativePosition,
@@ -223,7 +220,7 @@ impl RenderOnce for TabStrip {
                                 .items_center()
                                 .gap(ui(6.))
                                 .px(ui(14.))
-                                .text_size(ui(13.))
+                                .text_size(ui(TYPE_MENU))
                                 .text_color(palette.chrome_faint)
                                 .child(PendingDot {
                                     color: palette.chrome_faint,
@@ -254,7 +251,12 @@ impl RenderOnce for TabStrip {
                 } => {
                     if *pinned {
                         label.push("Pinned".to_owned());
-                        glyph = Some(pin_glyph(palette.chrome_dim).into_any_element());
+                        glyph = Some(
+                            Icon::new(Glyph::Pin)
+                                .size(ui(11.))
+                                .text_color(palette.chrome_dim)
+                                .into_any_element(),
+                        );
                     }
                     label.push(tab.title.clone());
                     if *zoomed {
@@ -303,7 +305,11 @@ impl RenderOnce for TabStrip {
                                     // A pointer affordance: the menu is the
                                     // keyboard's way to pin, as in Tauri.
                                     .tab_stop(false)
-                                    .child(pin_glyph(palette.chrome_faint))
+                                    .child(
+                                        Icon::new(Glyph::Pin)
+                                            .size(ui(11.))
+                                            .text_color(palette.chrome_faint),
+                                    )
                                     .tooltip(if *pinned { "Unpin tab" } else { "Pin tab" })
                                     .on_click(move |_, _, cx| {
                                         weak.update(cx, |this, cx| {
@@ -523,7 +529,7 @@ impl RenderOnce for TabStrip {
                             .pl(ui(14.))
                             // The pin toggle beside it brings its own space.
                             .pr(ui(if terminal { 2. } else { 14. }))
-                            .text_size(ui(13.))
+                            .text_size(ui(TYPE_MENU))
                             .text_color(if is_active {
                                 palette.chrome_ink_strong
                             } else if is_docked {
@@ -556,7 +562,7 @@ impl RenderOnce for TabStrip {
                                 )
                             })
                             .when_some(dot, |tab, state| {
-                                tab.child(state_indicator(state, glyphs, 8., cx))
+                                tab.child(state_indicator(state, glyphs, palette.chrome_ink, cx))
                             }),
                     )
                     .children(trailing)

@@ -190,11 +190,20 @@ pub fn open_helper_dialog(
                     .when(busy, |detail| {
                         detail
                             .flex()
-                            .gap(ui(8.))
+                            .gap(ui(10.))
                             .items_center()
                             .child(Spinner::new().small())
                     })
-                    .child(detail_text(helper_detail(busy, &probe).into(), cx)),
+                    // Beside the spinner the text is a flex item, which keeps its
+                    // one-line width and runs past the card unless it may shrink.
+                    .child(
+                        div()
+                            .id("helper-dialog-text")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .child(detail_text(helper_detail(busy, &probe).into(), cx)),
+                    ),
             )
             .footer(controls(
                 DialogFooter::new()

@@ -340,6 +340,7 @@ impl HistoryOverlay {
                 } else {
                     colors.chrome_bg
                 },
+                selected,
                 cx,
             ))
             .child(div().flex_none().max_w_1_2().truncate().child(
@@ -572,6 +573,7 @@ pub fn woke_rows(cx: &App) -> Vec<AnyElement> {
                     glyphs,
                     colors.chrome_dim,
                     colors.accent_wash,
+                    false,
                     cx,
                 ))
                 .child(div().flex_1().min_w_0().truncate().child(title))

@@ -53,6 +53,8 @@ use crate::{
 };
 
 const DIALOG_WIDTH: f32 = 620.;
+/// Between the rows of a tab: roomier than Tauri's 12px, which read as crowded.
+const SETTINGS_ROW_GAP: f32 = 16.;
 /// `.settings-dialog { max-height: min(640px, 78vh) }`.
 const DIALOG_MAX_HEIGHT: f32 = 640.;
 const DIALOG_MAX_VIEWPORT: f32 = 0.78;
@@ -659,7 +661,14 @@ fn set_text(input: &Entity<InputState>, text: String, window: &mut Window, cx: &
     }
 }
 
+/// Help under a control: Tauri's `.settings-hint`, 6px under the control (with
+/// its group's 5px gap) and 4px more than the tab's row gap over the next row.
 fn hint<T: Into<SharedString>>(text: T, cx: &App) -> impl IntoElement + use<T> {
+    div().mt(ui(1.)).mb(ui(4.)).child(note(text, cx))
+}
+
+/// The same text in a stack of actions, where Tauri sets no margin on it.
+fn note<T: Into<SharedString>>(text: T, cx: &App) -> impl IntoElement + use<T> {
     div()
         .text_size(ui(TYPE_SECONDARY))
         .line_height(ui(TYPE_SECONDARY * 1.5))
@@ -698,7 +707,7 @@ fn setting_check<F: Fn(bool, &mut Window, &mut App) + 'static>(
     cx: &App,
 ) -> impl IntoElement + use<F> {
     v_flex()
-        .gap(ui(4.))
+        .gap(ui(5.))
         .child(
             Checkbox::new(id)
                 .label(label)
@@ -760,7 +769,7 @@ pub fn agent_setup_row(cx: &App) -> impl IntoElement + use<> {
             !status.available,
             &theme::palette(cx),
         ))
-        .child(hint(agent_setup_hint(status), cx))
+        .child(note(agent_setup_hint(status), cx))
 }
 
 impl SettingsDialog {
@@ -770,7 +779,7 @@ impl SettingsDialog {
             || "Local".to_owned(),
             |controller| controller.read(cx).active_host_label(),
         );
-        let mut tab = v_flex().gap(ui(12.)).child(setting_check(
+        let mut tab = v_flex().gap(ui(SETTINGS_ROW_GAP)).child(setting_check(
             "settings-compact-workspaces",
             "Compact workspace list",
             prefs.compact_workspaces,
@@ -793,7 +802,7 @@ impl SettingsDialog {
         ));
         tab.child(
             v_flex()
-                .gap(ui(4.))
+                .gap(ui(5.))
                 .child(caption("Default Markdown view", cx))
                 .child(radios(
                     "settings-markdown-view",
@@ -809,11 +818,11 @@ impl SettingsDialog {
         )
         .child(
             v_flex()
-                .gap(ui(12.))
+                .gap(ui(SETTINGS_ROW_GAP))
                 .child(legend_for_host(&host_label, cx))
                 .child(
                     v_flex()
-                        .gap(ui(4.))
+                        .gap(ui(5.))
                         .child(caption("Start in directory", cx))
                         .child(
                             Input::new(&self.start_directory)
@@ -827,7 +836,7 @@ impl SettingsDialog {
                 )
                 .child(
                     v_flex()
-                        .gap(ui(4.))
+                        .gap(ui(5.))
                         .child(caption("Run command in first tab", cx))
                         .child(
                             Input::new(&self.startup_command)
@@ -864,10 +873,10 @@ impl SettingsDialog {
     fn terminal_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let prefs = get(cx).clone();
         v_flex()
-            .gap(ui(12.))
+            .gap(ui(SETTINGS_ROW_GAP))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(caption("Font size", cx))
                     .child(
                         div().w(ui(120.)).child(
@@ -975,10 +984,10 @@ impl SettingsDialog {
             (UI_SCALES[4], "130%"),
         ];
         v_flex()
-            .gap(ui(12.))
+            .gap(ui(SETTINGS_ROW_GAP))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(legend("Theme", cx))
                     .child(radios("settings-theme", "Theme", &THEMES, prefs.theme, |theme, window, cx| {
                         update(|prefs| prefs.theme = theme, window, cx);
@@ -987,7 +996,7 @@ impl SettingsDialog {
             )
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(caption("Interface size", cx))
                     .child(radios("settings-ui-scale", "Interface size", scales, prefs.ui_scale, |scale, window, cx| {
                         update(|prefs| prefs.ui_scale = scale, window, cx);
@@ -1008,7 +1017,7 @@ impl SettingsDialog {
             ))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(legend("Markdown appearance", cx))
                     .child(radios(
                         "settings-markdown-appearance",
@@ -1038,7 +1047,7 @@ impl SettingsDialog {
         };
         let can_test = notifier(cx).is_some() && !self.sending_test;
         v_flex()
-            .gap(ui(12.))
+            .gap(ui(SETTINGS_ROW_GAP))
             .child(setting_check(
                 "settings-sounds-enabled",
                 "Play agent cues",
@@ -1072,7 +1081,7 @@ impl SettingsDialog {
             ))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(caption("Volume", cx))
                     .child(self.volume_slider(window, cx)),
             )
@@ -1093,7 +1102,7 @@ impl SettingsDialog {
                         !can_test,
                         &theme::palette(cx),
                     ))
-                    .child(hint(notification_status_hint(self.notification_status.as_deref()), cx))
+                    .child(note(notification_status_hint(self.notification_status.as_deref()), cx))
                     .children(self.test_failure.as_ref().map(|failure| {
                         SurfaceError::new("settings-test-failure", failure.clone())
                             .summary("The test notification could not be sent.")
@@ -1102,7 +1111,7 @@ impl SettingsDialog {
                         div()
                             .id("settings-test-sent")
                             .role(Role::Status)
-                            .child(hint(
+                            .child(note(
                                 "Sent. If nothing appeared, check System Settings → Notifications → Muxflow.",
                                 cx,
                             ))
@@ -1112,7 +1121,7 @@ impl SettingsDialog {
 
     fn accessibility_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let prefs = get(cx).clone();
-        v_flex().gap(ui(12.)).child(setting_check(
+        v_flex().gap(ui(SETTINGS_ROW_GAP)).child(setting_check(
             "settings-agent-state-glyphs",
             "Shapes in agent state dots",
             prefs.agent_state_glyphs,
