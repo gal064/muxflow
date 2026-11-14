@@ -124,6 +124,25 @@ using the phone mocks as the checklist.
 | D2 | `gpui/chat-d2` | Merged | `98ae5e5` | Merge `a8c72bc`, no conflict. 2 code and 1 design review rounds; worker QA and a recheck on the final binaries passed. The Details button sits in the chat, not the tab strip; the card says "Changes vs main". Details in the plan under "As built by stream D2" |
 | E | `gpui/chat-e` | Merged | `af4a80c` | Merged ahead of B; no conflict. 3 review rounds, worker QA passed both scenarios; the round-3 and post-QA fixes have host tests only. Desktop History UI has tests but no headless frames. Hiding `/btw` forks from History needs B's split placement. Not built: resume in a split, a clickable wake notification, dismissing a placeholder. Details in the plan under "As built by stream E" |
 | F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
-| Integration | `gpui/chat` | Final QA running | `a8c72bc` | With every task merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, mobile `protocol:check` passes and `cargo deny check licenses` is ok. Root fix: a side fork's pane is now hidden from History. One host test failed once under `cargo test` and not again in 52 runs; not identified |
+| Integration | `gpui/chat` | Fixing QA findings | `a8c72bc` | With every task merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, mobile `protocol:check` passes and `cargo deny check licenses` is ok. Root fix: a side fork's pane is now hidden from History. One host test failed once under `cargo test` and not again in 52 runs; not identified |
 
-Next step: `gdev_qa_chat` reports; root triages its findings.
+Final QA (`gdev_qa_chat`, on `7c52ff5`, real `claude` 11 turns and `codex` 5): all ten
+steps passed. Not run: the Allow/Deny card (Auto never asked), the wake
+notification (no notification service in the sandbox), the phone. Findings:
+
+1. A `/btw` fork stays a terminal in Chat mode, and includes the in-flight message.
+2. History lists one conversation up to three times (the replaced terminal
+   session, the session before a rewind, the current one).
+3. Chat sessions are titled "sh" or the shell's stale window title on the tab,
+   the Agents row, History and the woke placeholder.
+4. A Codex whose Muxflow hooks are not yet trusted converts before the trust
+   prompt can be answered, and then reports no status and no session. The hook
+   command is unchanged on this branch, so existing trust holds.
+5. Claude's edit row counts disagree with Git (`+3 −2` for a one-line insert).
+6. The model pill reads "Haiku", then "Haiku 5.5" after a rewind.
+7. A resumed Codex chat shows as not running in History until its first turn ends.
+8. Long slash argument hints are cut with no ellipsis.
+
+Next step: task `gpui/chat-fix` (findings 1 to 3, and 7 if cheap) finishes;
+root merges it and runs the checks. Findings 4 to 6 and 8 are left for the owner
+to rank.
