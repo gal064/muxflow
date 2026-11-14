@@ -110,13 +110,13 @@ using the phone mocks as the checklist.
 
 | Task | Branch | State | Commit | Notes |
 | --- | --- | --- | --- | --- |
-| A | `gpui/chat-a` | In progress | | Dispatched |
-| B | `gpui/chat-b` | Not started | | |
-| C | `gpui/chat-c` | Not started | | |
-| D1 | `gpui/chat-d1` | Not started | | |
+| A | `gpui/chat-a` | Merged | `5b1dbbb` | Fast-forward. 4 review rounds, worker QA and a recheck on the final binary passed. `PROTOCOL_MAJOR` 5. Departures from plan §4 are in the plan under "As built by stream A". LOAD_OLDER stays a response with a revision (root decision) |
+| B | `gpui/chat-b` | In progress | | Dispatched |
+| C | `gpui/chat-c` | In progress | | Dispatched |
+| D1 | `gpui/chat-d1` | In progress | | Dispatched |
 | D2 | `gpui/chat-d2` | Not started | | |
-| E | `gpui/chat-e` | Not started | | |
-| F | `gpui/chat-f` | Not started | | |
+| E | `gpui/chat-e` | In progress | | Dispatched |
+| F | `gpui/chat-f` | In progress | | Dispatched |
 | Integration | `gpui/chat` | Not started | | |
 
-Next step: task A finishes; root merges it and dispatches wave 1.
+Next step: wave 1 finishes; root merges B, E, C, D1, F in that order, then dispatches D2.
