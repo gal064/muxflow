@@ -104,18 +104,21 @@ fn state_color(state: DisplayState, palette: &Palette) -> Rgba {
     }
 }
 
+/// An agent state standing on its own, in CSS pixels: a workspace row, a tab,
+/// a group heading, quick open. One size for a dot and the running mark, so a
+/// state change never moves the text beside it. Tauri's 7–9px were too small
+/// to tell the states apart at a glance.
+const STATE_SIZE: f32 = 10.;
+/// A state docked on an adapter mark, ringed in the row's colour.
+const BADGE_SIZE: f32 = 8.;
+
 /// One agent state, drawn the same way everywhere: a ring means running (held
 /// still, see [`motion::WorkingIcon`]), a dot means a state that is not going
 /// anywhere. With glyphs on, every state is a dot whose shape carries it. Idle
 /// keeps its slot and draws nothing. `ink` is the running ring's colour: the
 /// text colour of the row it sits in, as Tauri's `currentColor`.
-pub fn state_indicator(
-    state: DisplayState,
-    glyphs: bool,
-    size: f32,
-    ink: Rgba,
-    cx: &App,
-) -> AnyElement {
+pub fn state_indicator(state: DisplayState, glyphs: bool, ink: Rgba, cx: &App) -> AnyElement {
+    let size = STATE_SIZE;
     let palette = theme::palette(cx);
     if state == DisplayState::Working && !glyphs {
         return motion::WorkingIcon::new(size, ink).into_any_element();
@@ -170,19 +173,15 @@ pub fn agent_mark(
             .flex_none()
             .items_center()
             .gap(ui(3.))
-            .child(state_indicator(state, true, 9., ink, cx))
+            .child(state_indicator(state, true, ink, cx))
             .child(icon)
             .into_any_element();
     }
     let badge = (state != DisplayState::Idle).then(|| {
-        // Tauri's badge is `size` across with a 1.5px ring of the row's colour
-        // outside it, a box-shadow. Drawn as a border it ate the badge: a 6px
-        // dot showed 4px. Here the ring is a backing 3px wider.
-        let size = if state == DisplayState::Working {
-            7.
-        } else {
-            6.
-        };
+        // A 1.5px ring of the row's colour outside the badge, as Tauri's
+        // box-shadow: drawn as a border it ate the badge. Here the ring is a
+        // backing 3px wider.
+        let size = BADGE_SIZE;
         let dot = div().size(ui(size)).rounded_full();
         let inner = match state {
             DisplayState::Working => {
@@ -1034,7 +1033,7 @@ fn heading(
         .text_color(palette.chrome_dim)
         // The heading's own ink, as Tauri's `.spinner.agent-group-dot`.
         .when_some(dot, |this, (state, glyphs)| {
-            this.child(state_indicator(state, glyphs, 8., palette.chrome_dim, cx))
+            this.child(state_indicator(state, glyphs, palette.chrome_dim, cx))
         })
         .child(div().min_w_0().truncate().child(text))
         .child(
@@ -1941,7 +1940,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_badge_is_tauris_size_with_its_ring_outside_it(cx: &mut TestAppContext) {
+    fn a_badge_is_one_size_with_its_ring_outside_it(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
@@ -1958,8 +1957,8 @@ mod tests {
                 .collect()
         });
         sizes.sort_by(f32::total_cmp);
-        // A 6px dot and a 7px ring, each with 1.5px of ring on every side.
-        assert_eq!(sizes, [9., 10.]);
+        // One badge size for every state, with 1.5px of ring on every side.
+        assert_eq!(sizes, [BADGE_SIZE + 3.; 2]);
     }
 
     #[gpui_kit::test]

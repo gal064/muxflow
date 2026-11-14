@@ -562,13 +562,7 @@ impl RenderOnce for TabStrip {
                                 )
                             })
                             .when_some(dot, |tab, state| {
-                                tab.child(state_indicator(
-                                    state,
-                                    glyphs,
-                                    8.,
-                                    palette.chrome_ink,
-                                    cx,
-                                ))
+                                tab.child(state_indicator(state, glyphs, palette.chrome_ink, cx))
                             }),
                     )
                     .children(trailing)
