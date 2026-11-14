@@ -1,6 +1,6 @@
 //! Editing inside a rendered table, as today's table widget (`liveTable.ts`):
-//! every cell edit goes through the whole-cell normalization; Tab, Enter and
-//! the arrows move by cell and leave the table at its edges; a row is added
+//! every cell edit goes through whole-cell normalization; Enter adds a line,
+//! Tab and the boundary arrows move by cell; a row is added
 //! from the last row and an empty one removed with Backspace. A short row's
 //! missing cells take the caret, and typing into one fills the row out to it.
 
@@ -44,6 +44,67 @@ fn odd_backslashes(text: &str) -> bool {
     text.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
 }
 
+/// A break inside code closes the current span and reopens it on the next
+/// nonempty line. Existing literal `<br>` text inside code stays literal.
+fn code_break_edit(source: &str, range: Range<usize>, text: &str) -> Option<(String, usize)> {
+    use markdown::mdast::Node;
+    if !text.contains(['\r', '\n']) {
+        return None;
+    }
+    fn find(node: &Node, source: &str, range: &Range<usize>) -> Option<(Range<usize>, usize)> {
+        if let Node::InlineCode(code) = node {
+            let pos = code.position.as_ref()?;
+            let span = pos.start.offset..pos.end.offset;
+            let ticks = source[span.clone()]
+                .bytes()
+                .take_while(|b| *b == b'`')
+                .count();
+            if range.start >= span.start + ticks && range.end <= span.end - ticks {
+                return Some((span, ticks));
+            }
+        }
+        node.children()?
+            .iter()
+            .find_map(|child| find(child, source, range))
+    }
+    let (span, ticks) = find(&crate::projection::parse_inline(source), source, &range)?;
+    let marker = "`".repeat(ticks);
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let prefix = &source[span.start + ticks..range.start];
+    let content = format!("{prefix}{text}{}", &source[range.end..span.end - ticks]);
+    let caret = prefix.len() + text.len();
+    let mut out = source[..span.start].to_owned();
+    let mut offset = 0;
+    let mut mapped = out.len();
+    for (i, line) in content.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !line.is_empty() {
+            out.push_str(&marker);
+        }
+        // Keep a literal edge backtick from merging with the delimiter.
+        // Markdown removes this matching pair of padding spaces on display.
+        let pad = line.starts_with('`') || line.ends_with('`');
+        if pad {
+            out.push(' ');
+        }
+        if caret >= offset && caret <= offset + line.len() {
+            mapped = out.len() + caret - offset;
+        }
+        out.push_str(line);
+        if pad {
+            out.push(' ');
+        }
+        if !line.is_empty() {
+            out.push_str(&marker);
+        }
+        offset += line.len() + 1;
+    }
+    out.push_str(&source[span.end..]);
+    Some((out, mapped))
+}
+
 impl LiveDoc {
     /// The missing cell holding the caret, as (row end, column).
     pub(super) fn missing(&self) -> Option<(usize, usize)> {
@@ -82,6 +143,7 @@ impl LiveDoc {
     }
 
     fn go(&mut self, cell: &Cell, end: bool) {
+        self.cell_typed_end = None;
         if cell.missing {
             self.set_caret_in_missing(cell.from, cell.col);
         } else {
@@ -116,15 +178,23 @@ impl LiveDoc {
             return false;
         }
         let src = self.doc.text();
-        let new = format!(
-            "{}{}{}",
-            &src[from..range.start],
+        let (new, caret_in_new) = code_break_edit(
+            &src[from..limit],
+            range.start - from..range.end - from,
             text,
-            &src[range.end..limit]
-        );
-        let caret_in_new = range.start - from + text.len();
-        let caret = self.write_cell(from, limit, &new, caret_in_new, kind);
-        self.cell_typed_end = text.ends_with(' ').then_some(caret);
+        )
+        .unwrap_or_else(|| {
+            (
+                format!(
+                    "{}{}{}",
+                    &src[from..range.start],
+                    text,
+                    &src[range.end..limit]
+                ),
+                range.start - from + text.len(),
+            )
+        });
+        self.write_cell(from, limit, &new, caret_in_new, kind);
         true
     }
 
@@ -156,6 +226,7 @@ impl LiveDoc {
         };
         self.doc
             .replace(from..end, &format!("{normalized}{suffix}"), caret, kind);
+        self.cell_typed_end = Some(from + normalized.len());
         caret
     }
 
@@ -166,20 +237,21 @@ impl LiveDoc {
             return false;
         };
         if caret > cell.from {
-            let prev = self
-                .prev_boundary(caret)
+            let prev = p
+                .atomic_before(caret)
+                .map(|r| r.start)
+                .or_else(|| self.prev_boundary(caret))
                 .unwrap_or(cell.from)
                 .max(cell.from);
             let src = self.doc.text();
             let new = format!("{}{}", &src[cell.from..prev], &src[caret..cell.limit]);
-            let at = self.write_cell(
+            self.write_cell(
                 cell.from,
                 cell.limit,
                 &new,
                 prev - cell.from,
                 EditKind::Deletion,
             );
-            self.cell_typed_end = self.cell_typed_end.map(|_| at);
             self.settle();
         } else if cell.from == cell.limit
             && let Some(line) = empty_row(p, t, cell.row)
@@ -206,8 +278,10 @@ impl LiveDoc {
             return false;
         };
         if caret < cell.limit {
-            let next = self
-                .next_boundary(caret)
+            let next = p
+                .atomic_after(caret)
+                .map(|r| r.end)
+                .or_else(|| self.next_boundary(caret))
                 .unwrap_or(cell.limit)
                 .min(cell.limit);
             let src = self.doc.text();
@@ -224,10 +298,16 @@ impl LiveDoc {
         true
     }
 
-    /// Enter in a cell moves down a row, adding one at the end; never a
-    /// newline, which would split the row. True when the caret is in a cell.
+    /// Enter inserts a rendered break without splitting the source table row.
     pub(super) fn enter_in_cell(&mut self) -> bool {
-        self.table_key(TableKey::Enter)
+        if self.read_only {
+            return false;
+        }
+        let handled = self.type_in_cell(self.doc.selection().range(), "\n", EditKind::Other);
+        if handled {
+            self.settle();
+        }
+        handled
     }
 
     /// A key with the caret in a cell, as today's widget takes it. Left and
@@ -237,6 +317,9 @@ impl LiveDoc {
     pub fn table_key(&mut self, key: TableKey) -> bool {
         if self.read_only {
             return false;
+        }
+        if key == TableKey::Enter {
+            return self.enter_in_cell();
         }
         let sel = self.doc.selection();
         let p = self.here();
@@ -270,17 +353,11 @@ impl LiveDoc {
             TableKey::ShiftTab | TableKey::Left if row > 0 => (at(row - 1, last_col), true),
             TableKey::Up if row > 0 => (at(row - 1, col), true),
             TableKey::Down if row < last_row => (at(row + 1, col), true),
-            TableKey::Enter if row < last_row => (at(row + 1, col), false),
-            TableKey::Tab | TableKey::Enter => {
-                let new_col = if key == TableKey::Tab { 0 } else { col };
+            TableKey::Tab => {
                 let (at, insert) = row_insertion(&table.layout, row);
                 self.cell_typed_end = None;
-                self.doc.replace(
-                    at..at,
-                    &insert,
-                    at + 2 + col_offset(new_col),
-                    EditKind::Other,
-                );
+                self.doc
+                    .replace(at..at, &insert, at + 2 + col_offset(0), EditKind::Other);
                 self.settle();
                 return true;
             }
@@ -292,6 +369,7 @@ impl LiveDoc {
                 self.exit_table(src, false);
                 return true;
             }
+            TableKey::Enter => unreachable!("handled above"),
         };
         if let Some(target) = target.cloned() {
             self.go(&target, end);

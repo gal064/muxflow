@@ -738,6 +738,14 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn table_cell_breaks_saved_by_live_are_shown_in_preview(cx: &mut TestAppContext) {
+        let (fixture, cx) = open("| a |\n|---|\n| one<br>two |", cx);
+        let rendered = fixture.rendered(cx);
+        assert!(rendered.contains("one\ntwo"), "{rendered:?}");
+        assert!(!rendered.contains("<br>"));
+    }
+
+    #[gpui_kit::test]
     fn a_standing_selection_holds_a_change_until_it_is_cleared(cx: &mut TestAppContext) {
         let (fixture, cx) = open("before", cx);
         let text = cx.update(|_, cx| fixture.view.read(cx).text.clone());

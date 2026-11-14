@@ -12,12 +12,20 @@ inside the signed bundle.
 so it is never stale. It runs `cargo-about` 0.9.3 (configured by
 `release/about.toml`) once for the app and once for the helper, since it scans
 one root crate at a time. It fails if a crate's licence cannot be determined.
-Where a crate offers Apache-2.0, that text is shipped. Where a crate does not
-package its licence file, the standard licence text is shipped with the
-crate's authors, plus any other licence files the crate has. The Rust standard
+Where a crate offers Apache-2.0, that text is shipped. Missing packaged notices
+are recovered from pinned upstream revisions in `release/licenses`, with their
+sources and checksums in `release/license-notices.json`. The generator refuses
+an unrecorded version or a changed notice. Seahash and realfft publish MIT
+declarations without copyright notices; their exact declarations accompany the
+standard MIT text, with no invented attribution. The Rust standard
 library, which every binary includes, is named in the file's header. The packages' `verify-package.sh` scripts refuse a
 package without the file. Install `cargo-about` with
 `cargo install --locked --features cli cargo-about@0.9.3`.
+
+The patched `gpui-pre-linux` backend omits its KDE blur fallback and the
+`wayland-protocols-plasma` dependency. Muxflow uses opaque windows; normal
+Wayland/X11 support and standard background effects are retained. The package
+notice generator rejects a shipped graph that brings those bindings back.
 
 The bundled JetBrains Mono fonts are licensed under the SIL Open Font License
 1.1. Their license texts are in `apps/desktop-gpui/assets/fonts/LICENSE-JetBrainsMono.txt`,

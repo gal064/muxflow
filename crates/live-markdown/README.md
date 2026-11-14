@@ -66,7 +66,13 @@ an edit above the screen does not move what is shown.
 
 ## Tables
 
-A table is edited as Tauri's widget edits it (`liveTable.ts`). A short row is
+Enter adds a line inside the current cell, stored as `<br>` so the Markdown row
+stays intact. Tab and Shift-Tab move between cells; Tab at the last cell adds a
+row. Arrows and Home/End follow the cell's visual lines, and vertical arrows
+move between cells at the first and last line. Trailing spaces remain editable
+after typing, deletion and undo rather than sending the caret to another cell.
+
+A short row is
 drawn to the header's width, as GFM draws it: its missing cells take the caret
 and write nothing until typed into, which fills the row out. Cells past the
 header's width are not drawn. In a read-only document no cell takes the caret.

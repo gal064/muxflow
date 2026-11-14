@@ -140,6 +140,10 @@ impl Document {
         self.change.take()
     }
 
+    pub(crate) fn pending_change(&self) -> Option<Change> {
+        self.change
+    }
+
     fn record(&mut self, range: Range<usize>, len: usize) {
         self.change = Some(Change::grow(self.change, range, len));
     }

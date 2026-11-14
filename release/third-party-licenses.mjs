@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { upstreamNotices } from './license-notices.mjs';
 
 const ABOUT_VERSION = '0.9.3';
 const output = process.argv[2];
@@ -75,6 +76,9 @@ for (const scan of scans) {
 }
 for (const [name, info] of crates) {
   if (!info.found) throw new Error(`no licence text found for ${name}`);
+  if (info.krate.name === 'wayland-protocols-plasma') {
+    throw new Error('the shipped graph must not include KDE blur protocol bindings');
+  }
 }
 
 // Files cargo-about does not ship but the crate's licence asks for: notices of
@@ -96,6 +100,9 @@ for (const name of [...crates.keys()].sort(compare)) {
   const root = readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && (notice.test(entry.name) || (generic && licenceFile.test(entry.name))))
     .map((entry) => entry.name);
+  if (generic && root.length === 0) {
+    extras.push(...upstreamNotices(name, join(repo, 'release')));
+  }
   // readFileSync throws if a listed nested notice has moved, so a bump fails.
   for (const file of [...root.sort(compare), ...(nested[krate.name] ?? [])]) {
     extras.push({ name, file, text: normalize(readFileSync(join(dir, file), 'utf8')) });

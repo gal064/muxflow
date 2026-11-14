@@ -12,7 +12,7 @@ members = [
   "crates/live-markdown",
 ]
 # Vendored crates keep their own upstream formatting and are not linted here.
-exclude = ["vendor/gpui-pre-macos", "vendor/markdown", "vendor/multiversion-macros"]
+exclude = ["vendor/gpui-pre-macos", "vendor/gpui-pre-linux", "vendor/markdown", "vendor/multiversion-macros"]
 resolver = "2"
 
 # GPUI's macOS backend at gpui-kit's pin (gpui-pre-macos 0.3.11, and still in
@@ -30,6 +30,8 @@ resolver = "2"
 # See vendor/multiversion-macros/VENDORED.md.
 [patch.crates-io]
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# Remove the unused KDE blur fallback and its non-permissive protocol bindings.
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 markdown = { path = "vendor/markdown" }
 multiversion-macros = { path = "vendor/multiversion-macros" }
 

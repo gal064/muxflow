@@ -145,12 +145,13 @@ impl LiveDoc {
     }
 
     /// Home or End to `target`, the edge of the visual line the view found;
-    /// inside a table cell, the cell's edge.
-    pub fn move_to_line_edge(&mut self, end: bool, extend: bool, target: usize) {
+    /// clamped to the current cell when editing a table.
+    pub fn move_to_line_edge(&mut self, _end: bool, extend: bool, target: usize) {
         let head = self.doc.selection().head;
-        if self.here().cell_at(head).is_some() {
-            return self.move_line_edge(end, extend);
-        }
+        let target = self
+            .here()
+            .cell_at(head)
+            .map_or(target, |(_, _, cell)| target.clamp(cell.from, cell.limit));
         if extend {
             self.set_head(target)
         } else {
