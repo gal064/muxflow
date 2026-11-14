@@ -4,19 +4,41 @@
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::TermMode;
-use gpui_kit::Context;
+use gpui_kit::{Context, ScrollDelta};
 use terminal_engine::{Command, HistoryPageTrigger};
 
 use super::super::pane::TerminalPane;
 
-/// Whole lines a wheel event moves, carrying the fraction a touchpad leaves
-/// over to the next event. Positive is up, into the history.
-pub fn wheel_lines(carry: &mut f32, pixels: f32, cell_height: f32) -> i32 {
-    if cell_height <= 0. {
-        return 0;
+/// Rows per line GPUI reports. Tauri's xterm.js scrolled 50 px a wheel notch,
+/// about 3 rows at the default font. GPUI's Linux and Windows backends already
+/// report a notch as 3 lines; macOS reports the notch itself, 1 line.
+const ROWS_PER_LINE: f32 = if cfg!(target_os = "macos") { 3. } else { 1. };
+
+/// Trackpad pixels as Tauri scrolled them: xterm.js moves 50 px a tick. On
+/// macOS WebKit counts 40 px as a tick (`pixelsPerLineStep`); on Wayland GTK
+/// counts 10 axis units as a tick, and GPUI has already tripled each unit.
+/// Only macOS and Wayland report pixels.
+const PIXEL_SCALE: f32 = if cfg!(target_os = "macos") {
+    50. / 40.
+} else {
+    50. / 10. / 3.
+};
+
+/// How far a wheel or trackpad event scrolls, in rows. Positive is up, into
+/// the history.
+pub fn wheel_rows(delta: ScrollDelta, cell_height: f32) -> f32 {
+    match delta {
+        ScrollDelta::Lines(lines) => lines.y * ROWS_PER_LINE,
+        ScrollDelta::Pixels(_) if cell_height <= 0. => 0.,
+        ScrollDelta::Pixels(pixels) => f32::from(pixels.y) * PIXEL_SCALE / cell_height,
     }
-    *carry += pixels / cell_height;
-    let lines = carry.trunc();
+}
+
+/// Whole rows to move now, carrying the rest to the next event. Rounded, as
+/// xterm.js shows the row nearest its scroll position.
+pub fn wheel_lines(carry: &mut f32, rows: f32) -> i32 {
+    *carry += rows;
+    let lines = carry.round();
     *carry -= lines;
     lines as i32
 }
@@ -127,14 +149,70 @@ mod tests {
     use super::super::buffer::tests::term;
     use super::*;
 
+    use gpui_kit::{point, px};
+
+    /// One notch as this platform's GPUI backend reports it.
+    const NOTCH: f32 = if cfg!(target_os = "macos") { 1. } else { 3. };
+
+    fn lines(y: f32) -> ScrollDelta {
+        ScrollDelta::Lines(point(0., y))
+    }
+
+    fn pixels(y: f32) -> ScrollDelta {
+        ScrollDelta::Pixels(point(px(0.), px(y)))
+    }
+
+    fn moved(carry: &mut f32, events: impl IntoIterator<Item = ScrollDelta>, cell: f32) -> i32 {
+        events
+            .into_iter()
+            .map(|delta| wheel_lines(carry, wheel_rows(delta, cell)))
+            .sum()
+    }
+
     #[test]
-    fn a_wheel_moves_whole_lines_and_keeps_the_fraction() {
+    fn a_notch_moves_three_rows_as_it_did_in_tauri() {
         let mut carry = 0.;
-        assert_eq!(wheel_lines(&mut carry, 3. * 17., 17.), 3);
-        assert_eq!(wheel_lines(&mut carry, 10., 17.), 0);
-        assert_eq!(wheel_lines(&mut carry, 10., 17.), 1);
-        assert_eq!(wheel_lines(&mut carry, -51., 17.), -2);
-        assert_eq!(wheel_lines(&mut carry, 5., 0.), 0);
+        assert_eq!(moved(&mut carry, [lines(NOTCH)], 18.), 3);
+        assert_eq!(moved(&mut carry, [lines(-NOTCH)], 18.), -3);
+        // Whole rows a notch, so a burst never drifts.
+        assert_eq!(moved(&mut carry, (0..30).map(|_| lines(NOTCH)), 18.), 90);
+    }
+
+    #[test]
+    fn a_trackpad_tick_scrolls_what_xterm_scrolled_for_it() {
+        // A tick is 40 px of macOS travel, or 10 Wayland axis units, which
+        // GPUI reports as 30 px; xterm.js scrolled 50 px for it.
+        let tick = if cfg!(target_os = "macos") { 40. } else { 30. };
+        let close = |rows: f32, expected: f32| (rows - expected).abs() < 1e-4;
+        assert!(close(wheel_rows(pixels(tick), 50.), 1.));
+        assert!(close(wheel_rows(pixels(-tick), 25.), -2.));
+        assert_eq!(wheel_rows(pixels(tick), 0.), 0.);
+    }
+
+    #[test]
+    fn a_slow_drag_and_its_momentum_add_up_from_remainders() {
+        let mut carry = 0.;
+        // 200 events of a twentieth of a row each, far below one row.
+        let step = 17. / 20. / PIXEL_SCALE;
+        assert_eq!(moved(&mut carry, (0..200).map(|_| pixels(step)), 17.), 10);
+        assert_eq!(moved(&mut carry, (0..200).map(|_| pixels(-step)), 17.), -10);
+    }
+
+    #[test]
+    fn the_view_shows_the_row_nearest_the_scroll_position_as_xterm_does() {
+        let mut carry = 0.;
+        // At 0.45, 0.55, 0.45 and 0 rows xterm.js shows rows 0, 1, 0 and 0.
+        assert_eq!(wheel_lines(&mut carry, 0.45), 0);
+        assert_eq!(wheel_lines(&mut carry, 0.1), 1);
+        assert_eq!(wheel_lines(&mut carry, -0.1), -1);
+        assert_eq!(wheel_lines(&mut carry, -0.45), 0);
+    }
+
+    #[test]
+    fn a_notch_on_a_full_screen_program_sends_a_key_per_row() {
+        let mut carry = 0.;
+        let rows = moved(&mut carry, [lines(NOTCH)], 18.);
+        assert_eq!(alternate_scroll_bytes(rows, false), b"\x1b[A".repeat(3));
     }
 
     #[test]
