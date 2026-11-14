@@ -36,7 +36,7 @@ use crate::{
     fonts,
     theme::{
         self,
-        metrics::{BAR_HEIGHT, NARROW_TERMINAL, TYPE_META, narrower_than, ui},
+        metrics::{BAR_HEIGHT, NARROW_TERMINAL, TYPE_MENU, TYPE_META, narrower_than, ui},
     },
     ui::title_bar::{bar_button, disabled_ink},
     workspaces::{
@@ -220,7 +220,7 @@ impl RenderOnce for TabStrip {
                                 .items_center()
                                 .gap(ui(6.))
                                 .px(ui(14.))
-                                .text_size(ui(13.))
+                                .text_size(ui(TYPE_MENU))
                                 .text_color(palette.chrome_faint)
                                 .child(PendingDot {
                                     color: palette.chrome_faint,
@@ -529,7 +529,7 @@ impl RenderOnce for TabStrip {
                             .pl(ui(14.))
                             // The pin toggle beside it brings its own space.
                             .pr(ui(if terminal { 2. } else { 14. }))
-                            .text_size(ui(13.))
+                            .text_size(ui(TYPE_MENU))
                             .text_color(if is_active {
                                 palette.chrome_ink_strong
                             } else if is_docked {
