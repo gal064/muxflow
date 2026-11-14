@@ -1484,7 +1484,7 @@ fn prune_fallbacks(runtime: &Path, prefix: &str) {
 fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {
     let value = Options::parse(arguments)
         .adapter
-        .context("hook ingest requires --adapter codex|claude-code|pi")?;
+        .context("hook ingest requires --adapter codex|claude-code|pi|opencode")?;
     crate::service::agents::adapters::by_id(&value)
         .map(|adapter| adapter.legacy_kind())
         .ok_or_else(|| anyhow::anyhow!("unsupported hook adapter"))
