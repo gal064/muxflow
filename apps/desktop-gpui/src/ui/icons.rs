@@ -39,6 +39,7 @@ pub enum Glyph {
     Diff,
     Zoom,
     Search,
+    Pin,
     Folder,
     WindowMaximize,
     WindowRestore,
@@ -92,6 +93,11 @@ impl Glyph {
                 r#"<path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10"/>"#
             ),
             Self::Search => glyph!(r#"<circle cx="7" cy="7" r="4.25"/><path d="m10.2 10.2 3 3"/>"#),
+            // Bootstrap Icons (MIT) `pin` redrawn as a stroke: a push pin seen
+            // head-on, so it reads as a pin rather than a bookmark at 11px.
+            Self::Pin => glyph!(
+                r#"<path d="M4.75 1.25h6.5c0 .95-.55 1.5-1.25 1.9V6.9c1.2.7 2.25 1.6 2.25 2.85h-8.5c0-1.25 1.05-2.15 2.25-2.85V3.15c-.7-.4-1.25-.95-1.25-1.9Z"/><path d="M8 9.75v4.75"/>"#
+            ),
             Self::Folder => crate::files::icons::Shape::Folder.svg(),
             Self::WindowMaximize => {
                 glyph!(r#"<rect height="8.5" rx="1" width="8.5" x="3.75" y="3.75"/>"#)
@@ -117,7 +123,7 @@ mod tests {
 
     use super::*;
 
-    const ALL: [Glyph; 20] = [
+    const ALL: [Glyph; 21] = [
         Glyph::SidebarLeft,
         Glyph::PanelRight,
         Glyph::Bell,
@@ -135,6 +141,7 @@ mod tests {
         Glyph::Diff,
         Glyph::Zoom,
         Glyph::Search,
+        Glyph::Pin,
         Glyph::Folder,
         Glyph::WindowMaximize,
         Glyph::WindowRestore,

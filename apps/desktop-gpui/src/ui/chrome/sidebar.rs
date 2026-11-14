@@ -13,7 +13,7 @@ use gpui_kit::{
     assets::IconName,
     base::{Disableable, HandleEdge, TestSupportExt},
     component::{
-        Sizable,
+        Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         menu::{ContextMenuExt, DropdownMenu, PopupMenu},
@@ -45,6 +45,7 @@ use crate::{
             divider::{Divider, divider},
             layout,
         },
+        icons::Glyph,
         title_bar::{bar_button, disabled_ink},
     },
     workspaces::{RowKeys, Target, Workspaces, focus_terminal, rows::WorkspaceRow, run_command},
@@ -90,16 +91,6 @@ fn sort_toggle(
                 .text_color(accent)
                 .child(text.into()),
         )
-}
-
-/// A pushpin, drawn: the default icon set has none.
-pub(super) fn pin_glyph(ink: Rgba) -> gpui_kit::Div {
-    v_flex()
-        .flex_none()
-        .items_center()
-        .w(ui(8.))
-        .child(div().size(ui(6.)).rounded_full().bg(ink))
-        .child(div().w(ui(1.5)).h(ui(4.)).bg(ink))
 }
 
 /// A link's phase as a color.
@@ -223,7 +214,7 @@ fn workspace_row(
             .tooltip(pin_label)
             // A pointer affordance: the menu is the keyboard's way to pin.
             .tab_stop(false)
-            .child(pin_glyph(meta))
+            .child(Icon::new(Glyph::Pin).size(ui(12.)).text_color(meta))
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 weak.update(cx, |this, cx| this.toggle_session_pin(&row, cx))
