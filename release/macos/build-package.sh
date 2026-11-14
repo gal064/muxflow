@@ -73,6 +73,7 @@ install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-gpui" "$app/Contents/MacOS/mu
 install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-host" "$app/Contents/MacOS/muxflow-host"
 install -m 0644 apps/desktop/src-tauri/icons/icon.icns release/macos/package-owner "$resources/"
 sed "s/@VERSION@/$version/g" release/macos/Info.plist > "$app/Contents/Info.plist"
+node release/third-party-licenses.mjs "$resources/THIRD-PARTY-LICENSES"
 
 # The shipped Linux helpers are produced by release/linux/build-compatible-host.sh,
 # the same builder every Phase 8/9 gate validates. They previously had their own
