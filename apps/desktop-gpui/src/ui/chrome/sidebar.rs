@@ -241,7 +241,7 @@ fn workspace_row(
                 DisplayState::Blocked | DisplayState::Done | DisplayState::Working
             )
         });
-        state_indicator(state.unwrap_or(DisplayState::Idle), glyphs, 8., ink, cx)
+        state_indicator(state.unwrap_or(DisplayState::Idle), glyphs, ink, cx)
     } else {
         // Working alone, and always as motion: the lines below carry the rest.
         let state = if agents.working {
@@ -249,7 +249,7 @@ fn workspace_row(
         } else {
             DisplayState::Idle
         };
-        state_indicator(state, false, 8., ink, cx)
+        state_indicator(state, false, ink, cx)
     };
     // Tauri rings the active row's state dot in accent ink: on the accent block
     // a red or a green dot would dissolve. A working mark takes the ink itself.
