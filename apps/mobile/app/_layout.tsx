@@ -35,6 +35,8 @@ export default function RootLayout() {
         <Stack.Screen name="workspace/[sessionId]" options={{ title: "Workspace" }} />
         <Stack.Screen name="terminal/[paneId]" options={{ headerShown: false }} />
         <Stack.Screen name="voice/[paneId]" options={{ headerShown: false }} />
+        <Stack.Screen name="chat/[paneId]" options={{ headerShown: false }} />
+        <Stack.Screen name="history" options={{ title: "History" }} />
         <Stack.Screen name="files/[paneId]/index" options={{ title: "Files" }} />
         <Stack.Screen name="files/[paneId]/dir" options={{ title: "Files" }} />
         <Stack.Screen name="file/[paneId]" options={{ title: "File" }} />
