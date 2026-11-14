@@ -3,7 +3,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = prost_build::Config::new();
     config.protoc_executable(protoc);
     config.compile_protos(
-        &["proto/envelope.proto", "proto/automation.proto"],
+        &[
+            "proto/envelope.proto",
+            "proto/automation.proto",
+            "proto/chat.proto",
+            "proto/history.proto",
+        ],
         &["proto"],
     )?;
     println!("cargo:rerun-if-changed=proto");

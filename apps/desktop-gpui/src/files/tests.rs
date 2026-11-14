@@ -915,6 +915,7 @@ fn pane(overrides: Value) -> tmux_control::Pane {
         "id": "%1", "sessionId": "$1", "windowId": "@1", "index": 0, "active": true,
         "width": 80, "height": 24, "left": 0, "top": 0, "currentPath": "/repo",
         "currentCommand": "zsh", "panePid": 1, "startCommand": "", "title": "",
+        "chatAdapterId": "",
     });
     for (key, field) in overrides.as_object().unwrap() {
         value[key] = field.clone();

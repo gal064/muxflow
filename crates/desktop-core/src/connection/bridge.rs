@@ -980,6 +980,27 @@ fn process_event(
         v1::EventKind::Automation => {
             send_protocol_event(channel, event_sequence, TerminalEvent::AutomationChanged)?;
         }
+        v1::EventKind::Chat => {
+            let chat = event.chat.ok_or("chat event omitted payload")?;
+            send_protocol_event(
+                channel,
+                event_sequence,
+                TerminalEvent::ChatService {
+                    payload: super::chat::encode_event(&chat),
+                    pane_id: chat.pane_id,
+                },
+            )?;
+        }
+        v1::EventKind::SessionHistory => {
+            let history = event.history.ok_or("history event omitted payload")?;
+            send_protocol_event(
+                channel,
+                event_sequence,
+                TerminalEvent::HistoryService {
+                    payload: super::history::encode_event(&history),
+                },
+            )?;
+        }
         _ => send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?,
     }
     // No pane of a host the renderer has not named a session on is being

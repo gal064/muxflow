@@ -8,6 +8,7 @@ pub(super) fn build(
     state: &StoredState,
     server_identity: &str,
     wiring: &[super::hooks::ObservedAdapter],
+    agent_mode: v1::ChatAgentMode,
 ) -> v1::AgentSnapshot {
     let agents = state
         .agents
@@ -25,6 +26,7 @@ pub(super) fn build(
         notification_watermark: state.generation,
         adapters: adapters::descriptors(&home, wiring),
         accepted_generation: state.generation,
+        agent_mode: agent_mode.into(),
     }
 }
 

@@ -556,6 +556,7 @@ fn a_refreshed_baseline_names_what_moved() {
         pane_pid: 0,
         start_command: String::new(),
         title: String::new(),
+        chat_adapter_id: String::new(),
     };
     let base = tmux_control::TmuxSnapshot {
         sessions: vec![tmux_control::Session {

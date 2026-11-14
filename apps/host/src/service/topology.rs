@@ -344,6 +344,11 @@ impl TopologyActor {
         // for equivalent title frames: a shell-hosted agent can start or stop
         // without changing pane_current_command, and suppressing that frame
         // must not suppress the resulting agent-state refresh.
+        // A fresh look at tmux is what can say a chat nobody has open has
+        // lost its pane.
+        crate::service::chat::ChatRuntime::global().forget_closed(None, &identity, |pane_id| {
+            current.panes.iter().any(|pane| pane.id == pane_id)
+        });
         let agent_changed = match crate::service::agents::AgentRuntime::global()
             .reconcile_topology(&current, &identity)
         {
@@ -717,6 +722,7 @@ mod tests {
                 pane_pid: 42,
                 start_command: "bash".into(),
                 title: String::new(),
+                chat_adapter_id: String::new(),
             }],
         }
     }

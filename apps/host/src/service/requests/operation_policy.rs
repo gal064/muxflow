@@ -31,6 +31,8 @@ pub(crate) enum Handler {
     Agent,
     Voice,
     Automation,
+    Chat,
+    History,
     Daemon,
     Test,
 }
@@ -177,6 +179,12 @@ impl OperationPolicy {
             // Detached: a run started now waits on the new tab's shell, and
             // a save waits on the scheduler's lock while a tick launches.
             v1::Operation::Automation => (Lane::Control, Scheduling::Detached, Handler::Automation),
+            // Inline: a connection's chat requests take effect in the order
+            // it sent them. Each touches memory or hands a command to the
+            // provider, which must not make the lane wait: the first request
+            // for a pane also loads its history and connects its session.
+            v1::Operation::Chat => (Lane::Control, Scheduling::Inline, Handler::Chat),
+            v1::Operation::SessionHistory => (Lane::Control, Scheduling::Inline, Handler::History),
             v1::Operation::TestDelay
             | v1::Operation::TestInjectGap
             | v1::Operation::TestOverflow => (Lane::Control, Scheduling::Inline, Handler::Test),
@@ -242,9 +250,9 @@ mod tests {
     /// lists of the same operations would be the very drift being guarded.
     fn expected_policies() -> Vec<(v1::Operation, Lane, Scheduling, Handler)> {
         use Handler::{
-            ActiveRoot as AR, Agent as AH, Automation as AU, Daemon as DH, Filesystem as FH,
-            Git as GH, Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH,
-            Unsupported as UH, Voice as VH,
+            ActiveRoot as AR, Agent as AH, Automation as AU, Chat as CH, Daemon as DH,
+            Filesystem as FH, Git as GH, History as HH, Snapshot as SH, Terminal as TH, Test as XH,
+            TmuxAction as MH, Unsupported as UH, Voice as VH,
         };
         use Lane::{Bulk as B, Control as C};
         use Scheduling::{Detached as Dd, Inline as I};
@@ -310,6 +318,8 @@ mod tests {
             (VoiceSpeak, C, Dd, VH),
             (VoiceSession, C, I, VH),
             (Automation, C, Dd, AU),
+            (Chat, C, I, CH),
+            (SessionHistory, C, I, HH),
             (TestDelay, C, I, XH),
             (TestInjectGap, C, I, XH),
             (TestOverflow, C, I, XH),

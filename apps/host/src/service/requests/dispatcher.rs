@@ -166,6 +166,26 @@ pub(crate) async fn handle_request(
             return;
         }
 
+        (Handler::Chat, Some(_)) => {
+            super::chat_dispatch::handle(
+                request_id,
+                request,
+                control_tx,
+                connection_id,
+                topology_baseline,
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::History, Some(_)) => {
+            let response = super::history_dispatch::handle(request.history);
+            send_response(control_tx, request_id, response).await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
         (
             Handler::ActiveRoot,
             Some(

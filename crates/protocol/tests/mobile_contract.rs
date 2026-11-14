@@ -83,6 +83,14 @@ fn mobile_contract_matches_rust() {
                     }), ..Default::default()
                 }), ..Default::default()
             })),
+            "chat": frame(v1::envelope::Payload::Event(v1::HostEvent {
+                kind: v1::EventKind::Chat.into(), scope: "%3".into(), chat: Some(v1::ChatEvent {
+                    pane_id: "%3".into(), revision: (1 << 53) + 3,
+                    change: Some(v1::chat_event::Change::Delta(v1::ChatItemDelta {
+                        item_id: "a1".into(), text_append: "h\u{e9}llo".into(),
+                    })),
+                }), ..Default::default()
+            })),
         },
     });
     for (file, value) in [

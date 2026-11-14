@@ -84,23 +84,29 @@ pub(crate) enum Delivery {
 /// change it must see — but it is reported apart from a departed connection,
 /// which is the one case the caller should forget about.
 pub(crate) fn send_control_event_to(connection_id: u64, event: v1::HostEvent) -> Delivery {
-    let Some(hub) = CONTROL_EVENT_HUB.get() else {
+    control_sink(connection_id).map_or(Delivery::Gone, |sink| sink.offer(event))
+}
+
+/// Queues one ordered event the connection must not miss.
+///
+/// Like `send_control_event_to`, but a full queue is not a dropped event: it
+/// costs the connection the same resync a saturated broadcast does. A chat
+/// event is a step in a per-pane revision sequence, and a client that missed
+/// the last one of a turn would otherwise wait on it for ever.
+pub(crate) fn send_required_control_event_to(connection_id: u64, event: v1::HostEvent) -> Delivery {
+    let Some(sink) = control_sink(connection_id) else {
         return Delivery::Gone;
     };
-    let sender = hub
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|sink| sink.id == connection_id)
-        .map(|sink| sink.sender.clone());
-    match sender {
-        None => Delivery::Gone,
-        Some(sender) => match sender.try_send(SequencerControl::OrderedEvent(event)) {
-            Ok(()) => Delivery::Sent,
-            Err(mpsc::error::TrySendError::Full(_)) => Delivery::Full,
-            Err(mpsc::error::TrySendError::Closed(_)) => Delivery::Gone,
-        },
+    let delivery = sink.offer(event);
+    if delivery == Delivery::Full {
+        sink.resync_after_overflow();
     }
+    delivery
+}
+
+fn control_sink(connection_id: u64) -> Option<ControlEventSink> {
+    let hub = CONTROL_EVENT_HUB.get()?.lock().unwrap();
+    hub.iter().find(|sink| sink.id == connection_id).cloned()
 }
 
 pub(crate) fn broadcast_control_event(event: v1::HostEvent) {
@@ -115,21 +121,40 @@ pub(crate) fn broadcast_control_event(event: v1::HostEvent) {
         {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
-                if sink
-                    .overflow_pending
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    crate::diagnostics::record_event_queue_overflow();
-                    saturated.push(sink.clone());
-                }
+                saturated.push(sink.clone());
                 true
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
     });
     for sink in saturated {
-        let pending = Arc::clone(&sink.overflow_pending);
+        sink.resync_after_overflow();
+    }
+}
+
+impl ControlEventSink {
+    /// Queues one ordered event if there is room for it.
+    fn offer(&self, event: v1::HostEvent) -> Delivery {
+        match self.sender.try_send(SequencerControl::OrderedEvent(event)) {
+            Ok(()) => Delivery::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => Delivery::Full,
+            Err(mpsc::error::TrySendError::Closed(_)) => Delivery::Gone,
+        }
+    }
+
+    /// Tells a connection whose queue dropped an event to resync, once per
+    /// overflow episode. The resync waits for room on a task of its own: the
+    /// queue it goes into was full a moment ago.
+    fn resync_after_overflow(self) {
+        if self
+            .overflow_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        crate::diagnostics::record_event_queue_overflow();
+        let pending = Arc::clone(&self.overflow_pending);
         // The most expensive event this host can send — it costs the client a
         // full resnapshot — and it used to carry no reason at all, so a log
         // full of them said only that something happened. Under a sustained
@@ -143,12 +168,12 @@ pub(crate) fn broadcast_control_event(event: v1::HostEvent) {
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = sink.sender.send(message).await;
+                let _ = self.sender.send(message).await;
                 pending.store(false, Ordering::Release);
             });
         } else {
             std::thread::spawn(move || {
-                let _ = sink.sender.blocking_send(message);
+                let _ = self.sender.blocking_send(message);
                 pending.store(false, Ordering::Release);
             });
         }
