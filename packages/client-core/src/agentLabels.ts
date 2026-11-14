@@ -12,7 +12,7 @@ export interface AgentLabelAdapter {
 }
 
 const UUID_LIKE = /^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{24,})$/i;
-const GENERIC_TAB_NAME = /^(?:agent|codex|claude(?:[- ]code)?|pi)$/i;
+const GENERIC_TAB_NAME = /^(?:agent|codex|claude(?:[- ]code)?|opencode|pi)$/i;
 /* Claude Code and Codex prefix their tmux window titles with a status marker —
    Claude's asterisk frames (· ✢ ✳ ✶ ✻ ✽), Codex's braille spinner frames
    (U+2800–U+28FF), quarter circles (◐ ◓ ◑ ◒), and check/cross marks on
@@ -61,5 +61,6 @@ function adapterFallback(adapterId: string): string {
   if (adapterId === "codex") return "Codex";
   if (adapterId === "claude-code") return "Claude";
   if (adapterId === "pi") return "Pi";
+  if (adapterId === "opencode") return "OpenCode";
   return "Agent";
 }
