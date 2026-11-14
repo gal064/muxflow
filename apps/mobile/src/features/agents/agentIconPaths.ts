@@ -1,7 +1,7 @@
 /**
  * The adapter marks' geometry, copied byte-for-byte from the desktop's
- * `apps/desktop/src/agents/view.rs`. A test reads that file and compares
- * every string here against it, so the two apps cannot drift.
+ * `apps/desktop/src/agents/view.rs` (the pin from `ui/icons.rs`). A test reads
+ * those files and compares every string here, so the two apps cannot drift.
  * Kept apart from the React component so the test runs without a native
  * runtime.
  */
