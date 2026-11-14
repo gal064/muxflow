@@ -1,4 +1,4 @@
-//! The Settings dialog: six tabs over [`Prefs`](super::Prefs), with the
+//! The Settings dialog: seven tabs over [`Prefs`](super::Prefs), with the
 //! connection form on the first. Copy, order and behavior from
 //! `features/shell/SettingsDialog.tsx`.
 
@@ -30,7 +30,8 @@ use gpui_kit::{
 };
 
 use super::{
-    AgentSetupStatus, agent_setup, get, notifier, on_runtime,
+    AgentMode, AgentSetupStatus, agent_mode, agent_mode_change, agent_setup, get, notifier,
+    on_runtime,
     prefs::{AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
     update,
 };
@@ -66,15 +67,17 @@ pub enum Tab {
     Connection,
     Workspace,
     Terminal,
+    Agents,
     Appearance,
     Sounds,
     Accessibility,
 }
 
-const TABS: [(Tab, &str); 6] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Connection, "Connection"),
     (Tab::Workspace, "Workspace"),
     (Tab::Terminal, "Terminal"),
+    (Tab::Agents, "Agents"),
     (Tab::Appearance, "Appearance"),
     (Tab::Sounds, "Sounds"),
     (Tab::Accessibility, "Accessibility"),
@@ -168,6 +171,19 @@ pub fn notification_status_hint(status: Option<&str>) -> &'static str {
         // No notification daemon is answering, or a permission state this build
         // has never heard of.
         Some(_) => "This system did not report a notification permission this app understands.",
+    }
+}
+
+/// What the agent mode does, or why it cannot be changed now.
+pub fn agent_mode_hint(mode: AgentMode) -> &'static str {
+    match mode.chat {
+        None => "Connect to this host to choose.",
+        Some(true) => {
+            "An agent you start in a terminal opens as a chat in the same tab. Agents already running stay as they are, and pi stays a terminal."
+        }
+        Some(false) => {
+            "An agent you start in a terminal runs there, as its own terminal interface. Agents already running stay as they are."
+        }
     }
 }
 
@@ -323,6 +339,8 @@ impl SettingsDialog {
         subscriptions.push(cx.on_release(|_, cx| {
             commands::update_context(cx, |context| context.has_host_profile = false);
         }));
+        // The host's answer to a change of its agent mode, or another host's.
+        subscriptions.push(cx.observe_global::<AgentMode>(|_, cx| cx.notify()));
         let mut this = Self {
             tab,
             controller,
@@ -856,6 +874,49 @@ impl SettingsDialog {
             ))
     }
 
+    /// What the host on screen does with an agent started in a terminal. The
+    /// host keeps the choice, so it is the same from every device.
+    fn agents_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mode = agent_mode(cx);
+        let change = agent_mode_change(cx);
+        let host_label = self.controller.as_ref().map_or_else(
+            || "Local".to_owned(),
+            |controller| controller.read(cx).active_host_label(),
+        );
+        let off = mode.chat.is_none() || mode.changing || change.is_none();
+        let radio = |label: &'static str| {
+            Radio::new(SharedString::from(format!("settings-agent-mode-{label}")))
+                .label(label)
+                .disabled(off)
+        };
+        v_flex()
+            .gap(ui(12.))
+            .child(agents_legend(&host_label, cx))
+            .child(
+                v_flex()
+                    .gap(ui(4.))
+                    .child(caption("New agents open as", cx))
+                    .child(
+                        div()
+                            .id("settings-agent-mode-group")
+                            .role(Role::RadioGroup)
+                            .aria_label("New agents open as")
+                            .child(
+                                RadioGroup::horizontal("settings-agent-mode")
+                                    .children([radio("Terminal"), radio("Chat")])
+                                    .selected_index(mode.chat.map(usize::from))
+                                    .disabled(off)
+                                    .on_change(move |index, window, cx| {
+                                        if let Some(change) = change.as_ref() {
+                                            change(*index == 1, window, cx);
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(hint(agent_mode_hint(mode), cx)),
+            )
+    }
+
     fn appearance_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let prefs = get(cx).clone();
         let scales: &'static [(f64, &'static str)] = &[
@@ -1050,6 +1111,13 @@ impl SettingsDialog {
     }
 }
 
+fn agents_legend(label: &str, cx: &App) -> impl IntoElement + use<> {
+    div()
+        .text_size(ui(TYPE_LABEL))
+        .text_color(theme::palette(cx).chrome_faint)
+        .child(format!("AGENTS ON {}", label.to_uppercase()))
+}
+
 fn legend_for_host(label: &str, cx: &App) -> impl IntoElement + use<> {
     div()
         .text_size(ui(TYPE_LABEL))
@@ -1129,6 +1197,7 @@ impl Render for SettingsDialog {
             Tab::Connection => div().children(self.form.clone()).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
             Tab::Terminal => self.terminal_tab(cx).into_any_element(),
+            Tab::Agents => self.agents_tab(cx).into_any_element(),
             Tab::Appearance => self.appearance_tab(cx).into_any_element(),
             Tab::Sounds => self.sounds_tab(window, cx).into_any_element(),
             Tab::Accessibility => self.accessibility_tab(cx).into_any_element(),

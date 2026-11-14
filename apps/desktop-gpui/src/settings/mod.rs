@@ -11,9 +11,11 @@
 //!
 //! # For features Settings renders something of
 //!
-//! Two controls belong to a feature that is not a preference:
-//! [`set_agent_setup`] publishes "Set up agent status…" and [`set_notifier`]
-//! the native notifier the Sounds tab asks about the permission.
+//! Three controls belong to a feature that is not a preference:
+//! [`set_agent_setup`] publishes "Set up agent status…", [`set_notifier`]
+//! the native notifier the Sounds tab asks about the permission, and
+//! [`publish_agent_mode`] with [`set_agent_mode_change`] the host's choice
+//! between terminal and chat agents, which the host keeps.
 //!
 //! Saves go through `update_app_state`, which holds the store's write lock
 //! across the read and the write, so they cannot overwrite the shell layout or
@@ -162,6 +164,46 @@ pub fn set_agent_setup(setup: AgentSetup, cx: &mut App) {
 
 pub(crate) fn agent_setup(cx: &App) -> Option<AgentSetup> {
     cx.try_global::<AgentSetupSlot>().map(|slot| slot.0.clone())
+}
+
+/// What the host on screen does with an agent started in one of its
+/// terminals, as the Agents tab shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AgentMode {
+    /// Whether it becomes a chat. `None` until a connected host has said.
+    pub chat: Option<bool>,
+    /// A change is on its way to the host.
+    pub changing: bool,
+}
+
+impl Global for AgentMode {}
+
+/// Asks the host on screen for chat agents (`true`) or terminal agents.
+pub type ChangeAgentMode = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+struct AgentModeChange(ChangeAgentMode);
+
+impl Global for AgentModeChange {}
+
+/// Publishes what the host on screen does with new agents. The Agents tab
+/// follows it while it is open.
+pub fn publish_agent_mode(mode: AgentMode, cx: &mut App) {
+    cx.set_global(mode);
+}
+
+/// Publishes how the Agents tab changes the host's agent mode. Until a
+/// feature does, the choice is off.
+pub fn set_agent_mode_change(change: ChangeAgentMode, cx: &mut App) {
+    cx.set_global(AgentModeChange(change));
+}
+
+pub(crate) fn agent_mode(cx: &App) -> AgentMode {
+    cx.try_global::<AgentMode>().copied().unwrap_or_default()
+}
+
+pub(crate) fn agent_mode_change(cx: &App) -> Option<ChangeAgentMode> {
+    cx.try_global::<AgentModeChange>()
+        .map(|slot| slot.0.clone())
 }
 
 struct Notifier(NativeNotifications);

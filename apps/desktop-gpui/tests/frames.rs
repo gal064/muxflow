@@ -46,6 +46,8 @@ fn weights_are_distinct_faces() {
 
 #[cfg(target_os = "linux")]
 mod frames {
+    mod chat;
+
     use std::{collections::HashSet, path::Path, sync::Arc};
 
     use gpui_kit::{
@@ -345,6 +347,7 @@ mod frames {
             }
             render_surfaces(theme);
             render_context_menu(theme);
+            chat::run(theme);
         }
     }
 }
