@@ -37,9 +37,8 @@ use super::{
     dialog,
     focus_history::Direction,
     model::{
-        CombinedTab, TabKind, bulk_close_complete_status, bulk_close_outcome_status, close_app_tab,
-        dock_app_tab, ordered_sessions, pin_app_tab, reorder_app_tab, selectable_tabs,
-        undock_app_tab,
+        CombinedTab, TabKind, bulk_close_outcome_status, close_app_tab, dock_app_tab,
+        ordered_sessions, pin_app_tab, reorder_app_tab, selectable_tabs, undock_app_tab,
     },
     navigation::{PaneDirection, adjacent_pane, relative_window_reorder_action},
 };
@@ -598,9 +597,6 @@ impl Workspaces {
                     },
                     cx,
                 );
-                if let Some(complete) = bulk_close_complete_status(closed + documents) {
-                    this.report(complete, cx);
-                }
             })
             .ok();
             finish(cx);

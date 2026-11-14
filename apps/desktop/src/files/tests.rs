@@ -669,13 +669,19 @@ fn leaves_a_newer_status_alone_but_not_routine_chatter() {
         "File rename completed."
     );
     let active = banner("download-1", "running");
-    let newer = reconcile_status("File rename completed.", Some(&active), list);
+    let newer = reconcile_status("Copied the path", Some(&active), list);
     assert_eq!(
         (newer.status.as_str(), newer.active),
-        ("File rename completed.", None)
+        ("Copied the path", None)
     );
     let queued = banner("download-1", "queued");
-    for chatter in ["Live", "Topology changed; reconciling…", ""] {
+    for chatter in [
+        "Live",
+        "Topology changed; reconciling…",
+        "File rename completed.",
+        "Closed 1 tab.",
+        "",
+    ] {
         assert_eq!(
             reconcile_status(chatter, Some(&queued), list).status,
             "Download complete: /downloads/image.png"

@@ -404,8 +404,8 @@ final sweep command returning only justified hits.
 | 6 | Done, owner Mac test done | `f93e815` | Integrated QA passed. Mac test found bugs, now being fixed. Benchmark: `docs/gpui-benchmark.md`; the owner committed to GPUI |
 | 7 | Done on Linux: T7.1 to T7.8 merged (1 MiB limit), `gdev_qa_phase7` PASS | | Owner Mac test |
 | 8 | Done on Linux and in CI: T8.1 to T8.3 merged; both package jobs green | `c42bd4d` | Owner Mac package test; optional rc tag for the aarch64 and release-only steps |
-| 9 | T9.1 and T9.2 done on `gpui/cutover`, not merged | | Merge `gpui/ui-polish` and `gpui/term-scroll` into it, then the owner opens the cutover PR |
-| 10 | Owner decides | | |
+| 9 | Cutover implemented on `gpui/cutover`; not merged to main | `c8f687b` | Owner keeps main unchanged |
+| 10 | Draft RC preparation authorized: table editing fixes, licence closeout, automated checks and package workflow | | Manual QA and hardware checks explicitly skipped; stable release deferred |
 
 ### Task log
 

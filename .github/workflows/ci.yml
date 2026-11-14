@@ -109,6 +109,7 @@ jobs:
           release/check-version.sh
           bash tests/release/test-tags.sh
           bash tests/release/test-build-apk.sh
+          node --test release/license-notices.test.mjs
       - name: TypeScript
         run: |
           pnpm mobile:check

@@ -318,16 +318,6 @@ pub fn bulk_close_outcome_status(closed: usize, failed: usize, skipped: usize) -
     ))
 }
 
-/// The receipt for a close that asked nothing first. `None` when nothing closed.
-pub fn bulk_close_complete_status(closed: usize) -> Option<String> {
-    (closed > 0).then(|| {
-        format!(
-            "Closed {closed} {}.",
-            if closed == 1 { "tab" } else { "tabs" }
-        )
-    })
-}
-
 pub fn workspace_ui_record<'a>(
     state: &'a PersistedAppState,
     host: &str,
@@ -849,15 +839,6 @@ mod tests {
             Some(
                 "Closed 3 of 6 tabs; 1 could not be closed; 2 still had an agent and were left open."
             )
-        );
-        assert_eq!(bulk_close_complete_status(0), None);
-        assert_eq!(
-            bulk_close_complete_status(1).as_deref(),
-            Some("Closed 1 tab.")
-        );
-        assert_eq!(
-            bulk_close_complete_status(4).as_deref(),
-            Some("Closed 4 tabs.")
         );
     }
 

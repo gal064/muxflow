@@ -92,26 +92,22 @@ fn row_span(line: &str, offset: usize) -> RowSpan {
     }
 }
 
-/// Cell text as written to source: one line, with typed pipes escaped.
+/// Cell text as written to source: breaks use HTML so the GFM row stays intact.
 pub fn cell_source(text: &str) -> String {
     let flat = text.replace('\u{a0}', " ");
     let mut out = String::new();
-    let mut pending_space = false;
     let mut chars = flat.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\r' || c == '\n' {
-            while out.ends_with([' ', '\t']) {
-                out.pop();
-            }
-            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            if c == '\r' && chars.peek() == Some(&'\n') {
                 chars.next();
             }
-            pending_space = true;
+            // A literal backslash must not escape the generated HTML tag.
+            if out.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1 {
+                out.push('\\');
+            }
+            out.push_str("<br>");
             continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
         }
         if c == '|' {
             let slashes = out.chars().rev().take_while(|c| *c == '\\').count();
@@ -120,9 +116,6 @@ pub fn cell_source(text: &str) -> String {
             }
         }
         out.push(c);
-    }
-    if pending_space {
-        out.push(' ');
     }
     out
 }
@@ -220,7 +213,9 @@ mod tests {
     fn writes_cell_text_on_one_line_with_typed_pipes_escaped() {
         assert_eq!(cell_source("a|b"), "a\\|b");
         assert_eq!(cell_source("a\\|b"), "a\\|b");
-        assert_eq!(cell_source("one\ntwo"), "one two");
+        assert_eq!(cell_source("one\ntwo"), "one<br>two");
+        assert_eq!(cell_source("one\\\ntwo"), "one\\\\<br>two");
+        assert_eq!(cell_source("one \r\n  two\r\n"), "one <br>  two<br>");
         assert_eq!(cell_source("a\u{a0}b"), "a b");
     }
 

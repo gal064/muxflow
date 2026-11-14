@@ -177,6 +177,14 @@ impl LiveDoc {
     /// After an edit: keep the caret off hidden or atomic markup.
     fn settle(&mut self) {
         let sel = self.doc.selection();
+        // An edit, undo or redo can expose trailing whitespace even when the
+        // last typed character was not a space. Keep that position editable.
+        let end = sel.range().end;
+        let retained = self.cell_typed_end.unwrap_or(end).max(end);
+        self.cell_typed_end = Some(retained);
+        if retained > end && self.here().cell_at(sel.head).is_none() {
+            self.cell_typed_end = Some(end);
+        }
         if sel.is_empty() && !self.is_stop(sel.head) {
             let pos = self.snap(sel.head);
             self.doc.set_selection_coalescing(Selection::caret(pos));
@@ -249,7 +257,6 @@ impl LiveDoc {
         if self.missing().is_some_and(|(at, _)| at == pos) {
             return;
         }
-        self.cell_typed_end = None;
         self.missing = None;
         let pos = self.snap(pos);
         self.commit_composition();
@@ -266,7 +273,6 @@ impl LiveDoc {
     /// From outside a table it takes the table whole, as today's widget does,
     /// leaving the head on the stop just past the table in the travel direction.
     pub fn extend_to(&mut self, pos: usize, forward: bool) {
-        self.cell_typed_end = None;
         let pos = self.snap(pos);
         let anchor = self.doc.selection().anchor;
         let from_cell = self
@@ -380,11 +386,22 @@ impl LiveDoc {
             .near(Selection::caret(start), start..start)
             .cell_at(start)
             .is_some();
+        let offset = caret_in_text.unwrap_or(text.len()).min(text.len());
+        let offset = if in_cell {
+            crate::table::cell_source(&text[..offset]).len()
+        } else {
+            offset
+        };
         let escaped = in_cell.then(|| crate::table::cell_source(text));
         let text = escaped.as_deref().unwrap_or(text);
-        let caret = start + caret_in_text.unwrap_or(text.len()).min(text.len());
+        let caret = start + offset;
+        let retained = self
+            .cell_typed_end
+            .filter(|end| *end >= range.end)
+            .map(|end| end - range.len() + text.len());
         self.doc.replace(range, text, caret, EditKind::Composition);
         self.marked = (!text.is_empty()).then(|| start..start + text.len());
+        self.cell_typed_end = Some(retained.unwrap_or(caret).max(caret));
     }
 
     /// Type text at the caret, through the same path as the platform's input
@@ -413,7 +430,9 @@ impl LiveDoc {
         if !sel.is_empty() {
             let range = sel.range();
             let caret = range.start;
-            self.doc.replace(range, "", caret, EditKind::Deletion);
+            if !self.type_in_cell(range.clone(), "", EditKind::Deletion) {
+                self.doc.replace(range, "", caret, EditKind::Deletion);
+            }
             self.settle();
         }
     }
@@ -507,17 +526,30 @@ impl LiveDoc {
     }
 
     pub fn undo(&mut self) {
-        self.cell_typed_end = None;
         self.commit_composition();
+        self.refresh();
         self.doc.undo();
+        self.restore_cell_end();
         self.settle();
     }
 
     pub fn redo(&mut self) {
-        self.cell_typed_end = None;
         self.commit_composition();
+        self.refresh();
         self.doc.redo();
+        self.restore_cell_end();
         self.settle();
+    }
+
+    fn restore_cell_end(&mut self) {
+        if let Some(change) = self.doc.pending_change() {
+            // Whole-cell writes record their editable end, including spaces
+            // beyond the restored caret. This also works after leaving the cell.
+            self.cell_typed_end = Some(
+                self.cell_typed_end
+                    .map_or(change.new_end, |end| change.map(end).max(change.new_end)),
+            );
+        }
     }
 
     /// Selects a match of the find bar exactly, inside hidden markup too:
