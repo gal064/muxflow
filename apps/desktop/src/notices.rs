@@ -1,4 +1,4 @@
-//! Status notices. Port of `apps/desktop/src/features/shell/statusNotice.ts`:
+//! Status notices. Port of the Tauri app's `features/shell/statusNotice.ts`:
 //! the app has one status channel that many places write to, and this decides
 //! which of its messages a person needs to see.
 //!

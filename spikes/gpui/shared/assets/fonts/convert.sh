@@ -4,7 +4,7 @@
 # Usage: ./convert.sh   (needs `uv`; fonttools and brotli are fetched on demand)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$here/../../../../../apps/desktop-gpui/assets/fonts"
+src="$here/../../../../../apps/desktop/assets/fonts"
 for f in JetBrainsMono-Regular JetBrainsMono-Bold JetBrainsMono-Italic JetBrainsMono-BoldItalic InterVariable InterVariable-Italic; do
   uv run --quiet --with fonttools --with brotli python -I -c '
 import sys

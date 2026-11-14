@@ -12,7 +12,7 @@ use desktop_core::app_state::ThemePreference;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use gpui_kit::{AppContext, Entity, TestAppContext, font, px};
-use muxflow_gpui::{
+use muxflow::{
     connection_ui::backend::{EngineChannel, TerminalBackend},
     terminal::{
         TerminalLink, TerminalPane,
@@ -105,7 +105,7 @@ impl TerminalBackend for Fake {
 
     fn start_upload(
         &self,
-        _: muxflow_gpui::terminal::integration::transfers::UploadRequest,
+        _: muxflow::terminal::integration::transfers::UploadRequest,
         _: Arc<dyn desktop_core::platform::EventSink>,
     ) -> Result<String, String> {
         Err("no uploads here".into())

@@ -1,4 +1,4 @@
-//! Context menus, on Kit's `PopupMenu`. Port of `apps/desktop/src/ui/ContextMenu.tsx`.
+//! Context menus, on Kit's `PopupMenu`. Port of the Tauri app's `ui/ContextMenu.tsx`.
 //!
 //! Attach a menu to an element with Kit's `.context_menu(...)`, and fill it with
 //! [`fill`]. Kit supplies the arrow keys, Escape, dismissal on an outside press,

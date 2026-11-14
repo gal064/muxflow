@@ -44,7 +44,7 @@ const GIT_CONTENT_CHUNK: u32 = 1024 * 1024;
 const MAX_CONCURRENT_READS: usize = 1;
 
 /// Frame kinds on the response channel. The renderer's matching decoder is in
-/// `apps/desktop/src/features/git/api.ts`.
+/// the Tauri app's `features/git/api.ts`.
 const FRAME_CHUNK: u8 = 1;
 const FRAME_COMPLETE: u8 = 2;
 const FRAME_ERROR: u8 = 3;

@@ -24,13 +24,13 @@ const cargo = (file) => {
 
 const app = json("apps/mobile/app.json").expo;
 const found = {
-  "apps/desktop-gpui/Cargo.toml": cargo("apps/desktop-gpui/Cargo.toml"),
+  "apps/desktop/Cargo.toml": cargo("apps/desktop/Cargo.toml"),
   "apps/host/Cargo.toml": cargo("apps/host/Cargo.toml"),
   "apps/mobile/app.json": app.version,
   "apps/mobile/package.json": json("apps/mobile/package.json").version,
 };
 
-const version = expected || found["apps/desktop-gpui/Cargo.toml"];
+const version = expected || found["apps/desktop/Cargo.toml"];
 const semver = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
 const problems = [];
 if (!semver) problems.push(`version ${JSON.stringify(version)} is not X.Y.Z`);

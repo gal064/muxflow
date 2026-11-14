@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isPiAdapter, PI_ICON, PIN_ICON } from "./agentIconPaths";
 
-const view = readFileSync(resolve(__dirname, "../../../../desktop-gpui/src/agents/view.rs"), "utf8");
+const view = readFileSync(resolve(__dirname, "../../../../desktop/src/agents/view.rs"), "utf8");
 
 /** The SVG source of one of the desktop's `const NAME: &[u8] = br##"<svg …>"##;` icons. */
 function svg(name: string): string {

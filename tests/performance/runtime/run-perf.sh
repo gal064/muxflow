@@ -59,9 +59,11 @@ known_hosts="$runtime/known-hosts"
 remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 # The harness must reconcile stale topology on exactly the budget the shipped
 # desktop uses, or its create-action numbers would describe a different product.
-reconcile_timeout_ms="$(sed -n 's/^const ACTION_RECONCILE_TIMEOUT_MS = \([0-9_]*\);.*/\1/p' \
-  "$repo_root/apps/desktop/src/features/tmux/actionReconciliation.ts" | tr -d '_')"
-[[ -n "$reconcile_timeout_ms" ]]
+actions="$repo_root/apps/desktop/src/workspaces/actions.rs"
+reconcile_polls="$(sed -n 's/^pub const RECONCILE_POLLS: u32 = \([0-9]*\);/\1/p' "$actions")"
+reconcile_poll_ms="$(sed -n 's/^pub const RECONCILE_POLL_MS: u64 = \([0-9]*\);/\1/p' "$actions")"
+[[ -n "$reconcile_polls" && -n "$reconcile_poll_ms" ]]
+reconcile_timeout_ms=$((reconcile_polls * reconcile_poll_ms))
 
 cleanup() {
   ADE_HOST_RUNTIME_DIR="$local_runtime" ADE_TMUX_SOCKET_NAME="$local_socket" \

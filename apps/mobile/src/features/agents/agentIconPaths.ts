@@ -1,6 +1,6 @@
 /**
  * The adapter marks' geometry, copied byte-for-byte from the desktop's
- * `apps/desktop-gpui/src/agents/view.rs`. A test reads that file and compares
+ * `apps/desktop/src/agents/view.rs`. A test reads that file and compares
  * every string here against it, so the two apps cannot drift.
  * Kept apart from the React component so the test runs without a native
  * runtime.

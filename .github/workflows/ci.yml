@@ -170,7 +170,7 @@ jobs:
       - name: Build and verify the package
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml)
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop/Cargo.toml)
           release/linux/build-package.sh x86_64
           release/linux/verify-package.sh "tmp/release/muxflow-$version-linux-x86_64.tar.gz"
 

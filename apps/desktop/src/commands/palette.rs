@@ -1,4 +1,4 @@
-//! The command palette. Port of `apps/desktop/src/commands/CommandPalette.tsx`:
+//! The command palette. Port of the Tauri app's `commands/CommandPalette.tsx`:
 //! 560px wide, 28px rows, group names as inline headings, subsequence matching.
 
 use gpui_kit::{

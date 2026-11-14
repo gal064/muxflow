@@ -15,7 +15,7 @@ fn main() {
 /// silently drops faces that share a PostScript name, so this runs there too.
 fn weights_are_distinct_faces() {
     use gpui_kit::{FontWeight, HeadlessAppContext, assets::Assets, font};
-    use muxflow_gpui::fonts;
+    use muxflow::fonts;
     use std::sync::Arc;
 
     let mut cx = HeadlessAppContext::with_platform(
@@ -51,7 +51,7 @@ mod frames {
     use gpui_kit::{
         AnyWindowHandle, Bounds, HeadlessAppContext, Rgba, WindowBounds, assets::Assets, px, size,
     };
-    use muxflow_gpui::{
+    use muxflow::{
         app::{self, Core},
         fonts,
         theme::{self, Palette},
@@ -183,14 +183,14 @@ mod frames {
                 InteractiveElement, ParentElement, Styled, TestSupportExt,
                 component::menu::ContextMenuExt, div,
             };
-            use muxflow_gpui::{
+            use muxflow::{
                 context_menu::{self, Entry, Item},
                 theme::palette,
             };
             let palette = palette(cx);
             let entries = std::rc::Rc::new(vec![
                 Entry::from(
-                    Item::new("Open", |_, _| {}).hint(&muxflow_gpui::menus::RunCommand {
+                    Item::new("Open", |_, _| {}).hint(&muxflow::menus::RunCommand {
                         id: "commands.show",
                     }),
                 ),
@@ -249,7 +249,7 @@ mod frames {
             component::WindowExt as _,
             test::{TestQueryExt, TestWindowExt},
         };
-        use muxflow_gpui::notices;
+        use muxflow::notices;
 
         let dir = tempfile::tempdir().unwrap();
         let state = write_state(dir.path(), theme, 1.0);
@@ -354,7 +354,7 @@ mod frames {
 /// italic are never synthesized from the regular one.
 fn terminal_styles_are_distinct_faces() {
     use gpui_kit::{FontStyle, FontWeight, HeadlessAppContext, assets::Assets, font};
-    use muxflow_gpui::fonts;
+    use muxflow::fonts;
     use std::sync::Arc;
 
     let mut cx = HeadlessAppContext::with_platform(

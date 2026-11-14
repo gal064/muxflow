@@ -50,10 +50,6 @@ run_gate rust-tests cargo test --workspace --all-targets
 run_gate phase8-driver-fmt cargo fmt --manifest-path tests/release/protocol-driver/Cargo.toml -- --check
 run_gate phase8-driver-clippy cargo clippy --manifest-path tests/release/protocol-driver/Cargo.toml -- -D warnings
 run_gate phase8-driver-tests cargo test --manifest-path tests/release/protocol-driver/Cargo.toml
-run_gate frontend-check pnpm check
-run_gate frontend-tests pnpm test
-run_gate frontend-build pnpm build
-run_gate tauri-release pnpm tauri build --no-bundle
 run_gate parser-fuzz cargo run --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 10000
 run_gate phase0-local pnpm test:transport:local
 run_gate phase0-ssh pnpm test:transport:ssh

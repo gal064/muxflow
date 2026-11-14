@@ -1,5 +1,5 @@
 //! Shortcut strings and what a keystroke means. Port of the keyboard half of
-//! `apps/desktop/src/commands/registry.ts`.
+//! the Tauri app's `commands/registry.ts`.
 //!
 //! Shortcuts are stored in the portable form the shortcut editor round-trips
 //! (`Meta+Shift+P`). A key press is turned into that form and compared, rather

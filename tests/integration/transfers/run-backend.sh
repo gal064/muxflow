@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'echo "phase7 backend/frontend deterministic gate failed at line $LINENO" >&2' ERR
+trap 'echo "phase7 backend/app deterministic gate failed at line $LINENO" >&2' ERR
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$repo_root/tests/release/storage.sh"
@@ -31,11 +31,8 @@ cargo test -p desktop-core transfer_event::tests \
   >"$evidence/typed-transfer-contract.log" 2>&1 & event_pid=$!
 cargo test -p desktop-core scheduler::tests -- --test-threads=1 \
   >"$evidence/canonical-engine.log" 2>&1 & engine_pid=$!
-pnpm --dir apps/desktop test -- \
-  src/features/terminal/terminalTransfers.test.ts \
-  src/features/terminal/TerminalTransferSurface.test.tsx \
-  src/features/terminal/terminalTransferApi.test.ts \
-  >"$evidence/frontend-transfer.log" 2>&1 & frontend_pid=$!
+cargo test -p muxflow --lib transfers \
+  >"$evidence/desktop-app-transfer.log" 2>&1 & app_pid=$!
 cargo check --manifest-path tests/integration/Cargo.toml --workspace \
   >"$evidence/driver-check.log" 2>&1 & driver_pid=$!
 bash tests/integration/transfers/package-scripts.sh \
@@ -43,7 +40,7 @@ bash tests/integration/transfers/package-scripts.sh \
 
 phase7_wait_all "$fmt_pid" "$driver_fmt_pid" "$protocol_pid" "$host_pid" "$host_staging_pid" \
   "$desktop_pid" "$clipboard_pid" "$destination_pid" "$event_pid" \
-  "$engine_pid" "$frontend_pid" "$driver_pid" "$package_scripts_pid"
+  "$engine_pid" "$app_pid" "$driver_pid" "$package_scripts_pid"
 rg -Fq \
   'test service::filesystem::terminal_upload::tests::crash::sigkill_restart_matrix_converges_every_upload_transaction_boundary ...' \
   "$evidence/host-upload.log"
@@ -75,4 +72,4 @@ jq -n --arg digest "$(<"$evidence/source-tree-digest.txt")" \
       newAndOverwrite: true
     }
   }' >"$evidence/result.json"
-printf '%s\n' "phase7 backend/frontend evidence: $evidence"
+printf '%s\n' "phase7 backend/app evidence: $evidence"

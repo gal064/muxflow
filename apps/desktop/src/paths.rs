@@ -1,7 +1,6 @@
-//! The per-user directories the native app stores into: exactly the ones Tauri
-//! resolves, so profiles, app state and logs carry over. Pinned by
-//! `tests/paths.rs` against the same golden values as
-//! `apps/desktop/src-tauri/src/golden_paths.rs`.
+//! The per-user directories the native app stores into: exactly the ones the
+//! Tauri app resolved, so profiles, app state and logs carry over. Pinned by
+//! `tests/paths.rs` against that app's golden values.
 
 use std::path::PathBuf;
 

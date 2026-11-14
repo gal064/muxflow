@@ -16,7 +16,7 @@ use gpui_kit::{
     AppContext, Entity, Focusable, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
     Point, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, font, point, px,
 };
-use muxflow_gpui::{
+use muxflow::{
     app::Core,
     commands::{self, registry::Platform},
     terminal::{TerminalLink, TerminalPane, cell_metrics::CellMetrics, link::POLL_ACTIVE, reading},
@@ -35,11 +35,11 @@ struct Calls {
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Calls>>);
 
-impl muxflow_gpui::connection_ui::backend::TerminalBackend for Fake {
+impl muxflow::connection_ui::backend::TerminalBackend for Fake {
     fn spawn_engine(
         &self,
         outputs: Sender<EngineOutput>,
-    ) -> Box<dyn muxflow_gpui::connection_ui::backend::EngineChannel> {
+    ) -> Box<dyn muxflow::connection_ui::backend::EngineChannel> {
         Box::new(terminal_engine::spawn(HubLimits::default(), outputs))
     }
 
@@ -104,7 +104,7 @@ impl muxflow_gpui::connection_ui::backend::TerminalBackend for Fake {
 
     fn start_upload(
         &self,
-        _: muxflow_gpui::terminal::integration::transfers::UploadRequest,
+        _: muxflow::terminal::integration::transfers::UploadRequest,
         _: Arc<dyn desktop_core::platform::EventSink>,
     ) -> Result<String, String> {
         Err("no uploads here".into())
@@ -219,11 +219,11 @@ fn mounted_with<'a>(
         }
         commands::init(cx);
         // Copy on select is read from the live Settings.
-        muxflow_gpui::settings::init(cx);
+        muxflow::settings::init(cx);
         reading::init(cx);
     });
     let fake = Fake::default();
-    let backend: Arc<dyn muxflow_gpui::connection_ui::backend::TerminalBackend> =
+    let backend: Arc<dyn muxflow::connection_ui::backend::TerminalBackend> =
         Arc::new(fake.clone());
     let link = cx.new(|cx| TerminalLink::new("qa".into(), backend, cx));
     let link_for_pane = link.clone();

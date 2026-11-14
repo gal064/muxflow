@@ -16,7 +16,7 @@ use gpui_kit::{
     point, px, size,
     test::{TestQueryExt, TestWindowExt},
 };
-use muxflow_gpui::{
+use muxflow::{
     app::{self, Core},
     settings::{self, Prefs},
     theme::Appearance,
@@ -602,7 +602,7 @@ fn a_reset_of_saved_state_makes_its_defaults_live(cx: &mut TestAppContext) {
     let defaults = desktop_core::app_state::PersistedAppState::default();
     cx.update(|cx| {
         settings::reload(&defaults, cx);
-        muxflow_gpui::commands::reload_overrides(&defaults, cx);
+        muxflow::commands::reload_overrides(&defaults, cx);
     });
     assert_eq!(
         cx.read(|cx| settings::get(cx).clone()),

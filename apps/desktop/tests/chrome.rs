@@ -12,7 +12,7 @@ use gpui_kit::{
     App, Role, TestAppContext, VisualTestContext, point, px, size,
     test::{TestQueryExt, TestWindowExt},
 };
-use muxflow_gpui::{
+use muxflow::{
     app::{self, Core},
     commands,
     ui::{chrome::layout, shell::Shell},

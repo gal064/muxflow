@@ -1,4 +1,4 @@
-//! Lengths and type steps from `apps/desktop/src/tokens.css`, in CSS pixels at
+//! Lengths and type steps from the Tauri app's `tokens.css`, in CSS pixels at
 //! 100% UI scale. Size chrome with [`ui`], not `px()`, so it follows UI scale.
 
 use gpui_kit::{Rems, Window, rems};

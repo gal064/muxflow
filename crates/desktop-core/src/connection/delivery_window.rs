@@ -1,7 +1,7 @@
 //! Bounded native delivery and exact host-credit translation.
 //!
-//! JavaScript acknowledges wire frames only after synchronous decode and hub
-//! admission. This ledger maps those cumulative frame boundaries back to the
+//! The app acknowledges wire frames only after the terminal engine has applied
+//! them. This ledger maps those cumulative frame boundaries back to the
 //! exact terminal payload charge reserved by the host protocol connection.
 
 use std::{

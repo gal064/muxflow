@@ -1657,7 +1657,7 @@ fn a_history_request_captures_only_the_scrollback_range() {
     // row. One physical row per line is what lets them be compared at all. The
     // reflow and copy that `-J` used to buy are bought instead by the way the
     // desktop composes the page: a row that fills the grid is written without a
-    // line break, and xterm wraps it itself.
+    // line break, and the terminal wraps it itself.
     assert!(!command.contains(" -J "), "{command}");
     // And the size probe stays, for the reason that outlived the join: tmux
     // clamps a range running past the top of its history and answers one

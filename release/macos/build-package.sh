@@ -53,23 +53,23 @@ export MUXFLOW_PERF_BUILD
 # Two builds, not one: built together, the app's dependencies would unify
 # features into the helper's (gpui turns on serde_json's `preserve_order`), and
 # the shipped helper must stay the one `-p muxflow-host` builds everywhere else.
-# The app is built for the bundle's LSMinimumSystemVersion, as `tauri build`
-# did; the helper keeps the toolchain default it always had.
+# The app is built for the bundle's LSMinimumSystemVersion; the helper keeps
+# the toolchain default it always had.
 CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host \
   ${perf_features[@]+"${perf_features[@]}"}
-CARGO_INCREMENTAL=0 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p muxflow-gpui \
+CARGO_INCREMENTAL=0 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p muxflow \
   ${perf_features[@]+"${perf_features[@]}"}
 
-# The bundle is laid out by hand with the names the Tauri bundle used, so an
-# install over it keeps its identity: the GPUI binary ships as `muxflow`, the
+# The bundle is laid out by hand with the names earlier releases used, so an
+# install over one keeps its identity: `muxflow`, the
 # helper beside it, and the Linux helpers, icon and owner marker in Resources.
 app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
-version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml)
+version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop/Cargo.toml)
 dmg="$CARGO_TARGET_DIR/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
 resources="$app/Contents/Resources"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$resources"
-install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-gpui" "$app/Contents/MacOS/muxflow"
+install -m 0755 "$CARGO_TARGET_DIR/release/muxflow" "$app/Contents/MacOS/muxflow"
 install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-host" "$app/Contents/MacOS/muxflow-host"
 install -m 0644 release/macos/icon.icns release/macos/package-owner "$resources/"
 sed "s/@VERSION@/$version/g" release/macos/Info.plist > "$app/Contents/Info.plist"

@@ -6,7 +6,7 @@ CodeMirror view (`LiveMarkdownEditor.tsx`, `liveMarkdown.ts`, `liveTable.ts`)
 and grew out of the prototype in `spikes/gpui/markdown` (see its `REPORT.md`).
 
 The app draws it for a Markdown tab's Live mode through one seam,
-`editor::set_live_markdown`, registered in `apps/desktop-gpui/src/markdown`.
+`editor::set_live_markdown`, registered in `apps/desktop/src/markdown`.
 The view never owns the file: it edits the tab's document buffer, so autosave,
 dirty state, changes on disk and reconnects stay in the editor module.
 

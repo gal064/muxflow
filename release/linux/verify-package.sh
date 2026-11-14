@@ -58,7 +58,7 @@ fi
 # The desktop is the GPUI app: its panic locations name the app's sources, and
 # it links no WebKitGTK or GTK. This catches a package assembled from the old
 # Tauri binary.
-grep -aF 'apps/desktop-gpui/src/' "$package_root/bin/muxflow" >/dev/null || {
+grep -aF 'apps/desktop/src/' "$package_root/bin/muxflow" >/dev/null || {
   echo "desktop is not the GPUI app" >&2
   exit 1
 }
