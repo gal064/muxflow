@@ -113,10 +113,10 @@ using the phone mocks as the checklist.
 | A | `gpui/chat-a` | Merged | `5b1dbbb` | Fast-forward. 4 review rounds, worker QA and a recheck on the final binary passed. `PROTOCOL_MAJOR` 5. Departures from plan §4 are in the plan under "As built by stream A". LOAD_OLDER stays a response with a revision (root decision) |
 | B | `gpui/chat-b` | In progress | | Dispatched |
 | C | `gpui/chat-c` | In progress | | Dispatched |
-| D1 | `gpui/chat-d1` | In progress | | Dispatched |
+| D1 | `gpui/chat-d1` | Merged | `402f36e` | Merged ahead of B, E and C; no conflict. 2 code review rounds, 1 design round, worker QA passed 8 scenarios. Wire: Git operations 62 to 64 and a default-branch diff target, additive, no major bump. Chat opens a diff through `crate::git::open_file_diff(path, cx)`. Branch list and checkout exist in the host and `desktop-core` only; D2 adds the client calls. Details in the plan under "As built by stream D1" |
 | D2 | `gpui/chat-d2` | Not started | | |
 | E | `gpui/chat-e` | In progress | | Dispatched |
 | F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
 | Integration | `gpui/chat` | Not started | | |
 
-Next step: wave 1 finishes; root merges B, E, C, D1, F in that order, then dispatches D2.
+Next step: B, E and C finish; root merges them in that order, wires the chat file-edit row to `git::open_file_diff`, then dispatches D2.
