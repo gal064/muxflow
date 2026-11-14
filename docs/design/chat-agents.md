@@ -116,7 +116,7 @@ using the phone mocks as the checklist.
 | D1 | `gpui/chat-d1` | In progress | | Dispatched |
 | D2 | `gpui/chat-d2` | Not started | | |
 | E | `gpui/chat-e` | In progress | | Dispatched |
-| F | `gpui/chat-f` | In progress | | Dispatched |
+| F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
 | Integration | `gpui/chat` | Not started | | |
 
 Next step: wave 1 finishes; root merges B, E, C, D1, F in that order, then dispatches D2.
