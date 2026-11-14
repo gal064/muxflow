@@ -1777,3 +1777,109 @@ fn lists_the_default_branch_changes_only_while_that_scope_is_shown(cx: &mut Test
     }
     assert_eq!(panel.fake.count("branchSummary"), 2);
 }
+
+#[gpui_kit::test]
+fn reads_the_default_branch_changes_while_a_reader_wants_them(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        Some(Ok(match command.operation.as_str() {
+            "branchSummary" => json!({ "branchSummary": { "baseRef": "origin/main",
+                "totalFileCount": "0", "added": "3", "removed": "1" } }),
+            _ => json!({ "status": status(1) }),
+        }))
+    });
+    panel.point_at("t", 1, cx);
+    panel
+        .panel
+        .update(cx, |panel, cx| panel.read_branch_summary(true, cx));
+    cx.run_until_parked();
+    // Read once the status has rested.
+    assert_eq!(panel.fake.count("branchSummary"), 0);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(1100));
+    cx.run_until_parked();
+    assert_eq!(panel.fake.count("branchSummary"), 1);
+    let summary = panel.panel.read_with(cx, |panel, _| panel.branch_summary());
+    assert_eq!(summary.unwrap().added, 3);
+
+    // With no reader left and the uncommitted list shown, a moved status
+    // reads nothing.
+    panel
+        .panel
+        .update(cx, |panel, cx| panel.read_branch_summary(false, cx));
+    let watch_id = panel.fake.requests.borrow()[0].watch_id.clone();
+    panel.store.update(cx, |store, cx| {
+        store.handle_event(watch_event(&watch_id, "t", 2), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(panel.fake.count("branchSummary"), 1);
+}
+
+#[gpui_kit::test]
+fn lists_branches_and_switches_once_against_the_status_on_screen(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        Some(Ok(match command.operation.as_str() {
+            "branches" => json!({ "branches": {
+                "branches": ["main", "feature"], "current": "main", "truncated": false,
+            }}),
+            "checkout" => applied(2),
+            _ => json!({ "status": status(1) }),
+        }))
+    });
+    panel.point_at("t", 1, cx);
+    let read = panel
+        .panel
+        .read_with(cx, |panel, cx| panel.branches(cx))
+        .unwrap();
+    let branches = block_on(read).unwrap();
+    assert_eq!(branches.names, ["main", "feature"]);
+    assert_eq!(branches.current.as_deref(), Some("main"));
+    let sent = panel.fake.requests.borrow().last().unwrap().clone();
+    assert_eq!(
+        (sent.operation.as_str(), sent.repository_id.as_str()),
+        ("branches", "repo")
+    );
+
+    let switching = panel
+        .panel
+        .update(cx, |panel, cx| panel.checkout("feature".into(), cx))
+        .unwrap();
+    cx.run_until_parked();
+    let result = block_on(switching).unwrap();
+    assert!(result.applied());
+    assert_eq!(panel.fake.count("checkout"), 1);
+    let sent = panel.fake.requests.borrow().last().unwrap().clone();
+    assert_eq!(sent.branch, "feature");
+    assert_eq!(sent.expected_status_generation, "1");
+    // The status the switch left is the one the panel now shows.
+    let generation = panel
+        .panel
+        .read_with(cx, |panel, cx| panel.status(cx).unwrap().generation);
+    assert_eq!(generation, 2);
+}
+
+#[gpui_kit::test]
+fn switches_no_branch_while_git_cannot_be_written_to(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, answering);
+    let context = PanelContext::new(Some(root("t")), live(1), false);
+    panel
+        .panel
+        .update(cx, |panel, cx| panel.set_context(context, cx));
+    cx.run_until_parked();
+    let switching = panel
+        .panel
+        .update(cx, |panel, cx| panel.checkout("feature".into(), cx));
+    assert!(switching.is_none());
+    assert_eq!(panel.fake.count("checkout"), 0);
+}
+
+#[test]
+fn a_branch_list_without_a_current_branch_is_a_detached_head() {
+    let branches = model::response_branches(
+        model::response(json!({ "branches": { "branches": ["main"], "truncated": true } }))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(branches.current, None);
+    assert!(branches.truncated);
+    assert!(model::response_branches(model::response(json!({})).unwrap()).is_err());
+}
