@@ -26,6 +26,7 @@ pub fn init(cx: &mut App) {
     crate::window_state::init(cx);
     crate::terminal::init(cx);
     crate::agents::init(cx);
+    crate::chat::init(cx);
     crate::automations::init(cx);
     crate::dragdrop::init(cx);
     crate::editor::init(cx);
