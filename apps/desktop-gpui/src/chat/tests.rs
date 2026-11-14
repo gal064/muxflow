@@ -1126,6 +1126,23 @@ fn a_slash_lists_the_providers_commands_and_enter_takes_one(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_dollar_lists_the_skills_in_the_middle_of_a_message(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("look at this with $co");
+    assert!(shell.named("$code-review"));
+    assert!(!shell.named("$compact"), "a command is not a skill");
+    shell.press("enter");
+    // Taken into the message, not sent.
+    assert_eq!(shell.host.count(ChatAction::Send), 0);
+    assert!(!shell.named("$code-review"));
+    shell.press("enter");
+    assert_eq!(
+        shell.host.last(ChatAction::Send).text,
+        "look at this with $code-review"
+    );
+}
+
+#[gpui_kit::test]
 fn a_side_question_forks_instead_of_sending(cx: &mut TestAppContext) {
     let mut shell = open(cx);
     shell.input("/btw which file holds the join?");

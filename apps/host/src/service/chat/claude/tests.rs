@@ -820,6 +820,33 @@ async fn options_are_asked_of_the_agent_and_shown_as_it_answers() {
 
 // --- the session's file -----------------------------------------------------
 
+#[tokio::test]
+async fn a_skill_named_with_a_dollar_at_the_start_is_sent_with_a_slash() {
+    let mut lines = STREAM.lines().peekable();
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    replay.done(Done::History(history::load(
+        Path::new("/nonexistent"),
+        SESSION,
+        "",
+    )));
+    replay.play(&mut lines, "@get_settings");
+    let mut sent = |text: &str| {
+        replay
+            .command(SessionCommand::Send {
+                text: text.into(),
+                item_id: text.into(),
+            })
+            .unwrap();
+        replay.written.last().unwrap()["message"]["content"].clone()
+    };
+    assert_eq!(sent("$release-notes since v1.2"), "/release-notes since v1.2");
+    assert_eq!(sent("$release-notes"), "/release-notes");
+    // Not one of the agent's, or not at the start: as typed.
+    assert_eq!(sent("$HOME is where"), "$HOME is where");
+    assert_eq!(sent("use $release-notes"), "use $release-notes");
+}
+
 #[test]
 fn a_session_that_cannot_be_read_says_so_and_one_with_no_file_is_empty() {
     let home = home();

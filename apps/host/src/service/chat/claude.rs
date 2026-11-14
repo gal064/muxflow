@@ -1575,6 +1575,20 @@ impl Dialect for Claude {
                 if waits && self.held.len() >= MAX_HELD {
                     return Err(not_ready());
                 }
+                // A skill named with `$` at the start is one the agent takes
+                // with a slash. Which of its commands are skills it says only
+                // in its first turn, so any of them counts. Elsewhere in a
+                // message it has no way to be handed one, and reads the name
+                // as text.
+                let text = match text.strip_prefix('$') {
+                    Some(rest) if self.commands.iter().any(|command| {
+                        command.name == rest.split(char::is_whitespace).next().unwrap_or(rest)
+                    }) =>
+                    {
+                        format!("/{rest}")
+                    }
+                    _ => text,
+                };
                 let uuid = message_uuid(&item_id);
                 let message = json!({
                     "type": "user",

@@ -290,6 +290,8 @@ export function agentModeLabel(mode: "terminal" | "chat" | "unknown"): string {
 
 export interface CommandGroup {
   title: string;
+  /** What its entries are named with: `$` for skills asked for with one. */
+  sigil: "/" | "$";
   commands: ChatCommand[];
 }
 
@@ -302,18 +304,33 @@ const GROUPS: { kind: ChatCommandKind; title: string }[] = [
 /** At most this many entries show at once; typing narrows the rest. */
 export const SLASH_LIST_LIMIT = 30;
 
+/** A skill being named with `$` in the draft's last word. */
+const SKILL_WORD = /(?:^|\s)\$(\S*)$/;
+
 /**
- * The composer's slash list for `draft`: shown while the draft is a slash
- * followed by a name and nothing after it. Prefix matches rank before
- * matches inside the name. Muxflow's entries need a provider that can fork.
+ * The composer's list for `draft`. A slash followed by a name and nothing
+ * after it lists the commands and skills; a `$` in the last word, anywhere in
+ * the message, lists the skills. Prefix matches rank before matches inside
+ * the name. Muxflow's entries need a provider that can fork.
  */
 export function slashMatches(catalog: ChatCatalog | undefined, draft: string): CommandGroup[] {
-  const match = /^\/(\S*)$/.exec(draft);
-  if (!match || !catalog) return [];
+  if (!catalog) return [];
+  const slash = /^\/(\S*)$/.exec(draft);
+  const skill = slash ? null : SKILL_WORD.exec(draft);
+  const match = slash ?? skill;
+  if (!match) return [];
+  const sigil = skill ? "$" : "/";
   const query = match[1]!.toLowerCase();
   const canFork = catalog.capabilities?.fork === true;
+  // An agent that has not said yet which of its commands are skills is asked
+  // for any of them.
+  const marked = catalog.commands.some((command) => command.kind === ChatCommandKind.SKILL);
+  const offered = (command: ChatCommand) => {
+    if (command.kind === ChatCommandKind.MUXFLOW) return !skill && canFork;
+    return !skill || command.kind === ChatCommandKind.SKILL || !marked;
+  };
   const ranked = catalog.commands
-    .filter((command) => command.kind !== ChatCommandKind.MUXFLOW || canFork)
+    .filter(offered)
     .map((command) => ({ command, at: command.name.toLowerCase().indexOf(query) }))
     .filter((entry) => entry.at >= 0)
     .sort((a, b) => Number(a.at !== 0) - Number(b.at !== 0) || a.command.name.localeCompare(b.command.name))
@@ -322,11 +339,18 @@ export function slashMatches(catalog: ChatCatalog | undefined, draft: string): C
   const groups: CommandGroup[] = [];
   for (const { kind, title } of GROUPS) {
     const commands = ranked.filter((command) => command.kind === kind);
-    if (commands.length > 0) groups.push({ title, commands });
+    if (commands.length > 0) groups.push({ title, sigil, commands });
   }
   const other = ranked.filter((command) => !GROUPS.some((group) => group.kind === command.kind));
-  if (other.length > 0) groups.push({ title: "Commands", commands: other });
+  if (other.length > 0) groups.push({ title: "Commands", sigil, commands: other });
   return groups;
+}
+
+/** The draft once `command` is taken from the list: the name it was being typed as, finished. */
+export function withPickedCommand(draft: string, command: ChatCommand): string {
+  const skill = draft.startsWith("/") ? null : SKILL_WORD.exec(draft);
+  if (!skill) return `/${command.name} `;
+  return `${draft.slice(0, draft.length - skill[1]!.length - 1)}$${command.name} `;
 }
 
 /**

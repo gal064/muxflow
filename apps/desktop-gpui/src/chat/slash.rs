@@ -32,22 +32,71 @@ pub fn section(command: &ChatCommand) -> Section {
     }
 }
 
-/// The word being typed after a leading slash, while it is the whole text.
-/// `None` once there is a space: the command is chosen and its arguments
-/// are being typed.
-pub fn query(text: &str) -> Option<&str> {
-    let word = text.strip_prefix('/')?;
-    (!word.contains(char::is_whitespace)).then_some(word)
+/// The name being completed: a command or skill after a leading slash, or a
+/// skill after a `$` anywhere in the message.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Query<'a> {
+    /// Named with `$`: only skills are offered.
+    pub skill: bool,
+    pub word: &'a str,
+    /// Where the name's sigil is in the text.
+    pub start: usize,
 }
 
-/// What `/query` offers: commands, then skills, each best match first and in
+impl Query<'_> {
+    pub fn sigil(&self) -> char {
+        if self.skill { '$' } else { '/' }
+    }
+}
+
+/// What is being completed with the cursor at `cursor`. A slash counts only
+/// while it is the whole text: after a space the command is chosen and its
+/// arguments are being typed. A `$` counts in the word the cursor ends.
+pub fn query(text: &str, cursor: usize) -> Option<Query<'_>> {
+    if let Some(word) = text.strip_prefix('/')
+        && !word.contains(char::is_whitespace)
+    {
+        return Some(Query {
+            skill: false,
+            word,
+            start: 0,
+        });
+    }
+    let before = text.get(..cursor)?;
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, character)| character.is_whitespace())
+        .map_or(0, |(at, character)| at + character.len_utf8());
+    let word = before[start..].strip_prefix('$')?;
+    Some(Query {
+        skill: true,
+        word,
+        start,
+    })
+}
+
+/// What the query offers: commands, then skills, each best match first and in
 /// the catalog's order where equal.
-pub fn suggestions<'a>(catalog: &'a ChatCatalog, query: &str) -> Vec<&'a ChatCommand> {
+pub fn suggestions<'a>(catalog: &'a ChatCatalog, query: &Query) -> Vec<&'a ChatCommand> {
+    // An agent that has not said yet which of its commands are skills is
+    // asked for any of them.
+    let marked = catalog
+        .commands
+        .iter()
+        .any(|command| section(command) == Section::Skills);
+    let offered = |command: &&ChatCommand| match kind(command) {
+        _ if !query.skill => true,
+        ChatCommandKind::Skill => true,
+        ChatCommandKind::Muxflow => false,
+        _ => !marked,
+    };
     let mut ranked: Vec<(Section, i64, &ChatCommand)> = catalog
         .commands
         .iter()
+        .filter(offered)
         .filter_map(|command| {
-            let score = fuzzy_match(&command.name, query)?.score;
+            let score = fuzzy_match(&command.name, query.word)?.score;
             Some((section(command), score, command))
         })
         .collect();
@@ -95,20 +144,60 @@ mod tests {
     }
 
     fn names(query: &str) -> Vec<String> {
-        suggestions(&catalog(), query)
+        let text = format!("/{query}");
+        suggestions(&catalog(), &super::query(&text, text.len()).unwrap())
             .into_iter()
             .map(|command| command.name.clone())
             .collect()
     }
 
+    fn word(text: &str) -> Option<&str> {
+        query(text, text.len()).map(|query| query.word)
+    }
+
     #[test]
     fn the_list_opens_on_a_slash_and_closes_at_the_first_space() {
-        assert_eq!(query("/"), Some(""));
-        assert_eq!(query("/co"), Some("co"));
-        assert_eq!(query("/compact "), None);
-        assert_eq!(query("/co\nmore"), None);
-        assert_eq!(query("see /co"), None);
-        assert_eq!(query(""), None);
+        assert_eq!(word("/"), Some(""));
+        assert_eq!(word("/co"), Some("co"));
+        assert_eq!(word("/compact "), None);
+        assert_eq!(word("/co\nmore"), None);
+        assert_eq!(word("see /co"), None);
+        assert_eq!(word(""), None);
+    }
+
+    #[test]
+    fn a_dollar_names_a_skill_wherever_the_cursor_is() {
+        let skill = |word, start| {
+            Some(Query {
+                skill: true,
+                word,
+                start,
+            })
+        };
+        assert_eq!(query("$", 1), skill("", 0));
+        assert_eq!(query("run $co", 7), skill("co", 4));
+        assert_eq!(query("run $code now", 7), skill("co", 4));
+        assert_eq!(query("/compact $co", 12), skill("co", 9));
+        assert_eq!(query("run $code now", 13), None);
+        assert_eq!(query("costs $5 ", 9), None);
+        let text = "run $c";
+        let marked = catalog();
+        let names: Vec<_> = suggestions(&marked, &query(text, text.len()).unwrap())
+            .into_iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, ["code-review", "diagnose-crash"]);
+
+        // No skill is marked: the agent's own commands stand in.
+        let mut unmarked = catalog();
+        unmarked
+            .commands
+            .retain(|command| kind(command) != ChatCommandKind::Skill);
+        let names: Vec<_> = suggestions(&unmarked, &query(text, text.len()).unwrap())
+            .into_iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        assert_eq!(names, ["compact", "clear"]);
     }
 
     #[test]
