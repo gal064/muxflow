@@ -41,6 +41,4 @@ exceptions = [
   { crate = "windows-win", allow = ["BSL-1.0"] },
   # CDLA-Permissive-2.0: permissive license for the bundled root CA data.
   { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
-  # Apache-2.0 with the LLVM exception: Apache-2.0 plus extra permission.
-  { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
 ]
