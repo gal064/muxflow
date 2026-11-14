@@ -55,6 +55,16 @@ if [[ -f "$mac_helper" ]]; then
     exit 1
   }
 fi
+# The licence notices the shipped crates require (release/third-party-licenses.mjs):
+# present, with the Apache-2.0 text and the GPUI and terminal crates it covers.
+notices="$package_root/THIRD-PARTY-LICENSES"
+[[ -s "$notices" ]] \
+  && grep -Fq 'TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION' "$notices" \
+  && grep -Eq '^gpui-pre [0-9]' "$notices" \
+  && grep -Eq '^alacritty_terminal [0-9]' "$notices" || {
+  echo "THIRD-PARTY-LICENSES is missing or incomplete" >&2
+  exit 1
+}
 # The desktop is the GPUI app: its panic locations name the app's sources, and
 # it links no WebKitGTK or GTK. This catches a package assembled from the old
 # Tauri binary.
