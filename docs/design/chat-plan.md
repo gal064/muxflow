@@ -984,7 +984,10 @@ Known limits, recorded and not fixed:
   over in place of its name. Claude: a leading `$name` that is one of the
   agent's commands is sent as `/name`, the agent's own way. Claude Code has no
   way to be handed a skill in the middle of a message, so there `$name` is
-  text. No wire change.
+  text. No wire change. Checked with real agents: Codex ran both of two
+  skills named mid-sentence, each handed over once; Claude ran a leading
+  `$name`. Codex 0.169.0 also finds `$name` in plain text on its own, even
+  inside a word (`a$name`), which Muxflow does not hand over.
 - **The list opens on `$` too.** Desktop: in the word the cursor ends,
   anywhere in the message. Phone: in the draft's last word. It offers skills
   only. Claude says which of its commands are skills in its first turn, so

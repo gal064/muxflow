@@ -108,7 +108,7 @@ impl ChatPane {
         }
         match self.send_refusal() {
             None if self.turn() == ChatTurnState::Working => "Send a follow-up while it works",
-            None => "Reply, or type / for commands",
+            None => "Reply, or type / for commands and $ for skills",
             Some(reason) => reason,
         }
     }
