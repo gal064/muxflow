@@ -127,7 +127,7 @@ const SOURCE_CONTROL: &str = "Source control";
 /// take Ctrl+D (EOF) or Ctrl+E (end-of-line), or collide with another binding,
 /// the Linux default is Ghostty's instead.
 #[rustfmt::skip]
-pub static COMMANDS: [CommandDefinition; 82] = [
+pub static COMMANDS: [CommandDefinition; 83] = [
     command("commands.show", "Show command palette", APPLICATION).keys("Meta+K", "Ctrl+K"),
     command("workspaces.switch", "Quick Open…", APPLICATION).keys("Meta+P", "Ctrl+P"),
     command("shortcuts.configure", "Configure keyboard shortcuts", APPLICATION),
@@ -163,6 +163,7 @@ pub static COMMANDS: [CommandDefinition; 82] = [
     command("window.moveLeft", "Move current tab left", TERMINAL_TAB).requires(Requires::Tab),
     command("window.moveRight", "Move current tab right", TERMINAL_TAB).requires(Requires::Tab),
     command("window.close", "Close current tab", TERMINAL_TAB).keys("Meta+W", "Ctrl+W").requires(Requires::Tab).destructive(),
+    command("window.closeNonAgent", "Close all non-agent tabs", TERMINAL_TAB).keys("Meta+Shift+W", "Ctrl+Shift+W").requires(Requires::Tab).destructive(),
     // Ctrl+D is EOF, so split right takes Ghostty's Ctrl+Shift+O, which leaves
     // the Meta→Ctrl image of ⌘⇧D free for split down.
     command("pane.splitRight", "Split pane right", PANE).keys("Meta+D", "Ctrl+Shift+O").mutates().requires(Requires::Pane),
@@ -325,9 +326,9 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_lists_64_and_hides_only_the_positional_selectors() {
-        assert_eq!(COMMANDS.len(), 82);
-        assert_eq!(palette_commands().count(), 64);
+    fn the_palette_lists_65_and_hides_only_the_positional_selectors() {
+        assert_eq!(COMMANDS.len(), 83);
+        assert_eq!(palette_commands().count(), 65);
         for command in COMMANDS.iter().filter(|command| command.palette_hidden) {
             assert!(
                 command.id.starts_with("workspace.select") || command.id.starts_with("tab.select"),
@@ -401,13 +402,21 @@ mod tests {
     }
 
     #[test]
-    fn marks_exactly_the_tmux_closes_for_confirmation() {
+    fn marks_the_commands_that_close_workspaces_tabs_or_panes() {
         let destructive: Vec<_> = COMMANDS
             .iter()
             .filter(|command| command.destructive)
             .map(|command| command.id)
             .collect();
-        assert_eq!(destructive, ["session.close", "window.close", "pane.close"]);
+        assert_eq!(
+            destructive,
+            [
+                "session.close",
+                "window.close",
+                "window.closeNonAgent",
+                "pane.close"
+            ]
+        );
     }
 
     #[test]
