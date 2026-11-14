@@ -284,7 +284,7 @@ const CLICK_SLOP: f32 = 4.;
 /// wherever the press began, so without this a drag that ends on a link, or a
 /// right click, would follow it. Kit itself already holds off while the
 /// preview has a selection.
-fn is_click(event: &ClickEvent, pressed: Option<Point<Pixels>>) -> bool {
+pub(crate) fn is_click(event: &ClickEvent, pressed: Option<Point<Pixels>>) -> bool {
     match event {
         ClickEvent::Mouse(click) => {
             let travelled = pressed.map(|at| at - click.up.position);
