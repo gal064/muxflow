@@ -178,6 +178,31 @@ jobs:
       - name: Rust tests
         run: cargo test --locked --workspace --all-targets --no-fail-fast
 
+  # The release's Linux x86_64 package, built and verified the way release.yml
+  # does it, with the same system packages. The glibc baseline check is why it
+  # runs on ubuntu-24.04.
+  linux-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space for the release build
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Install system packages
+        timeout-minutes: 14
+        run: .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev
+      # The package scripts read the version with `node`.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Build and verify the package
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          version=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')
+          release/linux/build-package.sh x86_64
+          release/linux/verify-package.sh "tmp/release/muxflow-$version-linux-x86_64.tar.gz"
+
   # Builds the ad-hoc GPUI package, launches it from the bundle and keeps the
   # plist and logs: the only Mac the migration's agents can reach (T8.2).
   macos-package:

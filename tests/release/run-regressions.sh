@@ -70,11 +70,11 @@ run_gate phase7 pnpm test:transfers
 run_gate phase7-parent pnpm test:transfers:parent-swap
 run_gate phase7-transfer-smoke bash tests/integration/transfers/run-smoke.sh
 if phase8_is_darwin; then
-  # Builds the Linux desktop package, which links WebKitGTK and cannot be built
-  # on macOS at any architecture. This lane is Linux-only by platform, so the
+  # Builds the Linux desktop package, which cannot be built on macOS at any
+  # architecture. This lane is Linux-only by platform, so the
   # Phase 0-8 matrix is not fully executable on a Mac and must not be reported
   # as if it were.
-  skip_gate phase8-package "Linux-only: builds a WebKitGTK desktop package"
+  skip_gate phase8-package "Linux-only: builds the Linux desktop package"
 else
   run_gate phase8-package pnpm test:package
 fi
