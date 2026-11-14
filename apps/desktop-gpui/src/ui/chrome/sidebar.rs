@@ -481,13 +481,13 @@ fn workspace_row(
                         })
                         .children(inline_unread),
                 )
-                // Tauri's `.workspace-activity`: 12.5px lines, 1px apart.
+                // Tauri's `.workspace-activity`: lines a step under the name, 1px apart.
                 .when(!compact, |this| {
                     this.child(
                         v_flex()
                             .min_w_0()
                             .gap(ui(1.))
-                            .text_size(ui(12.5))
+                            .text_size(ui(TYPE_ROW - 1.))
                             .line_height(relative(1.35))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(meta)

@@ -8,12 +8,14 @@ pub fn ui(css_pixels: f32) -> Rems {
     rems(css_pixels / 16.)
 }
 
-pub const TYPE_ROW: f32 = 13.5;
-pub const TYPE_SECONDARY: f32 = 11.5;
-pub const TYPE_META: f32 = 11.;
-pub const TYPE_LABEL: f32 = 10.5;
-pub const TYPE_MENU: f32 = 13.;
-pub const TYPE_TITLEBAR: f32 = 12.5;
+// One step above `tokens.css`: Tauri's sizes read small next to apps such as
+// T3 Code (14px rows, 12px meta), so every step is 1px larger here.
+pub const TYPE_ROW: f32 = 14.5;
+pub const TYPE_SECONDARY: f32 = 12.5;
+pub const TYPE_META: f32 = 12.;
+pub const TYPE_LABEL: f32 = 11.5;
+pub const TYPE_MENU: f32 = 14.;
+pub const TYPE_TITLEBAR: f32 = 13.5;
 pub const TERM_FONT_SIZE: f32 = 13.;
 pub const WEIGHT_ROW: f32 = 600.;
 /// `--tracking-label`, in ems.
