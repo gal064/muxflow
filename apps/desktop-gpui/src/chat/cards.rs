@@ -46,7 +46,7 @@ fn button(
         .px(ui(10.))
         .py(ui(4.))
         .border_1()
-        .text_size(ui(12.))
+        .text_size(ui(13.))
         .disabled(disabled);
     let button = if primary {
         button.primary().border_color(p.accent)
@@ -73,13 +73,13 @@ fn head(title: SharedString, note: SharedString, p: &Palette) -> impl IntoElemen
         .py(ui(7.))
         .border_b_1()
         .border_color(p.chrome_hairline)
-        .text_size(ui(12.5))
+        .text_size(ui(13.5))
         .text_color(p.chrome_ink_strong)
         .child(div().flex_1().min_w_0().child(title))
         .child(
             div()
                 .flex_none()
-                .text_size(ui(11.))
+                .text_size(ui(12.))
                 .text_color(p.chrome_faint)
                 .child(note),
         )
@@ -163,7 +163,7 @@ fn permission(
                             .rounded(ui(5.))
                             .bg(p.chrome_raised)
                             .font_family(fonts::MONO)
-                            .text_size(ui(12.))
+                            .text_size(ui(13.))
                             .text_color(p.chrome_ink_strong)
                             .child(detail.clone()),
                         vec![("Copy", detail)],
@@ -282,7 +282,7 @@ fn questions(
             .when(!description.is_empty(), |words| {
                 words.child(
                     div()
-                        .text_size(ui(12.))
+                        .text_size(ui(13.))
                         .text_color(p.chrome_dim)
                         .child(description),
                 )

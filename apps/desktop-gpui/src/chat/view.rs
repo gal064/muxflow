@@ -87,7 +87,7 @@ fn markdown_style(p: &Palette, dark: bool) -> TextViewStyle {
                 _ => 1.,
             };
             StyleRefinement::default()
-                .text_size(rems(size * 13.5 / 16.))
+                .text_size(rems(size * 14.5 / 16.))
                 .text_color(strong)
                 .font_weight(FontWeight::SEMIBOLD)
         })
@@ -235,7 +235,7 @@ impl ChatPane {
             div()
                 .w_full()
                 .text_center()
-                .text_size(ui(11.5))
+                .text_size(ui(12.5))
                 .text_color(palette.chrome_faint)
                 .child(text)
         };
@@ -268,7 +268,7 @@ impl ChatPane {
                         .px(ui(6.))
                         .rounded(ui(4.))
                         .focus_visible(move |style| style.bg(wash))
-                        .text_size(ui(11.5))
+                        .text_size(ui(12.5))
                         .text_color(palette.accent)
                         .child("Load earlier messages")
                         .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
@@ -298,7 +298,7 @@ impl ChatPane {
                     .pl(ui(10.))
                     .border_l_2()
                     .border_color(palette.chrome_hairline)
-                    .text_size(ui(12.5))
+                    .text_size(ui(13.5))
                     .text_color(palette.chrome_dim)
                     .child(text)
                     .into_any_element()
@@ -308,7 +308,7 @@ impl ChatPane {
                 div()
                     .w_full()
                     .text_center()
-                    .text_size(ui(11.5))
+                    .text_size(ui(12.5))
                     .text_color(palette.chrome_faint)
                     .child(text)
                     .into_any_element()
@@ -340,7 +340,7 @@ impl ChatPane {
                 .border_color(palette.chrome_border)
                 .rounded(ui(5.))
                 .bg(palette.chrome_bg)
-                .text_size(ui(11.))
+                .text_size(ui(12.))
                 .text_color(palette.chrome_faint)
                 .cursor_pointer()
                 .tab_index(0)
@@ -431,13 +431,13 @@ impl ChatPane {
             .gap(ui(8.))
             .px(ui(9.))
             .py(ui(5.))
-            .text_size(ui(12.5))
+            .text_size(ui(13.5))
             .text_color(palette.chrome_dim)
             .child(
                 div()
                     .flex_none()
                     .font_family(fonts::MONO)
-                    .text_size(ui(11.))
+                    .text_size(ui(12.))
                     .text_color(palette.chrome_faint)
                     .child(verb),
             )
@@ -447,14 +447,14 @@ impl ChatPane {
                     .min_w_0()
                     .truncate()
                     .font_family(fonts::MONO)
-                    .text_size(ui(12.))
+                    .text_size(ui(13.))
                     .text_color(palette.chrome_ink)
                     .child(detail),
             )
             .child(
                 div()
                     .flex_none()
-                    .text_size(ui(11.))
+                    .text_size(ui(12.))
                     .child(outcome(&tool, palette)),
             );
         let row = v_flex()
@@ -518,7 +518,7 @@ impl ChatPane {
                                 .px(ui(10.))
                                 .py(ui(6.))
                                 .font_family(fonts::MONO)
-                                .text_size(ui(11.5))
+                                .text_size(ui(12.5))
                                 .line_height(relative(1.55))
                                 .text_color(palette.chrome_ink)
                                 .child(text)
@@ -531,7 +531,7 @@ impl ChatPane {
                         div()
                             .px(ui(10.))
                             .pb(ui(6.))
-                            .text_size(ui(11.))
+                            .text_size(ui(12.))
                             .text_color(palette.chrome_faint)
                             .child("The rest of the output is not shown."),
                     )
@@ -582,7 +582,7 @@ impl ChatPane {
                         .aria_label(said.clone())
                         .flex_1()
                         .min_w_0()
-                        .text_size(ui(12.))
+                        .text_size(ui(13.))
                         .text_color(palette.danger_ink)
                         .child(said),
                 )
@@ -722,7 +722,7 @@ impl Render for ChatPane {
             .overflow_hidden()
             .bg(palette.chrome_bg)
             .text_color(palette.chrome_ink)
-            .text_size(ui(13.5))
+            .text_size(ui(14.5))
             .line_height(relative(1.45))
             // Captured: Kit's text view takes the press itself.
             .capture_any_mouse_down(move |event, _, _| {
