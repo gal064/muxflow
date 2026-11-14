@@ -93,6 +93,11 @@ jobs:
         with:
           node-version: 24
       - run: rustup show active-toolchain || rustup toolchain install
+      # The packages' licence notices (release/third-party-licenses.mjs). Same pin
+      # there. The action is pinned to a commit (v2.88.0): it runs in the signing job.
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32
+        with:
+          tool: cargo-about@0.9.3
       - name: Build and verify the package
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
@@ -162,6 +167,11 @@ jobs:
         with:
           node-version: 24
       - run: rustup show active-toolchain || rustup toolchain install
+      # The packages' licence notices (release/third-party-licenses.mjs). Same pin
+      # there. The action is pinned to a commit (v2.88.0): it runs in the signing job.
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32
+        with:
+          tool: cargo-about@0.9.3
       # build-package.sh lays out the DMG window with dmgbuild through uvx.
       - uses: astral-sh/setup-uv@v10.2.0
       - uses: actions/download-artifact@v4

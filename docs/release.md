@@ -171,7 +171,10 @@ the requested architecture. The archive contains the GPUI desktop (installed
 as `bin/muxflow`), a Debian 12
 baseline remote helper, desktop integration, installer/uninstaller, and a
 SHA-256 manifest. Docker is required for the conservative helper build unless a
-separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied. The desktop builds
+separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied. Both package
+scripts also need `cargo-about` 0.9.3 for the licence notices
+(`cargo install --locked --features cli cargo-about@0.9.3`; see
+`docs/third-party.md`). The desktop builds
 on ubuntu-24.04 (glibc 2.39, which `verify-package.sh` enforces) with
 `pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev` installed. At run time it needs
 `libxkbcommon-x11-0`, `libasound2t64` and `libvulkan1` plus a Vulkan driver.
@@ -221,7 +224,7 @@ SHA-256 sums.
 # macOS release
 
 Run `release/macos/build-package.sh` on an Apple-Silicon Mac with Xcode,
-Node 24, Rust 1.97.1, uv, and Docker. The script creates an arm64 `.app`
+Node 24, Rust 1.97.1, cargo-about 0.9.3, uv, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
 ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
 `MUXFLOW_LINUX_HELPERS_DIR`, which needs no Docker), and runs
