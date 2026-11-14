@@ -307,9 +307,11 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
         let mut text = String::new();
         for part in source[name].as_array().map_or(&[][..], Vec::as_slice) {
             // A skill is shown as it was typed: its name, then what follows.
+            // One named with `$` is in the text already.
             let skill = string(part, "type") == "skill";
             let piece = match part.as_str() {
                 Some(piece) => piece.to_owned(),
+                None if skill && !text.is_empty() => continue,
                 None if skill => format!("/{}", string(part, "name")),
                 None => string(part, "text").to_owned(),
             };
@@ -674,8 +676,9 @@ impl Codex {
         }
     }
 
-    /// The message as the server takes it: a skill named at its start is
-    /// handed over as the skill, not as its name.
+    /// The message as the server takes it: a skill named at its start with
+    /// a slash is handed over as the skill, not as its name, and each one
+    /// named with `$` anywhere is handed over beside the text.
     fn input(&self, text: &str) -> Value {
         let named = text.strip_prefix('/').and_then(|rest| {
             let (name, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
@@ -690,7 +693,31 @@ impl Codex {
                 }
                 Value::Array(input)
             }
-            None => json!([{"type": "text", "text": text}]),
+            None => {
+                let mut input = vec![json!({"type": "text", "text": text})];
+                let mut named: Vec<&str> = Vec::new();
+                for (at, _) in text.match_indices('$') {
+                    let inside = text[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|before| before.is_alphanumeric() || before == '$');
+                    let rest = &text[at + 1..];
+                    let end = rest
+                        .find(|c: char| !(c.is_alphanumeric() || "-_:.".contains(c)))
+                        .unwrap_or(rest.len());
+                    // A name does not end in the sentence's own punctuation.
+                    let name = rest[..end].trim_end_matches(['.', ':']);
+                    let skill = self.skills.iter().find(|(skill, _, _)| skill == name);
+                    if let Some((name, _, path)) = skill
+                        && !inside
+                        && !named.contains(&name.as_str())
+                    {
+                        named.push(name);
+                        input.push(json!({"type": "skill", "name": name, "path": path}));
+                    }
+                }
+                Value::Array(input)
+            }
         }
     }
 

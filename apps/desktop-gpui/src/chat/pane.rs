@@ -813,23 +813,28 @@ impl ChatPane {
         self.slash_dismissed = None;
     }
 
-    /// The commands a typed `/word` offers, while the list is open.
-    pub(super) fn slash_suggestions(&self, cx: &App) -> Vec<ChatCommand> {
-        let text = self.composer.read(cx).value();
+    /// The commands a typed `/word` or `$word` offers, while the list is
+    /// open, and the sigil they are named with.
+    pub(super) fn slash_suggestions(&self, cx: &App) -> (char, Vec<ChatCommand>) {
+        let composer = self.composer.read(cx);
+        let text = composer.value();
         if self.slash_dismissed.as_deref() == Some(text.as_ref()) {
-            return Vec::new();
+            return ('/', Vec::new());
         }
-        match slash::query(&text) {
-            Some(query) => slash::suggestions(&self.chat.catalog, query)
-                .into_iter()
-                .cloned()
-                .collect(),
-            None => Vec::new(),
+        match slash::query(&text, composer.cursor()) {
+            Some(query) => (
+                query.sigil(),
+                slash::suggestions(&self.chat.catalog, &query)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            ),
+            None => ('/', Vec::new()),
         }
     }
 
     pub(super) fn slash_step(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
-        let count = self.slash_suggestions(cx).len();
+        let count = self.slash_suggestions(cx).1.len();
         if count == 0 {
             return false;
         }
@@ -847,18 +852,37 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let suggestions = self.slash_suggestions(cx);
+        let (_, suggestions) = self.slash_suggestions(cx);
         let Some(command) = suggestions.get(index.unwrap_or(self.slash_active)) else {
             return false;
         };
-        self.set_composer(&format!("/{} ", command.name), window, cx);
+        let (text, cursor) = {
+            let composer = self.composer.read(cx);
+            (composer.value(), composer.cursor())
+        };
+        match slash::query(&text, cursor) {
+            // A skill named in the middle of a message: only its word changes.
+            Some(query) if query.skill => {
+                let named = format!("${} ", command.name);
+                let after = text[cursor..].strip_prefix(' ').unwrap_or(&text[cursor..]);
+                let end = query.start + named.len();
+                let text = format!("{}{named}{after}", &text[..query.start]);
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_value(text, window, cx);
+                    composer.set_selected_range(end..end, cx);
+                });
+                self.slash_active = 0;
+                self.slash_dismissed = None;
+            }
+            _ => self.set_composer(&format!("/{} ", command.name), window, cx),
+        }
         window.focus(&self.input_focus(cx), cx);
         cx.notify();
         true
     }
 
     pub(super) fn slash_dismiss(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.slash_suggestions(cx).is_empty() {
+        if self.slash_suggestions(cx).1.is_empty() {
             return false;
         }
         self.slash_dismissed = Some(self.composer.read(cx).value().to_string());

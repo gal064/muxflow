@@ -99,14 +99,14 @@ function SlashList({ groups, onPick }: { groups: CommandGroup[]; onPick: (comman
             <Text style={styles.section}>{group.title}</Text>
             {group.commands.map((command) => (
               <Pressable
-                accessibilityLabel={`/${command.name}${command.description ? `, ${command.description}` : ""}`}
+                accessibilityLabel={`${group.sigil}${command.name}${command.description ? `, ${command.description}` : ""}`}
                 accessibilityRole="button"
                 key={`${command.kind}:${command.name}`}
                 onPress={() => onPick(command)}
                 style={({ pressed }) => [styles.entry, pressed && styles.entryPressed]}
               >
                 <View style={styles.entryLine}>
-                  <Text numberOfLines={1} style={styles.entryName}>/{command.name}</Text>
+                  <Text numberOfLines={1} style={styles.entryName}>{group.sigil}{command.name}</Text>
                   {command.argumentHint ? <Text numberOfLines={1} style={styles.entryHint}>{command.argumentHint}</Text> : null}
                 </View>
                 {command.description ? <Text numberOfLines={1} style={styles.entryDescription}>{command.description}</Text> : null}

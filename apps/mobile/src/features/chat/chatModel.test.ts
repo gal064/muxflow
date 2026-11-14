@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ChatItemKind, ChatToolStatus, ChatTurnState } from "../../protocol/gen/chat_pb";
+import { ChatCommandKind, ChatItemKind, ChatToolStatus, ChatTurnState } from "../../protocol/gen/chat_pb";
 import {
   applyChatEvent,
   applyOlderPage,
@@ -11,6 +11,7 @@ import {
   slashMatches,
   usageFraction,
   usageLabel,
+  withPickedCommand,
   type ChatPane,
 } from "./chatModel";
 import {
@@ -159,6 +160,21 @@ describe("the slash list", () => {
     expect(slashMatches(catalog(), "/compact now")).toEqual([]);
     expect(slashMatches(catalog(), "hello")).toEqual([]);
     expect(slashMatches(catalog(), "/").flatMap((group) => group.commands)).toHaveLength(6);
+  });
+
+  it("lists the skills for a dollar in the last word, anywhere in the message", () => {
+    const groups = slashMatches(catalog(), "look at this with $c");
+    expect(groups.map((group) => [group.title, group.sigil])).toEqual([["Skills", "$"]]);
+    expect(groups[0]!.commands.map((command) => command.name)).toEqual(["code-review", "diagnose-crash"]);
+    expect(slashMatches(catalog(), "costs $5 a month")).toEqual([]);
+    expect(slashMatches(catalog(), "a$c")).toEqual([]);
+    const skill = groups[0]!.commands[0]!;
+    expect(withPickedCommand("look at this with $c", skill)).toBe("look at this with $code-review ");
+    expect(withPickedCommand("/c", skill)).toBe("/code-review ");
+    // No skill is marked: the agent's own commands stand in.
+    const unmarked = catalog();
+    unmarked.commands = unmarked.commands.filter((command) => command.kind !== ChatCommandKind.SKILL);
+    expect(slashMatches(unmarked, "$c").flatMap((group) => group.commands.map((command) => command.name))).toEqual(["clear", "compact"]);
   });
 
   it("offers Muxflow's side questions only to a provider that can fork", () => {
