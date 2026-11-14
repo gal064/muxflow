@@ -814,7 +814,8 @@ async fn a_skill_named_at_the_start_of_a_message_is_handed_over_as_the_skill() {
 #[tokio::test]
 async fn skills_named_with_a_dollar_anywhere_are_handed_over_beside_the_text() {
     let (mut replay, _lines) = opened(Launch::default());
-    let text = "Write them up with $release-notes. Not $unknown, a$release-notes or $release-notes again";
+    let text =
+        "Write them up with $release-notes. Not $unknown, a$release-notes or $release-notes again";
     replay.send("m1", text);
     assert_eq!(
         replay.last_asked("turn/start")["params"]["input"],
@@ -822,6 +823,20 @@ async fn skills_named_with_a_dollar_anywhere_are_handed_over_beside_the_text() {
             {"type": "text", "text": text},
             {"type": "skill", "name": "release-notes",
              "path": "/work/.codex/skills/release-notes/SKILL.md"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn a_skill_named_with_a_slash_and_again_with_a_dollar_is_one() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "/release-notes and $release-notes");
+    assert_eq!(
+        replay.last_asked("turn/start")["params"]["input"],
+        json!([
+            {"type": "skill", "name": "release-notes",
+             "path": "/work/.codex/skills/release-notes/SKILL.md"},
+            {"type": "text", "text": "and $release-notes"},
         ])
     );
 }

@@ -840,7 +840,10 @@ async fn a_skill_named_with_a_dollar_at_the_start_is_sent_with_a_slash() {
             .unwrap();
         replay.written.last().unwrap()["message"]["content"].clone()
     };
-    assert_eq!(sent("$release-notes since v1.2"), "/release-notes since v1.2");
+    assert_eq!(
+        sent("$release-notes since v1.2"),
+        "/release-notes since v1.2"
+    );
     assert_eq!(sent("$release-notes"), "/release-notes");
     // Not one of the agent's, or not at the start: as typed.
     assert_eq!(sent("$HOME is where"), "$HOME is where");

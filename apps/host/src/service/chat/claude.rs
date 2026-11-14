@@ -1577,13 +1577,16 @@ impl Dialect for Claude {
                 }
                 // A skill named with `$` at the start is one the agent takes
                 // with a slash. Which of its commands are skills it says only
-                // in its first turn, so any of them counts. Elsewhere in a
+                // in its first turn: until then any of them counts. Elsewhere in a
                 // message it has no way to be handed one, and reads the name
                 // as text.
+                let is_skill = |name: &str| match self.skills.is_empty() {
+                    true => self.commands.iter().any(|command| command.name == name),
+                    false => self.skills.contains(name),
+                };
                 let text = match text.strip_prefix('$') {
-                    Some(rest) if self.commands.iter().any(|command| {
-                        command.name == rest.split(char::is_whitespace).next().unwrap_or(rest)
-                    }) =>
+                    Some(rest)
+                        if is_skill(rest.split(char::is_whitespace).next().unwrap_or(rest)) =>
                     {
                         format!("/{rest}")
                     }
