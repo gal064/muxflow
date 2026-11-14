@@ -694,6 +694,46 @@ window when what it would return changes.
   App)`: `path` absolute or relative to the active repository. Unstaged, then
   staged, changes; otherwise the file against the default branch.
 
+#### As built by stream D2
+
+No wire change. `chat/details.rs` publishes the card through
+`chat::set_details_card`; each chat keeps its own card state while it draws it.
+
+- **Rows.** Host (the profile's label) and folder (the pane's path, cut from
+  the start). Branch, Commit… and Changes come from the active repository as
+  the Git panel follows it, and show only while the chat's folder lies in that
+  repository on the same host; clicking into the chat makes its pane the
+  active one. Context is the chat's usage, as the composer's meter reads it.
+- **Branch menu.** A Kit popover under the branch row: a filter (substring,
+  any case; Enter takes the first branch left) and the local branches, most
+  recently committed first, read when the menu opens. Choosing one sends
+  `GIT_CHECKOUT` against the status on screen; while it runs the row says
+  "Switching…", and a switch Git refuses shows Git's words under the row.
+- **Commit…** opens Source Control on the Uncommitted scope with the keyboard
+  in the commit message. **Changes** opens it on the default-branch scope and
+  shows `vs <base>` and the line counts, or "no default branch".
+- **Git side.** `git/client.rs` gains `branches` and `checkout`;
+  `GitPanel` gains `branches`, `checkout` (which takes the status the switch
+  leaves), `start_commit`, and `read_branch_summary`, which keeps the
+  default-branch summary read while a card shows it (wide or opened, on the
+  chat's repository), whatever scope the panel lists; for a card alone it is
+  read once the status has rested for a second, not for every save. `git/mod.rs` gains `panel`, `show(scope)` and `start_commit`.
+
+What differs from the mock:
+
+- The Details button is inside the chat, at the card's place, not in the tab
+  strip, and only under 940px; a wide chat always shows the card. A press
+  outside the opened card, or Commit… or Changes, puts it away. Under about
+  670px, where the column fills the chat, the button lies over the top right
+  of the conversation.
+- The base reads `vs main`, not `vs origin/main`: in the app's type the card
+  has no room for both the remote and the counts.
+- The folder is the host's full path cut from the start, not shortened to
+  `~`: the desktop does not know the host's home.
+- A refused switch shows Git's message once, at most three lines.
+- Clicking the folder does nothing (the mock reveals it in Files).
+- A chat whose folder is not in the active repository shows no Git rows.
+
 ### E — History and Snooze
 
 - Host: `service/history/` store (`sessions.json`, cap 1,000), fed from

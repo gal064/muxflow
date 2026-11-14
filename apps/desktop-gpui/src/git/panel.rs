@@ -51,6 +51,10 @@ use super::{
     store::{GitRepositories, RepositoryState},
 };
 
+/// How long the status must rest before the default-branch summary is read
+/// for a reader while the panel lists another scope.
+const SUMMARY_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Key context around the commit message box.
 const COMMIT_CONTEXT: &str = "GitCommit";
 
@@ -147,6 +151,8 @@ struct CommitForm {
     busy: bool,
     /// The message was committed; the field empties on the next draw.
     clear: bool,
+    /// The keyboard goes to the message on the next draw.
+    focus: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -186,6 +192,9 @@ pub struct GitPanel {
     form: CommitForm,
     scope: Scope,
     branch: BranchList,
+    /// How many others need the default-branch summary kept read while the
+    /// panel lists another scope: the chat details cards on screen.
+    summary_readers: usize,
     /// `workflow.git.panelPaint`: from showing or observing a repository to
     /// drawing its first status. None unless the perf probe is on.
     panel_paint: Option<crate::perf::PaintTicket>,
@@ -221,6 +230,7 @@ impl GitPanel {
             form: CommitForm::default(),
             scope: Scope::default(),
             branch: BranchList::default(),
+            summary_readers: 0,
             panel_paint: None,
             _store: observed,
         }
@@ -337,9 +347,78 @@ impl GitPanel {
         self.branch.summary.clone()
     }
 
+    /// Keeps the default-branch summary read whatever scope is listed, for as
+    /// long as each `true` is not yet matched by a `false`.
+    pub fn read_branch_summary(&mut self, reading: bool, cx: &mut Context<Self>) {
+        if reading {
+            self.summary_readers += 1;
+        } else {
+            self.summary_readers = self.summary_readers.saturating_sub(1);
+        }
+        self.follow_branch(cx);
+    }
+
+    /// Lists the uncommitted changes and puts the keyboard in the commit
+    /// message once the form is drawn.
+    pub fn start_commit(&mut self, cx: &mut Context<Self>) {
+        self.set_scope(Scope::Uncommitted, cx);
+        self.form.focus = true;
+        cx.notify();
+    }
+
+    /// Reads the repository's local branches. `None` while there is no
+    /// repository to ask.
+    pub fn branches(
+        &self,
+        cx: &App,
+    ) -> Option<impl std::future::Future<Output = Result<model::Branches, String>> + use<>> {
+        let scope = self.context.scope.clone()?;
+        let status = self.state(cx).status?;
+        let transport = self.store.read(cx).transport();
+        Some(client::branches(
+            transport,
+            scope,
+            status.repository.id.clone(),
+        ))
+    }
+
+    /// Switches the repository to the local branch `branch`, against the
+    /// status on screen. `None` while Git cannot be written to.
+    pub fn checkout(
+        &mut self,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<CommandResult, String>>> {
+        let state = self.state(cx);
+        if self.unavailable(&state) {
+            return None;
+        }
+        let (key, scope, status) = (
+            self.key.clone()?,
+            self.context.scope.clone()?,
+            state.status?,
+        );
+        let transport = self.store.read(cx).transport();
+        Some(cx.spawn(async move |this, cx| {
+            let result = client::checkout(
+                transport,
+                scope,
+                status.repository.id.clone(),
+                status.generation,
+                branch,
+            )
+            .await;
+            if let Ok(result) = &result {
+                this.update(cx, |this, cx| this.accept(&key, result, cx))
+                    .ok();
+            }
+            result
+        }))
+    }
+
     /// Keeps the default-branch list in step with the repository: read again
     /// whenever the observed status moves, since an edit, a commit or a switch
-    /// all move it. Only while that list is shown.
+    /// all move it. Only while that list is shown or a reader wants it.
     fn follow_branch(&mut self, cx: &mut Context<Self>) {
         // Another repository's list goes at once, before its status arrives.
         if self
@@ -355,7 +434,7 @@ impl GitPanel {
             .key
             .clone()
             .zip(state.status.as_ref().map(|status| status.generation))
-            .filter(|_| self.scope == Scope::Branch);
+            .filter(|_| self.scope == Scope::Branch || self.summary_readers > 0);
         let Some((key, generation)) = wanted else {
             return;
         };
@@ -368,7 +447,14 @@ impl GitPanel {
         self.branch.asked = Some((key, generation));
         let transport = self.store.read(cx).transport();
         let repository_id = status.repository.id.clone();
+        // For a reader alone, a status that keeps moving (an agent editing)
+        // is read once it rests, not for every save.
+        let settle =
+            (self.scope != Scope::Branch).then(|| cx.background_executor().timer(SUMMARY_SETTLE));
         self.branch.task = Some(cx.spawn(async move |this, cx| {
+            if let Some(settle) = settle {
+                settle.await;
+            }
             let answer = client::branch_summary(transport, scope, repository_id).await;
             this.update(cx, |this, cx| {
                 this.branch.task = None;
@@ -1691,6 +1777,9 @@ impl GitPanel {
         let input = self.input(window, cx);
         if std::mem::take(&mut self.form.clear) {
             input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        if std::mem::take(&mut self.form.focus) {
+            input.update(cx, |input, cx| input.focus(window, cx));
         }
         let staged = self.staged_count(cx);
         let busy = self.form.busy;
