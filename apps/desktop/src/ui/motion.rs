@@ -97,7 +97,7 @@ fn wake(id: WindowId, cx: &mut App) {
 
 /// The running mark every working agent wears. Swapping the design is this
 /// one line.
-pub const WORKING_MARK: WorkingMark = WorkingMark::OpenArc;
+pub const WORKING_MARK: WorkingMark = WorkingMark::Bars;
 
 /// Designs for the running mark. It holds still (see the module doc), so it
 /// must read as "running" without moving, in full ink at 8px.
@@ -110,6 +110,8 @@ pub enum WorkingMark {
     HalfDisc,
     /// Three dots in a row, as a typing indicator.
     Dots,
+    /// Three bars of uneven height, as a level meter.
+    Bars,
 }
 
 impl WorkingMark {
@@ -139,6 +141,27 @@ impl WorkingMark {
                     )
                 })
                 .concat(),
+            // Whole CSS pixels, so the bars and gaps land on device pixels at
+            // 1x and 2x: fractional bars smear to grey at 8px. Each height
+            // keeps the box's parity, so every bar is centred on a pixel edge.
+            Self::Bars => {
+                let width = (size * 0.22).round().max(1.);
+                let gap = (size * 0.1).round().max(1.);
+                let margin = ((size - 3. * width - 2. * gap) / 2.).floor();
+                [0.5, 0.9, 0.7]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, height)| {
+                        let inset = (size * (1. - height) / 2.).round();
+                        format!(
+                            r##"<rect x="{}" y="{inset}" width="{width}" height="{}" rx="{}" fill="#000" stroke="none"/>"##,
+                            margin + i as f32 * (width + gap),
+                            size - 2. * inset,
+                            width / 2.
+                        )
+                    })
+                    .collect()
+            }
         };
         format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" fill="none" stroke="#000" stroke-width="{stroke}" stroke-linecap="round">{body}</svg>"##
@@ -309,8 +332,9 @@ pub(crate) mod tests {
             WorkingMark::OpenArc,
             WorkingMark::HalfDisc,
             WorkingMark::Dots,
+            WorkingMark::Bars,
         ] {
-            for size in [8., 10.] {
+            for size in [8., 10., 12.] {
                 let image = renderer
                     .render_single_frame(mark.svg(size).as_bytes(), 4.)
                     .unwrap_or_else(|error| panic!("{mark:?} at {size}: {error}"));

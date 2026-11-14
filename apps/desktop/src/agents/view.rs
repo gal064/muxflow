@@ -112,11 +112,12 @@ const STATE_SIZE: f32 = 10.;
 /// A state docked on an adapter mark, ringed in the row's colour.
 const BADGE_SIZE: f32 = 8.;
 
-/// One agent state, drawn the same way everywhere: a ring means running (held
-/// still, see [`motion::WorkingIcon`]), a dot means a state that is not going
-/// anywhere. With glyphs on, every state is a dot whose shape carries it. Idle
-/// keeps its slot and draws nothing. `ink` is the running ring's colour: the
-/// text colour of the row it sits in, as Tauri's `currentColor`.
+/// One agent state, drawn the same way everywhere: the working mark means
+/// running (held still, see [`motion::WorkingIcon`]), a dot means a state that
+/// is not going anywhere. With glyphs on, every state is a dot whose shape
+/// carries it. Idle keeps its slot and draws nothing. `ink` is the working
+/// mark's colour: the text colour of the row it sits in, as Tauri's
+/// `currentColor`.
 pub fn state_indicator(state: DisplayState, glyphs: bool, ink: Rgba, cx: &App) -> AnyElement {
     let size = STATE_SIZE;
     let palette = theme::palette(cx);
