@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::connection_ui::{backend::TerminalBackend, bridge_events::ChannelSink};
 
 use super::model::{
-    self, BranchSummary, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope, Mutation,
-    StatusSnapshot, path_bytes, target_name,
+    self, BranchSummary, Branches, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope,
+    Mutation, StatusSnapshot, path_bytes, target_name,
 };
 
 /// How Git reaches a host's helper.
@@ -217,6 +217,39 @@ pub async fn branch_summary(
     };
     let answer = read(&transport, &scope, wire).await?;
     model::response_branch_summary(model::response(answer)?)
+}
+
+/// The repository's local branches.
+pub async fn branches(
+    transport: Transport,
+    scope: GitScope,
+    repository_id: String,
+) -> Result<Branches, String> {
+    let wire = GitCommand {
+        repository_id,
+        ..command(&scope, "branches")
+    };
+    let answer = read(&transport, &scope, wire).await?;
+    model::response_branches(model::response(answer)?)
+}
+
+/// Switches to the local branch `branch`. Sent exactly once, like a commit; a
+/// switch Git refuses comes back not applied, with Git's words.
+pub async fn checkout(
+    transport: Transport,
+    scope: GitScope,
+    repository_id: String,
+    expected_status_generation: u64,
+    branch: String,
+) -> Result<CommandResult, String> {
+    let wire = GitCommand {
+        repository_id,
+        expected_status_generation: expected_status_generation.to_string(),
+        branch,
+        ..command(&scope, "checkout")
+    };
+    let answer = transport.request(scope.client_id.clone(), wire).await?;
+    model::response_command(model::response(answer)?)
 }
 
 /// Both withheld sides over one bulk read; a failure on either side stops the
