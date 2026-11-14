@@ -1,0 +1,123 @@
+// A stand-in for `react-native` in vitest (aliased in vitest.config.ts), so
+// screens can be rendered with react-test-renderer in Node. Host components
+// render as elements named after the component, with their props, so a test
+// can find them and call their handlers; `renderHtml` draws the same tree.
+
+import { createElement, forwardRef, useImperativeHandle, type ReactNode } from "react";
+
+type Props = Record<string, unknown> & { children?: ReactNode };
+
+function host(name: string) {
+  const component = forwardRef<unknown, Props>(function Host(props, ref) {
+    useImperativeHandle(ref, () => ({ scrollToEnd() {}, scrollTo() {}, focus() {}, blur() {}, measure() {} }));
+    return createElement(name, props);
+  });
+  component.displayName = name;
+  return component;
+}
+
+export const View = host("View");
+export const Text = host("Text");
+export const ScrollView = host("ScrollView");
+export const TextInput = host("TextInput");
+export const ActivityIndicator = host("ActivityIndicator");
+export const Switch = host("Switch");
+export const Image = host("Image");
+export const KeyboardAvoidingView = host("View");
+
+/** Resolves `style` and `children` given as functions of the press state, as React Native does. */
+export const Pressable = forwardRef<unknown, Props>(function Pressable(props, _ref) {
+  const { style, children, ...rest } = props;
+  const state = { pressed: false, hovered: false };
+  return createElement(
+    "Pressable",
+    { ...rest, style: typeof style === "function" ? (style as (s: typeof state) => unknown)(state) : style },
+    (typeof children === "function" ? (children as (s: typeof state) => ReactNode)(state) : children) as ReactNode,
+  );
+});
+export const TouchableOpacity = Pressable;
+
+/** A Modal shows its children only while visible. */
+export function Modal(props: Props & { visible?: boolean }) {
+  const { visible, children, ...rest } = props;
+  return visible === false ? null : createElement("Modal", rest, children);
+}
+
+export const StyleSheet = {
+  create<T>(styles: T): T {
+    return styles;
+  },
+  flatten(style: unknown): Record<string, unknown> {
+    if (!style) return {};
+    if (Array.isArray(style)) return Object.assign({}, ...style.map((entry) => StyleSheet.flatten(entry)));
+    return style as Record<string, unknown>;
+  },
+  hairlineWidth: 1,
+  absoluteFill: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
+  absoluteFillObject: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
+};
+
+export const Platform = {
+  OS: "android",
+  Version: 34,
+  select<T>(choices: { android?: T; ios?: T; default?: T }): T | undefined {
+    return choices.android ?? choices.default;
+  },
+};
+
+const subscription = { remove() {} };
+
+export const AppState = { currentState: "active", addEventListener: () => subscription };
+export const AccessibilityInfo = {
+  isReduceMotionEnabled: async () => false,
+  addEventListener: () => subscription,
+  announceForAccessibility() {},
+};
+export const Keyboard = { addListener: () => subscription, dismiss() {}, isVisible: () => false, metrics: () => undefined };
+export const Linking = { openURL: async () => undefined };
+export const Alert = { alert() {} };
+export const ToastAndroid = { show() {}, SHORT: 0, LONG: 1 };
+export const Dimensions = { get: () => ({ width: 360, height: 780, scale: 3, fontScale: 1 }), addEventListener: () => subscription };
+export function useWindowDimensions() {
+  return { width: 360, height: 780, scale: 3, fontScale: 1 };
+}
+
+class AnimatedValue {
+  constructor(private value: number) {}
+  setValue(value: number) {
+    this.value = value;
+  }
+  stopAnimation() {}
+  interpolate() {
+    return this;
+  }
+  valueOf() {
+    return this.value;
+  }
+}
+
+const animation = { start() {}, stop() {}, reset() {} };
+
+export const Animated = {
+  Value: AnimatedValue,
+  View: host("View"),
+  Text: host("Text"),
+  timing: () => animation,
+  loop: () => animation,
+  sequence: () => animation,
+  parallel: () => animation,
+};
+
+export const Easing = {
+  out: (fn: unknown) => fn,
+  in: (fn: unknown) => fn,
+  inOut: (fn: unknown) => fn,
+  quad: () => 0,
+  linear: () => 0,
+  bezier: () => () => 0,
+};
+
+export default {
+  View, Text, ScrollView, TextInput, ActivityIndicator, Switch, Image, Pressable, Modal, StyleSheet, Platform, AppState,
+  AccessibilityInfo, Keyboard, Linking, Alert, ToastAndroid, Dimensions, Animated, Easing, useWindowDimensions,
+};
