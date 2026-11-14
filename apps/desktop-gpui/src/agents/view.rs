@@ -7,7 +7,7 @@ use std::{rc::Rc, time::Duration};
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FocusHandle, FontWeight,
+    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, RenderOnce,
     Rgba, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     Window,
@@ -36,12 +36,13 @@ use crate::{
         self, Palette,
         metrics::{
             NARROW_DIALOGS, RADIUS_CONTROL, RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW,
-            TYPE_SECONDARY, narrower_than, ui,
+            TYPE_SECONDARY, WEIGHT_ROW, narrower_than, ui,
         },
     },
     ui::{
-        chrome::host_letter,
+        chrome::{host_letter, list_divider},
         dialog::{self, Action, Prose},
+        icons::Glyph,
         motion,
         surface_error::SurfaceError,
     },
@@ -70,7 +71,6 @@ const CLAUDE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 const CODEX: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="146.694 227.042 267.198 264.812"><g transform="translate(280.293 359.448) scale(.86) translate(-280.293 -359.448)"><path d="M249.176 323.434V298.276C249.176 296.158 249.971 294.569 251.825 293.509L302.406 264.381C309.29 260.409 317.5 258.555 325.973 258.555C357.75 258.555 377.877 283.185 377.877 309.399C377.877 311.253 377.877 313.371 377.611 315.49L325.178 284.771C322.001 282.919 318.822 282.919 315.645 284.771L249.176 323.434ZM367.283 421.415V361.301C367.283 357.592 365.694 354.945 362.516 353.092L296.048 314.43L317.763 301.982C319.617 300.925 321.206 300.925 323.058 301.982L373.639 331.112C388.205 339.586 398.003 357.592 398.003 375.069C398.003 395.195 386.087 413.733 367.283 421.412V421.415ZM233.553 368.452L211.838 355.742C209.986 354.684 209.19 353.095 209.19 350.975V292.718C209.19 264.383 230.905 242.932 260.301 242.932C271.423 242.932 281.748 246.641 290.49 253.26L238.321 283.449C235.146 285.303 233.555 287.951 233.555 291.659V368.455L233.553 368.452ZM280.292 395.462L249.176 377.985V340.913L280.292 323.436L311.407 340.913V377.985L280.292 395.462ZM300.286 475.968C289.163 475.968 278.837 472.259 270.097 465.64L322.264 435.449C325.441 433.597 327.03 430.949 327.03 427.239V350.445L349.011 363.155C350.865 364.213 351.66 365.802 351.66 367.922V426.179C351.66 454.514 329.679 475.965 300.286 475.965V475.968ZM237.525 416.915L186.944 387.785C172.378 379.31 162.582 361.305 162.582 343.827C162.582 323.436 174.763 305.164 193.563 297.485V357.861C193.563 361.571 195.154 364.217 198.33 366.071L264.535 404.467L242.82 416.915C240.967 417.972 239.377 417.972 237.525 416.915ZM234.614 460.343C204.689 460.343 182.71 437.833 182.71 410.028C182.71 407.91 182.976 405.792 183.238 403.672L235.405 433.863C238.582 435.715 241.763 435.715 244.938 433.863L311.407 395.466V420.622C311.407 422.742 310.612 424.331 308.758 425.389L258.179 454.519C251.293 458.491 243.083 460.343 234.611 460.343H234.614ZM300.286 491.854C332.329 491.854 359.073 469.082 365.167 438.892C394.825 431.211 413.892 403.406 413.892 375.073C413.892 356.535 405.948 338.529 391.648 325.552C392.972 319.991 393.766 314.43 393.766 308.87C393.766 271.003 363.048 242.666 327.562 242.666C320.413 242.666 313.528 243.723 306.644 246.109C294.725 234.457 278.307 227.042 260.301 227.042C228.258 227.042 201.513 249.815 195.42 280.004C165.761 287.685 146.694 315.49 146.694 343.824C146.694 362.362 154.638 380.368 168.938 393.344C167.613 398.906 166.819 404.467 166.819 410.027C166.819 447.894 197.538 476.231 233.024 476.231C240.172 476.231 247.058 475.173 253.943 472.788C265.859 484.441 282.278 491.854 300.286 491.854Z"/></g></svg>"##;
 const PI: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 560"><g transform="translate(280 280) scale(.76) translate(-280 -280)"><path d="M420 280H280V140H0V0H420V280ZM560 560H420V280H560V560ZM140 560H0V140H140V280H280V420H140V560Z"/></g></svg>"##;
 const GENERIC: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-linecap="round" stroke-width="1.35"><circle cx="8" cy="8" r="5.5"/><circle cx="6" cy="7" r=".8" fill="#000" stroke="none"/><circle cx="10" cy="7" r=".8" fill="#000" stroke="none"/><path d="M5.5 10h5"/></svg>"##;
-const PIN: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"><path d="M4.75 1.25h6.5c0 .95-.55 1.5-1.25 1.9V6.9c1.2.7 2.25 1.6 2.25 2.85h-8.5c0-1.25 1.05-2.15 2.25-2.85V3.15c-.7-.4-1.25-.95-1.25-1.9Z"/><path d="M8 9.75v4.75"/></svg>"##;
 const BRANCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35"><circle cx="4.75" cy="3.75" r="1.75"/><circle cx="4.75" cy="12.25" r="1.75"/><circle cx="11.25" cy="3.75" r="1.75"/><path d="M4.75 5.5v5M11.25 5.5v1.25a2.5 2.5 0 0 1-2.5 2.5H6.5"/></svg>"##;
 
 pub fn adapter_icon(adapter_id: &str) -> &'static [u8] {
@@ -104,14 +104,24 @@ fn state_color(state: DisplayState, palette: &Palette) -> Rgba {
     }
 }
 
+/// An agent state standing on its own, in CSS pixels: a workspace row, a tab,
+/// a group heading, quick open. One size for a dot and the running mark, so a
+/// state change never moves the text beside it. Tauri's 7–9px were too small
+/// to tell the states apart at a glance.
+const STATE_SIZE: f32 = 10.;
+/// A state docked on an adapter mark, ringed in the row's colour.
+const BADGE_SIZE: f32 = 8.;
+
 /// One agent state, drawn the same way everywhere: a ring means running (held
 /// still, see [`motion::WorkingIcon`]), a dot means a state that is not going
 /// anywhere. With glyphs on, every state is a dot whose shape carries it. Idle
-/// keeps its slot and draws nothing.
-pub fn state_indicator(state: DisplayState, glyphs: bool, size: f32, cx: &App) -> AnyElement {
+/// keeps its slot and draws nothing. `ink` is the running ring's colour: the
+/// text colour of the row it sits in, as Tauri's `currentColor`.
+pub fn state_indicator(state: DisplayState, glyphs: bool, ink: Rgba, cx: &App) -> AnyElement {
+    let size = STATE_SIZE;
     let palette = theme::palette(cx);
     if state == DisplayState::Working && !glyphs {
-        return motion::WorkingIcon::new(size, palette.chrome_ink).into_any_element();
+        return motion::WorkingIcon::new(size, ink).into_any_element();
     }
     let dot = div().flex_none().size(ui(size)).rounded_full();
     if state == DisplayState::Idle {
@@ -146,12 +156,14 @@ pub fn adapter_glyph(adapter_id: &str, ink: Rgba) -> gpui_kit::Svg {
 }
 
 /// The adapter mark with its state docked to it, or beside it with glyphs on.
+/// `ring` is the row's colour; a selected row is the accent block.
 pub fn agent_mark(
     adapter_id: &str,
     state: DisplayState,
     glyphs: bool,
     ink: Rgba,
     ring: Rgba,
+    selected: bool,
     cx: &App,
 ) -> AnyElement {
     let palette = theme::palette(cx);
@@ -161,34 +173,47 @@ pub fn agent_mark(
             .flex_none()
             .items_center()
             .gap(ui(3.))
-            .child(state_indicator(state, true, 9., cx))
+            .child(state_indicator(state, true, ink, cx))
             .child(icon)
             .into_any_element();
     }
     let badge = (state != DisplayState::Idle).then(|| {
-        let size = if state == DisplayState::Working {
-            7.
-        } else {
-            6.
-        };
-        let badge = div()
-            .absolute()
-            .right(ui(-2.))
-            .bottom(ui(-2.))
-            .size(ui(size))
-            .rounded_full()
-            .border_1()
-            .border_color(ring);
-        match state {
-            DisplayState::Working => badge
-                .bg(ring)
-                .child(motion::WorkingIcon::new(5., palette.chrome_ink)),
-            DisplayState::Unknown => badge
-                .bg(ring)
+        // A 1.5px ring of the row's colour outside the badge, as Tauri's
+        // box-shadow: drawn as a border it ate the badge. Here the ring is a
+        // backing 3px wider.
+        let size = BADGE_SIZE;
+        let dot = div().size(ui(size)).rounded_full();
+        let inner = match state {
+            DisplayState::Working => {
+                let ink = if selected {
+                    palette.accent_ink
+                } else {
+                    palette.chrome_ink
+                };
+                motion::WorkingIcon::new(size, ink).into_any_element()
+            }
+            // On the accent block the unknown colour all but vanishes.
+            DisplayState::Unknown => dot
+                .border_1()
                 .border_dashed()
-                .border_color(palette.state_unknown),
-            other => badge.bg(state_color(other, &palette)),
-        }
+                .border_color(if selected {
+                    Hsla::from(palette.accent_ink).opacity(0.65)
+                } else {
+                    palette.state_unknown.into()
+                })
+                .into_any_element(),
+            other => dot.bg(state_color(other, &palette)).into_any_element(),
+        };
+        div()
+            .id("agent-badge")
+            .test_support()
+            .absolute()
+            .right(ui(-3.5))
+            .bottom(ui(-3.5))
+            .p(ui(1.5))
+            .rounded_full()
+            .bg(ring)
+            .child(inner)
     });
     div()
         .relative()
@@ -829,10 +854,10 @@ fn agent_row(
         .min_w_0()
         .items_center()
         .gap(ui(6.))
-        .px(ui(7.))
-        .py(ui(5.))
+        .p(ui(7.))
         .rounded(ui(RADIUS_CONTROL))
         .text_size(ui(TYPE_ROW))
+        .font_weight(FontWeight(WEIGHT_ROW))
         .text_color(ink)
         .when(selected, |this| this.bg(palette.accent))
         .when(!selected && !unavailable, |this| {
@@ -875,6 +900,7 @@ fn agent_row(
             glyphs,
             if selected { ink } else { dim },
             background,
+            selected,
             cx,
         ))
         .when(!row.location.host_letter.is_empty(), |this| {
@@ -888,7 +914,13 @@ fn agent_row(
                 .gap(ui(4.))
                 .child(div().min_w_0().truncate().child(session_label))
                 .when(row.location.tab_pinned, |this| {
-                    this.child(svg().data(PIN).flex_none().size(ui(11.)).text_color(dim))
+                    this.child(
+                        svg()
+                            .data(Glyph::Pin.svg())
+                            .flex_none()
+                            .size(ui(11.))
+                            .text_color(dim),
+                    )
                 }),
         )
         .child(
@@ -952,7 +984,7 @@ fn agent_row(
                 .child(
                     row_action(
                         format!("agent-pin-{key}").into(),
-                        PIN,
+                        Glyph::Pin.svg(),
                         if row.location.tab_pinned {
                             "Unpin tab"
                         } else {
@@ -999,8 +1031,9 @@ fn heading(
         .text_size(ui(TYPE_SECONDARY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(palette.chrome_dim)
+        // The heading's own ink, as Tauri's `.spinner.agent-group-dot`.
         .when_some(dot, |this, (state, glyphs)| {
-            this.child(state_indicator(state, glyphs, 8., cx))
+            this.child(state_indicator(state, glyphs, palette.chrome_dim, cx))
         })
         .child(div().min_w_0().truncate().child(text))
         .child(
@@ -1011,19 +1044,6 @@ fn heading(
         .when_some(tooltip, |this, tip| {
             this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
         })
-        .into_any_element()
-}
-
-fn divider_label(text: &str, cx: &App) -> AnyElement {
-    let palette = theme::palette(cx);
-    div()
-        .mx(ui(9.))
-        .mt(ui(2.))
-        .mb(ui(4.))
-        .text_size(ui(TYPE_LABEL))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(palette.chrome_faint)
-        .child(text.to_uppercase())
         .into_any_element()
 }
 
@@ -1181,7 +1201,12 @@ impl RenderOnce for AgentsList {
                             if block.is_empty() {
                                 continue;
                             }
-                            body.push(divider_label(label, cx));
+                            body.push(list_divider(
+                                SharedString::from(format!("agents-divider-{label}")),
+                                label,
+                                body.is_empty(),
+                                cx,
+                            ));
                             body.extend(block.into_iter().map(|group| render_group(group, cx)));
                         }
                     } else {
@@ -1190,7 +1215,12 @@ impl RenderOnce for AgentsList {
                 }
                 AgentSortMode::Pinned => {
                     for (label, half) in group_by_pin(&rows) {
-                        body.push(divider_label(label, cx));
+                        body.push(list_divider(
+                            SharedString::from(format!("agents-divider-{label}")),
+                            label,
+                            body.is_empty(),
+                            cx,
+                        ));
                         body.push(group_box(
                             half.iter()
                                 .map(|row| {
@@ -1887,6 +1917,48 @@ mod tests {
     fn redraw(visual: &mut VisualTestContext) {
         visual.update(|window, _| window.refresh());
         visual.run_until_parked();
+    }
+
+    /// One adapter mark per state, as a sidebar row draws them.
+    struct Marks;
+
+    impl Render for Marks {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let palette = theme::palette(cx);
+            h_flex().children([DisplayState::Blocked, DisplayState::Working].map(|state| {
+                div().id(state as usize).child(agent_mark(
+                    "claude",
+                    state,
+                    false,
+                    palette.chrome_dim,
+                    palette.chrome_bg,
+                    false,
+                    cx,
+                ))
+            }))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_badge_is_one_size_with_its_ring_outside_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
+        });
+        let (_, visual) = cx.add_window_view(|_, _| Marks);
+        visual.run_until_parked();
+        let id = gpui_kit::ElementId::Name("agent-badge".into());
+        let mut sizes: Vec<_> = visual.update(|window, _| {
+            window
+                .elements()
+                .into_iter()
+                .filter(|element| element.path().last() == Some(&id))
+                .map(|element| f32::from(element.bounds().size.width))
+                .collect()
+        });
+        sizes.sort_by(f32::total_cmp);
+        // One badge size for every state, with 1.5px of ring on every side.
+        assert_eq!(sizes, [BADGE_SIZE + 3.; 2]);
     }
 
     #[gpui_kit::test]
