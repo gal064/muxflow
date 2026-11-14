@@ -509,7 +509,18 @@ impl QuickOpen {
                         )))
                         .role(Role::Image)
                         .aria_label(format!("Agent {}", state.word()))
-                        .child(state_indicator(state, glyphs, 7., cx))
+                        // Tauri's 8px dot, or its plain 9px spinner.
+                        .child(state_indicator(
+                            state,
+                            glyphs,
+                            if state == DisplayState::Working {
+                                9.
+                            } else {
+                                8.
+                            },
+                            colors.chrome_ink,
+                            cx,
+                        ))
                         .test_support(),
                 )
             })
