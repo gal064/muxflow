@@ -7,7 +7,7 @@ use std::{rc::Rc, time::Duration};
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FocusHandle, FontWeight,
+    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, RenderOnce,
     Rgba, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
     Window,
@@ -107,11 +107,18 @@ fn state_color(state: DisplayState, palette: &Palette) -> Rgba {
 /// One agent state, drawn the same way everywhere: a ring means running (held
 /// still, see [`motion::WorkingIcon`]), a dot means a state that is not going
 /// anywhere. With glyphs on, every state is a dot whose shape carries it. Idle
-/// keeps its slot and draws nothing.
-pub fn state_indicator(state: DisplayState, glyphs: bool, size: f32, cx: &App) -> AnyElement {
+/// keeps its slot and draws nothing. `ink` is the running ring's colour: the
+/// text colour of the row it sits in, as Tauri's `currentColor`.
+pub fn state_indicator(
+    state: DisplayState,
+    glyphs: bool,
+    size: f32,
+    ink: Rgba,
+    cx: &App,
+) -> AnyElement {
     let palette = theme::palette(cx);
     if state == DisplayState::Working && !glyphs {
-        return motion::WorkingIcon::new(size, palette.chrome_ink).into_any_element();
+        return motion::WorkingIcon::new(size, ink).into_any_element();
     }
     let dot = div().flex_none().size(ui(size)).rounded_full();
     if state == DisplayState::Idle {
@@ -146,12 +153,14 @@ pub fn adapter_glyph(adapter_id: &str, ink: Rgba) -> gpui_kit::Svg {
 }
 
 /// The adapter mark with its state docked to it, or beside it with glyphs on.
+/// `ring` is the row's colour; a selected row is the accent block.
 pub fn agent_mark(
     adapter_id: &str,
     state: DisplayState,
     glyphs: bool,
     ink: Rgba,
     ring: Rgba,
+    selected: bool,
     cx: &App,
 ) -> AnyElement {
     let palette = theme::palette(cx);
@@ -161,34 +170,51 @@ pub fn agent_mark(
             .flex_none()
             .items_center()
             .gap(ui(3.))
-            .child(state_indicator(state, true, 9., cx))
+            .child(state_indicator(state, true, 9., ink, cx))
             .child(icon)
             .into_any_element();
     }
     let badge = (state != DisplayState::Idle).then(|| {
+        // Tauri's badge is `size` across with a 1.5px ring of the row's colour
+        // outside it, a box-shadow. Drawn as a border it ate the badge: a 6px
+        // dot showed 4px. Here the ring is a backing 3px wider.
         let size = if state == DisplayState::Working {
             7.
         } else {
             6.
         };
-        let badge = div()
-            .absolute()
-            .right(ui(-2.))
-            .bottom(ui(-2.))
-            .size(ui(size))
-            .rounded_full()
-            .border_1()
-            .border_color(ring);
-        match state {
-            DisplayState::Working => badge
-                .bg(ring)
-                .child(motion::WorkingIcon::new(5., palette.chrome_ink)),
-            DisplayState::Unknown => badge
-                .bg(ring)
+        let dot = div().size(ui(size)).rounded_full();
+        let inner = match state {
+            DisplayState::Working => {
+                let ink = if selected {
+                    palette.accent_ink
+                } else {
+                    palette.chrome_ink
+                };
+                motion::WorkingIcon::new(size, ink).into_any_element()
+            }
+            // On the accent block the unknown colour all but vanishes.
+            DisplayState::Unknown => dot
+                .border_1()
                 .border_dashed()
-                .border_color(palette.state_unknown),
-            other => badge.bg(state_color(other, &palette)),
-        }
+                .border_color(if selected {
+                    Hsla::from(palette.accent_ink).opacity(0.65)
+                } else {
+                    palette.state_unknown.into()
+                })
+                .into_any_element(),
+            other => dot.bg(state_color(other, &palette)).into_any_element(),
+        };
+        div()
+            .id("agent-badge")
+            .test_support()
+            .absolute()
+            .right(ui(-3.5))
+            .bottom(ui(-3.5))
+            .p(ui(1.5))
+            .rounded_full()
+            .bg(ring)
+            .child(inner)
     });
     div()
         .relative()
@@ -875,6 +901,7 @@ fn agent_row(
             glyphs,
             if selected { ink } else { dim },
             background,
+            selected,
             cx,
         ))
         .when(!row.location.host_letter.is_empty(), |this| {
@@ -1005,8 +1032,9 @@ fn heading(
         .text_size(ui(TYPE_SECONDARY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(palette.chrome_dim)
+        // The heading's own ink, as Tauri's `.spinner.agent-group-dot`.
         .when_some(dot, |this, (state, glyphs)| {
-            this.child(state_indicator(state, glyphs, 8., cx))
+            this.child(state_indicator(state, glyphs, 8., palette.chrome_dim, cx))
         })
         .child(div().min_w_0().truncate().child(text))
         .child(
@@ -1893,6 +1921,48 @@ mod tests {
     fn redraw(visual: &mut VisualTestContext) {
         visual.update(|window, _| window.refresh());
         visual.run_until_parked();
+    }
+
+    /// One adapter mark per state, as a sidebar row draws them.
+    struct Marks;
+
+    impl Render for Marks {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let palette = theme::palette(cx);
+            h_flex().children([DisplayState::Blocked, DisplayState::Working].map(|state| {
+                div().id(state as usize).child(agent_mark(
+                    "claude",
+                    state,
+                    false,
+                    palette.chrome_dim,
+                    palette.chrome_bg,
+                    false,
+                    cx,
+                ))
+            }))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_badge_is_tauris_size_with_its_ring_outside_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
+        });
+        let (_, visual) = cx.add_window_view(|_, _| Marks);
+        visual.run_until_parked();
+        let id = gpui_kit::ElementId::Name("agent-badge".into());
+        let mut sizes: Vec<_> = visual.update(|window, _| {
+            window
+                .elements()
+                .into_iter()
+                .filter(|element| element.path().last() == Some(&id))
+                .map(|element| f32::from(element.bounds().size.width))
+                .collect()
+        });
+        sizes.sort_by(f32::total_cmp);
+        // A 6px dot and a 7px ring, each with 1.5px of ring on every side.
+        assert_eq!(sizes, [9., 10.]);
     }
 
     #[gpui_kit::test]
