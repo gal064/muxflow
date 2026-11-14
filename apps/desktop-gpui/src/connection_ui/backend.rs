@@ -22,6 +22,7 @@ use desktop_core::{
         git::{self, GitCommand},
         git_content::{self, GitDiffContentCommand},
         helper::{self, HelperInstallReport},
+        history::{HistoryRequest, HistoryResponse, history_request},
         tmux_action,
     },
     incidents::{IncidentJournal, record_incident},
@@ -131,6 +132,14 @@ pub trait TerminalBackend: Send + Sync {
         _command: AutomationCommand,
     ) -> BoxFuture<'static, Result<Value, String>> {
         futures::future::ready(Err("automations are unavailable here".to_owned())).boxed()
+    }
+    /// One session history request (`history_request`).
+    fn history_request(
+        &self,
+        _client_id: String,
+        _request: HistoryRequest,
+    ) -> BoxFuture<'static, Result<HistoryResponse, String>> {
+        futures::future::ready(Err("session history is unavailable here".to_owned())).boxed()
     }
     /// Starts an editor read or write (`start_file_read`, `start_file_write`),
     /// reporting its frames to `events`. Answers with the transfer id.
@@ -416,6 +425,15 @@ impl TerminalBackend for NativeBackend {
     ) -> BoxFuture<'static, Result<Value, String>> {
         let clients = self.clients.clone();
         spawned(async move { automation_request(client_id, command, &clients).await })
+    }
+
+    fn history_request(
+        &self,
+        client_id: String,
+        request: HistoryRequest,
+    ) -> BoxFuture<'static, Result<HistoryResponse, String>> {
+        let clients = self.clients.clone();
+        spawned(async move { history_request(client_id, request, &clients).await })
     }
 
     fn start_file_io(

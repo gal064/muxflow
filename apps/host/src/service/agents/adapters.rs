@@ -55,7 +55,7 @@ pub(crate) struct LaunchSpec {
 /// The display name for a copy of the conversation named `source`. A name that
 /// is already a fork is not marked twice, and leading dashes are dropped so a
 /// terminal title can never be read as a command-line flag.
-fn fork_name(source: &str) -> String {
+pub(crate) fn fork_name(source: &str) -> String {
     let source = source
         .trim_start_matches(|c: char| c == '-' || c.is_whitespace())
         .trim_end();
