@@ -118,12 +118,12 @@ using the phone mocks as the checklist.
 | Task | Branch | State | Commit | Notes |
 | --- | --- | --- | --- | --- |
 | A | `gpui/chat-a` | Merged | `5b1dbbb` | Fast-forward. 4 review rounds, worker QA and a recheck on the final binary passed. `PROTOCOL_MAJOR` 5. Departures from plan §4 are in the plan under "As built by stream A". LOAD_OLDER stays a response with a revision (root decision) |
-| B | `gpui/chat-b` | In progress | | Dispatched |
+| B | `gpui/chat-b` | Merged | `8380b6d` | No conflict. 2 review rounds, worker QA with real `claude` and `codex` passed (17 and 16 turns). Claude rewind and per-pane Codex hooks verified; Claude fast mode unverified (the account has none). Known: a streaming answer loses its head across a daemon restart; the Codex server sends its deltas in bursts; conversion reads `/proc` (no macOS); side fork and Codex command approval not run through the wire. Open for the owner: the agent's environment is handed over in a 0600 file. Details in the plan under "As built by stream B" |
 | C | `gpui/chat-c` | In progress | | Dispatched |
 | D1 | `gpui/chat-d1` | Merged | `402f36e` | Merged ahead of B, E and C; no conflict. 2 code review rounds, 1 design round, worker QA passed 8 scenarios. Wire: Git operations 62 to 64 and a default-branch diff target, additive, no major bump. Chat opens a diff through `crate::git::open_file_diff(path, cx)`. Branch list and checkout exist in the host and `desktop-core` only; D2 adds the client calls. Details in the plan under "As built by stream D1" |
 | D2 | `gpui/chat-d2` | Not started | | |
 | E | `gpui/chat-e` | Merged | `af4a80c` | Merged ahead of B; no conflict. 3 review rounds, worker QA passed both scenarios; the round-3 and post-QA fixes have host tests only. Desktop History UI has tests but no headless frames. Hiding `/btw` forks from History needs B's split placement. Not built: resume in a split, a clickable wake notification, dismissing a placeholder. Details in the plan under "As built by stream E" |
 | F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
-| Integration | `gpui/chat` | In progress | `8352e54` | With A, F, D1 and E merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, and mobile `protocol:check` passes |
+| Integration | `gpui/chat` | In progress | `43efba8` | With A, F, D1, E and B merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, and mobile `protocol:check` passes. Root fix: a side fork's pane is now hidden from History. One host test failed once under `cargo test` and not again in 52 runs; not identified |
 
-Next step: B and C finish; root merges B then C, wires the chat file-edit row to `git::open_file_diff`, then dispatches D2.
+Next step: C finishes; root merges it, wires the chat file-edit row to `git::open_file_diff`, then dispatches D2.
