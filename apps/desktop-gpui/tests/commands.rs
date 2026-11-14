@@ -137,7 +137,7 @@ fn the_registry_matches_registry_ts() {
             format!("Alt+{digit}"),
         );
     }
-    assert_eq!(COMMANDS.len(), 64 + 18);
+    assert_eq!(COMMANDS.len(), 65 + 18);
 }
 
 /// id, macOS key, Linux key, `-` for none. Pins the defaults independently of
@@ -158,6 +158,7 @@ tab.previous Meta+Shift+[ Ctrl+Shift+[
 tab.next Meta+Shift+] Ctrl+Shift+]
 window.new Meta+T Ctrl+T
 window.close Meta+W Ctrl+W
+window.closeNonAgent Meta+Shift+W Ctrl+Shift+W
 pane.splitRight Meta+D Ctrl+Shift+O
 pane.splitDown Meta+Shift+D Ctrl+Shift+D
 pane.focusLeft Meta+Alt+ArrowLeft Ctrl+Alt+ArrowLeft
@@ -190,7 +191,7 @@ fn the_default_keymaps_are_pinned() {
         assert_eq!(shown(Platform::Mac), mac, "{} on macOS", command.id);
         assert_eq!(shown(Platform::Linux), linux, "{} on Linux", command.id);
     }
-    assert_eq!(pinned.len(), 29);
+    assert_eq!(pinned.len(), 30);
 }
 
 #[test]
@@ -312,7 +313,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
     press(handle, "secondary-k", cx);
     assert!(dialog_open(handle, cx));
     with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 64);
+        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 65);
         for command in palette_commands() {
             // The title bar may name a control the same as a command.
             let rows = window.find_all_by_label(command.title);
@@ -574,7 +575,7 @@ fn shortcut_editor_edits_conflicts_and_saves(cx: &mut TestAppContext) {
         })
     };
     with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::TextInput).len(), 82);
+        assert_eq!(window.find_all_by_role(Role::TextInput).len(), 83);
         let value = window.find_by_label(field).value().map(str::to_owned);
         assert_eq!(value.as_deref(), Some(&*format!("{PRIMARY}+K")));
     });
