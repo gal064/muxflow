@@ -87,6 +87,10 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         write_safe_log(SafeErrorClass::HookFallbackIngestionFailed);
     }
 
+    // The chats that were running when the last daemon stopped go on from
+    // where they are, with nobody connected to ask for them.
+    tokio::task::spawn_blocking(service::chat::adopt_running);
+
     // A persistence failure can recover without a daemon restart (for example,
     // after transient quota pressure). Keep draining the durable mailbox while
     // this daemon is alive; live ingest also drains synchronously before it

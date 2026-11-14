@@ -32,6 +32,10 @@ pub(crate) const CLAUDE_SUBAGENT_EVENT_FIELD: &str = "from_subagent";
 pub(crate) const LAST_ASSISTANT_MESSAGE_FIELD: &str = "last_assistant_message";
 /// Set when the hook cut the message at its 32 KiB bound.
 pub(crate) const LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD: &str = "last_assistant_message_truncated";
+/// How a `SessionStart` began, as the agent reports it (`startup`, `resume`,
+/// `clear`, `compact`). Chat mode resumes the named session when it is
+/// `resume`.
+pub(crate) const SESSION_START_SOURCE_FIELD: &str = "source";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed event set or entry configuration changes. An
 /// older install can otherwise look current while missing an event or carrying
@@ -449,7 +453,7 @@ pub(super) fn detect(command: &str) -> Option<&'static dyn AgentAdapter> {
     all().find(|candidate| candidate.identifies_process(command))
 }
 
-pub(super) fn detect_argv(argv: &[String]) -> Option<&'static dyn AgentAdapter> {
+pub(crate) fn detect_argv(argv: &[String]) -> Option<&'static dyn AgentAdapter> {
     let executable = argv.first()?;
     if let Some(adapter) = detect(executable) {
         return Some(adapter);

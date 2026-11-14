@@ -148,6 +148,8 @@ impl AgentRuntime {
         let _order = self.ingest_order.lock().unwrap();
         let ingested =
             self.try_ingest_hook_with_context(event, active_server_identity, topology)?;
+        // In Chat mode a session that has just started becomes a chat.
+        crate::service::chat::agent_hooked(event, active_server_identity);
         let event = ingested.event.clone();
         super::publish(ingested.event);
         self.dispatch_reply(ingested.reply);

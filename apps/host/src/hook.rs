@@ -44,6 +44,8 @@ struct VendorHookPayload {
     tool_name: Option<String>,
     turn_id: Option<String>,
     transcript_path: Option<String>,
+    /// How a `SessionStart` began: `startup`, `resume`, `clear` or `compact`.
+    source: Option<String>,
     has_running_subagent: bool,
     has_background_work: bool,
     is_task_wakeup: bool,
@@ -70,6 +72,7 @@ enum HookField {
     TurnIdCamel,
     TranscriptPath,
     TranscriptPathCamel,
+    Source,
     BackgroundTasks,
     Prompt,
     LastAssistantMessage,
@@ -118,6 +121,7 @@ impl Visitor<'_> for HookFieldVisitor {
             "turnId" => HookField::TurnIdCamel,
             "transcript_path" => HookField::TranscriptPath,
             "transcriptPath" => HookField::TranscriptPathCamel,
+            "source" => HookField::Source,
             "background_tasks" => HookField::BackgroundTasks,
             "prompt" => HookField::Prompt,
             "last_assistant_message" => HookField::LastAssistantMessage,
@@ -351,6 +355,7 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
         let mut turn_id_camel = None;
         let mut transcript_path = None;
         let mut transcript_path_camel = None;
+        let mut source = None;
         let mut background_work = BackgroundWork::default();
         let mut is_task_wakeup = false;
         let mut last_assistant_message = None;
@@ -386,6 +391,7 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
                 HookField::TranscriptPathCamel => {
                     transcript_path_camel = map.next_value::<BoundedString>()?.0
                 }
+                HookField::Source => source = map.next_value::<BoundedString>()?.0,
                 HookField::BackgroundTasks => background_work = map.next_value()?,
                 HookField::Prompt => is_task_wakeup = map.next_value::<TaskWakeupPrompt>()?.0,
                 HookField::LastAssistantMessage => {
@@ -409,6 +415,7 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
             tool_name: tool_name.or(tool_name_camel),
             turn_id: turn_id.or(turn_id_camel),
             transcript_path: transcript_path.or(transcript_path_camel),
+            source,
             has_running_subagent: background_work.subagent,
             has_background_work: background_work.shell_or_monitor,
             is_task_wakeup,
@@ -1054,6 +1061,7 @@ fn build_event_from_payload(
     // it, and `StopFailure` forwards nothing. The daemon hands it to voice mode
     // and keeps nothing (docs/mobile/voice-mode-plan.md §4.5).
     let stop = event_name == "Stop";
+    let session_start = event_name == "SessionStart";
     let notification_type = payload.notification_type.clone().unwrap_or_default();
     let mut normalized = serde_json::Map::new();
     normalized.insert("hook_event_name".into(), event_name.into());
@@ -1062,6 +1070,16 @@ fn build_event_from_payload(
     }
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
+    }
+    // Chat mode reads this to tell a resumed session from a new one
+    // (docs/design/chat-plan.md §3).
+    if session_start
+        && let Some(source) = payload.source.as_ref().filter(|source| !source.is_empty())
+    {
+        normalized.insert(
+            crate::service::agents::adapters::SESSION_START_SOURCE_FIELD.into(),
+            source.clone().into(),
+        );
     }
     if codex_child_event
         && let Some(agent_id) = payload.agent_id.as_ref().filter(|id| !id.is_empty())
@@ -1947,6 +1965,36 @@ mod tests {
         assert_eq!(event.origin_server_identity, "tmux:server-a");
         assert_eq!(event.source_generation, 0);
         assert!(!event.source_sequence_authoritative);
+    }
+
+    /// Chat mode resumes the session a `SessionStart` names only when the
+    /// agent says it resumed one, so the source travels with that event and
+    /// with no other.
+    #[test]
+    fn a_session_start_keeps_its_source() {
+        let payload = |event: &str| {
+            let hook =
+                format!(r#"{{"hook_event_name":"{event}","session_id":"s","source":"resume"}}"#);
+            let event = build_event(
+                v1::AgentAdapterKind::ClaudeCode,
+                hook.into_bytes(),
+                "%12",
+                "tmux:server-a",
+                7,
+                None,
+            )
+            .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&event.payload_json).unwrap()
+        };
+        assert_eq!(
+            payload("SessionStart"),
+            serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "s",
+                "source": "resume",
+            })
+        );
+        assert!(payload("UserPromptSubmit").get("source").is_none());
     }
 
     #[test]

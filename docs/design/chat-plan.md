@@ -131,6 +131,108 @@ Codex 0.169.0, `codex app-server --listen unix://PATH` (JSON-RPC; schema via
   later only touches this provider.
 - **To verify**: hooks from a per-pane server are attributed to that pane.
 
+### As built by stream B
+
+The three open provider facts:
+
+- **Claude rewind** works, without `--fork-session`: the agent is started again
+  with `--resume <id> --resume-session-at <uuid>`, where the uuid is the entry
+  before the message being dropped, and the session's file grows a new branch.
+  Run end to end against the real agent.
+- **Claude fast mode** is switched with the control request
+  `apply_flag_settings {fastMode}`, not a launch setting. The account this was
+  built on has no fast mode (`fast_mode_disabled_reason`), so on and off were
+  never seen to take. The chat asks, shows what the agent answers, and says
+  "Fast mode is not available" when it stays off.
+- **Codex hooks from a per-pane server** are attributed to the pane: the server
+  inherits the pane's environment, and the pane's agent row carried the thread
+  id and went idle on the server's own `Stop`.
+
+What differs from the plan above:
+
+- **Launch flags.** The command line is read against a table of the agent's
+  options. Model, effort, permission and extra directories are carried over as
+  planned; options that shape the session (settings, MCP configuration, system
+  prompt, tools, Codex `-c`) are passed through unchanged rather than dropped,
+  since dropping them would start a different session from the one asked for.
+  A command line with an option the table does not know, a subcommand, or
+  print mode leaves the pane a terminal. So does one that asks for a session
+  that may change nothing (Claude `--permission-mode plan`, Codex `--sandbox
+  read-only`): a chat has no such mode to become. Every other permission
+  setting becomes Auto, and only the bypass flags become Full.
+- **Claude is started with `--permission-prompt-tool stdio`**, which is what
+  the installed binary calls the `--permission-prompts host` above. **Codex is
+  started with `-c features.default_mode_request_user_input=true`**, without
+  which its questions never reach the chat. Codex's extra directories go with
+  the first turn of a new thread, not on the command line.
+- **Provider trait.** `launch(arguments, resumed)` reads a command line into a
+  `Launch`; `pane_command(launch, socket)` says what runs in the pane, whether
+  `chat-pipe` bridges it, and the session id when it is known up front;
+  `announces_start` says whether the agent's `SessionStart` hook is the
+  trigger. `connect(pane_id, sink)` stays as stream A left it: the session
+  reads the socket from the pane's tag. A provider that learns the
+  conversation after it connects hands it over with `ChatSink::reset`, which
+  sends subscribers a snapshot when it differs from what they hold.
+- **Pane options.** Besides `@muxflow-chat` and `@muxflow-chat-socket`:
+  `-session` (the agent's id for the conversation), `-start` (the `Launch`,
+  hex JSON, so a rewind can start the agent again the same way), `-at` (the
+  message a rewind dropped, which is how the abandoned branch of a Claude
+  session file is told from the live one) and `-side` (a side-question fork).
+- **Codex runs behind `chat-pipe` too**, without `--socket`: the pipe restores
+  the agent's environment, starts the server and waits for it. A thread is
+  noted on the pane at its first turn, since the server cannot reopen one that
+  never had a turn.
+- **The pane stays a terminal nobody is meant to type into.** While the agent
+  runs, `chat-pipe` turns off echo and the signal keys on the pane's terminal,
+  and throws away what was typed when the agent ends, so the shell that follows
+  runs none of it.
+- **The environment** is written to a file only the owner can read, in the
+  runtime directory, and `chat-pipe` deletes it as it reads it. A chat that
+  never starts has its file removed when the daemon gives up on it or sweeps
+  the directory.
+- **Trigger.** Claude converts on its hook when the hook is installed, with or
+  without a client connected. Codex converts on process detection, which runs
+  only while a client is subscribed: `codex` started with no desktop or phone
+  connected stays a terminal. A `SessionStart` older than 10 s starts no chat:
+  one that waited in the mailbox of a daemon that was down is about a session
+  somebody may already be typing into. The hook names a pane and not a
+  process, so the agent found in the pane must itself be under 20 s old: a
+  session that resumes another from inside, or starts an agent of its own
+  (`claude -p` from a tool call), says `SessionStart` too and is left alone.
+- **Message ids.** Claude names a message by a UUID. A client that sends one as
+  the item id keeps that id when the conversation is read again; any other id
+  is hashed into one, and the message comes back under the hash after a reload.
+- **Claude's session files** are looked for where the agent's own environment
+  says (`CLAUDE_CONFIG_DIR`, else its `HOME`), not in the daemon's home.
+- **Status.** The chat reports through the hook ingest path what no hook says:
+  blocked on a pending request and its end, and a Claude turn that was stopped.
+- **Codex speed** goes with a turn only once it was chosen in the chat. Until
+  then the thread keeps the service tier it was configured with, which may be
+  one the chat has no name for.
+- **Streaming.** Deltas are joined for 50 ms before they are published. A full
+  queue still costs the connection a resync; the per-pane snapshot recovery
+  stream A suggested is not built.
+- **Side fork** starts the adapter's own branch command in a split with the
+  question as its prompt; in Chat mode the fork then converts like any agent.
+
+Known limits: a prompt given on the command line is given again to the chat's
+agent, though the terminal session that was replaced may have begun on it, and
+a side fork in Chat mode therefore leaves the fork the terminal made behind,
+unused; conversion reads `/proc`, so it does nothing on macOS; a request
+Codex was waiting on is not shown again after a daemon restart (stop the turn);
+Codex history arrives as one message (bounded at 64 MiB) and is not paged; Codex
+keeps nothing of an answer that was stopped part of the way; `codex resume
+--last` is mapped to `thread/list` and was not run against a real server. An
+answer that was streaming when the daemon restarted shows only what arrived
+after the restart until the answer ends and replaces it; a Codex answer stopped
+in that state stays that way. A Codex question leaves no item in the timeline.
+The context usage shown is not corrected by a rewind until the next turn.
+
+Seen from the installed Codex server itself, with a second client reading its
+raw stream beside the chat: a long answer streams for about six seconds, stops,
+and arrives in one burst when the turn ends. The chat shows what the server
+sends, when it sends it.
+
 ## 4. Wire contract (stream A owns it)
 
 New files `crates/protocol/proto/chat.proto` and `history.proto`, imported by
