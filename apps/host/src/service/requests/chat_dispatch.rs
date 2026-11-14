@@ -220,6 +220,7 @@ fn side_fork(
         return Err(unavailable("The fork could not be opened."));
     }
     // So that the fork is never listed as a session of its own.
+    super::super::history::History::global().hide_pane(&forked);
     if let Ok(mut command) = tmux_command() {
         let option = super::super::chat::SIDE_OPTION;
         let _ = command
