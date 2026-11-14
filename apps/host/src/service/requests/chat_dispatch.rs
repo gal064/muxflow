@@ -213,6 +213,15 @@ fn side_fork(
         // tmux reads a start directory as a format.
         .arg(escaped_format_literal(&source.folder))
         .args(agent_launch_argv(launch))
+        // Marked in the same step, on the pane the split made: the chat the
+        // fork becomes reads the mark, and may be starting already.
+        .args([
+            ";",
+            "set-option",
+            "-p",
+            super::super::chat::SIDE_OPTION,
+            "1",
+        ])
         .output()
         .map_err(|_| unavailable("The fork could not be opened."))?;
     let forked = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -221,12 +230,6 @@ fn side_fork(
     }
     // So that the fork is never listed as a session of its own.
     super::super::history::History::global().hide_pane(&forked);
-    if let Ok(mut command) = tmux_command() {
-        let option = super::super::chat::SIDE_OPTION;
-        let _ = command
-            .args(["set-option", "-p", "-t", &forked, option, "1"])
-            .output();
-    }
     Ok(forked)
 }
 

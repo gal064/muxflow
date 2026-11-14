@@ -749,7 +749,7 @@ What differs from the mock:
 
 - **Store.** `service/history/` keeps `sessions.json` in the state directory:
   provider, session id, title, workspace, folder, last activity, wake time,
-  `woke`, `chat` and a sticky `fork` flag, at most 1,000 entries (the least
+  `woke`, `chat` and a sticky `hidden` flag, at most 1,000 entries (the least
   recently active go first; a running, snoozed or woke one never does). Which
   sessions run is held in memory only. Entries are written by the daemon's 2 s
   pass when they changed, activity times alone at most once a minute; a snooze,
@@ -911,3 +911,65 @@ No wire change. What the phone does, and where it departs from the mock:
 
 Against the devbox host, by a fresh agent that only reports observations: the
 ten steps under "Manual QA" in the mock.
+
+### Fixes after the final QA
+
+Three bugs the final QA reported, and one smaller one, fixed on the host. No
+wire change.
+
+- **A `/btw` fork stayed a terminal.** Claude gives `fork`, not `startup` or
+  `resume`, as the source of the `SessionStart` of an agent started with
+  `--fork-session`, and conversion took only those two. `fork` is now a start
+  like them. The fork's pane is marked a side question in the same tmux step
+  that opens it.
+- **History listed one conversation up to three times.** When the chat runtime
+  starts an agent in a pane in place of another (`convert::note_replaced`),
+  the session that went is hidden for good unless the new agent carries it on
+  (`History::replaced`): the terminal session a chat replaced as it started,
+  the terminal's copy of a fork, and a Claude conversation that a rewind to
+  its first message started over. A resume and a rewind part of the way keep
+  their session. In a side fork's pane the chat's own session is the fork, and
+  is hidden as the terminal's was. A session that ended earlier in the same
+  pane is not touched: only the one the replaced agent reported is. Codex
+  reports no session before its first turn and rewinds inside its thread, so
+  neither leaves one behind (but see the limits for one started with a
+  prompt).
+- **Chats had poor titles.** A chat titles its own pane, as an agent in a
+  terminal does: the agent's name when the pane becomes a chat, then the name
+  the provider has for the conversation (`--name`, a Codex thread name and
+  `thread/name/updated`), else the first line of the first message, cut to 60
+  characters (`Pane::retitle`, set by the session's task). A name is kept to
+  120, so that a fork's, its source's title and ` (fork)`, still tells it from
+  its source. The tab is named after the title by the naming hook, which now
+  takes a chat's pane, known by its mark, as it takes an agent's: only from
+  the window's first pane, never a tab whose name is locked, and back to
+  tmux's naming when the chat ends. Where the user's own tmux configuration
+  names windows after pane titles, theirs does. The agent's row, History and
+  the woke placeholder read the pane's title as before.
+- **A resumed Codex chat was listed as closed** until its first turn ended:
+  no hook of the server's names the thread before a turn. The chat now tells
+  the agent runtime which thread it came back to.
+
+Known limits, recorded and not fixed:
+
+- A side fork made mid-turn still starts from its source as it is, the
+  message in flight included. Claude takes `--resume-session-at` in print mode
+  only (the terminal ignores it; checked), so the terminal fork `/btw` opens
+  cannot be cut there. Cutting it means the chat starting the fork itself, and
+  the source's session saying where its running turn began. Not looked at for
+  Codex.
+- A fork's chat shows none of its source's earlier messages: Claude writes no
+  record of the copy until something is said in it. The agent has them.
+- A Codex terminal fork whose own `SessionStart` arrives after it was replaced
+  is taken for the fork, and the chat's thread is then listed.
+- A Codex chat whose thread never had a turn starts another after a helper
+  restart. If a hook had named the first, it stays listed.
+- A Codex started in a terminal with a prompt begins a turn at once. If its
+  hook lands before the chat replaces it, its thread stays listed beside the
+  chat's: Codex is replaced when its process is seen, which names no session.
+- On a host whose setup the user declined there is no naming hook, and the
+  tab of a Codex chat reads `sh`. Naming it there would rename a window
+  without the consent the hook stands for. The pane's title, and so the
+  agent's row and History, are right on any host.
+- A chat with no name and no message keeps the title it has: after a rewind
+  to the first message, the old first line until the next message.

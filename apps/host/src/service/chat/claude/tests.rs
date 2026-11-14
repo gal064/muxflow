@@ -473,6 +473,8 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
         .client
         .assert_answered(M1, "Reply with exactly: ok", "ok");
     replay.client.assert_describes_itself();
+    // The pane goes by the conversation's first message from then on.
+    assert_eq!(replay.titles, ["Reply with exactly: ok"]);
     let options = replay.client.state.options.clone().unwrap();
     assert_eq!(
         (options.model.as_str(), options.effort.as_str()),
@@ -616,6 +618,20 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     replay.play(&mut lines, "\"completed\"");
     replay.client.assert_answered(M5, list, "red or blue");
     assert_eq!(replay.client.snapshots, 0);
+}
+
+/// A session started under a name (`--name`, as a fork is) goes by it, not by
+/// what is said in it.
+#[tokio::test]
+async fn a_named_session_gives_its_pane_its_name() {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    let launch = launch(&["--name", "Fix tests (fork)"], None).unwrap();
+    replay.connect(&Tag {
+        launch,
+        ..tag(SESSION, "")
+    });
+    replay.send(M1, "What is 2+2?");
+    assert_eq!(replay.titles, ["Fix tests (fork)"]);
 }
 
 /// A daemon that starts while the agent waits on its user finds the
