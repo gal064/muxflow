@@ -469,6 +469,89 @@ merged) and merges back into `gpui/chat`. One manual QA at the end.
 - Done when: `pnpm mobile:check` and `pnpm mobile:test` pass and every phone mock
   works against the scripted provider.
 
+#### As built by stream F
+
+No wire change. What the phone does, and where it departs from the mock:
+
+- **Following a chat.** `features/chat/ChatClient.ts` keeps one pane per
+  open chat screen (screens `acquire` it; the last to let go sends `CLOSE`)
+  and applies the rules in "As built by stream A" through the pure reducer in
+  `chatModel.ts`. A lost change, or a truncate naming an item the phone does
+  not hold, marks the pane as resyncing and sends one `OPEN`; events are
+  ignored until the snapshot. Every held chat is opened again on each
+  reconnect (a `RESYNC_REQUIRED` reconnects the phone). `chat_queue_full` is
+  retried four times with a growing pause, then shown with Retry. Older pages
+  follow the three `ChatResponse.revision` rules, and are also dropped when
+  the pane's cursor changed under them (a rewind of the first message).
+  `chat_cursor_invalid` brings a fresh snapshot. A pane that leaves the
+  topology, or a server change, ends the chat with a `CLOSE`. A reconnect to
+  another tmux server (a restart, or another host) ends a held chat instead
+  of opening the same pane id there; a screen opened later on that id follows
+  the new pane. An `OPEN` the host does not answer shows
+  Retry; `chat_server_changed` ends the chat.
+- **Routing.** `Pane.chat_adapter_id` is in the session store. The Terminal
+  route redirects a chat pane to `chat/[paneId]`, so every way into a pane
+  (agents, workspaces, notifications, History) lands on the chat. The Voice
+  route redirects a chat pane to its chat with voice mode on.
+- **Sending.** A sent message shows at once, dimmed, until the host's USER
+  item with the same `client_message_id` replaces it; a refusal puts the text
+  back in the composer. `chat_message_duplicate` counts as sent. When the
+  answer to a `SEND` is lost (the connection drops or the host does not
+  answer), the message stays and, on a live connection, a fresh snapshot is
+  asked for; after a snapshot, one the timeline lacks is sent again with the
+  same id. A duplicate then means it is older than the snapshot's window, so
+  the placeholder goes; a refusal, or leaving the chat before it is settled,
+  is a toast. While a
+  request card waits, Send is held unless the provider takes messages
+  mid-turn. Mid-turn, a provider that takes messages shows Send beside Stop
+  once there is text; a `/btw` question can always be sent, as it does not
+  touch the main turn.
+- **Questions** step with Next to the last one, which has Submit, because one
+  `ANSWER` carries every question's answer. `/btw` and
+  `/side` (MUXFLOW commands of a provider that can fork) send `SIDE_FORK` and,
+  once the topology names the fork's pane, push its chat screen; Back returns
+  to the original.
+  `chat_side_fork_unavailable` is said plainly until stream B wires it.
+- **Edit and resend** is a long press on a rewindable message (phones have no
+  hover); the banner and Cancel follow the mock.
+- **Pills.** The phone mock's composer has none, so the model, effort,
+  Full/Auto and Standard/Fast controls live in the Details sheet (the header's
+  `i`), with the context meter. Each shows only when the capabilities allow it;
+  an unlisted model leaves only the permission mode.
+- **Details sheet** shows host, folder and context. Branch and Changes are not
+  there: the phone has no Git messages, and stream D adds them for the desktop.
+- **Permission card** is Allow / Deny. The mock's "This session" has no field in
+  `ChatAnswer`, so it is left out rather than faked.
+- **Voice mode** reuses `VoiceController` with two new options: `submit` sends a
+  transcript as a chat message instead of typing into the terminal, and
+  `registerWithHost: false` registers no `VOICE_SESSION`, so the host's hook
+  replies are not pushed as well. As on the Voice screen, the controller
+  outlives a reconnect, so a brief drop does not cancel a take or stop a
+  reply. A Voice screen controller made for the pane
+  before it was known to be a chat is ended and replaced. The mic says why
+  while the chat is not ready or the agent has stopped. When a turn ends, the newest assistant
+  message is read with `VOICE_SPEAK` (`speakReply`). The bar is `MicButton`'s
+  new `bar` variant; the reply row is the Voice screen's `ReplyPlayer` and
+  speed button. Voice mode plays replies whatever the Voice screen's autoplay
+  preference says.
+- **History** is a screen (`history`) opened from the Agents header. All or
+  Snoozed, as the phone mock has, instead of the desktop's groups; snoozed
+  rows carry Wake now on both tabs, as on the desktop. A running session opens its pane; any other resumes and
+  opens where the host says it started. It lists on open and after each
+  `SESSION_HISTORY` event while open. A woken session is a toast; there is no
+  phone notification for it.
+- **Snooze** is in the agent's long-press menu, with the desktop's default
+  intervals; "Pick a time…" is desktop only. On iOS the Snooze sheet opens
+  once the menu has finished closing, as iOS shows one modal at a time. It is disabled with the reason
+  while the agent works or is blocked, or has no native session id yet.
+- **Agent mode** is read-only in Settings ("Agents start as"), from the agent
+  snapshot, which Settings asks for again when it opens.
+- **Tests.** Component tests render each phone mock from scripted events with
+  react-test-renderer and stubs for the native modules (`src/testing/stubs`,
+  aliased in `vitest.config.ts`). With `MUXFLOW_RENDER_DIR` set they also
+  write each state as an HTML page at phone width (`src/testing/renderTree.ts`).
+  Nothing ran on a device.
+
 ## 6. Final manual QA
 
 Against the devbox host, by a fresh agent that only reports observations: the
