@@ -462,13 +462,17 @@ The built-in places read this list:
   and its tests changed with it.
 - The saved surface is a string. `resolved_surface` keeps a built-in surface
   or an enabled extension's, and falls back to `files` otherwise.
-- The right panel renders the enabled extensions after the built-ins; arrow-key cycling uses the visible list, and a surface that isn't
-  showable displays Files.
-- The Settings Workspace tab renders one checkbox per extension.
+- The right panel renders the enabled extensions after the built-ins, each
+  with the body its feature registers through `PanelBodies::register`.
+  Arrow-key cycling uses the visible list, and a surface that isn't showable
+  displays Files.
+- The Settings Workspace tab has a checkbox for each extension, written by hand
+  in `settings/dialog.rs`.
 - There are no `view.show*` commands for extensions, so the command registry
   stays static. Selecting an extension's tab opens the panel on it.
 
-A new panel is one entry in the list.
+A new panel is an entry in `EXTENSION_LABELS`, a registered body and a
+Settings checkbox.
 
 ## Desktop panel (phase 2)
 
@@ -571,8 +575,11 @@ If the feature isn't used:
    (`APP_SHELL`, `resolved_start_directory` and the others in
    `tmux_actions.rs`, `send_input_batch` in `terminal.rs`), or clippy reports
    them unused.
-2. Delete `apps/desktop/src/automations/`, its `start` call in
-   `connection_ui/mod.rs`, and its entry in `EXTENSION_LABELS`.
+2. Delete `apps/desktop/src/automations/` and `pub mod automations` in
+   `lib.rs`, its `init` call in `features.rs` and its `start` call in
+   `connection_ui/mod.rs`, its entry in `EXTENSION_LABELS`, the Settings
+   checkbox in `settings/dialog.rs`, and `AUTOMATIONS_EXTENSION` with its
+   default in `settings/prefs.rs`.
 3. Delete `crates/protocol/proto/automation.proto` and its line in
    `crates/protocol/build.rs`. In `envelope.proto`, remove the import and the
    five additions, and reserve their numbers. Remove the `operation_policy`

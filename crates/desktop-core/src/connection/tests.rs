@@ -103,8 +103,8 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
     drop(read_end);
 }
 
-/// `set_terminal_colors` is reached from a sync Tauri command, on a thread with
-/// no tokio runtime, and hands its send to the blocking pool. A bare
+/// `set_terminal_colors` is reached from the UI thread, which has no tokio
+/// runtime, and hands its send to the blocking pool. A bare
 /// `tokio::task::spawn_blocking` panics there, so this goes through to the bytes
 /// the host would read.
 #[test]

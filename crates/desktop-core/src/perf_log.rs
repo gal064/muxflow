@@ -7,7 +7,7 @@
 //! Compile-out scheme: the real implementation is compiled whenever
 //! `debug_assertions` is on (plain `cargo build` / `cargo test`) or the
 //! non-default `perf-log` cargo feature is enabled. A plain release build
-//! (`cargo build --release`, `tauri build`) therefore contains only the inert
+//! (`cargo build --release`) therefore contains only the inert
 //! stubs in `stub.rs`; a measurement campaign re-enables the real code with
 //! `cargo build --release -p muxflow --features perf-log`. Call sites stay
 //! unconditional because the stubs keep identical module paths and signatures.

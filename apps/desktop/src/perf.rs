@@ -41,9 +41,8 @@ struct Contract {
 fn contract() -> &'static Contract {
     static CONTRACT: OnceLock<Contract> = OnceLock::new();
     CONTRACT.get_or_init(|| {
-        let value: Value =
-            serde_json::from_str(include_str!("../perf-log-contract.json"))
-                .expect("perf-log-contract.json must remain valid");
+        let value: Value = serde_json::from_str(include_str!("../perf-log-contract.json"))
+            .expect("perf-log-contract.json must remain valid");
         let number = |key: &str| value[key].as_u64().expect("contract number") as usize;
         Contract {
             max_lines_per_append: number("maxLinesPerAppend"),

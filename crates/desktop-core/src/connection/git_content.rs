@@ -43,8 +43,8 @@ const GIT_CONTENT_CHUNK: u32 = 1024 * 1024;
 /// one profile's slow read cannot serialize an unrelated profile behind it.
 const MAX_CONCURRENT_READS: usize = 1;
 
-/// Frame kinds on the response channel. The renderer's matching decoder is in
-/// the Tauri app's `features/git/api.ts`.
+/// Frame kinds on the response channel. The app's matching decoder is in
+/// `apps/desktop/src/git/model.rs`.
 const FRAME_CHUNK: u8 = 1;
 const FRAME_COMPLETE: u8 = 2;
 const FRAME_ERROR: u8 = 3;

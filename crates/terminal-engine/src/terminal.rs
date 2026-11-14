@@ -19,7 +19,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, Processor, 
 use crate::event::GridSize;
 use crate::history_page::{compose_history_page, split_history_rows};
 
-/// Rows kept above the screen, the same as the desktop's xterm.
+/// Rows kept above the screen, the same as the Tauri desktop's xterm.
 pub const SCROLLBACK_LIMIT: usize = 10_000;
 
 const WRITE_SLICE_BYTES: usize = 256 * 1024;
@@ -121,7 +121,8 @@ impl PaneTerminal {
 fn new_term(columns: usize, rows: usize) -> Term<Listener> {
     let config = Config {
         scrolling_history: SCROLLBACK_LIMIT,
-        // The desktop's xterm blinks a block cursor until a program says otherwise.
+        // The Tauri desktop's xterm blinked a block cursor until a program said
+        // otherwise.
         default_cursor_style: CursorStyle {
             shape: CursorShape::Block,
             blinking: true,

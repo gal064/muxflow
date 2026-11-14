@@ -391,8 +391,8 @@ fn read_macos_clipboard() -> Result<Option<Value>, String> {
     }
 
     // Plain text is the last rung, so a copied file or image still wins. Without
-    // it the webview would have to fall back to `navigator.clipboard`, which
-    // WebKit refuses for content the page did not write itself — that refusal is
+    // it the old webview had to fall back to `navigator.clipboard`, which
+    // WebKit refused for content the page did not write itself — that refusal is
     // M10-E054: pasting from any other application silently did nothing.
     let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) else {
         return Ok(None);

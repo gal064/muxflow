@@ -94,7 +94,7 @@ mod tests {
 
     const PATIENCE: Duration = Duration::from_secs(10);
 
-    /// The thread a sync Tauri command runs on: no ambient tokio runtime.
+    /// A thread with no ambient tokio runtime, such as GPUI's main thread.
     fn on_a_thread_without_a_runtime(work: impl FnOnce() + Send + 'static) {
         std::thread::spawn(move || {
             assert!(

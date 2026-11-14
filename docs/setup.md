@@ -3,7 +3,8 @@
 ## Supported environment
 
 The validated Linux V1 package is x86-64 with glibc 2.39 or newer, xkbcommon
-(with its X11 library), ALSA and the Vulkan loader (`libvulkan.so.1`) installed. An
+(with its X11 library), ALSA, and the Vulkan loader (`libvulkan.so.1`) with a
+driver installed. An
 ARM64-native build lane is defined, but no retained native runner artifact or
 ARM64 hardware result exists for this release, so ARM64 is not release-claimed.
 The attached host may be local Linux or a remote Linux machine reachable
@@ -69,8 +70,8 @@ user configuration.
 # macOS
 
 Development and the internal package require macOS 14 or newer, Xcode Command
-Line Tools, Rust 1.97.1, Node 24 (the package script reads the notary's answer
-with it), tmux 3.3 or newer, and Git. Homebrew
+Line Tools, Rust 1.97.1, tmux 3.3 or newer, and Git; a Developer ID build also
+needs Node 24, which reads the notary's answer. Homebrew
 installations under `/opt/homebrew` are supported from the non-interactive app
 environment. Muxflow searches the application environment, macOS path registry,
 and the standard Homebrew, MacPorts, and pkgsrc prefixes without starting a

@@ -1,5 +1,5 @@
 //! Quick Open: files, workspaces and tabs. Port of
-//! `apps/desktop/src/features/workspaces/{quickOpen.ts,useQuickOpenSearch.ts,WorkspaceSwitcher.tsx}`.
+//! the Tauri app's `features/workspaces/{quickOpen.ts,useQuickOpenSearch.ts,WorkspaceSwitcher.tsx}`.
 //!
 //! The rows come from a [`QuickOpenSource`] the workspace and file features
 //! install; until then Quick Open opens with nothing to list.

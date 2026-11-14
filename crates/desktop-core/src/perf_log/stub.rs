@@ -1,8 +1,8 @@
 //! Inert replacement for the measurement modules, compiled only when perf
 //! logging is excluded from the binary (release without the `perf-log`
 //! feature). Module paths and signatures mirror the real implementation so
-//! every call site and the Tauri command shims stay unconditional. The commands
-//! answer exactly like the real implementation does when `ADE_PERF_LOG` is unset.
+//! every call site stays unconditional. Each stub answers exactly like the real
+//! implementation does when `ADE_PERF_LOG` is unset.
 
 const DISABLED: &str = "performance logging is not enabled for this process";
 
