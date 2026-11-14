@@ -124,7 +124,7 @@ using the phone mocks as the checklist.
 | D2 | `gpui/chat-d2` | Merged | `98ae5e5` | Merge `a8c72bc`, no conflict. 2 code and 1 design review rounds; worker QA and a recheck on the final binaries passed. The Details button sits in the chat, not the tab strip; the card says "Changes vs main". Details in the plan under "As built by stream D2" |
 | E | `gpui/chat-e` | Merged | `af4a80c` | Merged ahead of B; no conflict. 3 review rounds, worker QA passed both scenarios; the round-3 and post-QA fixes have host tests only. Desktop History UI has tests but no headless frames. Hiding `/btw` forks from History needs B's split placement. Not built: resume in a split, a clickable wake notification, dismissing a placeholder. Details in the plan under "As built by stream E" |
 | F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
-| Integration | `gpui/chat` | Fixing QA findings | `a8c72bc` | With every task merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, mobile `protocol:check` passes and `cargo deny check licenses` is ok. Root fix: a side fork's pane is now hidden from History. One host test failed once under `cargo test` and not again in 52 runs; not identified |
+| Integration | `gpui/chat` | Done; owner's review and phone pass remain | `edc1eb5` | With every task and the QA fixes merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, mobile `protocol:check` passes and `cargo deny check licenses` is ok. Root fix: a side fork's pane is now hidden from History. One host test, `plugins::automations::launch::tests::an_existing_session_named_automation_is_left_alone`, fails now and then on a tmux fixture error; unrelated to chat |
 
 Final QA (`gdev_qa_chat`, on `7c52ff5`, real `claude` 11 turns and `codex` 5): all ten
 steps passed. Not run: the Allow/Deny card (Auto never asked), the wake
@@ -143,6 +143,14 @@ notification (no notification service in the sandbox), the phone. Findings:
 7. A resumed Codex chat shows as not running in History until its first turn ends.
 8. Long slash argument hints are cut with no ellipsis.
 
-Next step: task `gpui/chat-fix` (findings 1 to 3, and 7 if cheap) finishes;
-root merges it and runs the checks. Findings 4 to 6 and 8 are left for the owner
-to rank.
+Fix task (`3b2a872`, merge `edc1eb5`): findings 1 to 3 and 7 are fixed and were
+rechecked with real `claude` (6 turns) and `codex` (3). What is left of them is in
+the plan under "Fixes after the final QA": a mid-turn fork still includes the
+in-flight message, and the tab follows the chat's title only where the tab-naming
+setup was accepted. Findings 4 to 6 and 8 are open for the owner to rank.
+
+Next step: the owner reviews `gpui/chat`, does the phone device pass (checklist
+in the plan under "As built by stream F"), and decides the open points: the
+environment file stream B writes, permission settings widening to Auto, and
+whether a chat renames its tab on a host that declined the naming setup. Nothing
+is pushed.
