@@ -188,26 +188,32 @@ pub(crate) struct ChatSink {
 
 impl ChatSink {
     /// Applies one change to the pane's timeline and state, and sends it to the
-    /// connections that opened the pane.
-    pub(crate) fn publish(&self, change: Change) {
-        if let Some(panes) = self.panes.upgrade() {
-            panes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .publish(&self.key, change);
-        }
+    /// connections that opened the pane. Answers the title the pane is to be
+    /// given, when the change gives it another: a provider with a pane
+    /// process sets it, off the lock.
+    pub(crate) fn publish(&self, change: Change) -> Option<String> {
+        let panes = self.panes.upgrade()?;
+        let mut panes = panes.lock().unwrap_or_else(PoisonError::into_inner);
+        panes.publish(&self.key, change)
     }
 
     /// Replaces the pane's timeline with the conversation as the provider
     /// read it, oldest first. `complete` is false when the provider could not
     /// read all of it. The connections that opened the pane get a snapshot.
-    pub(crate) fn reset(&self, items: Vec<v1::ChatItem>, complete: bool) {
-        if let Some(panes) = self.panes.upgrade() {
-            panes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .reset(&self.key, items, complete);
-        }
+    /// Answers a new title as [`Self::publish`] does.
+    pub(crate) fn reset(&self, items: Vec<v1::ChatItem>, complete: bool) -> Option<String> {
+        let panes = self.panes.upgrade()?;
+        let mut panes = panes.lock().unwrap_or_else(PoisonError::into_inner);
+        panes.reset(&self.key, items, complete)
+    }
+
+    /// Takes the provider's own name for the conversation: a session's
+    /// name, a thread's. Empty when it has none. Answers a new title as
+    /// [`Self::publish`] does.
+    pub(crate) fn name(&self, name: &str) -> Option<String> {
+        let panes = self.panes.upgrade()?;
+        let mut panes = panes.lock().unwrap_or_else(PoisonError::into_inner);
+        panes.name(&self.key, name)
     }
 
     /// The pane this sink reports for.

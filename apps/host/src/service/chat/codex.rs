@@ -565,6 +565,7 @@ impl Codex {
             self.thread = id.to_owned();
             self.noted = false;
         }
+        out.name(string(thread, "name"));
         let options = self.state.options.get_or_insert_default();
         if !self.permission_chosen {
             options.permission = permission(&result["approvalPolicy"], &result["sandbox"]).into();
@@ -636,6 +637,11 @@ impl Codex {
         self.starting = false;
         self.state.connection = Connection::Ready.into();
         self.publish_state(out);
+        // No hook of the server's names the thread until a turn runs on it:
+        // one that was resumed would not be known to be running until then.
+        if !self.turns.is_empty() && self.turn.is_none() {
+            out.report(json!({"hook_event_name": "SessionStart", "session_id": self.thread}));
+        }
         self.send_held(out);
     }
 
@@ -1082,6 +1088,7 @@ impl Codex {
                     self.notice(id, reason, out);
                 }
             }
+            "thread/name/updated" => out.name(string(params, "threadName")),
             "skills/changed" => {
                 let params = json!({"cwds": [self.cwd]});
                 self.request("skills/list", params, Asked::Skills, out);
