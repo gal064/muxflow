@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 mod bridge;
 mod build_identity;
+mod chat_pipe;
 mod daemon;
 mod diagnostics;
 mod hook;
@@ -80,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(i32::from(outcome.is_err()));
         }
         Some("helper") => remote_helper::run_cli(std::env::args().skip(2).collect()),
+        Some("chat-pipe") => chat_pipe::run(std::env::args_os().skip(2).collect()).await,
         Some("hook") => match std::env::args().nth(2).as_deref() {
             Some("ingest") => hook::run(std::env::args().skip(3).collect()).await,
             Some(verb @ ("status" | "install" | "uninstall")) => {
@@ -156,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: muxflow-host <daemon|daemon-stop [--force]|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover|voice <status|provision --yes|transcribe FILE|speak TEXT --out FILE>>"
+            "usage: muxflow-host <daemon|daemon-stop [--force]|protocol-check|bridge --stdio|chat-pipe [--env FILE] [--socket PATH] -- COMMAND|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover|voice <status|provision --yes|transcribe FILE|speak TEXT --out FILE>>"
         ),
     }
 }
