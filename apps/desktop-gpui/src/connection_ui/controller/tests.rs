@@ -2067,6 +2067,18 @@ mod surface {
             ),
             Some(Role::Status)
         );
+        // Beside the spinner it wraps inside the card instead of running past it.
+        let edge = visual.update(|window, _| window.find_by_label("Working…").bounds().right());
+        let detail = visual.update(|window, _| {
+            let id = gpui_kit::ElementId::Name("helper-dialog-text".into());
+            window
+                .elements()
+                .into_iter()
+                .find(|element| element.path().last() == Some(&id))
+                .expect("the busy detail is drawn")
+                .bounds()
+        });
+        assert!(detail.right() <= edge, "{detail:?} runs past {edge:?}");
     }
 
     #[gpui_kit::test]
