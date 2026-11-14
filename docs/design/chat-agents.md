@@ -22,8 +22,15 @@ the differences below.
 
 ## Isolation for every task
 
-- `~/dev/muxflow-gpui-tools/locked` first on `PATH`: one cargo command at a time
-  across all agents. Run built binaries directly, never through `cargo run`.
+- Every cargo call uses the pinned toolchain behind the shared lock:
+  `T=$HOME/dev/muxflow-gpui-tools/rust; export CARGO_HOME=$T/cargo RUSTUP_HOME=$T/rustup PATH=$HOME/dev/muxflow-gpui-tools/locked:$T/cargo/bin:$HOME/.cargo/bin:$PATH`.
+  One cargo command runs at a time across all agents. Run built binaries
+  directly, never through `cargo run`. With only `locked` on `PATH`, cargo
+  picks the system Rust, whose newer clippy fails on `fetch_update`; that is
+  not a real failure and must not be suppressed.
+- Workspace-wide clippy and tests also need
+  `TAURI_CONFIG='{"bundle":{"externalBin":[]}}'` and a built desktop frontend
+  (`pnpm install --frozen-lockfile && pnpm build`), as CI does.
 - Its own tmux socket (`tmux -L muxflow-qa-<task>`), its own `ADE_HOST_RUNTIME_DIR`
   and a private `HOME` for anything that starts the helper or the app. Never
   touch the owner's live daemon, tmux server, `~/.claude` or `~/.codex`.
@@ -117,6 +124,6 @@ using the phone mocks as the checklist.
 | D2 | `gpui/chat-d2` | Not started | | |
 | E | `gpui/chat-e` | In progress | | Dispatched |
 | F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
-| Integration | `gpui/chat` | Not started | | |
+| Integration | `gpui/chat` | In progress | `2742b84` | With A, F and D1 merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, and mobile `protocol:check` passes |
 
 Next step: B, E and C finish; root merges them in that order, wires the chat file-edit row to `git::open_file_diff`, then dispatches D2.
