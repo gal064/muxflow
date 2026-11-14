@@ -6,6 +6,12 @@
 //! revision, and sends it to the connections that opened that pane and to no
 //! others. Every string and list that crosses the wire is cut to a bound here,
 //! so no provider has to remember to.
+//!
+//! A chat pane is a tmux pane tagged with its adapter (`pane.rs`). The agent
+//! in it talks to the daemon over a unix socket (`session.rs`), and what it
+//! says is turned into the wire's items by its provider (`claude.rs`,
+//! `codex.rs`). `convert.rs` is how a pane becomes one: in Chat mode, an
+//! agent started in a terminal is started again in its pane as a chat.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,11 +27,20 @@ use tmux_agent_protocol::v1;
 use super::events::{Delivery, send_control_event_to, send_required_control_event_to};
 use super::snapshot::{load_sidecar, save_sidecar};
 
+mod claude;
+mod codex;
+mod convert;
+mod items;
+mod pane;
 mod provider;
 mod scripted;
+mod session;
 #[cfg(test)]
 mod tests;
+mod websocket;
 
+pub(crate) use convert::{agent_hooked, agents_detected};
+pub(crate) use pane::SIDE as SIDE_OPTION;
 use provider::{Change, ChatProvider, ChatSession, ChatSink};
 pub(crate) use provider::{ChatError, SessionCommand};
 
@@ -85,6 +100,18 @@ struct Pane {
     session: Option<SharedSession>,
 }
 
+/// What a fork of a chat's conversation starts from.
+pub(crate) struct Conversation {
+    pub(crate) adapter_id: String,
+    /// The agent's own id for the conversation.
+    pub(crate) native_session_id: String,
+    /// The folder the agent works in.
+    pub(crate) folder: String,
+    /// The agent's own options for the model and permissions the chat is
+    /// set to, so that a fork starts as its source is.
+    pub(crate) arguments: Vec<String>,
+}
+
 /// One pane of one tmux server. A pane id is only unique within its server.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PaneKey {
@@ -102,6 +129,9 @@ pub(crate) struct ChatRuntime {
     settings_path: PathBuf,
     /// The stored agent mode, read from `settings_path` on first use.
     mode: Mutex<Option<v1::ChatAgentMode>>,
+    /// When this daemon was last told to turn Chat mode on. An agent older
+    /// than that was started in a terminal on purpose, and stays one.
+    chat_since: Mutex<Option<std::time::Instant>>,
 }
 
 static GLOBAL: OnceLock<ChatRuntime> = OnceLock::new();
@@ -133,7 +163,77 @@ impl ChatRuntime {
             panes: Arc::default(),
             settings_path,
             mode: Mutex::new(None),
+            chat_since: Mutex::new(None),
         }
+    }
+
+    fn provider(&self, adapter_id: &str) -> Option<&Arc<dyn ChatProvider>> {
+        self.providers.get(adapter_id)
+    }
+
+    /// How long Chat mode has been on, when this daemon is what turned it on.
+    fn chat_mode_age(&self) -> Option<Duration> {
+        let since = *self
+            .chat_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        since.map(|since| since.elapsed())
+    }
+
+    /// Starts the chat of every pane that is tagged as one and has none yet,
+    /// so that a chat nobody has open still reports what its agent waits on,
+    /// and a daemon that restarts picks its chats up where they are.
+    pub(crate) fn adopt(&self, server_identity: &str, panes: &[tmux_control::Pane]) {
+        for pane in panes {
+            if pane.chat_adapter_id.is_empty() || self.provider(&pane.chat_adapter_id).is_none() {
+                continue;
+            }
+            let key = PaneKey {
+                server_identity: server_identity.to_owned(),
+                pane_id: pane.id.clone(),
+            };
+            let _ = self.ensure_session(&key, &pane.chat_adapter_id);
+        }
+    }
+
+    /// Starts the pane's chat anew with `adapter_id`'s provider, for a pane
+    /// whose agent was just replaced. The connections that had the old chat
+    /// open get the new one's snapshot.
+    fn restart(&self, key: &PaneKey, adapter_id: &str) {
+        let old = self.panes().0.remove(key);
+        let subscribers = old
+            .as_ref()
+            .map(|pane| pane.subscribers.clone())
+            .unwrap_or_default();
+        // Dropped outside the lock: a session may publish as it ends.
+        drop(old);
+        if self.ensure_session(key, adapter_id).is_ok() {
+            for connection_id in subscribers {
+                let _ = self.open(connection_id, key, adapter_id);
+            }
+        }
+    }
+
+    /// What a fork of the pane's conversation starts from. `None` until the
+    /// agent has said which conversation it is, and while nothing has been
+    /// said in it: an agent keeps no record of a conversation until then, so
+    /// there is nothing to fork.
+    pub(crate) fn conversation(&self, key: &PaneKey, adapter_id: &str) -> Option<Conversation> {
+        let (state, empty) = self
+            .with_pane(key, adapter_id, |pane| {
+                Ok((pane.state.clone(), pane.items.is_empty()))
+            })
+            .ok()?;
+        if state.native_session_id.is_empty() || empty {
+            return None;
+        }
+        let options = state.options.unwrap_or_default();
+        Some(Conversation {
+            arguments: self.provider(&state.adapter_id)?.terminal_options(&options),
+            folder: pane::read(&key.pane_id)?.cwd,
+            adapter_id: state.adapter_id,
+            native_session_id: state.native_session_id,
+        })
     }
 
     fn panes(&self) -> MutexGuard<'_, Panes> {
@@ -421,8 +521,39 @@ impl ChatRuntime {
             )
         })?;
         *stored = Some(mode);
+        *self
+            .chat_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            (mode == v1::ChatAgentMode::Chat).then(std::time::Instant::now);
         Ok(())
     }
+}
+
+/// Adopts the chats of the tmux server as it is now: what a daemon does once
+/// when it starts, with nobody connected to make it look. Blocks on tmux.
+pub(crate) fn adopt_running() {
+    let Ok((snapshot, identity)) = super::snapshot::discover_authoritative() else {
+        return;
+    };
+    pane::sweep(&snapshot.panes);
+    ChatRuntime::global().adopt(&identity, &snapshot.panes);
+}
+
+/// Has every connection look at tmux again: a pane has become a chat, or
+/// stopped being one, which tmux itself tells nobody.
+fn topology_changed() {
+    super::broadcast_control_event(v1::HostEvent {
+        kind: v1::EventKind::TopologyDirty.into(),
+        scope: "topology".into(),
+        ..Default::default()
+    });
+}
+
+fn now_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
 impl Panes {
@@ -439,6 +570,31 @@ impl Panes {
             pane.state.history_complete = false;
             pane.emit(Change::State(pane.state.clone()));
         }
+    }
+
+    /// Replaces the pane's timeline, and sends its subscribers the snapshot
+    /// that replaces what they hold. Nothing happens when the timeline is
+    /// already that.
+    pub(super) fn reset(&mut self, key: &PaneKey, mut items: Vec<v1::ChatItem>, complete: bool) {
+        let Some(pane) = self.0.get_mut(key) else {
+            return;
+        };
+        items.retain_mut(bound_item);
+        // One item per id: the first stays.
+        let mut ids = BTreeSet::new();
+        items.retain(|item| ids.insert(item.id.clone()));
+        if pane.items == items && pane.state.history_complete == complete {
+            return;
+        }
+        pane.items = items;
+        pane.trimmed = false;
+        pane.trim();
+        pane.state.history_complete = complete && !pane.trimmed;
+        pane.revision += 1;
+        let snapshot = pane.event(Change::Snapshot(pane.snapshot()));
+        pane.subscribers.retain(|connection_id| {
+            send_required_control_event_to(*connection_id, snapshot.clone()) != Delivery::Gone
+        });
     }
 }
 
@@ -762,11 +918,27 @@ fn registered_providers(
     scripted_switch: Option<&std::ffi::OsStr>,
     step: Duration,
 ) -> Vec<Arc<dyn ChatProvider>> {
-    if test_build || scripted::enabled(scripted_switch) {
-        vec![Arc::new(scripted::ScriptedProvider::new(step))]
-    } else {
-        Vec::new()
+    let mut providers: Vec<Arc<dyn ChatProvider>> = Vec::new();
+    // The real ones start agents, which no test of this crate may do.
+    if !test_build {
+        providers.push(Arc::new(claude::ClaudeProvider));
+        providers.push(Arc::new(codex::CodexProvider));
     }
+    if test_build || scripted::enabled(scripted_switch) {
+        providers.push(Arc::new(scripted::ScriptedProvider::new(step)));
+    }
+    providers
+}
+
+/// The slash commands Muxflow answers itself, for a provider whose
+/// conversations can be forked.
+fn muxflow_commands() -> [v1::ChatCommand; 2] {
+    ["btw", "side"].map(|name| v1::ChatCommand {
+        name: name.to_owned(),
+        description: "Ask a side question in a fork".to_owned(),
+        argument_hint: "<question>".to_owned(),
+        kind: v1::ChatCommandKind::Muxflow.into(),
+    })
 }
 
 fn invalid(message: &str) -> ChatError {

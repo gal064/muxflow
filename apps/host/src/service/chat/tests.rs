@@ -9,6 +9,8 @@ use super::super::events::{
 use super::scripted::ScriptedProvider;
 use super::*;
 
+pub(super) mod replay;
+
 const WAIT: Duration = Duration::from_secs(5);
 
 // --- an isolated runtime, with connections that are only an event queue -----
@@ -1114,7 +1116,7 @@ fn a_pane_takes_one_command_at_a_time_from_its_check_to_its_effect() {
 }
 
 #[test]
-fn the_scripted_provider_is_registered_only_in_tests_and_by_its_switch() {
+fn tests_get_the_scripted_provider_alone_and_a_real_build_gets_it_by_its_switch() {
     let registered = |test_build, switch: Option<&str>| {
         let providers = registered_providers(test_build, switch.map(str::as_ref), Duration::ZERO);
         let ids: Vec<&str> = providers
@@ -1123,9 +1125,13 @@ fn the_scripted_provider_is_registered_only_in_tests_and_by_its_switch() {
             .collect();
         ids
     };
-    assert!(registered(false, None).is_empty());
-    assert!(registered(false, Some("0")).is_empty());
-    assert_eq!(registered(false, Some("1")), ["scripted"]);
+    assert_eq!(registered(false, None), ["claude-code", "codex"]);
+    assert_eq!(registered(false, Some("0")), ["claude-code", "codex"]);
+    assert_eq!(
+        registered(false, Some("1")),
+        ["claude-code", "codex", "scripted"]
+    );
+    // A test build starts no real agent.
     assert_eq!(registered(true, None), ["scripted"]);
 }
 
@@ -1901,7 +1907,7 @@ async fn refusals_name_their_reason_over_the_wire() {
         ),
         (
             chat_request(chat(v1::ChatAction::SideFork, PANE)),
-            "chat_side_fork_unavailable",
+            "chat_invalid_request",
         ),
         (
             chat_request(chat(v1::ChatAction::LoadOlder, PANE)),
