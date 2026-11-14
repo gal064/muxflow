@@ -122,8 +122,8 @@ using the phone mocks as the checklist.
 | C | `gpui/chat-c` | In progress | | Dispatched |
 | D1 | `gpui/chat-d1` | Merged | `402f36e` | Merged ahead of B, E and C; no conflict. 2 code review rounds, 1 design round, worker QA passed 8 scenarios. Wire: Git operations 62 to 64 and a default-branch diff target, additive, no major bump. Chat opens a diff through `crate::git::open_file_diff(path, cx)`. Branch list and checkout exist in the host and `desktop-core` only; D2 adds the client calls. Details in the plan under "As built by stream D1" |
 | D2 | `gpui/chat-d2` | Not started | | |
-| E | `gpui/chat-e` | In progress | | Dispatched |
+| E | `gpui/chat-e` | Merged | `af4a80c` | Merged ahead of B; no conflict. 3 review rounds, worker QA passed both scenarios; the round-3 and post-QA fixes have host tests only. Desktop History UI has tests but no headless frames. Hiding `/btw` forks from History needs B's split placement. Not built: resume in a split, a clickable wake notification, dismissing a placeholder. Details in the plan under "As built by stream E" |
 | F | `gpui/chat-f` | Merged | `0effd0f` | Merged first: it touches only `apps/mobile`. 3 code review rounds, 1 design round, worker QA rendered 13 states. 732 mobile tests pass. `/btw` and History resume need rechecking once B and E are in. Departures and the device checklist are in the plan under "As built by stream F" |
-| Integration | `gpui/chat` | In progress | `2742b84` | With A, F and D1 merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, and mobile `protocol:check` passes |
+| Integration | `gpui/chat` | In progress | `8352e54` | With A, F, D1 and E merged: fmt, CI's clippy on the pinned toolchain and `cargo test --workspace --all-targets` pass, and mobile `protocol:check` passes |
 
-Next step: B, E and C finish; root merges them in that order, wires the chat file-edit row to `git::open_file_diff`, then dispatches D2.
+Next step: B and C finish; root merges B then C, wires the chat file-edit row to `git::open_file_diff`, then dispatches D2.
