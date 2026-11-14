@@ -370,6 +370,15 @@ pub(super) struct WireResponse {
     command: Option<WireCommand>,
     #[serde(rename = "branchSummary")]
     branch_summary: Option<WireBranchSummary>,
+    branches: Option<WireBranches>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct WireBranches {
+    branches: Vec<String>,
+    current: String,
+    truncated: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -1311,6 +1320,25 @@ pub(super) fn response_branch_summary(response: WireResponse) -> Result<BranchSu
         added: count(&value.added, "Git branch added lines")?,
         removed: count(&value.removed, "Git branch removed lines")?,
         files,
+    })
+}
+
+/// The repository's local branches, most recently committed first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Branches {
+    pub names: Vec<String>,
+    /// `None` on a detached HEAD.
+    pub current: Option<String>,
+    /// The host lists at most 500.
+    pub truncated: bool,
+}
+
+pub(super) fn response_branches(response: WireResponse) -> Result<Branches, String> {
+    let value = response.branches.ok_or("Host omitted the branch list.")?;
+    Ok(Branches {
+        names: value.branches,
+        current: optional(value.current),
+        truncated: value.truncated,
     })
 }
 

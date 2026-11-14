@@ -1679,3 +1679,30 @@ fn a_right_click_copies_what_cannot_be_selected(cx: &mut TestAppContext) {
         Some("cargo test links")
     );
 }
+
+#[gpui_kit::test]
+fn a_narrow_chat_shows_its_details_only_from_the_details_button(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    assert!(shell.shows("chat-details-toggle"));
+    assert!(!shell.shows("chat-details-card"));
+    shell.click("chat-details-toggle");
+    assert!(shell.named("Session details"));
+    assert_eq!(shell.label("chat-details-folder"), "Folder: /work/repo");
+    assert_eq!(
+        shell.label("chat-details-context"),
+        "Context used: 209k / 1M"
+    );
+    // No repository is observed here, so no Git row is offered.
+    assert!(!shell.shows("chat-details-branch"));
+    shell.click("chat-details-toggle");
+    assert!(!shell.shows("chat-details-card"));
+}
+
+#[gpui_kit::test]
+fn a_wide_chat_shows_its_details_beside_the_conversation(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.visual.simulate_resize(size(px(3000.), px(800.)));
+    shell.settle();
+    assert!(shell.shows("chat-details-card"));
+    assert!(!shell.shows("chat-details-toggle"));
+}
