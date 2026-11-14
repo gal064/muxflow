@@ -40,7 +40,18 @@ const ROUTINE: &[&str] = &[
     "Waiting for authoritative tmux state…",
     "Topology changed; reconciling…",
     "Terminal output is catching up…",
+    "File create completed.",
+    "File rename completed.",
+    "File delete completed.",
+    "Directory create completed.",
+    "Directory rename completed.",
+    "Directory delete completed.",
+    "Native notification shown without click actions; in-app attention remains available.",
 ];
+
+// Exact success receipts only: a partial close must still explain what failed.
+static CLOSED_TABS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Closed \d+ tabs?\.$").expect("a valid pattern"));
 
 /// Ordinary progress with a variable tail.
 const ROUTINE_PREFIXES: &[&str] = &[
@@ -87,6 +98,7 @@ pub fn notice_for_status(message: &str) -> Option<StatusNotice> {
     let message = message.trim();
     if message.is_empty()
         || ROUTINE.contains(&message)
+        || CLOSED_TABS.is_match(message)
         || ROUTINE_PREFIXES
             .iter()
             .any(|prefix| message.starts_with(prefix))
@@ -329,9 +341,23 @@ mod tests {
     }
 
     #[test]
-    fn times_out_a_bulk_closes_receipt_but_not_its_partial_failure() {
-        let receipt = notice_for_status("Closed 3 tabs.").unwrap();
-        assert_eq!(receipt.severity, Severity::Info);
+    fn visible_successes_are_silent_but_failures_and_downloads_remain() {
+        for success in [
+            "Closed 1 tab.",
+            "Closed 3 tabs.",
+            "File rename completed.",
+            "Directory delete completed.",
+        ] {
+            assert_eq!(severity(success), None, "{success}");
+        }
+        for receipt in [
+            "Download complete: /downloads/file.zip",
+            "Download completed: /repo/file.zip",
+            "Copied the path",
+            "Pushed to origin/main.",
+        ] {
+            assert_eq!(severity(receipt), Some(Severity::Info), "{receipt}");
+        }
         for partial in [
             "Closed 1 of 2 tabs; 1 could not be closed.",
             "Closed 1 of 2 tabs; 1 still had an agent and was left open.",

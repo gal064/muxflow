@@ -18,7 +18,7 @@ EXCLUDED_FILES = {"todo.md", "docs/history/implementation.md"}
 # Upstream copies (see each VENDORED.md): their author and example addresses
 # are upstream's, so only home paths and tokens are checked there, except in
 # our own VENDORED.md.
-THIRD_PARTY_PATHS = ("vendor/markdown/",)
+THIRD_PARTY_PATHS = ("vendor/markdown/", "release/licenses/")
 EXAMPLE_ACCOUNTS = {
     "ade", "agents", "alice", "deploy", "dev", "example", "linuxbrew", "me",
     "operator", "operator-extra", "someone", "test", "u", "user", "x", "zed",

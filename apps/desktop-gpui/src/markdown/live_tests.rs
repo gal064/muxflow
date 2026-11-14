@@ -459,6 +459,43 @@ fn press(view: &Entity<LiveView>, keys: &str, cx: &mut VisualTestContext) -> usi
 }
 
 #[gpui_kit::test]
+fn table_breaks_draw_navigate_and_save_inside_the_cell(cx: &mut TestAppContext) {
+    let source = "| a | b |\n|---|---|\n| one | other |\n| next | row |";
+    let (fixture, cx) = open(source, cx);
+    let view = fixture.view(cx);
+    let at = source.find("one").unwrap() + 3;
+    focus_at(&view, at..at, cx);
+    let before = drawn_at(&view, at..at, cx).unwrap();
+    assert_eq!(press(&view, "enter", cx), at + 4);
+    let after = drawn_at(&view, at + 4..at + 4, cx).unwrap();
+    assert!(
+        after.top() > before.top(),
+        "Enter must draw a new line: {before:?} {after:?}"
+    );
+    fixture.type_at(at + 4, "two", cx);
+    drawn_at(&view, 0..0, cx);
+    assert_eq!(press(&view, "home", cx), at + 4);
+    assert_eq!(press(&view, "end", cx), at + 7);
+    assert_eq!(press(&view, "up", cx), at);
+    assert_eq!(press(&view, "down", cx), at + 7);
+    let saved = fixture.saved_after_debounce(cx);
+    assert_eq!(saved.last().unwrap(), &source.replace("one", "one<br>two"));
+    assert_eq!(press(&view, "home backspace", cx), at);
+    assert_eq!(fixture.shown(cx), source.replace("one", "onetwo"));
+}
+
+#[gpui_kit::test]
+fn deleting_the_last_word_character_keeps_typing_in_its_cell(cx: &mut TestAppContext) {
+    let source = "| a | b |\n|---|---|\n| hello x | other |";
+    let (fixture, cx) = open(source, cx);
+    let view = fixture.view(cx);
+    let at = source.find("hello x").unwrap() + 7;
+    focus_at(&view, at..at, cx);
+    assert_eq!(press(&view, "backspace z", cx), at);
+    assert_eq!(fixture.shown(cx), source.replace("hello x", "hello z"));
+}
+
+#[gpui_kit::test]
 fn down_and_up_walk_a_lists_items_from_left_of_their_text(cx: &mut TestAppContext) {
     // From a paragraph's start, the goal is left of the items' text, over
     // their bullets.
