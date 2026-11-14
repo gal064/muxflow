@@ -1882,6 +1882,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-user-notifications",
  "phase0-core",
+ "prost",
  "serde",
  "serde_json",
  "sha2 0.10.9",

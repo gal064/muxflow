@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { ChatAction, ChatPermissionMode, ChatSpeed } from "./gen/chat_pb";
 import { Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
-import { agentDiagnostics, closeTmuxTarget, resolveTerminalFile, setPinnedTarget, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+import { HistoryAction } from "./gen/history_pb";
+import {
+  agentDiagnostics, chatAnswer, chatClose, chatInterrupt, chatLoadOlder, chatOpen, chatRewind, chatSend, chatSetOptions, chatSideFork,
+  closeTmuxTarget, historyList, historyResume, historySnooze, historyWake, resolveTerminalFile, setPinnedTarget,
+  voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe,
+} from "./requests";
 
 describe("terminal file request builder", () => {
   it("binds the candidate to the exact pane route and host generation", () => {
@@ -106,5 +112,64 @@ describe("pin request builder", () => {
       .toMatchObject({ kind: TmuxActionKind.SET_PINNED, sessionId: "$1", windowId: "", pinned: true, expectedServerIdentity: "server-a", expectedGeneration: 0n });
     expect(setPinnedTarget({ kind: "window", sessionId: "$1", windowId: "@2" }, false, "server-a").tmuxAction)
       .toMatchObject({ kind: TmuxActionKind.SET_PINNED, sessionId: "$1", windowId: "@2", pinned: false });
+  });
+});
+
+// Field usage against apps/host/src/service/requests/chat_dispatch.rs: every
+// pane-scoped action names the pane and the server it was seen on, in
+// `Request.chat`, and nothing rides in `scope` or `data`.
+describe("chat request builders", () => {
+  const target = { paneId: "%7", expectedServerIdentity: "server-a" };
+
+  it("names the pane, the server and the action on every request", () => {
+    const requests = [
+      [chatOpen(target), ChatAction.OPEN],
+      [chatClose(target), ChatAction.CLOSE],
+      [chatSend(target, "hello", "m1"), ChatAction.SEND],
+      [chatInterrupt(target), ChatAction.INTERRUPT],
+      [chatAnswer(target, "q1", { skipped: true }), ChatAction.ANSWER],
+      [chatRewind(target, "m1"), ChatAction.REWIND],
+      [chatSetOptions(target, { model: "m" }), ChatAction.SET_OPTIONS],
+      [chatLoadOlder(target, "c1"), ChatAction.LOAD_OLDER],
+      [chatSideFork(target, "why?"), ChatAction.SIDE_FORK],
+    ] as const;
+    for (const [request, action] of requests) {
+      expect(request.operation).toBe(Operation.CHAT);
+      expect(request.chat).toMatchObject({ action, paneId: "%7", expectedServerIdentity: "server-a" });
+      expect(request.scope).toBe("");
+      expect(request.data.length).toBe(0);
+    }
+  });
+
+  it("carries each action's own fields", () => {
+    expect(chatSend(target, "hello", "m1").chat).toMatchObject({ text: "hello", clientMessageId: "m1" });
+    expect(chatRewind(target, "m1").chat?.itemId).toBe("m1");
+    expect(chatLoadOlder(target, "c1").chat?.olderCursor).toBe("c1");
+    expect(chatSideFork(target, "why?").chat?.text).toBe("why?");
+
+    const answer = chatAnswer(target, "q1", { answers: [{ questionId: "scope", optionIds: ["a", "b"], otherText: "c" }] }).chat;
+    expect(answer?.requestId).toBe("q1");
+    expect(answer?.answer?.answers[0]).toMatchObject({ questionId: "scope", optionIds: ["a", "b"], otherText: "c" });
+    expect(chatAnswer(target, "p1", { allow: true }).chat?.answer).toMatchObject({ allow: true, skipped: false });
+
+    // Unset options stay empty or unspecified, which the host reads as "keep".
+    const options = chatSetOptions(target, { speed: ChatSpeed.FAST }).chat?.options;
+    expect(options).toMatchObject({ model: "", effort: "", permission: ChatPermissionMode.UNSPECIFIED, speed: ChatSpeed.FAST });
+  });
+});
+
+describe("history request builders", () => {
+  const entry = { adapterId: "codex", nativeSessionId: "s1" };
+  const topology = { expectedServerIdentity: "server-a", expectedTopologyGeneration: 42n };
+
+  it("lists with no target, and names the session for every other action", () => {
+    const list = historyList();
+    expect(list.operation).toBe(Operation.SESSION_HISTORY);
+    expect(list.history).toMatchObject({ action: HistoryAction.LIST, adapterId: "", nativeSessionId: "" });
+
+    expect(historyResume(entry, topology).history).toMatchObject({ action: HistoryAction.RESUME, ...entry, ...topology });
+    expect(historySnooze(entry, 1_800_000_000_000n, topology).history)
+      .toMatchObject({ action: HistoryAction.SNOOZE, ...entry, ...topology, snoozeUntilUnixMillis: 1_800_000_000_000n });
+    expect(historyWake(entry).history).toMatchObject({ action: HistoryAction.WAKE, ...entry, snoozeUntilUnixMillis: 0n });
   });
 });

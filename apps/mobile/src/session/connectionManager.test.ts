@@ -194,7 +194,7 @@ describe("connectionManager", () => {
     expect(getConnection()).toBeNull();
   });
 
-  it.each([3, 5])("does not let resume retry a protocol-major %s refusal", async (protocolMajor) => {
+  it.each([4, 6])("does not let resume retry a protocol-major %s refusal", async (protocolMajor) => {
     const pending = connectHost(host).catch((error: Error) => error);
     await settle();
     dials[0]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor }));

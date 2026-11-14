@@ -150,6 +150,12 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(19, "automation", 0))).toThrow("nonzero");
   });
 
+  it("lets chat and history events advance the sequence without reading them", () => {
+    expect(decodeTerminalEvent(frame(20, "%4", 22, new Uint8Array([8, 1])))).toEqual({ kind: "protocolProgress", sequence: 22 });
+    expect(decodeTerminalEvent(frame(21, "history", 23, new Uint8Array([8, 1])))).toEqual({ kind: "protocolProgress", sequence: 23 });
+    expect(() => decodeTerminalEvent(frame(20, "%4", 0))).toThrow("nonzero");
+  });
+
   it("rejects frames truncated before the label, sequence, or terminal generation", () => {
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37]).buffer)).toThrow("common header");
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37, 49, 50, 51, ...u64(1).slice(0, 7)]).buffer)).toThrow("truncated");

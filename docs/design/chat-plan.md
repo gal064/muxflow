@@ -190,21 +190,22 @@ message ChatSnapshot { uint64 revision; ChatState state; ChatCatalog catalog;
 message ChatRequest { ChatAction action; string pane_id; string expected_server_identity;
                       string text; string client_message_id; string request_id; ChatAnswer answer;
                       string item_id; string older_cursor; ChatOptions options; ChatAgentMode mode; }
-message ChatResponse { ChatSnapshot snapshot; repeated ChatItem older; string older_cursor;
-                       string forked_pane_id; ChatAgentMode mode; }
+message ChatResponse { repeated ChatItem older; string older_cursor;
+                       string forked_pane_id; ChatAgentMode mode; uint64 revision; }
 
 message ChatItemDelta { string item_id; string text_append; }
 message ChatTruncate { string after_item_id; }   // rewind: drop everything after this item
 message ChatEvent { string pane_id; uint64 revision;
                     oneof change { ChatItem item; ChatItemDelta delta; ChatState state;
-                                   ChatCatalog catalog; ChatTruncate truncate; } }
+                                   ChatCatalog catalog; ChatTruncate truncate;
+                                   ChatSnapshot snapshot; ChatItem updated; } }
 ```
 
 Semantics:
 
-- `OPEN` subscribes the connection to one pane and returns a snapshot. Chat
-  events go only to subscribed connections (`send_control_event_to`).
-- `revision` increases by one per event per pane. A client that sees a gap
+- `OPEN` subscribes the connection to one pane; the snapshot arrives as a chat
+  event ahead of the answer. Chat events go only to subscribed connections.
+- `revision` increases by one per change per pane. A client that sees a gap
   re-sends `OPEN`.
 - `SEND` while `turn` is WORKING is delivered mid-turn when the provider's
   capabilities say so; otherwise the host refuses with a display message.
@@ -231,6 +232,159 @@ message HistoryEvent { uint64 generation; repeated HistoryEntry woke; }
 
 Clients `LIST` on open and after any `HistoryEvent`; search is client-side.
 Side forks are never listed.
+
+### As built by stream A
+
+The messages above are in the tree; the field numbers and comments are in
+`chat.proto` and `history.proto`. What §4 left open, and what changed:
+
+- **Open, and how a client follows a chat.** The snapshot is a chat event, not
+  part of the answer to `OPEN`. Both clients hand a response and an event to
+  their consumers on different paths, so a snapshot in the response could
+  reach a consumer after the events that follow it. As an event it is in order
+  with them by construction. A client keeps one revision per open pane:
+  - a `snapshot` replaces what it holds and sets the revision;
+  - any other event applies when its revision is one more, is ignored when it
+    is not newer, and otherwise means a change was lost: send `OPEN` again;
+  - events for a pane it holds no snapshot of are ignored;
+  - after a `RESYNC_REQUIRED` event or a reconnect it sends `OPEN` again for
+    every chat it has open. The desktop bridge drops the events that arrive
+    while it resyncs, and a dropped last event of a turn leaves no later gap
+    to notice.
+
+  `OPEN` on a chat that is already open only brings a fresh snapshot. A
+  connection may open several panes.
+- **New items and updates.** `item` is always a new item, after every other.
+  A change to an item already in the timeline is `updated`, which keeps the
+  item's place; a client that does not hold the item (it lies before what it
+  has loaded) ignores it. A provider says which it is publishing. An update
+  to an item the host's timeline no longer holds, because it was rewound or
+  trimmed away, is dropped rather than brought back as the newest item. An
+  item never changes kind: one published under a held id with another kind is
+  dropped, so a provider's item cannot replace a message whose id a client
+  chose.
+- **Older pages** come back in the response, on a different path from events,
+  so `ChatResponse.revision` says when the page was read. A client:
+  - drops a page that answers a request made before its current snapshot;
+  - keeps a page aside until its own revision for the pane has reached the
+    page's, since the events up to there are already in the page;
+  - asks for the page again if, past the page's revision, it ignored an
+    `updated` or a `delta` for an item it did not hold.
+- **Pending.** `ChatState.pending` is set only while the turn is WAITING; the
+  runtime clears it from any other state a provider publishes.
+- **Rewind.** `REWIND` names the user message being edited, so that message goes
+  too: `ChatTruncate.after_item_id` is the item *before* it, and is empty when
+  the first message is rewound (drop everything). The runtime works out
+  `after_item_id` and the session publishes the truncate, at the point in its
+  own stream where the rewind takes effect. A client that does not
+  hold `after_item_id`, because it has not loaded that far back, sends `OPEN`
+  again.
+- **Send.** `client_message_id` becomes the id of the USER item, so a client
+  can match the item to what it sent. Empty lets the host choose; an id already
+  in the timeline is refused with `chat_message_duplicate`, which tells a
+  client that sent a message again, having lost the answer, that the first one
+  arrived. Clients send random ids.
+- **Options.** In `SET_OPTIONS` an empty string or an unspecified enum keeps the
+  current value. The runtime does the merge and checks what is asked for
+  against the pane's catalog, so a provider is handed the whole options: what
+  is asked for must be something the provider's capabilities say it can
+  change, a model or an effort asked for must be listed, and fast must be
+  supported by the model. What a kept effort or speed becomes when a new model
+  lacks it is the provider's to say (the scripted one takes the highest effort
+  and standard speed). While the current model is one the catalog does not
+  list, only the permission mode can change.
+- **Answer.** `ANSWER` without an `answer` is refused; it is not a denial.
+- **One command at a time per pane.** A command is checked and handed to the
+  provider under the pane's session lock, so two connections with the same
+  chat open cannot interleave: the second is checked against what the first
+  left.
+- **A full event queue** costs the connection the same resync a saturated
+  broadcast does, instead of dropping a chat event silently. An `OPEN` whose
+  snapshot cannot be queued is refused with `chat_queue_full` instead, and the
+  client sends it again. A resync is the heaviest recovery there is (the phone
+  reconnects), and chat events are neither coalesced nor paced the way
+  terminal output is, whose flood can also be what fills the queue. Left open
+  for stream B, whose providers stream a delta per token: batch deltas before
+  publishing them, and consider answering a full queue with a fresh snapshot
+  of the one pane once there is room, instead of a resync of the connection.
+- **Mode.** `SET_MODE` answers its caller and tells nobody else: other
+  connections read the new mode from their next agent snapshot. Streams C and
+  F need that to be soon enough, or an event.
+- **Panes and servers.** A chat belongs to a pane of one tmux server: the
+  runtime keys it by `expected_server_identity` and pane id. When the
+  connection has a topology, a pane action is refused with
+  `chat_server_changed` if that is not the server it last saw and with
+  `chat_unavailable` if that server has no such pane; `CLOSE` of a well-formed
+  pane id is never refused. A connection with no topology is taken at its
+  word, and its pane is untagged: that is one that never asked for it, and
+  also one that has just launched an agent, until the next topology reaches
+  it. Stream B, whose
+  providers go by the pane's tag, has to cover that window (the scripted
+  provider claims untagged panes, so it does not show today). Each chat
+  request with a topology also lets go of the chats that connection has open
+  on panes the topology no longer has, and on other servers: the connection
+  stops hearing from them, and a chat nobody else has open is forgotten, which
+  drops its provider session. So a client sends `CLOSE` when a chat's pane
+  goes. No connection's view is trusted to say that a chat it does not have
+  open is gone; the host's own fresh look at tmux, each time the topology
+  actor reconciles one, forgets every chat nobody has open whose pane is not
+  a live pane of that server. Such a look can be older than a pane, so a
+  chat it forgets between its start and its first use is started again; one
+  forgotten later, while nobody has it open, loads its history again at the
+  next request.
+- **Bounds**, all enforced in `ChatRuntime` so no provider has to:
+  - tool output preview 16 KiB; a tool's or a pending request's `detail`
+    16 KiB; a tool's `path` 4 KiB; item text 256 KiB; every other string
+    1 KiB;
+  - an item id 128 bytes: an item with a longer or an empty id is dropped;
+  - a pending request 8 questions of 16 options; a catalog 64 models of 16
+    efforts and 256 commands;
+  - a snapshot or an older page 200 items and 1 MiB;
+  - a pane's timeline 2,000 items and 32 MiB of text. Past either the oldest
+    items are dropped and `history_complete` turns false;
+  - inbound: a message 256 KiB, a `client_message_id` 128 bytes, an answer
+    64 KiB, a pane id 11 bytes, a server identity 1 KiB.
+
+  The older cursor is the id of the first item of the page it follows.
+- **Refusals** carry an `error_code`: `chat_invalid_request`, `chat_unavailable`
+  (the pane has no chat), `chat_not_ready`, `chat_server_changed`,
+  `chat_turn_busy`, `chat_request_not_pending`, `chat_item_not_rewindable`,
+  `chat_message_too_large`, `chat_message_duplicate`, `chat_cursor_invalid`,
+  `chat_queue_full`,
+  `chat_mode_not_saved`, `chat_side_fork_unavailable` (until stream B wires it),
+  `history_invalid_request`, `history_unavailable` (every action but `LIST`,
+  until stream E).
+- **`Pane.chat_adapter_id`** is carried by `tmux_control::Pane`, which is what
+  the host discovers and what the desktop receives, so streams B and C fill and
+  read one field. Nothing tags a pane yet: it is empty, except that while the
+  scripted provider is registered every untagged pane reads `scripted`, so the
+  clients have a chat pane to open.
+- **Provider trait.** `ChatProvider` has `adapter_id`, `capabilities`,
+  `load_history` and `connect(pane_id, sink)`; `ChatSession` takes one
+  `SessionCommand`. `pane_command` and the socket `connect` reads from arrive
+  with the pane process, in stream B. Chat requests run inline on their
+  connection's ordered lane, so `load_history`, `connect` and `command` must
+  not wait on anything slow: a provider that would hands the work to its own
+  thread, or stream B moves the first `OPEN` of a pane off the lane. The ids a
+  provider gives its items and the `client_message_id`s clients choose are one
+  namespace. Clients send random ids, and the kind rule above keeps a
+  provider's item from taking a user message's place if two ever meet.
+- **Desktop frames.** Until streams C and E read them, both desktops let frame
+  kinds 20 and 21 pass: the GPUI app's two decoders (the connection UI's and
+  the terminal engine's, which owns the sequence) ignore them, and the Tauri
+  decoder treats them as protocol progress. The Tauri desktop keeps that arm;
+  it gets no chat.
+- **Scripted provider.** Each pane opens on a finished 233-item transcript.
+  Messages start two turns in rotation: one stops on a question (two questions:
+  one with an "other" answer, one multi-select), the next on a permission
+  request. A step runs every 120 ms. It says it can `fork` so the clients
+  have the control to build, though `SIDE_FORK` is refused for every provider
+  until stream B wires it.
+- **Desktop core** carries chat and history as the protocol's own types, not
+  JSON: `connection::chat::chat_request`, `connection::history::history_request`,
+  and event frames 20 (chat, labelled with the pane) and 21 (history) whose
+  payloads `chat::decode_event` and `history::decode_event` read. The agent
+  snapshot JSON gains `agentMode` (`"terminal"` or `"chat"`).
 
 Git additions belong to stream D alone (branch summary against the default
 branch, branch list, checkout, and a diff target for the default-branch scope).

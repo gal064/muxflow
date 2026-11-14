@@ -6,7 +6,7 @@ use tmux_agent_protocol::{PROTOCOL_MAJOR, encode_frame, read_frame_sync, v1};
 #[test]
 fn assigned_operation_and_enum_numbers_do_not_move() {
     use v1::Operation::*;
-    assert_eq!(PROTOCOL_MAJOR, 4);
+    assert_eq!(PROTOCOL_MAJOR, 5);
     for (operation, number) in [
         (ReconcileTerminalUpload, 41),
         (SelectTerminalSession, 43),
@@ -23,6 +23,8 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
         (AgentDiagnostics, 54),
         (YieldTerminalSizing, 55),
         (ResizeTerminalWindow, 56),
+        (Chat, 60),
+        (SessionHistory, 61),
         (TestDelay, 100),
     ] {
         assert_eq!(operation as i32, number);
@@ -36,6 +38,10 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
     assert_eq!(v1::EventKind::VoiceProvision as i32, 20);
     assert_eq!(v1::EventKind::VoiceReply as i32, 21);
     assert_eq!(v1::EventKind::VoiceReplyText as i32, 23);
+    assert_eq!(v1::EventKind::Chat as i32, 24);
+    assert_eq!(v1::EventKind::SessionHistory as i32, 25);
+    assert_eq!(v1::ChatAction::SetMode as i32, 10);
+    assert_eq!(v1::HistoryAction::Wake as i32, 4);
     assert_eq!(v1::VoiceProvider::EdgeTts as i32, 1);
     assert_eq!(v1::VoiceReadiness::Ready as i32, 4);
 }
@@ -77,6 +83,55 @@ fn field_numbers_and_wire_types_do_not_move() {
         }
         .encode_to_vec(),
         [0xa2, 1, 0]
+    );
+    // Chat and history: Request 27/28, Response 16/17, HostEvent 15/16,
+    // Pane 15 and AgentSnapshot 10.
+    assert_eq!(
+        v1::Request {
+            chat: Some(v1::ChatRequest::default()),
+            history: Some(v1::HistoryRequest::default()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0xda, 1, 0, 0xe2, 1, 0]
+    );
+    assert_eq!(
+        v1::Response {
+            chat: Some(v1::ChatResponse::default()),
+            history: Some(v1::HistoryResponse::default()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0x82, 1, 0, 0x8a, 1, 0]
+    );
+    assert_eq!(
+        v1::HostEvent {
+            chat: Some(v1::ChatEvent {
+                revision: 3,
+                change: Some(v1::chat_event::Change::Truncate(v1::ChatTruncate::default())),
+                ..Default::default()
+            }),
+            history: Some(v1::HistoryEvent::default()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0x7a, 4, 0x10, 3, 0x3a, 0, 0x82, 1, 0]
+    );
+    assert_eq!(
+        v1::Pane {
+            chat_adapter_id: "x".into(),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0x7a, 1, b'x']
+    );
+    assert_eq!(
+        v1::AgentSnapshot {
+            agent_mode: v1::ChatAgentMode::Chat.into(),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0x50, 2]
     );
     assert_eq!(
         v1::Response {

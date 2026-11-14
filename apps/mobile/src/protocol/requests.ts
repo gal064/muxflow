@@ -7,7 +7,8 @@
 // REQUEST_TERMINAL_SEED — read the pane id from `Request.scope`, not from
 // `pane_ids`; only ATTACH_TERMINAL takes `pane_ids`.
 
-import { create } from "@bufbuild/protobuf";
+import { create, type MessageInitShape } from "@bufbuild/protobuf";
+import { ChatAction, ChatAnswerSchema, ChatOptionsSchema, ChatRequestSchema } from "./gen/chat_pb";
 import {
   AgentRequestSchema,
   FileServiceRequestSchema,
@@ -18,6 +19,7 @@ import {
   VoiceRequestSchema,
   type Request,
 } from "./gen/envelope_pb";
+import { HistoryAction, HistoryRequestSchema } from "./gen/history_pb";
 
 export const DIRECTORY_PAGE_SIZE = 500;
 
@@ -342,6 +344,114 @@ export function voiceSession(paneId: string, expectedServerIdentity = ""): Reque
     operation: Operation.VOICE_SESSION,
     voice: create(VoiceRequestSchema, { paneId, expectedServerIdentity }),
   });
+}
+
+// Chat (docs/design/chat-plan.md §4). Every chat operation reads
+// `Request.chat` only. A refusal is a `HostError` whose `code` says why
+// (`chat_turn_busy`, `chat_request_not_pending`, `chat_cursor_invalid`, …).
+
+/** The pane a chat action names, on the tmux server the caller saw it on. */
+export interface ChatTarget {
+  paneId: string;
+  expectedServerIdentity: string;
+}
+
+function chat(action: ChatAction, target: ChatTarget, fields: MessageInitShape<typeof ChatRequestSchema> = {}): Request {
+  return create(RequestSchema, {
+    operation: Operation.CHAT,
+    chat: create(ChatRequestSchema, { ...fields, action, paneId: target.paneId, expectedServerIdentity: target.expectedServerIdentity }),
+  });
+}
+
+/**
+ * CHAT_ACTION_OPEN: subscribes this connection to the pane. The pane's
+ * snapshot arrives through `onChatEvent` before this request resolves, and
+ * every later change follows it there, each with the next `revision`.
+ * `ChatEvent` in chat.proto says how to follow them. Send this again on a
+ * gap, and for every open chat after a reconnect: subscriptions are per
+ * connection.
+ */
+export function chatOpen(target: ChatTarget): Request {
+  return chat(ChatAction.OPEN, target);
+}
+
+/** CHAT_ACTION_CLOSE: ends this connection's subscription. The chat keeps running. */
+export function chatClose(target: ChatTarget): Request {
+  return chat(ChatAction.CLOSE, target);
+}
+
+/** CHAT_ACTION_SEND: `clientMessageId` becomes the id of the USER item this message appears as. */
+export function chatSend(target: ChatTarget, text: string, clientMessageId: string): Request {
+  return chat(ChatAction.SEND, target, { text, clientMessageId });
+}
+
+/** CHAT_ACTION_INTERRUPT: stops the running turn. */
+export function chatInterrupt(target: ChatTarget): Request {
+  return chat(ChatAction.INTERRUPT, target);
+}
+
+/** CHAT_ACTION_ANSWER: answers `ChatState.pending`, named by its `requestId`. */
+export function chatAnswer(target: ChatTarget, requestId: string, answer: MessageInitShape<typeof ChatAnswerSchema>): Request {
+  return chat(ChatAction.ANSWER, target, { requestId, answer });
+}
+
+/** CHAT_ACTION_REWIND: drops the `rewindable` USER item and everything after it; the edited text is then a normal send. */
+export function chatRewind(target: ChatTarget, itemId: string): Request {
+  return chat(ChatAction.REWIND, target, { itemId });
+}
+
+/** CHAT_ACTION_SET_OPTIONS: an empty string or unspecified enum keeps the current value. */
+export function chatSetOptions(target: ChatTarget, options: MessageInitShape<typeof ChatOptionsSchema>): Request {
+  return chat(ChatAction.SET_OPTIONS, target, { options });
+}
+
+/** CHAT_ACTION_LOAD_OLDER: the page before `olderCursor`, in `Response.chat.older`, with the next cursor. */
+export function chatLoadOlder(target: ChatTarget, olderCursor: string): Request {
+  return chat(ChatAction.LOAD_OLDER, target, { olderCursor });
+}
+
+/** CHAT_ACTION_SIDE_FORK (`/btw`, `/side`): forks into a split and sends `text` there. */
+export function chatSideFork(target: ChatTarget, text: string): Request {
+  return chat(ChatAction.SIDE_FORK, target, { text });
+}
+
+// Session history and snooze (docs/design/chat-plan.md §4), in
+// `Request.history`. The phone lists on open and after every SESSION_HISTORY
+// event; search is local.
+
+/** The recorded session a history action names. */
+export interface HistoryTarget {
+  adapterId: string;
+  nativeSessionId: string;
+}
+
+/** What a history action that acts on tmux quotes, as a tmux action does. */
+export interface HistoryTopology {
+  expectedServerIdentity: string;
+  expectedTopologyGeneration: bigint;
+}
+
+function history(action: HistoryAction, fields: MessageInitShape<typeof HistoryRequestSchema> = {}): Request {
+  return create(RequestSchema, {
+    operation: Operation.SESSION_HISTORY,
+    history: create(HistoryRequestSchema, { ...fields, action }),
+  });
+}
+
+export function historyList(): Request {
+  return history(HistoryAction.LIST);
+}
+
+export function historyResume(target: HistoryTarget, topology: HistoryTopology): Request {
+  return history(HistoryAction.RESUME, { ...target, ...topology });
+}
+
+export function historySnooze(target: HistoryTarget, snoozeUntilUnixMillis: bigint, topology: HistoryTopology): Request {
+  return history(HistoryAction.SNOOZE, { ...target, ...topology, snoozeUntilUnixMillis });
+}
+
+export function historyWake(target: HistoryTarget): Request {
+  return history(HistoryAction.WAKE, target);
 }
 
 /** A fresh file-service operation id (UUID where the runtime has one). */

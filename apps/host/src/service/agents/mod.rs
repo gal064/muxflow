@@ -1099,7 +1099,8 @@ impl AgentRuntime {
             .map(|record| record.adapter_id.as_str())
             .collect();
         let wiring = self.wiring.lock().unwrap().current(&running);
-        snapshot::build(&state, server_identity, &wiring)
+        let agent_mode = crate::service::chat::ChatRuntime::global().agent_mode();
+        snapshot::build(&state, server_identity, &wiring, agent_mode)
     }
 
     pub(super) fn reconcile_topology(

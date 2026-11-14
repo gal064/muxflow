@@ -219,7 +219,8 @@ pub fn decode_frame(frame: &[u8]) -> Result<BridgeEvent, String> {
             let payload = text(data, "Git event payload")?;
             Ok(BridgeEvent::GitService { payload })
         }
-        1 | 2 | 8 | 9 | 11 | 18 => Ok(BridgeEvent::Ignored),
+        // 20 and 21 are chat and session history, which nothing here reads yet.
+        1 | 2 | 8 | 9 | 11 | 18 | 20 | 21 => Ok(BridgeEvent::Ignored),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
@@ -526,6 +527,13 @@ mod tests {
             decode_frame(&frame(2, "%1", 4, b"output")),
             Ok(BridgeEvent::Ignored)
         );
+        // Chat and session history, until something here reads them.
+        for (kind, label) in [(20, "%1"), (21, "history")] {
+            assert_eq!(
+                decode_frame(&frame(kind, label, 4, b"\x08\x01")),
+                Ok(BridgeEvent::Ignored)
+            );
+        }
     }
 
     #[test]

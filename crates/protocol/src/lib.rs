@@ -52,7 +52,7 @@ pub mod v1 {
 // when the last released mobile app misbehaves with the new host, or the new app
 // misbehaves with the last released host. Harmless additive fields do not bump.
 // No compatibility arms or version-dependent paths; desktop matches helper digests.
-pub const PROTOCOL_MAJOR: u32 = 4;
+pub const PROTOCOL_MAJOR: u32 = 5;
 pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

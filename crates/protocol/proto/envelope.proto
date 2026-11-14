@@ -3,6 +3,8 @@ syntax = "proto3";
 package tmux_agent.protocol.v1;
 
 import "automation.proto";
+import "chat.proto";
+import "history.proto";
 
 message Envelope {
   uint32 protocol_major = 1;
@@ -189,6 +191,13 @@ enum Operation {
   // connect and on every theme change. tmux keeps one answer per pane, so the
   // host keeps one value for every connection: the last one any client sent.
   OPERATION_SET_TERMINAL_COLORS = 59;
+  // Chat mode (chat.proto): every `ChatAction`, with `Request.chat` /
+  // `Response.chat`. Changes arrive as CHAT events, only on the connections
+  // that opened the pane.
+  OPERATION_CHAT = 60;
+  // Session history and snooze (history.proto), with `Request.history` /
+  // `Response.history`.
+  OPERATION_SESSION_HISTORY = 61;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -253,7 +262,11 @@ message Request {
   // SET_TERMINAL_COLORS only: `#rrggbb`.
   string terminal_foreground = 25;
   string terminal_background = 26;
-  // NEXT FREE FIELD = 27.
+  // OPERATION_CHAT only.
+  ChatRequest chat = 27;
+  // OPERATION_SESSION_HISTORY only.
+  HistoryRequest history = 28;
+  // NEXT FREE FIELD = 29.
 }
 
 message Response {
@@ -276,6 +289,10 @@ message Response {
   repeated string diagnostic_lines = 14;
   // OPERATION_AUTOMATION only.
   AutomationResponse automation = 15;
+  // OPERATION_CHAT only.
+  ChatResponse chat = 16;
+  // OPERATION_SESSION_HISTORY only.
+  HistoryResponse history = 17;
 }
 
 enum HookIngestDisposition {
@@ -347,6 +364,11 @@ enum EventKind {
   // once synthesis settles, and is complete on its own for a phone that ignores
   // this kind. Goes only to the connection holding the session.
   EVENT_KIND_VOICE_REPLY_TEXT = 23;
+  // One change to one chat, in `chat`, scoped to its pane. Sent only to the
+  // connections that opened that pane with CHAT_ACTION_OPEN.
+  EVENT_KIND_CHAT = 24;
+  // The session history changed, in `history`: list again.
+  EVENT_KIND_SESSION_HISTORY = 25;
 }
 
 message HostEvent {
@@ -371,6 +393,10 @@ message HostEvent {
   VoiceEvent voice = 13;
   // EVENT_KIND_AUTOMATION only.
   AutomationEvent automation = 14;
+  // EVENT_KIND_CHAT only.
+  ChatEvent chat = 15;
+  // EVENT_KIND_SESSION_HISTORY only.
+  HistoryEvent history = 16;
 }
 
 message Cancel {
@@ -424,6 +450,9 @@ message Pane {
   string current_command = 11;
   reserved 12, 13, 14;
   reserved "nested_tmux", "outer_pane_id", "nested_provenance";
+  // The chat adapter whose conversation fills this pane, as in
+  // `ChatState.adapter_id`. Empty for a terminal pane.
+  string chat_adapter_id = 15;
 }
 
 message TerminalBytes {
@@ -1166,6 +1195,9 @@ message AgentSnapshot {
   repeated AgentAdapterDescriptor adapters = 8;
   // All live events at or below this daemon generation are included.
   uint64 accepted_generation = 9;
+  // Whether an agent started in a terminal on this host becomes a chat.
+  // Written with CHAT_ACTION_SET_MODE; never unspecified from this host.
+  ChatAgentMode agent_mode = 10;
 }
 
 message AgentHookEvent {

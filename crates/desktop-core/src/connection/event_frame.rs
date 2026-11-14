@@ -106,6 +106,17 @@ pub(super) enum TerminalEvent {
     },
     /// The host's automations changed: list them again. No payload.
     AutomationChanged,
+    /// One change to a chat this client opened. `payload` is the encoded
+    /// `ChatEvent`, read back with `chat::decode_event`.
+    ChatService {
+        pane_id: String,
+        payload: Vec<u8>,
+    },
+    /// The host's session history changed. `payload` is the encoded
+    /// `HistoryEvent`, read back with `history::decode_event`.
+    HistoryService {
+        payload: Vec<u8>,
+    },
 }
 
 /// The one agent scope that is not a host agent event.
@@ -230,6 +241,12 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
             encode_bytes(14, scope, sequence, payload)
         }
         TerminalEvent::AutomationChanged => encode_empty(19, "automation".into(), sequence),
+        TerminalEvent::ChatService { pane_id, payload } => {
+            encode_bytes(20, pane_id, sequence, payload)
+        }
+        TerminalEvent::HistoryService { payload } => {
+            encode_bytes(21, "history".into(), sequence, payload)
+        }
         TerminalEvent::Snapshot {
             snapshot,
             sequence,
@@ -353,6 +370,37 @@ mod tests {
         let sequence_at = 3 + label_len;
         assert_eq!(&frame[sequence_at..sequence_at + 8], &23_u64.to_be_bytes());
         assert_eq!(&frame[sequence_at + 8..], payload);
+    }
+
+    /// Chat and history frames are ordered host events with protobuf
+    /// payloads: kind 20 labelled with the pane, kind 21 labelled "history".
+    #[test]
+    fn chat_and_history_frames_keep_their_sequence_and_exact_payload() {
+        for (event, kind, label) in [
+            (
+                TerminalEvent::ChatService {
+                    pane_id: "%7".into(),
+                    payload: vec![0, 0xff, 7],
+                },
+                20,
+                "%7",
+            ),
+            (
+                TerminalEvent::HistoryService {
+                    payload: vec![0, 0xff, 7],
+                },
+                21,
+                "history",
+            ),
+        ] {
+            let frame = encode_event_with_sequence(event, 41);
+            assert_eq!(frame[0], kind);
+            let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+            assert_eq!(&frame[3..3 + label_len], label.as_bytes());
+            let sequence_at = 3 + label_len;
+            assert_eq!(&frame[sequence_at..sequence_at + 8], &41_u64.to_be_bytes());
+            assert_eq!(&frame[sequence_at + 8..], [0, 0xff, 7]);
+        }
     }
 
     /// `features/terminal/api.ts` reads kind 19 as "automations changed".

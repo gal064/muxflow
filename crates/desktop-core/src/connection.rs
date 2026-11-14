@@ -37,10 +37,12 @@ mod writer;
 use writer::ControlWriterHandle;
 pub mod agent;
 pub mod automation;
+pub mod chat;
 pub mod files;
 pub mod git;
 pub mod git_content;
 use git_content::GitContentReads;
+pub mod history;
 pub mod ports;
 pub mod tmux_action;
 // Switch-timeline instrumentation. Compiled out of a plain release build with
@@ -1447,6 +1449,7 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
                 pane_pid: 0,
                 start_command: String::new(),
                 title: String::new(),
+                chat_adapter_id: item.chat_adapter_id,
             })
             .collect(),
     }
