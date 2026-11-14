@@ -28,30 +28,66 @@ pub(super) const INLINE_DIFF_BODY_LIMIT: usize = 256 * 1024;
 
 /// Who a diff is being read for.
 ///
-/// The two audiences want opposite things, and they are never mixed: a hunk
-/// mutation needs the raw patch and cannot defer anything, while the editor
-/// needs content and never read the patch at all.
+/// A hunk mutation needs the raw patch and cannot defer anything. The desktop
+/// draws the patch's hunks and, for the whole file, the two sides; on the
+/// control lane the patch comes first, and whatever does not fit beside it is
+/// referenced for the bulk lane.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DiffAudience {
-    /// The desktop editor. No patch; large bodies are referenced for the bulk
-    /// lane rather than sent on the control lane.
+    /// The desktop's diff tab.
     Client,
     /// A hunk mutation re-deriving its own patch, on the host, in process.
     Mutation,
 }
 
 impl DiffAudience {
-    fn includes_patch(self) -> bool {
-        self == Self::Mutation
-    }
-
-    /// Combined old + new bytes that may still be inlined in the response.
-    fn inline_body_limit(self) -> usize {
+    /// Bytes of patch and inlined bodies together that may ride the response.
+    fn inline_limit(self) -> usize {
         match self {
             Self::Client => INLINE_DIFF_BODY_LIMIT,
             Self::Mutation => usize::MAX,
         }
     }
+}
+
+/// Where the old side of a diff is read from: the object prefix of
+/// `<prefix>:<path>`.
+fn old_prefix(target: v1::GitDiffTarget, base: Option<&branch::Base>) -> Vec<u8> {
+    match (target, base) {
+        (v1::GitDiffTarget::Staged, _) => b"HEAD".to_vec(),
+        (v1::GitDiffTarget::Base, Some(base)) => base.merge_base.as_bytes().to_vec(),
+        _ => b":0".to_vec(),
+    }
+}
+
+/// The merge base a default-branch diff reads against; nothing otherwise.
+fn base_for(
+    root: &str,
+    target: v1::GitDiffTarget,
+    cancellation: Option<&AtomicBool>,
+) -> anyhow::Result<Option<branch::Base>> {
+    if target == v1::GitDiffTarget::Base {
+        branch::require_base(root, cancellation).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether Git tracks `path` at all: the default-branch diff of an untracked
+/// file is its whole content, but that of an unchanged tracked file is empty.
+fn untracked(root: &str, path: &[u8], cancellation: Option<&AtomicBool>) -> anyhow::Result<bool> {
+    let output = git_output_cancellable(
+        root,
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--error-unmatch"),
+            OsStr::new("--"),
+            OsStr::from_bytes(path),
+        ],
+        None,
+        cancellation,
+    )?;
+    Ok(!output.status.success())
 }
 
 pub(super) fn read_diff(
@@ -66,12 +102,15 @@ pub(super) fn read_diff(
     if target == v1::GitDiffTarget::Unspecified {
         bail!("diff target is required");
     }
-    let preclassified_binary = preclassify_binary(root, request, target, cancellation)?;
+    let base = base_for(root, target, cancellation)?;
+    let base = base.as_ref();
+    let preclassified_binary = preclassify_binary(root, request, target, base, cancellation)?;
     if let Some(diff) = bounded_diff_metadata(
         root,
         &repository,
         request,
         target,
+        base,
         preclassified_binary,
         false,
         cancellation,
@@ -85,9 +124,7 @@ pub(super) fn read_diff(
         OsString::from("--full-index"),
         OsString::from("--binary"),
     ];
-    if target == v1::GitDiffTarget::Staged {
-        args.push(OsString::from("--cached"));
-    }
+    args.extend(target_args(target, base));
     args.push(OsString::from("--"));
     if target == v1::GitDiffTarget::Staged
         && !request.original_path.is_empty()
@@ -100,7 +137,10 @@ pub(super) fn read_diff(
     let output = git_output_cancellable(root, &refs, None, cancellation)?;
     ensure_success(&output, "git diff")?;
     let mut patch = output.output.stdout;
-    if patch.is_empty() && target == v1::GitDiffTarget::Unstaged {
+    if patch.is_empty()
+        && (target == v1::GitDiffTarget::Unstaged
+            || (target == v1::GitDiffTarget::Base && untracked(root, &request.path, cancellation)?))
+    {
         let worktree = WorktreeRoot::capture(root)?;
         let entry = worktree.entry(&request.path)?;
         if let Some(metadata) = entry.metadata()? {
@@ -110,6 +150,7 @@ pub(super) fn read_diff(
                     &repository,
                     request,
                     target,
+                    base,
                     true,
                     false,
                     cancellation,
@@ -164,13 +205,13 @@ pub(super) fn read_diff(
             too_large: false,
         }
     } else {
-        read_diff_contents(root, request, target, cancellation)?
+        read_diff_contents(root, request, target, base, cancellation)?
     };
-    let inlined_patch = if audience.includes_patch() {
-        patch.len()
-    } else {
-        0
-    };
+    // A mutation always reads its patch. The desktop gets it only when it is
+    // text it can draw and it fits the control lane on its own.
+    let send_patch =
+        audience == DiffAudience::Mutation || (!binary && patch.len() <= audience.inline_limit());
+    let inlined_patch = if send_patch { patch.len() } else { 0 };
     if contents
         .old
         .len()
@@ -183,13 +224,18 @@ pub(super) fn read_diff(
             &repository,
             request,
             target,
+            base,
             binary,
             true,
             cancellation,
         )?
         .ok_or_else(|| anyhow::anyhow!("Git diff exceeds the serialized frame budget"));
     }
-    let bodies = DiffBodies::place(contents.old, contents.new, audience.inline_body_limit());
+    let bodies = DiffBodies::place(
+        contents.old,
+        contents.new,
+        audience.inline_limit().saturating_sub(inlined_patch),
+    );
     Ok(v1::GitDiff {
         repository: Some(repository),
         target: target.into(),
@@ -200,11 +246,7 @@ pub(super) fn read_diff(
         new_content: bodies.new,
         old_content_ref: bodies.old_ref,
         new_content_ref: bodies.new_ref,
-        patch: if audience.includes_patch() {
-            patch
-        } else {
-            Vec::new()
-        },
+        patch: if send_patch { patch } else { Vec::new() },
         source_generation,
         binary,
         too_large: contents.too_large,
@@ -278,7 +320,8 @@ pub(super) fn read_diff_side(
         // same way. The inline read does this at its own entry point.
         validate_git_path(&request.original_path)?;
     }
-    Ok(read_side(root, request, target, side, cancellation)?.0)
+    let base = base_for(root, target, cancellation)?;
+    Ok(read_side(root, request, target, side, base.as_ref(), cancellation)?.0)
 }
 
 /// Where one side of a diff comes from. The single source of that truth.
@@ -290,18 +333,16 @@ fn read_side(
     request: &v1::GitRequest,
     target: v1::GitDiffTarget,
     side: v1::GitDiffContentSide,
+    base: Option<&branch::Base>,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<(Vec<u8>, bool)> {
     match (side, target) {
-        (v1::GitDiffContentSide::Old, v1::GitDiffTarget::Staged) => git_object(
+        (v1::GitDiffContentSide::Old, _) => git_object(
             root,
-            b"HEAD",
+            &old_prefix(target, base),
             old_object_path(request, target),
             cancellation,
         ),
-        (v1::GitDiffContentSide::Old, _) => {
-            git_object(root, b":0", old_object_path(request, target), cancellation)
-        }
         (v1::GitDiffContentSide::New, v1::GitDiffTarget::Staged) => {
             git_object(root, b":0", &request.path, cancellation)
         }
@@ -364,21 +405,20 @@ fn quote_patch_path(prefix: &[u8], path: &[u8]) -> Vec<u8> {
     quoted
 }
 
+#[allow(clippy::too_many_arguments)] // The default-branch base rides with the target.
 fn bounded_diff_metadata(
     root: &str,
     repository: &v1::GitRepository,
     request: &v1::GitRequest,
     target: v1::GitDiffTarget,
+    base: Option<&branch::Base>,
     binary: bool,
     force_too_large: bool,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<Option<v1::GitDiff>> {
     let old_path = old_object_path(request, target);
-    let old_size = if target == v1::GitDiffTarget::Staged {
-        object_size(root, b"HEAD", old_path, cancellation)?
-    } else {
-        object_size(root, b":0", old_path, cancellation)?
-    };
+    let old_prefix = old_prefix(target, base);
+    let old_size = object_size(root, &old_prefix, old_path, cancellation)?;
     let new_size = if target == v1::GitDiffTarget::Staged {
         object_size(root, b":0", &request.path, cancellation)?
     } else {
@@ -400,11 +440,10 @@ fn bounded_diff_metadata(
     hasher.update(&request.path);
     hasher.update(&old_size.unwrap_or(u64::MAX).to_be_bytes());
     hasher.update(&new_size.unwrap_or(u64::MAX).to_be_bytes());
+    update_object_identity(&mut hasher, root, &old_prefix, old_path, cancellation)?;
     if target == v1::GitDiffTarget::Staged {
-        update_object_identity(&mut hasher, root, b"HEAD", old_path, cancellation)?;
         update_object_identity(&mut hasher, root, b":0", &request.path, cancellation)?;
     } else {
-        update_object_identity(&mut hasher, root, b":0", old_path, cancellation)?;
         WorktreeRoot::capture(root)?
             .entry(&request.path)?
             .hash_identity(&mut hasher, cancellation)?;
@@ -428,6 +467,7 @@ fn preclassify_binary(
     root: &str,
     request: &v1::GitRequest,
     target: v1::GitDiffTarget,
+    base: Option<&branch::Base>,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<bool> {
     let mut args = vec![
@@ -435,9 +475,7 @@ fn preclassify_binary(
         OsString::from("--numstat"),
         OsString::from("-z"),
     ];
-    if target == v1::GitDiffTarget::Staged {
-        args.push(OsString::from("--cached"));
-    }
+    args.extend(target_args(target, base));
     args.push(OsString::from("--"));
     if target == v1::GitDiffTarget::Staged
         && !request.original_path.is_empty()
@@ -452,7 +490,12 @@ fn preclassify_binary(
     if output.stdout.starts_with(b"-\t-") {
         return Ok(true);
     }
-    if output.stdout.is_empty() && target == v1::GitDiffTarget::Unstaged {
+    // No numstat line means an untracked file, or, against the default branch,
+    // also a tracked file that did not change: only the first is sampled.
+    if output.stdout.is_empty()
+        && (target == v1::GitDiffTarget::Unstaged
+            || (target == v1::GitDiffTarget::Base && untracked(root, &request.path, cancellation)?))
+    {
         return WorktreeRoot::capture(root)?
             .entry(&request.path)?
             .sample_is_binary();
@@ -529,22 +572,12 @@ fn read_diff_contents(
     root: &str,
     request: &v1::GitRequest,
     target: v1::GitDiffTarget,
+    base: Option<&branch::Base>,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<DiffContents> {
-    let (old, old_missing) = read_side(
-        root,
-        request,
-        target,
-        v1::GitDiffContentSide::Old,
-        cancellation,
-    )?;
-    let (new, new_missing) = read_side(
-        root,
-        request,
-        target,
-        v1::GitDiffContentSide::New,
-        cancellation,
-    )?;
+    let side = |side| read_side(root, request, target, side, base, cancellation);
+    let (old, old_missing) = side(v1::GitDiffContentSide::Old)?;
+    let (new, new_missing) = side(v1::GitDiffContentSide::New)?;
     let too_large = old.len() > MAX_DIFF_CONTENT || new.len() > MAX_DIFF_CONTENT;
     Ok(DiffContents {
         old: if too_large { Vec::new() } else { old },
@@ -595,4 +628,15 @@ fn worktree_content(root: &str, path: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> 
             None => (Vec::new(), true),
         },
     )
+}
+
+/// What selects a diff target's two sides in `git diff`: the index against the
+/// worktree by default, `--cached` for HEAD against the index, and a commit
+/// against the worktree for the default branch.
+fn target_args(target: v1::GitDiffTarget, base: Option<&branch::Base>) -> Vec<OsString> {
+    match (target, base) {
+        (v1::GitDiffTarget::Staged, _) => vec![OsString::from("--cached")],
+        (v1::GitDiffTarget::Base, Some(base)) => vec![OsString::from(&base.merge_base)],
+        _ => Vec::new(),
+    }
 }

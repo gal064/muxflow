@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::connection_ui::{backend::TerminalBackend, bridge_events::ChannelSink};
 
 use super::model::{
-    self, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope, Mutation, StatusSnapshot,
-    path_bytes, target_name,
+    self, BranchSummary, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope, Mutation,
+    StatusSnapshot, path_bytes, target_name,
 };
 
 /// How Git reaches a host's helper.
@@ -89,6 +89,7 @@ fn command(scope: &GitScope, operation: &str) -> GitCommand {
         confirmation_token: String::new(),
         commit_message: String::new(),
         watch_id: String::new(),
+        branch: String::new(),
     }
 }
 
@@ -169,12 +170,15 @@ pub fn unwatch(
 }
 
 /// One round trip: the diff and the authoritative status it was read against.
-/// Bodies the host withheld from the control lane are then read over the bulk
-/// lane, where they cannot delay a keystroke.
+/// With `bodies`, the sides the host withheld from the control lane are then
+/// read over the bulk lane, where they cannot delay a keystroke. The hunks need
+/// only the patch, so only the whole file asks for them, or a diff whose patch
+/// was too large to send, which can only be shown whole.
 pub async fn diff(
     transport: Transport,
     scope: GitScope,
     request: DiffRequest,
+    bodies: bool,
 ) -> Result<(Diff, StatusSnapshot), String> {
     let wire = GitCommand {
         repository_id: request.repository_id.clone(),
@@ -189,10 +193,30 @@ pub async fn diff(
     };
     let answer = read(&transport, &scope, wire).await?;
     let (mut diff, status) = model::response_diff(model::response(answer)?, &request)?;
-    if diff.old_ref.is_some() || diff.new_ref.is_some() {
+    // No hunk to draw (an empty patch, a mode change, a pure rename) draws the
+    // whole file, which needs the sides.
+    let no_hunks = !diff
+        .patch
+        .split(|&byte| byte == b'\n')
+        .any(|line| line.starts_with(b"@@ "));
+    if (bodies || no_hunks) && (diff.old_ref.is_some() || diff.new_ref.is_some()) {
         read_bodies(&transport, &scope, &mut diff).await?;
     }
     Ok((diff, status))
+}
+
+/// What the working tree changes against the default branch.
+pub async fn branch_summary(
+    transport: Transport,
+    scope: GitScope,
+    repository_id: String,
+) -> Result<BranchSummary, String> {
+    let wire = GitCommand {
+        repository_id,
+        ..command(&scope, "branchSummary")
+    };
+    let answer = read(&transport, &scope, wire).await?;
+    model::response_branch_summary(model::response(answer)?)
 }
 
 /// Both withheld sides over one bulk read; a failure on either side stops the

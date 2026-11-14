@@ -70,6 +70,7 @@ impl Drop for Fixture {
     }
 }
 
+mod branch;
 mod capability_safety;
 mod mutation;
 mod push;
