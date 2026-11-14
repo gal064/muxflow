@@ -1,7 +1,11 @@
 //! What a chat adapter implements. Nothing above this trait names a provider.
 
-use std::sync::{Mutex, PoisonError, Weak};
+use std::{
+    path::Path,
+    sync::{Mutex, PoisonError, Weak},
+};
 
+use serde::{Deserialize, Serialize};
 use tmux_agent_protocol::v1;
 
 pub(crate) use v1::chat_event::Change;
@@ -22,10 +26,64 @@ impl ChatError {
     }
 }
 
+/// How an agent was started in a pane, read from its command line, which is
+/// how its chat is started in that pane. Kept on the pane, so the chat can be
+/// started again the same way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Launch {
+    /// What runs the agent: `claude`, or `node` and the script it was given.
+    pub(crate) program: Vec<String>,
+    /// The folder the agent was told to work in, when that is not the one it
+    /// was started in.
+    pub(crate) cwd: String,
+    /// Empty for the agent's own default.
+    pub(crate) model: String,
+    pub(crate) effort: String,
+    /// Full when the agent was started with its permission checks off.
+    pub(crate) full_access: bool,
+    /// Directories the agent may work in besides its own.
+    pub(crate) directories: Vec<String>,
+    /// The name the session goes by, when one was given.
+    pub(crate) name: String,
+    /// Arguments the agent's chat takes exactly as its terminal did.
+    pub(crate) passthrough: Vec<String>,
+    pub(crate) resume: Resume,
+    /// The last message kept of a conversation resumed part of the way.
+    pub(crate) resume_at: String,
+    /// The message given on the command line, sent as the chat's first.
+    #[serde(skip)]
+    pub(crate) prompt: String,
+}
+
+/// The conversation a chat starts on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Resume {
+    #[default]
+    Fresh,
+    /// The most recent conversation in the agent's folder.
+    Latest,
+    Session {
+        id: String,
+        /// Continue in a copy, leaving the session itself as it is.
+        fork: bool,
+    },
+}
+
+/// What runs in a chat pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PaneCommand {
+    pub(crate) argv: Vec<String>,
+    /// The agent speaks on its own stdin and stdout, which `chat-pipe` turns
+    /// into the pane's socket. Otherwise the agent listens on the socket
+    /// itself.
+    pub(crate) piped: bool,
+    /// The agent's id for the conversation this starts, when the command
+    /// line settles it. Empty when only the agent can say.
+    pub(crate) session: String,
+}
+
 /// One chat adapter, registered in `ChatRuntime` under its id.
-///
-/// Stream B adds what a pane process needs (`pane_command`, and the socket
-/// `connect` reads from); the scripted provider has no process.
 pub(crate) trait ChatProvider: Send + Sync {
     fn adapter_id(&self) -> &'static str;
 
@@ -34,7 +92,9 @@ pub(crate) trait ChatProvider: Send + Sync {
 
     /// The messages a pane's conversation already holds, oldest first. Runs
     /// on the lane of the connection that first opens the pane, ahead of that
-    /// connection's later requests, so it must not wait on anything slow.
+    /// connection's later requests, so it must not wait on anything slow. A
+    /// provider with a pane process reads its history on its session's own
+    /// task instead, and hands it over with `ChatSink::reset`.
     fn load_history(&self, pane_id: &str) -> Vec<v1::ChatItem>;
 
     /// Starts the session for one pane. Everything it has to say goes through
@@ -43,6 +103,35 @@ pub(crate) trait ChatProvider: Send + Sync {
     /// from then on nothing of it may publish: the sink names the pane, and
     /// the same pane may by then hold a new session.
     fn connect(&self, pane_id: &str, sink: ChatSink) -> Box<dyn ChatSession>;
+
+    /// Reads the command line of an agent of this adapter, `arguments` being
+    /// what follows the program. `resumed` is the session the agent itself
+    /// said it resumed, when it said so. `None` when that start cannot be a
+    /// chat, and the pane stays a terminal.
+    fn launch(&self, _arguments: &[String], _resumed: Option<&str>) -> Option<Launch> {
+        None
+    }
+
+    /// What runs in the pane for `launch`, the agent talking over `socket`.
+    /// `None` for a provider that has no pane process.
+    fn pane_command(&self, _launch: &Launch, _socket: &Path) -> Option<PaneCommand> {
+        None
+    }
+
+    /// Whether the agent says it has started, through its `SessionStart`
+    /// hook, as soon as it is up. One that does becomes a chat when it says
+    /// so, which is also when it says which session it resumed; any other
+    /// when its process is seen.
+    fn announces_start(&self) -> bool {
+        false
+    }
+
+    /// The arguments that start the agent in a terminal set as `options`
+    /// are: what a fork of a chat is started with, so that it has its
+    /// source's model and permissions.
+    fn terminal_options(&self, _options: &v1::ChatOptions) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One pane's live conversation with its provider.
@@ -107,5 +196,22 @@ impl ChatSink {
                 .unwrap_or_else(PoisonError::into_inner)
                 .publish(&self.key, change);
         }
+    }
+
+    /// Replaces the pane's timeline with the conversation as the provider
+    /// read it, oldest first. `complete` is false when the provider could not
+    /// read all of it. The connections that opened the pane get a snapshot.
+    pub(crate) fn reset(&self, items: Vec<v1::ChatItem>, complete: bool) {
+        if let Some(panes) = self.panes.upgrade() {
+            panes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .reset(&self.key, items, complete);
+        }
+    }
+
+    /// The pane this sink reports for.
+    pub(crate) fn key(&self) -> &super::PaneKey {
+        &self.key
     }
 }

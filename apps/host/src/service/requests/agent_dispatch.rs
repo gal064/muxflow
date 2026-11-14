@@ -434,7 +434,7 @@ fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {
 /// `/bin/sh` is named here because tmux would otherwise hand one string to the
 /// user's own shell, and not every shell can parse `${SHELL:-...}`. Separate
 /// arguments make tmux run it directly.
-fn agent_launch_argv(launch: LaunchSpec) -> [String; 3] {
+pub(super) fn agent_launch_argv(launch: LaunchSpec) -> [String; 3] {
     let agent_command = std::iter::once(launch.program.to_owned())
         .chain(launch.arguments)
         .map(|argument| shell_quote(&argument))
