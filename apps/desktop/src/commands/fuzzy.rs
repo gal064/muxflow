@@ -1,5 +1,5 @@
 //! Subsequence matching for the palettes. Port of
-//! `apps/desktop/src/commands/fuzzy.ts`.
+//! the Tauri app's `commands/fuzzy.ts`.
 
 const CONSECUTIVE_BONUS: i64 = 8;
 const WORD_START_BONUS: i64 = 6;

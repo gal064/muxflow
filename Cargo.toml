@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "apps/desktop-gpui",
+  "apps/desktop",
   "apps/host",
   "crates/desktop-core",
   "crates/protocol",
@@ -38,8 +38,8 @@ rust-version = "1.97.1"
 
 # A development build runs the same control parser, protocol codec and hashing
 # as a release build, and at opt-level 0 those are slow enough to be mistaken
-# for product latency — every measurement taken against `tauri dev` was really
-# measuring the compiler. Level 1 on our own crates keeps builds quick and
+# for product latency — measurements taken against an opt-level 0 build were
+# really measuring the compiler. Level 1 on our own crates keeps builds quick and
 # debugging usable; dependencies are compiled once, so they get full
 # optimisation.
 [profile.dev]

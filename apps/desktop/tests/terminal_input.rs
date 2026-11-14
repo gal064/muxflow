@@ -16,7 +16,7 @@ use gpui_kit::{
     MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollEvent, Styled,
     TestAppContext, VisualTestContext, Window, base::Root, div, font, point, px,
 };
-use muxflow_gpui::{
+use muxflow::{
     connection_ui::backend::{EngineChannel, TerminalBackend},
     terminal::{self, TerminalLink, TerminalPane, cell_metrics::CellMetrics, link::POLL_ACTIVE},
     theme,
@@ -100,7 +100,7 @@ impl TerminalBackend for Fake {
 
     fn start_upload(
         &self,
-        _: muxflow_gpui::terminal::integration::transfers::UploadRequest,
+        _: muxflow::terminal::integration::transfers::UploadRequest,
         _: Arc<dyn desktop_core::platform::EventSink>,
     ) -> Result<String, String> {
         Err("no uploads here".into())

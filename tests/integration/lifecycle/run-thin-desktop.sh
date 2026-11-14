@@ -18,7 +18,7 @@ trap cleanup EXIT
 
 cd "$repo_root"
 cargo build --release --bin muxflow-host
-pnpm tauri build --no-bundle
+cargo build --release -p muxflow
 mkdir -p "$stage"
 release_target="${CARGO_TARGET_DIR:-$repo_root/target}/release"
 cp "$release_target/muxflow" "$stage/muxflow"
@@ -35,7 +35,6 @@ rm -rf "$runtime"
 mkdir -p "$runtime/config" "$runtime/data" "$runtime/cache" "$runtime/host"
 tmux -L "$tmux_socket" new-session -d -s thin 'bash'
 env \
-  GDK_BACKEND=x11 \
   XDG_CONFIG_HOME="$runtime/config" \
   XDG_DATA_HOME="$runtime/data" \
   XDG_CACHE_HOME="$runtime/cache" \

@@ -1,4 +1,4 @@
 fn main() {
-    muxflow_gpui::perf::start_clock();
-    muxflow_gpui::app::run();
+    muxflow::perf::start_clock();
+    muxflow::app::run();
 }

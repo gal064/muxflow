@@ -26,10 +26,6 @@ confidence-threshold = 0.9
 # permissive in the plain sense. Keep this list short and add a reason.
 exceptions = [
   # Mozilla Public License 2.0: file-level copyleft, used unmodified.
-  { crate = "cssparser", allow = ["MPL-2.0"] },        # via tauri-utils
-  { crate = "cssparser-macros", allow = ["MPL-2.0"] }, # via cssparser
-  { crate = "dtoa-short", allow = ["MPL-2.0"] },       # via cssparser
-  { crate = "selectors", allow = ["MPL-2.0"] },        # via tauri-utils
   { crate = "option-ext", allow = ["MPL-2.0"] },       # via dirs-sys
   { crate = "symphonia", allow = ["MPL-2.0"] },        # voice audio decode
   { crate = "symphonia-codec-aac", allow = ["MPL-2.0"] },

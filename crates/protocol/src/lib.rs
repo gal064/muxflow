@@ -15,10 +15,10 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/tmux_agent.protocol.v1.rs"));
 
     impl AgentHookWiring {
-        /// The name this state travels under across the WebView boundary.
+        /// The name this state travels under to the desktop's views.
         ///
         /// Here, beside the enum, because it was three copies: one in the
-        /// helper's CLI, a byte-identical one in the desktop's Tauri bridge,
+        /// helper's CLI, a byte-identical one in the old desktop's bridge,
         /// and a third as a TypeScript union. Adding a state meant editing all
         /// three, and missing one degraded silently to "unspecified" with no
         /// compile error in either language.

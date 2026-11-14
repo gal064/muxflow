@@ -1,6 +1,6 @@
 //! Native delivery acknowledgement validation and host-credit forwarding.
 //!
-//! This is the sole boundary that translates JavaScript's cumulative wire
+//! This is the sole boundary that translates the app's cumulative wire
 //! ownership back into the host's cumulative terminal byte/record credit.
 
 use super::*;

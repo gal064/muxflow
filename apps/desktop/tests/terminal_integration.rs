@@ -16,7 +16,7 @@ use futures::future::BoxFuture;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, Entity, TestAppContext, Window, WindowOptions, font, px,
 };
-use muxflow_gpui::{
+use muxflow::{
     connection_ui::backend::{EngineChannel, TerminalBackend},
     terminal::{
         TerminalLink, TerminalPane,

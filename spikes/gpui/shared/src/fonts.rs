@@ -3,7 +3,7 @@
 //!
 //! GPUI's Linux text system (cosmic-text / fontdb) cannot read `.woff2`; it
 //! drops the bytes without an error. The files here are TTFs converted
-//! losslessly from `apps/desktop/src/assets/fonts/*.woff2` (see
+//! losslessly from `apps/desktop/assets/fonts/*.woff2` (see
 //! `assets/fonts/convert.sh`).
 //!
 //! The Inter file's family name is "Inter Variable", not "Inter" as the CSS

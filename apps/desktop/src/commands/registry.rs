@@ -1,5 +1,5 @@
 //! The one command registry: every command's id, title, group, default keys and
-//! availability rule. Port of `apps/desktop/src/commands/registry.ts`.
+//! availability rule. Port of the Tauri app's `commands/registry.ts`.
 
 pub type CommandId = &'static str;
 

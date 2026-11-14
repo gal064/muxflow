@@ -1,12 +1,11 @@
-//! The native app resolves the same directories as Tauri. These expected values
-//! are the golden ones in `apps/desktop/src-tauri/src/golden_paths.rs`. As
-//! there, the environment is set on a child test process, since other tests
-//! read `HOME`.
+//! The native app resolves the same directories as the Tauri app did. These
+//! expected values are that app's golden ones. The environment is set on a
+//! child test process, since other tests read `HOME`.
 
 use std::process::Command;
 
 use desktop_core::platform::AppPaths;
-use muxflow_gpui::paths::NativePaths;
+use muxflow::paths::NativePaths;
 
 fn run_child(xdg: &[(&str, &str)]) {
     let mut child = Command::new(std::env::current_exe().unwrap());

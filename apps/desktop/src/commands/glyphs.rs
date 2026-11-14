@@ -1,5 +1,5 @@
 //! Renders a stored shortcut in the notation the platform's own menus use. Port
-//! of `apps/desktop/src/commands/shortcutGlyphs.ts`.
+//! of the Tauri app's `commands/shortcutGlyphs.ts`.
 
 use super::registry::Platform;
 

@@ -12,7 +12,7 @@ struct DiffContents {
     too_large: bool,
 }
 
-// A textual replacement can carry old + new once as Monaco contents and a
+// A textual replacement can carry old + new once as editor contents and a
 // second time in the patch. Keeping the source pair below 7 MiB leaves ample
 // protobuf/frame headroom under the 16 MiB protocol ceiling.
 const MAX_DIFF_SOURCE_PAIR: u64 = 7 * 1024 * 1024;

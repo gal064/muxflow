@@ -63,7 +63,7 @@ ${rustTheme("light", light)}`;
 
 const outputs = [
   [new URL("../palette.css", import.meta.url), css],
-  [new URL("../../../apps/desktop-gpui/src/theme/palette.rs", import.meta.url), rust],
+  [new URL("../../../apps/desktop/src/theme/palette.rs", import.meta.url), rust],
 ];
 for (const [target, content] of outputs) {
   if (process.argv.includes("--check")) {

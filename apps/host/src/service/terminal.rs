@@ -502,7 +502,7 @@ fn apply_membership_update(
 /// Gives tmux the palette its control client cannot discover from a TTY.
 ///
 /// tmux consumes an application's OSC 10/11 query before pane output reaches
-/// xterm. A `-C` client has no terminal of its own, so without these documented
+/// the desktop's terminal. A `-C` client has no terminal of its own, so without these documented
 /// `refresh-client -r` reports tmux answers black; Codex then derives its
 /// `rgb(30,30,30)` composer from that false background. The values are the
 /// connection's [`TerminalColors`]: the desktop sends the palette on screen, so
@@ -1704,9 +1704,10 @@ const MAX_HISTORY_SKIP_LINES: u32 = MAX_HISTORY_LINES;
 /// The old objection to dropping it was that scrollback spliced in hard-broken
 /// never reflows and copies back as separate lines. That is answered on the
 /// desktop rather than here: it composes the page so that a row filling the
-/// grid is written *without* a line break, xterm auto-wraps it, and the
-/// continuation carries xterm's own `isWrapped` — the same reflow and the same
-/// copy as a line the pane printed live. See `composeHistoryPage`.
+/// grid is written *without* a line break, the terminal auto-wraps it, and the
+/// continuation carries the terminal's own wrap flag — the same reflow and the
+/// same copy as a line the pane printed live. See `compose_history_page` in
+/// `crates/terminal-engine`.
 ///
 /// The trailing `__ADE_HISTORY_META__` leg is how the answer says whether it
 /// reached the top. The rows it carries cannot say: tmux clamps a range that

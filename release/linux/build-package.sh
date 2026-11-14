@@ -35,7 +35,7 @@ case "$arch" in
     ;;
 esac
 
-version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml)
+version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop/Cargo.toml)
 source_date_epoch=${SOURCE_DATE_EPOCH:-1704067200}
 output_dir=${ADE_RELEASE_OUTPUT_DIR:-"$repo_root/tmp/release"}
 mkdir -p "$repo_root/tmp" "$output_dir"
@@ -66,7 +66,7 @@ case "$native_arch" in
 esac
 
 if [[ "$arch" == "$native_arch" ]]; then
-  cargo build --locked --release -p muxflow-gpui
+  cargo build --locked --release -p muxflow
   binary_dir="$target_root/release"
 else
   target_libdir=$(rustc --print target-libdir --target "$rust_target" 2>/dev/null || true)
@@ -80,7 +80,7 @@ else
     exit 69
   fi
   export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker"
-  cargo build --locked --release --target "$rust_target" -p muxflow-gpui
+  cargo build --locked --release --target "$rust_target" -p muxflow
   binary_dir="$target_root/$rust_target/release"
 fi
 
@@ -93,7 +93,7 @@ fi
 package_name="muxflow-$version-linux-$arch"
 package_root="$build_root/$package_name"
 mkdir -p "$package_root/bin" "$package_root/share/applications" "$package_root/share/icons/hicolor/256x256/apps"
-install -m 0755 "$binary_dir/muxflow-gpui" "$package_root/bin/muxflow"
+install -m 0755 "$binary_dir/muxflow" "$package_root/bin/muxflow"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host-linux-$arch"
 if [[ "$arch" == x86_64 && -n "${ADE_HOST_HELPER_AARCH64_OVERRIDE:-}" ]]; then

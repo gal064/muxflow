@@ -21,7 +21,7 @@ use gpui_kit::{
     div, point, px, size,
     test::{TestQueryExt, TestWindowExt},
 };
-use muxflow_gpui::{
+use muxflow::{
     app::{self, Core},
     commands::{self, Commands, keymap::ShortcutOverrides, registry::Platform},
     context_menu::{self, Entry, Item},
@@ -417,7 +417,7 @@ impl Render for Row {
         };
         let entries = Rc::new(vec![
             Entry::from(
-                Item::new("Open", log("open")).hint(&muxflow_gpui::menus::RunCommand {
+                Item::new("Open", log("open")).hint(&muxflow::menus::RunCommand {
                     id: "commands.show",
                 }),
             ),

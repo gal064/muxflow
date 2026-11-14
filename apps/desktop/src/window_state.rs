@@ -1,5 +1,5 @@
 //! Window geometry: restored at launch and saved as the window moves. Port of
-//! `apps/desktop/src/features/shell/windowGeometry.ts`.
+//! the Tauri app's `features/shell/windowGeometry.ts`.
 //!
 //! The saved form is the one Tauri wrote, so an upgrade keeps the window where
 //! it was: physical pixels plus the scale they were captured at. GPUI measures in

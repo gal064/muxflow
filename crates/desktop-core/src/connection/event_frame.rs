@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(&frame[sequence_at + 8..], payload);
     }
 
-    /// `features/terminal/api.ts` reads kind 19 as "automations changed".
+    /// `connection_ui/bridge_events.rs` in the app reads kind 19 as "automations changed".
     #[test]
     fn an_automation_change_is_frame_kind_19_with_its_sequence_and_nothing_else() {
         let frame = encode_event_with_sequence(TerminalEvent::AutomationChanged, 31);

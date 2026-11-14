@@ -11,7 +11,7 @@
 //! | [`features`] | The single feature-registration point |
 //! | [`theme`] | Generated palette, metrics, light/dark, UI scale |
 //! | [`fonts`] | Embedded fonts |
-//! | [`paths`] | [`paths::NativePaths`], the same directories Tauri uses |
+//! | [`paths`] | [`paths::NativePaths`], the same directories Tauri used |
 //! | [`ui`] | Window shell and title bar; the accessibility baseline |
 //! | [`ui::chrome`] | Window body: dock, sidebar, tabs, right panel |
 //! | [`commands`] | Command registry, keymap, palette, Quick Open |

@@ -1,4 +1,4 @@
-//! Rebinding commands. Port of `apps/desktop/src/commands/ShortcutEditorDialog.tsx`.
+//! Rebinding commands. Port of the Tauri app's `commands/ShortcutEditorDialog.tsx`.
 
 use gpui_kit::{
     App, AppContext, Context, Entity, Focusable, FontWeight, InteractiveElement, IntoElement,

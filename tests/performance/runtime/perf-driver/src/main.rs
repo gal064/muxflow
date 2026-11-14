@@ -287,7 +287,7 @@ enum Incoming {
     Closed(String),
 }
 
-/// Matches `ACTION_RECONCILE_RETRIES` in `features/tmux/actionReconciliation.ts`.
+/// Matches `RECONCILE_RETRIES` in `apps/desktop/src/workspaces/actions.rs`.
 const ACTION_RECONCILE_RETRIES: usize = 2;
 
 struct PerfClient {
@@ -298,7 +298,7 @@ struct PerfClient {
     server_identity: String,
     obs: Observations,
     responses: BTreeMap<u64, v1::Response>,
-    /// Matches `ACTION_RECONCILE_TIMEOUT_MS` in the desktop reconciliation loop.
+    /// Matches the desktop's reconcile budget (`RECONCILE_POLLS` polls of `RECONCILE_POLL_MS`).
     reconcile_timeout: Duration,
     connection_epoch: u64,
     delivered_terminal_bytes: u64,

@@ -62,7 +62,7 @@ impl dyn EventSink {
 }
 
 /// The per-user directories the backend stores into. The three `app_*` ones are
-/// pinned by the golden test in `apps/desktop/src-tauri/src/golden_paths.rs`.
+/// pinned by the golden test in `apps/desktop/tests/paths.rs`.
 pub trait AppPaths {
     fn app_config_dir(&self) -> Result<PathBuf, String>;
     fn app_data_dir(&self) -> Result<PathBuf, String>;

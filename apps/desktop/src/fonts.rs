@@ -1,4 +1,4 @@
-//! Embedded fonts: JetBrains Mono and Inter, the faces the Tauri app ships.
+//! Embedded fonts: JetBrains Mono and Inter, the faces the Tauri app shipped.
 //!
 //! `.woff2` is unreadable to GPUI's Linux text system (it drops the bytes with
 //! no error), and variable Inter's weights are not honored there, so these are

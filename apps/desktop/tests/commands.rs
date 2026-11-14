@@ -1,5 +1,5 @@
-//! The registry against today's desktop app, and the palette, Quick Open and
-//! dialogs driven through GPUI's test platform.
+//! The registry, and the palette, Quick Open and dialogs driven through GPUI's
+//! test platform.
 
 use std::{
     cell::RefCell,
@@ -20,7 +20,7 @@ use gpui_kit::{
     point, px, size,
     test::{TestEventExt, TestQueryExt, TestWindowExt},
 };
-use muxflow_gpui::{
+use muxflow::{
     agents::model::DisplayState,
     app::{self, Core},
     commands::{
@@ -39,8 +39,6 @@ use muxflow_gpui::{
     ui::shell::Shell,
 };
 
-const REGISTRY_TS: &str = include_str!("../../desktop/src/commands/registry.ts");
-
 /// The primary modifier, in stored form.
 const PRIMARY: &str = if cfg!(target_os = "macos") {
     "Meta"
@@ -48,74 +46,9 @@ const PRIMARY: &str = if cfg!(target_os = "macos") {
     "Ctrl"
 };
 
-fn field(line: &str, name: &str) -> Option<String> {
-    let value = line.split_once(&format!("{name}: \""))?.1;
-    Some(value.split('"').next()?.to_owned())
-}
-
+/// The 18 positional selectors, generated in the registry.
 #[test]
-fn the_registry_matches_registry_ts() {
-    let parsed: Vec<&str> = REGISTRY_TS
-        .lines()
-        .filter(|line| line.trim_start().starts_with("{ id: \""))
-        .collect();
-    // Every command but the 18 generated positional selectors is one line there.
-    assert_eq!(parsed.len(), 64);
-    for line in &parsed {
-        let id = field(line, "id").unwrap();
-        let command = COMMANDS
-            .iter()
-            .find(|command| command.id == id)
-            .unwrap_or_else(|| panic!("{id} is in registry.ts but not the Rust registry"));
-        assert_eq!(
-            field(line, "title").as_deref(),
-            Some(command.title),
-            "{id} title"
-        );
-        assert_eq!(
-            field(line, "group").as_deref(),
-            Some(command.group),
-            "{id} group"
-        );
-        assert_eq!(field(line, "mac").as_deref(), command.mac, "{id} mac");
-        assert_eq!(field(line, "linux").as_deref(), command.linux, "{id} linux");
-        assert_eq!(
-            line.contains("mutates: true"),
-            command.mutates,
-            "{id} mutates"
-        );
-        assert_eq!(
-            line.contains("destructive: true"),
-            command.destructive,
-            "{id} destructive"
-        );
-        assert_eq!(
-            line.contains("nativeFallback: true"),
-            command.native_fallback,
-            "{id} fallback"
-        );
-        assert_eq!(
-            field(line, "requires").map(|value| value.to_lowercase()),
-            command
-                .requires
-                .map(|value| format!("{value:?}").to_lowercase()),
-            "{id} requires"
-        );
-        assert!(!command.palette_hidden, "{id} hidden");
-    }
-    for template in [
-        "`workspace.select${digit}`",
-        "`Go to workspace ${digit}`",
-        "{ mac: `Meta+${digit}`, linux: `Ctrl+${digit}` }",
-        "`tab.select${digit}`",
-        "`Go to tab ${digit}`",
-        "{ mac: `Ctrl+${digit}`, linux: `Alt+${digit}` }",
-    ] {
-        assert!(
-            REGISTRY_TS.contains(template),
-            "{template} changed in registry.ts"
-        );
-    }
+fn the_registry_generates_the_positional_selectors() {
     for digit in 1..=9 {
         let check = |id: String, title: String, mac: String, linux: String| {
             let command = COMMANDS.iter().find(|command| command.id == id).unwrap();
@@ -140,8 +73,7 @@ fn the_registry_matches_registry_ts() {
     assert_eq!(COMMANDS.len(), 64 + 18);
 }
 
-/// id, macOS key, Linux key, `-` for none. Pins the defaults independently of
-/// the TypeScript source, which goes away at cutover.
+/// id, macOS key, Linux key, `-` for none. Pins the default shortcuts.
 const DEFAULT_KEYMAP: &str = "\
 commands.show Meta+K Ctrl+K
 workspaces.switch Meta+P Ctrl+P

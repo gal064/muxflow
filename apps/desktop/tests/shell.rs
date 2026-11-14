@@ -8,7 +8,7 @@ use gpui_kit::{
     App, Context, IntoElement, ParentElement, Render, Role, Styled, TestAppContext, Window,
     component::Theme, div, px, test::TestQueryExt,
 };
-use muxflow_gpui::{
+use muxflow::{
     app::{self, Core},
     theme::{self, Appearance},
     ui::{shell::Shell, title_bar::WindowControls},
