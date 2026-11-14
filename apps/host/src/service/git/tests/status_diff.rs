@@ -182,8 +182,11 @@ async fn diff_preserves_crlf_missing_eof_binary_and_symlink_target() {
     let text = service.diff_only(&request, None).await.unwrap();
     assert_eq!(text.old_content, b"one\r\ntwo");
     assert_eq!(text.new_content, b"one\r\nchanged");
-    // The client response carries content, not the patch the editor never read.
-    assert!(text.patch.is_empty());
+    // The client response carries the patch its hunks are drawn from.
+    assert_eq!(
+        text.patch,
+        service.diff_with_patch(&request).await.unwrap().patch
+    );
     let marker = b"\\ No newline at end of file";
     assert!(
         service
