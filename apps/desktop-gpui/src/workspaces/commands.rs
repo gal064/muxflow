@@ -37,8 +37,9 @@ use super::{
     dialog,
     focus_history::Direction,
     model::{
-        CombinedTab, TabKind, bulk_close_outcome_status, close_app_tab, dock_app_tab,
-        ordered_sessions, pin_app_tab, reorder_app_tab, selectable_tabs, undock_app_tab,
+        CombinedTab, TabKind, bulk_close_disabled, bulk_close_outcome_status, close_app_tab,
+        dock_app_tab, ordered_sessions, pin_app_tab, reorder_app_tab, selectable_tabs,
+        tabs_to_close_non_agent, undock_app_tab,
     },
     navigation::{PaneDirection, adjacent_pane, relative_window_reorder_action},
 };
@@ -77,6 +78,7 @@ const SHELL_COMMANDS: &[CommandId] = &[
     "window.moveLeft",
     "window.moveRight",
     "window.close",
+    "window.closeNonAgent",
     "pane.splitRight",
     "pane.splitDown",
     "pane.focusLeft",
@@ -664,6 +666,15 @@ pub fn run(
     }
     match id {
         "session.new" => return dialog::open(this, window, cx),
+        "window.closeNonAgent" => {
+            return this.update(cx, |this, cx| {
+                let view = this.view(cx);
+                let tabs = tabs_to_close_non_agent(&view.tabs);
+                if !bulk_close_disabled(&tabs, view.can_mutate) {
+                    this.close_tab_set(view.scope, tabs, true, cx);
+                }
+            });
+        }
         "tab.previous" => return this.update(cx, |this, cx| this.select_relative_tab(-1, cx)),
         "tab.next" => return this.update(cx, |this, cx| this.select_relative_tab(1, cx)),
         "focus.back" => return this.update(cx, |this, cx| this.step_history(Direction::Back, cx)),
