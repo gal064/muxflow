@@ -1,0 +1,787 @@
+//! How a pane becomes a chat (docs/design/chat-plan.md §3).
+//!
+//! In Chat mode an agent started in a terminal is started again, in the same
+//! pane, as the headless process a chat talks to. What it was started with
+//! is read from its process: its command line, its environment and its
+//! folder. Only an agent that has just started is replaced, whatever says it
+//! started, so turning Chat mode on never takes a running terminal session
+//! away, and neither does a session that starts inside one.
+//!
+//! Two things say an agent has started. Its own `SessionStart` hook, which
+//! also says which session it resumed; and, for an agent whose hook is not
+//! installed or comes too late, its process appearing in the pane.
+
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
+
+use tmux_agent_protocol::v1;
+
+use super::{
+    ChatRuntime, PaneKey, SessionCommand, pane,
+    provider::{ChatProvider, Launch},
+};
+use crate::service::agents::adapters;
+
+/// The oldest a process may be when it is seen and still be replaced. Its
+/// user has typed nothing into it yet.
+const MAX_SEEN_AGE: Duration = Duration::from_secs(10);
+/// The oldest a `SessionStart` may be and still start a chat. One that waited
+/// in the mailbox of a daemon that was down is about a session somebody may
+/// be typing into by now, and replacing that would take their work away.
+const MAX_HOOK_AGE_MILLIS: i64 = 10_000;
+/// The oldest a process may be when its `SessionStart` arrives and still be
+/// replaced. The hook names a pane, not a process: an agent that has run for
+/// longer is not the one that just said it started, but one that resumed
+/// another session or started an agent of its own.
+const MAX_HOOKED_AGE: Duration = Duration::from_secs(20);
+const MAX_ARGV_BYTES: usize = 64 * 1024;
+const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROCESSES: usize = 32;
+const MAX_DEPTH: usize = 4;
+/// Agents seen and left alone, remembered so each is looked at once.
+const MAX_DECLINED: usize = 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Trigger {
+    /// The agent's process is in the pane, beneath the pane's own process
+    /// `pane_pid`.
+    Seen { pane_pid: u32 },
+    /// The agent said it started; `resumed` is the session it said it
+    /// resumed.
+    Hooked { resumed: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Candidate {
+    key: PaneKey,
+    adapter_id: &'static str,
+    trigger: Trigger,
+}
+
+#[derive(Default)]
+struct Work {
+    /// Waiting to be looked at, or being looked at.
+    queued: BTreeSet<Candidate>,
+    /// Agents seen that are not to become chats, by pane and process.
+    declined: BTreeSet<(PaneKey, u32)>,
+}
+
+static WORK: Mutex<Work> = Mutex::new(Work {
+    queued: BTreeSet::new(),
+    declined: BTreeSet::new(),
+});
+/// One conversion at a time: each reads a pane and then replaces what runs
+/// in it.
+static RUNNING: Mutex<()> = Mutex::new(());
+
+/// The agents process detection found, one per pane at most. Called on every
+/// look at tmux, so it does nothing but queue.
+pub(crate) fn agents_detected<'a>(
+    server_identity: &str,
+    agents: impl Iterator<Item = (&'a tmux_control::Pane, &'static str)>,
+) {
+    let runtime = ChatRuntime::global();
+    if runtime.agent_mode() != v1::ChatAgentMode::Chat {
+        return;
+    }
+    for (pane, adapter_id) in agents {
+        if pane.chat_adapter_id.is_empty() && runtime.provider(adapter_id).is_some() {
+            submit(Candidate {
+                key: PaneKey {
+                    server_identity: server_identity.to_owned(),
+                    pane_id: pane.id.clone(),
+                },
+                adapter_id,
+                trigger: Trigger::Seen {
+                    pane_pid: pane.pane_pid,
+                },
+            });
+        }
+    }
+}
+
+/// One hook event, as the agent runtime takes it in.
+pub(crate) fn agent_hooked(event: &v1::AgentHookEvent, active_server_identity: &str) {
+    let runtime = ChatRuntime::global();
+    if runtime.agent_mode() != v1::ChatAgentMode::Chat
+        || event.origin_server_identity != active_server_identity
+    {
+        return;
+    }
+    let adapter = if event.adapter_id.is_empty() {
+        adapters::adapter(v1::AgentAdapterKind::try_from(event.adapter).unwrap_or_default())
+    } else {
+        adapters::by_id(&event.adapter_id)
+    };
+    let Some(adapter_id) = adapter.map(|adapter| adapter.kind()) else {
+        return;
+    };
+    if !runtime
+        .provider(adapter_id)
+        .is_some_and(|provider| provider.announces_start())
+    {
+        return;
+    }
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&event.payload_json) else {
+        return;
+    };
+    let text = |name: &str| payload.get(name).and_then(serde_json::Value::as_str);
+    if text("hook_event_name") != Some("SessionStart") {
+        return;
+    }
+    // A session also "starts" when it is cleared or compacted, which is the
+    // same agent carrying on.
+    let source = text(adapters::SESSION_START_SOURCE_FIELD).unwrap_or("startup");
+    if !matches!(source, "startup" | "resume") {
+        return;
+    }
+    if !hook_is_fresh(event.occurred_at_unix_millis, super::now_unix_millis()) {
+        return;
+    }
+    let session = if event.native_session_id.is_empty() {
+        text("session_id").unwrap_or_default()
+    } else {
+        &event.native_session_id
+    };
+    submit(Candidate {
+        key: PaneKey {
+            server_identity: active_server_identity.to_owned(),
+            pane_id: event.pane_id.clone(),
+        },
+        adapter_id,
+        trigger: Trigger::Hooked {
+            resumed: (source == "resume" && !session.is_empty()).then(|| session.to_owned()),
+        },
+    });
+}
+
+/// A hook that does not say when it happened may have happened at any time.
+fn hook_is_fresh(occurred_at_unix_millis: i64, now_unix_millis: i64) -> bool {
+    occurred_at_unix_millis > 0 && now_unix_millis - occurred_at_unix_millis <= MAX_HOOK_AGE_MILLIS
+}
+
+/// What is known of an agent when it is decided whether it becomes a chat.
+struct Facts {
+    /// Its process was seen; otherwise it said it started.
+    seen: bool,
+    /// How long it has run, when that could be read.
+    age: Option<Duration>,
+    /// How long Chat mode has been on, when that is known.
+    chat_mode_age: Option<Duration>,
+    /// It says when it starts, and its hook is installed.
+    announces: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Replace,
+    /// Not this time.
+    Leave,
+    /// Not this process, however often it is seen.
+    Decline,
+}
+
+fn verdict(facts: &Facts) -> Verdict {
+    // An agent that was running before Chat mode was turned on was started
+    // in a terminal on purpose, and stays one whatever it says later.
+    let predates_mode = facts
+        .age
+        .is_some_and(|age| facts.chat_mode_age.is_some_and(|on| age >= on));
+    if !facts.seen {
+        let young = facts.age.is_some_and(|age| age <= MAX_HOOKED_AGE);
+        return if young && !predates_mode {
+            Verdict::Replace
+        } else {
+            Verdict::Leave
+        };
+    }
+    let young = facts.age.is_some_and(|age| age <= MAX_SEEN_AGE) && !predates_mode;
+    // One whose hook is installed says it started, and says more.
+    if young && !facts.announces {
+        Verdict::Replace
+    } else {
+        Verdict::Decline
+    }
+}
+
+fn work() -> std::sync::MutexGuard<'static, Work> {
+    WORK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn submit(candidate: Candidate) {
+    // Outside the daemon's runtime there is nothing to start a chat with.
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    if !work().queued.insert(candidate.clone()) {
+        return;
+    }
+    runtime.spawn_blocking(move || {
+        {
+            let _one = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+            convert(&candidate);
+        }
+        work().queued.remove(&candidate);
+    });
+}
+
+fn decline(key: &PaneKey, pid: u32) {
+    let mut work = work();
+    if work.declined.len() >= MAX_DECLINED {
+        work.declined.clear();
+    }
+    work.declined.insert((key.clone(), pid));
+}
+
+fn convert(candidate: &Candidate) {
+    let runtime = ChatRuntime::global();
+    let Candidate {
+        key,
+        adapter_id,
+        trigger,
+    } = candidate;
+    let Some(provider) = runtime.provider(adapter_id).cloned() else {
+        return;
+    };
+    if runtime.agent_mode() != v1::ChatAgentMode::Chat {
+        return;
+    }
+    let proc_root = Path::new("/proc");
+    let seen = matches!(trigger, Trigger::Seen { .. });
+    // Every look at tmux sees the same agents again: one that was left alone
+    // is known by its process, before anything is asked of tmux.
+    if let Trigger::Seen { pane_pid } = trigger {
+        let known = find_agent(proc_root, *pane_pid, adapter_id)
+            .is_some_and(|agent| work().declined.contains(&(key.clone(), agent.pid)));
+        if known {
+            return;
+        }
+    }
+    // A pane that is a chat already is never made one again: its headless
+    // agent starts a session too, and says so.
+    let Some(tag) = pane::read(&key.pane_id).filter(|tag| tag.adapter.is_empty()) else {
+        return;
+    };
+    let Some(agent) = find_agent(proc_root, tag.pid, adapter_id) else {
+        return;
+    };
+    if seen && work().declined.contains(&(key.clone(), agent.pid)) {
+        return;
+    }
+    match verdict(&Facts {
+        seen,
+        age: agent.age,
+        chat_mode_age: runtime.chat_mode_age(),
+        announces: seen && provider.announces_start() && hook_installed(adapter_id),
+    }) {
+        Verdict::Replace => {}
+        Verdict::Leave => return,
+        Verdict::Decline => {
+            decline(key, agent.pid);
+            return;
+        }
+    }
+    let resumed = match trigger {
+        Trigger::Hooked { resumed } => resumed.as_deref(),
+        Trigger::Seen { .. } => None,
+    };
+    let Some((program, arguments)) = split_program(&agent.argv) else {
+        return;
+    };
+    let Some(mut launch) = provider.launch(arguments, resumed) else {
+        if seen {
+            decline(key, agent.pid);
+        }
+        return;
+    };
+    launch.program = program.to_vec();
+    let prompt = std::mem::take(&mut launch.prompt);
+    if replace(&key.pane_id, provider.as_ref(), &agent, &launch, "").is_err() {
+        if seen {
+            decline(key, agent.pid);
+        }
+        return;
+    }
+    runtime.restart(key, adapter_id);
+    super::topology_changed();
+    if !prompt.trim().is_empty() {
+        let _ = runtime.command(
+            key,
+            adapter_id,
+            SessionCommand::Send {
+                text: prompt,
+                item_id: String::new(),
+            },
+        );
+    }
+}
+
+/// Replaces the agent running in a chat pane with one started from `launch`:
+/// how a provider whose agent cannot go back in a conversation while it runs
+/// starts it again from an earlier point. `rewound_to` is the pane's note of
+/// that point.
+pub(super) fn restart_agent(
+    pane_id: &str,
+    provider: &dyn ChatProvider,
+    launch: &Launch,
+    rewound_to: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let tag = pane::read(pane_id).context("the pane is gone")?;
+    let agent = find_agent(Path::new("/proc"), tag.pid, provider.adapter_id())
+        .context("the agent is not running")?;
+    replace(pane_id, provider, &agent, launch, rewound_to)
+}
+
+/// Starts `launch` in the pane in place of `agent`, in its folder and with
+/// its environment, and tags the pane.
+fn replace(
+    pane_id: &str,
+    provider: &dyn ChatProvider,
+    agent: &Agent,
+    launch: &Launch,
+    rewound_to: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+    let process = Path::new("/proc").join(agent.pid.to_string());
+    let environment = std::fs::read(process.join("environ")).context("read the environment")?;
+    if environment.len() > MAX_ENVIRONMENT_BYTES {
+        anyhow::bail!("the agent's environment is too large");
+    }
+    let started_in = std::fs::read_link(process.join("cwd")).context("read the folder")?;
+    let cwd = if launch.cwd.is_empty() {
+        started_in
+    } else {
+        started_in.join(&launch.cwd)
+    };
+    let (socket, environment_path) = pane::new_paths()?;
+    let command = provider
+        .pane_command(launch, &socket)
+        .context("the provider has no pane process")?;
+    // A helper that was replaced on disk can start nothing: the agent is
+    // left as it is rather than stopped for a chat that cannot start.
+    let helper = std::env::current_exe().context("locate the helper")?;
+    if !helper.is_file() {
+        anyhow::bail!("the helper is no longer where it was started from");
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&environment_path)
+        .and_then(|mut file| file.write_all(&environment))
+        .context("write the environment")?;
+    let line = pane::shell_line(
+        &helper,
+        Some(&environment_path),
+        command.piped.then_some(socket.as_path()),
+        &command.argv,
+    );
+    let started = pane::respawn(
+        pane_id,
+        &cwd.to_string_lossy(),
+        &line,
+        &[
+            (pane::ADAPTER, provider.adapter_id()),
+            (pane::SOCKET, &socket.to_string_lossy()),
+            (pane::SESSION, &command.session),
+            (pane::REWOUND_TO, rewound_to),
+            (pane::START, &pane::encode_launch(launch)),
+        ],
+    );
+    if started.is_err() {
+        let _ = std::fs::remove_file(&environment_path);
+    }
+    started
+}
+
+/// What the pane's agent has for `names` in its environment, for a provider
+/// that must look where its agent looks. Nothing else of the environment
+/// leaves here.
+pub(super) fn agent_variables(
+    pane_id: &str,
+    adapter_id: &str,
+    names: &[&str],
+) -> Vec<Option<std::ffi::OsString>> {
+    let proc_root = Path::new("/proc");
+    let environment = pane::read(pane_id)
+        .and_then(|tag| find_agent(proc_root, tag.pid, adapter_id))
+        .and_then(|agent| std::fs::read(proc_root.join(agent.pid.to_string()).join("environ")).ok())
+        .filter(|bytes| bytes.len() <= MAX_ENVIRONMENT_BYTES)
+        .map(|bytes| crate::chat_pipe::parse_environment(&bytes))
+        .unwrap_or_default();
+    names
+        .iter()
+        .map(|name| {
+            environment
+                .iter()
+                .find(|(given, _)| given == name)
+                .map(|(_, value)| value.clone())
+        })
+        .collect()
+}
+
+fn hook_installed(adapter_id: &str) -> bool {
+    crate::service::agents::HookManager::system_default()
+        .and_then(|manager| manager.managed_adapters())
+        .is_ok_and(|managed| managed.contains(&adapter_id))
+}
+
+/// The agent's own arguments, and what runs it: the program, or an
+/// interpreter and the script it was given.
+fn split_program(argv: &[String]) -> Option<(&[String], &[String])> {
+    let interpreted = matches!(argv.first()?.rsplit('/').next()?, "node" | "nodejs" | "bun");
+    argv.split_at_checked(if interpreted { 2 } else { 1 })
+}
+
+struct Agent {
+    pid: u32,
+    argv: Vec<String>,
+    /// How long ago it started, when that could be read.
+    age: Option<Duration>,
+}
+
+/// The pane's agent: the process nearest the pane's own that is one of
+/// `adapter_id`'s. Looking stops at the first agent of any adapter, since
+/// what runs beneath an agent is that agent's business.
+fn find_agent(proc_root: &Path, root_pid: u32, adapter_id: &str) -> Option<Agent> {
+    if root_pid == 0 {
+        return None;
+    }
+    let mut queue = std::collections::VecDeque::from([(root_pid, 0)]);
+    let mut visited = BTreeSet::new();
+    while let Some((pid, depth)) = queue.pop_front() {
+        if visited.len() >= MAX_PROCESSES || !visited.insert(pid) {
+            continue;
+        }
+        let process = proc_root.join(pid.to_string());
+        if let Some(argv) = read_argv(&process.join("cmdline"))
+            && let Some(adapter) = adapters::detect_argv(&argv)
+        {
+            return (adapter.kind() == adapter_id).then(|| Agent {
+                pid,
+                age: process_age(proc_root, pid),
+                argv,
+            });
+        }
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        let children = process.join("task").join(pid.to_string()).join("children");
+        if let Ok(children) = std::fs::read_to_string(children) {
+            queue.extend(
+                children
+                    .split_ascii_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    .map(|pid| (pid, depth + 1)),
+            );
+        }
+    }
+    None
+}
+
+/// A whole command line, or nothing: one that was cut short may have lost
+/// the argument that says what the agent was asked to do.
+fn read_argv(cmdline: &Path) -> Option<Vec<String>> {
+    let bytes = std::fs::read(cmdline).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_ARGV_BYTES {
+        return None;
+    }
+    bytes
+        .strip_suffix(&[0])
+        .unwrap_or(&bytes)
+        .split(|byte| *byte == 0)
+        .map(|argument| String::from_utf8(argument.to_vec()).ok())
+        .collect()
+}
+
+fn process_age(proc_root: &Path, pid: u32) -> Option<Duration> {
+    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    // The command name is in parentheses and may hold anything; the fields
+    // are counted from after it. `starttime` is the 22nd of them all.
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    let start_ticks: f64 = after_name.split_ascii_whitespace().nth(19)?.parse().ok()?;
+    let uptime = std::fs::read_to_string(proc_root.join("uptime")).ok()?;
+    let uptime: f64 = uptime.split_ascii_whitespace().next()?.parse().ok()?;
+    // SAFETY: `sysconf` reads a constant of the running system.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        return None;
+    }
+    let age = uptime - start_ticks / ticks_per_second as f64;
+    Some(Duration::from_secs_f64(age.max(0.0)))
+}
+
+/// How many values a command-line option takes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Takes {
+    Nothing,
+    One,
+    /// One, when the next argument is not an option.
+    Maybe,
+    /// Every argument up to the next option.
+    Many,
+}
+
+/// A command line read against the options a provider knows.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Arguments {
+    /// Each option as it was given, by the first of its names, with its
+    /// values.
+    pub(super) options: Vec<(&'static str, Vec<String>)>,
+    pub(super) positional: Vec<String>,
+}
+
+impl Arguments {
+    /// Reads `arguments` against `known`: each entry is an option's names
+    /// and what it takes. `None` when an option is not a known one, since
+    /// there is then no telling which of the arguments are its values.
+    pub(super) fn read(arguments: &[String], known: &[(&[&'static str], Takes)]) -> Option<Self> {
+        let mut read = Self::default();
+        let mut rest = arguments.iter().peekable();
+        while let Some(argument) = rest.next() {
+            if argument == "--" {
+                read.positional.extend(rest.cloned());
+                break;
+            }
+            if !argument.starts_with('-') || argument == "-" {
+                read.positional.push(argument.clone());
+                continue;
+            }
+            let (name, attached) = match argument.split_once('=') {
+                Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+                _ => (argument.as_str(), None),
+            };
+            let (names, takes) = known.iter().find(|(names, _)| names.contains(&name))?;
+            let mut values = Vec::new();
+            let is_value = |next: &&String| !next.starts_with('-') || next.as_str() == "-";
+            match (takes, attached) {
+                (Takes::Nothing, None) => {}
+                (Takes::Nothing, Some(_)) => return None,
+                (_, Some(value)) => values.push(value.to_owned()),
+                (Takes::One, None) => values.push(rest.next()?.clone()),
+                (Takes::Maybe, None) => values.extend(rest.next_if(is_value).cloned()),
+                (Takes::Many, None) => {
+                    while let Some(value) = rest.next_if(is_value) {
+                        values.push(value.clone());
+                    }
+                }
+            }
+            read.options.push((names[0], values));
+        }
+        Some(read)
+    }
+
+    pub(super) fn has(&self, name: &str) -> bool {
+        self.options.iter().any(|(given, _)| *given == name)
+    }
+
+    /// The last value given for `name`.
+    pub(super) fn value<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        self.values(name).last().map(String::as_str)
+    }
+
+    /// Every value given for `name`, in order.
+    pub(super) fn values<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl DoubleEndedIterator<Item = &'a String> {
+        self.options
+            .iter()
+            .filter(move |(given, _)| *given == name)
+            .flat_map(|(_, values)| values)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    const KNOWN: &[(&[&str], Takes)] = &[
+        (&["--model", "-m"], Takes::One),
+        (&["--verbose"], Takes::Nothing),
+        (&["--resume", "-r"], Takes::Maybe),
+        (&["--add-dir"], Takes::Many),
+    ];
+
+    #[test]
+    fn a_command_line_is_read_against_the_options_known() {
+        let read = Arguments::read(
+            &strings(&[
+                "-m",
+                "opus",
+                "--add-dir",
+                "/a",
+                "/b",
+                "--verbose",
+                "-r",
+                "--model=haiku",
+                "fix",
+                "--",
+                "--not-an-option",
+            ]),
+            KNOWN,
+        )
+        .unwrap();
+        assert_eq!(read.value("--model"), Some("haiku"));
+        assert_eq!(
+            read.values("--add-dir").cloned().collect::<Vec<_>>(),
+            ["/a", "/b"]
+        );
+        assert!(read.has("--verbose"));
+        // `-r` is followed by an option, so it has no value.
+        assert_eq!(read.value("--resume"), None);
+        assert!(read.has("--resume"));
+        assert_eq!(read.positional, ["fix", "--not-an-option"]);
+
+        // An optional value is taken when one follows.
+        let read = Arguments::read(&strings(&["-r", "abc"]), KNOWN).unwrap();
+        assert_eq!(read.value("--resume"), Some("abc"));
+        assert!(read.positional.is_empty());
+    }
+
+    #[test]
+    fn an_option_nobody_knows_makes_the_line_unreadable() {
+        assert_eq!(Arguments::read(&strings(&["--mystery", "x"]), KNOWN), None);
+        assert_eq!(Arguments::read(&strings(&["--verbose=1"]), KNOWN), None);
+        // A value that is missing.
+        assert_eq!(Arguments::read(&strings(&["--model"]), KNOWN), None);
+    }
+
+    #[test]
+    fn the_program_is_what_runs_the_agent() {
+        let argv = strings(&["/usr/bin/node", "/opt/claude-code/cli.js", "--model", "x"]);
+        let (program, arguments) = split_program(&argv).unwrap();
+        assert_eq!(program, &argv[..2]);
+        assert_eq!(arguments, &argv[2..]);
+        let argv = strings(&["claude"]);
+        let (program, arguments) = split_program(&argv).unwrap();
+        assert_eq!(program, &argv[..]);
+        assert!(arguments.is_empty());
+        assert!(split_program(&strings(&["node"])).is_none());
+    }
+
+    #[test]
+    fn only_an_agent_that_has_just_started_is_replaced() {
+        let seconds = Duration::from_secs;
+        let facts = |seen, age: Option<u64>, mode: Option<u64>, announces| Facts {
+            seen,
+            age: age.map(seconds),
+            chat_mode_age: mode.map(seconds),
+            announces,
+        };
+        // Seen: young, started after Chat mode came on, and with no hook to
+        // say more.
+        assert_eq!(
+            verdict(&facts(true, Some(2), Some(600), false)),
+            Verdict::Replace
+        );
+        assert_eq!(
+            verdict(&facts(true, Some(2), None, false)),
+            Verdict::Replace
+        );
+        assert_eq!(
+            verdict(&facts(true, Some(11), Some(600), false)),
+            Verdict::Decline
+        );
+        assert_eq!(
+            verdict(&facts(true, None, Some(600), false)),
+            Verdict::Decline
+        );
+        assert_eq!(
+            verdict(&facts(true, Some(2), Some(600), true)),
+            Verdict::Decline
+        );
+        // Chat mode was turned on a second ago; the agent is older.
+        assert_eq!(
+            verdict(&facts(true, Some(2), Some(1), false)),
+            Verdict::Decline
+        );
+        assert_eq!(
+            verdict(&facts(true, Some(2), Some(2), false)),
+            Verdict::Decline
+        );
+
+        // Hooked: the process in the pane is the one that said it started
+        // only if it has just started too.
+        let hooked = |age, mode| verdict(&facts(false, age, mode, false));
+        assert_eq!(hooked(Some(5), Some(600)), Verdict::Replace);
+        assert_eq!(hooked(Some(5), None), Verdict::Replace);
+        // A session that has run for an hour, in which another one started:
+        // it resumed one, or it started an agent of its own. A daemon that
+        // was started since does not know when Chat mode came on.
+        assert_eq!(hooked(Some(3600), None), Verdict::Leave);
+        assert_eq!(hooked(Some(21), Some(600)), Verdict::Leave);
+        assert_eq!(hooked(None, Some(600)), Verdict::Leave);
+        // Started before Chat mode came on. It may say it started again.
+        assert_eq!(hooked(Some(8), Some(5)), Verdict::Leave);
+    }
+
+    #[test]
+    fn a_session_start_that_waited_starts_no_chat() {
+        let now = 1_700_000_000_000;
+        assert!(hook_is_fresh(now, now));
+        assert!(hook_is_fresh(now - MAX_HOOK_AGE_MILLIS, now));
+        assert!(!hook_is_fresh(now - MAX_HOOK_AGE_MILLIS - 1, now));
+        // A clock that differs a little the other way.
+        assert!(hook_is_fresh(now + 500, now));
+        // One that does not say when it happened.
+        assert!(!hook_is_fresh(0, now));
+    }
+
+    fn process(root: &Path, pid: u32, argv: &[&str], children: &[u32], start_ticks: u64) {
+        let directory = root.join(pid.to_string());
+        let task = directory.join("task").join(pid.to_string());
+        std::fs::create_dir_all(&task).unwrap();
+        let mut cmdline = argv.join("\0").into_bytes();
+        cmdline.push(0);
+        std::fs::write(directory.join("cmdline"), cmdline).unwrap();
+        let children: Vec<String> = children.iter().map(u32::to_string).collect();
+        std::fs::write(task.join("children"), children.join(" ")).unwrap();
+        // A command name with spaces and a parenthesis, as a process may have.
+        let fields = ["0"; 18].join(" ");
+        std::fs::write(
+            directory.join("stat"),
+            format!("{pid} (a b) c) S {fields} {start_ticks} 0 0\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_panes_agent_is_the_first_one_beneath_its_shell() {
+        let root = tempfile::tempdir().unwrap();
+        // SAFETY: `sysconf` reads a constant of the running system.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+        std::fs::write(root.path().join("uptime"), "1000.00 900.00\n").unwrap();
+        process(root.path(), 10, &["-zsh"], &[11, 12], 0);
+        process(root.path(), 11, &["sleep", "5"], &[], 0);
+        process(
+            root.path(),
+            12,
+            &["claude", "--model", "opus", ""],
+            &[13],
+            995 * ticks,
+        );
+        // An agent started by the agent is not the pane's.
+        process(root.path(), 13, &["codex", "exec", "x"], &[], 999 * ticks);
+
+        let agent = find_agent(root.path(), 10, "claude-code").unwrap();
+        assert_eq!(agent.pid, 12);
+        // An empty argument is an argument.
+        assert_eq!(agent.argv, ["claude", "--model", "opus", ""]);
+        assert_eq!(agent.age, Some(Duration::from_secs(5)));
+        assert!(find_agent(root.path(), 10, "codex").is_none());
+        assert!(find_agent(root.path(), 11, "claude-code").is_none());
+        assert!(find_agent(root.path(), 0, "claude-code").is_none());
+    }
+}

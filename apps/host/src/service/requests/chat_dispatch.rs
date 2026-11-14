@@ -10,12 +10,18 @@ use tmux_agent_protocol::v1;
 
 use super::super::SequencerControl;
 use super::super::chat::{ChatError, ChatRuntime, PaneKey, SessionCommand};
+use super::super::snapshot::tmux_command;
 use super::super::terminal::validate_tmux_id;
+use super::super::tmux_actions::escaped_format_literal;
+use super::agent_dispatch::agent_launch_argv;
 use super::{response_error, send_response};
 
 /// "%" and the digits of a u32.
 const MAX_PANE_ID_BYTES: usize = 11;
 const MAX_SERVER_IDENTITY_BYTES: usize = 1024;
+/// The longest side question. It starts its fork on the agent's command
+/// line, and tmux takes no command much longer than this.
+const MAX_SIDE_QUESTION_BYTES: usize = 8 * 1024;
 
 pub(super) async fn handle(
     request_id: u64,
@@ -92,18 +98,31 @@ fn dispatch(
     // connection with no topology has nothing to compare against and is taken
     // at its word, with its pane untagged: one that never asked for it, or
     // one that has just launched an agent and not yet heard the result.
-    let tagged = match baseline.as_ref() {
+    let (tagged, title) = match baseline.as_ref() {
         Some((_, identity)) if *identity != key.server_identity => {
             return Err(ChatError::new(
                 "chat_server_changed",
                 "The tmux server changed. Reopen the chat.",
             ));
         }
-        Some(_) => pane(&key.pane_id)
-            .ok_or_else(|| ChatError::new("chat_unavailable", "That pane has closed."))?
-            .chat_adapter_id
-            .clone(),
-        None => String::new(),
+        Some((snapshot, _)) => {
+            let pane = pane(&key.pane_id)
+                .ok_or_else(|| ChatError::new("chat_unavailable", "That pane has closed."))?;
+            // A tab with a locked name publishes no pane title: that name is
+            // the one its agent goes by.
+            let title = if pane.title.is_empty() {
+                let tab = |window: &&tmux_control::Window| window.id == pane.window_id;
+                snapshot
+                    .windows
+                    .iter()
+                    .find(tab)
+                    .map_or("", |window| window.name.as_str())
+            } else {
+                pane.title.as_str()
+            };
+            (pane.chat_adapter_id.clone(), title.to_owned())
+        }
+        None => (String::new(), String::new()),
     };
     drop(baseline);
     let adapter_id = runtime.adapter_for(&tagged);
@@ -140,15 +159,74 @@ fn dispatch(
             )?))
         }
         Action::LoadOlder => runtime.load_older(&key, &adapter_id, &request.older_cursor),
-        // Stream B wires this to the agent branch action.
-        Action::SideFork => Err(ChatError::new(
-            "chat_side_fork_unavailable",
-            "Side questions are not available on this host yet.",
-        )),
+        Action::SideFork => {
+            let forked_pane_id = side_fork(runtime, &key, &adapter_id, &request.text, &title)?;
+            // The topology actor publishes the server as it is with the fork.
+            *topology_baseline.lock().unwrap() = None;
+            Ok(v1::ChatResponse {
+                forked_pane_id,
+                ..Default::default()
+            })
+        }
         Action::Unspecified | Action::SetMode | Action::Close => {
             unreachable!("answered above")
         }
     }
+}
+
+/// Opens a copy of the pane's conversation in a split beside it, with
+/// `text` as the copy's first message: the agent's own branch command, the
+/// way the Agents list starts a branch, and the question after it. In Chat
+/// mode the copy becomes a chat like any agent that starts.
+fn side_fork(
+    runtime: &ChatRuntime,
+    key: &PaneKey,
+    adapter_id: &str,
+    text: &str,
+    title: &str,
+) -> Result<String, ChatError> {
+    let unavailable = |message: &str| ChatError::new("chat_side_fork_unavailable", message);
+    if text.trim().is_empty() {
+        return Err(invalid("A side question needs some text."));
+    }
+    if text.len() > MAX_SIDE_QUESTION_BYTES {
+        return Err(ChatError::new(
+            "chat_message_too_large",
+            "That side question is too long. Ask it in a shorter message.",
+        ));
+    }
+    let source = runtime
+        .conversation(key, adapter_id)
+        .ok_or_else(|| unavailable("This chat has no conversation to fork yet."))?;
+    let adapter = super::super::agents::adapters::by_id(&source.adapter_id)
+        .ok_or_else(|| unavailable("This chat's agent cannot be forked."))?;
+    let mut launch = adapter.branch(&source.native_session_id, title);
+    // The fork has its source's model and permissions.
+    launch.arguments.extend(source.arguments);
+    launch.arguments.extend(["--".to_owned(), text.to_owned()]);
+    let failed = |_| unavailable("The fork could not be opened.");
+    let output = tmux_command()
+        .map_err(failed)?
+        .args(["split-window", "-h", "-P", "-F", "#{pane_id}", "-t"])
+        .arg(&key.pane_id)
+        .arg("-c")
+        // tmux reads a start directory as a format.
+        .arg(escaped_format_literal(&source.folder))
+        .args(agent_launch_argv(launch))
+        .output()
+        .map_err(|_| unavailable("The fork could not be opened."))?;
+    let forked = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || validate_tmux_id(&forked, '%').is_err() {
+        return Err(unavailable("The fork could not be opened."));
+    }
+    // So that the fork is never listed as a session of its own.
+    if let Ok(mut command) = tmux_command() {
+        let option = super::super::chat::SIDE_OPTION;
+        let _ = command
+            .args(["set-option", "-p", "-t", &forked, option, "1"])
+            .output();
+    }
+    Ok(forked)
 }
 
 fn invalid(message: &str) -> ChatError {
