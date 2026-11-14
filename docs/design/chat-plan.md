@@ -447,6 +447,56 @@ merged) and merges back into `gpui/chat`. One manual QA at the end.
 - Details card (`chat/details.rs`) once C's pane view has merged.
 - Done when: staging and discarding a hunk still act on the hunk shown.
 
+#### As built by stream D1
+
+- **The patch was not on the wire.** The host read `GitDiff.patch` only for
+  hunk mutations and left it out of the desktop's answer. It now sends it,
+  when the diff is text and the patch alone fits the control lane's 256 KiB;
+  the two sides get what is left of that budget, the rest goes over the bulk
+  lane as before. The desktop reads the bulk sides only for "Show whole
+  file", or when the patch has no hunk (left out as too large, or a mode
+  change or pure rename): that diff can only be shown whole, and says so. Hunk `n` on screen is the
+  host's hunk `n`, since both split the same bytes at `@@ ` lines.
+- **Wire, all Git, no bump.** `GIT_DIFF_TARGET_BASE`; operations
+  `GIT_BRANCH_SUMMARY` (62), `GIT_BRANCHES` (63), `GIT_CHECKOUT` (64);
+  `GitRequest.branch`; `GitResponse.branch_summary` and `.branches`
+  (`GitBranchSummary`, `GitBranchFile`, `GitBranchList`). The phone sends no
+  Git request and reads no Git answer, so neither an older nor a newer phone
+  meets any of it. Branch list and checkout are for D2's card: host and
+  `desktop-core` (`"branches"`, `"checkout"`) only; D2 adds the two calls in
+  `git/client.rs`.
+- **The default branch** is `origin/HEAD`, else `origin/main`, else
+  `origin/master`; none is an empty summary ("no default branch on origin"),
+  not an error. The scope is the working tree against the merge base of HEAD
+  and that branch, untracked files included (counted from the file, 1 MiB
+  each and 16 MiB in all). Renames are not detected there. The diff target
+  re-resolves the merge base per read. It is read only: every mutation with
+  it is refused on the host.
+- **Checkout** is `git switch --no-guess <branch>` after `show-ref --verify`
+  finds `refs/heads/<branch>`, under the repository lock and against an expected status
+  generation, like a commit. A switch Git refuses comes back `NOT_APPLIED`.
+- **Panel.** A segmented switch under the header: Uncommitted (today's groups,
+  actions and commit form, unchanged) or `vs origin/main` (named after the
+  base found): a read-only list with per-file and total line counts, read
+  again whenever the observed status moves and on Refresh (also while the
+  panel is hidden, if that scope was left selected). The mock's line
+  counts on Uncommitted rows are not built: the status carries none.
+- **Tab.** One Git diff tab per workspace, repointed for every file and side
+  (a workspace saved with several keeps them; the one on the same file, else
+  the first, is reused). Titled `<file> (unstaged|staged|branch)` rather than
+  the mock's "Git diff". Each hunk is a section of Kit's `Diff` (its own
+  patch under `<n>/<file name>`), so it collapses on its own and keeps syntax
+  highlighting; its header is Git's `@@` line, its counts, and Stage (Unstage
+  when staged) and Discard… in the Uncommitted scope. The toolbar carries the
+  file's counts, Collapse all / Expand all (⌥⌘[ / ⌥⌘], Ctrl+Alt+[ /
+  Ctrl+Alt+] on Linux, in the tab: Ctrl+Shift+[ / ] are the previous and
+  next tab) and Show whole file / Show hunks. The whole file keeps today's
+  bar of numbered hunk actions. A collapsed hunk stays collapsed across a
+  reload of the same file, matched by its lines, not its index.
+- **Entry point for chat.** `crate::git::open_file_diff(path: &str, cx: &mut
+  App)`: `path` absolute or relative to the active repository. Unstaged, then
+  staged, changes; otherwise the file against the default branch.
+
 ### E — History and Snooze
 
 - Host: `service/history/` store (`sessions.json`, cap 1,000), fed from

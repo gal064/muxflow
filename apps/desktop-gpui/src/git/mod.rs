@@ -54,6 +54,7 @@ impl Global for Git {}
 /// Called once from [`crate::features::init`].
 pub fn init(cx: &mut App) {
     panel::init(cx);
+    diff_view::init(cx);
     PanelBodies::register("git", body, cx);
     crate::editor::set_diff_surface(
         Rc::new(|tab, window, cx| {
@@ -182,6 +183,52 @@ pub(crate) fn report(message: String, cx: &mut App) {
 /// workspace's branch follow it.
 pub fn active_status(cx: &App) -> Option<Rc<StatusSnapshot>> {
     cx.try_global::<Git>()?.panel.read(cx).status(cx)
+}
+
+/// Opens one file's changes in the active workspace's Git diff tab, as a
+/// click on its Git row does. Chat's file-edit rows call this. `path` is
+/// absolute or relative to the active repository's root. Uncommitted changes
+/// come first, unstaged then staged; a file with none shows its changes against
+/// the default branch, which says so if there are none either.
+pub fn open_file_diff(path: &str, cx: &mut App) {
+    let Some(status) = active_status(cx) else {
+        report(format!("{path} is not in an observed Git repository."), cx);
+        return;
+    };
+    let root = status.repository.worktree_root.trim_end_matches('/');
+    let relative = match path.strip_prefix(root) {
+        Some(rest) if rest.starts_with('/') => rest.trim_start_matches('/'),
+        _ if path.starts_with('/') => {
+            report(format!("{path} is outside the active repository."), cx);
+            return;
+        }
+        _ => path.trim_start_matches("./"),
+    };
+    let entry = status
+        .entries
+        .iter()
+        .find(|entry| entry.display_path == relative && !entry.ignored);
+    let (entry, target) = match entry {
+        Some(entry) if entry.worktree_kind != model::ChangeKind::None => {
+            (entry.clone(), Target::Unstaged)
+        }
+        Some(entry) if entry.index_kind != model::ChangeKind::None => {
+            (entry.clone(), Target::Staged)
+        }
+        _ => (
+            model::BranchFile {
+                path: model::encode_path(relative.as_bytes()),
+                display_path: relative.to_owned(),
+                kind: model::ChangeKind::Modified,
+                added: 0,
+                removed: 0,
+                binary: false,
+            }
+            .as_entry(),
+            Target::Base,
+        ),
+    };
+    open_diff(&entry, target, &status, true, cx);
 }
 
 /// Opens the row's diff in the active workspace, or re-selects the one already
