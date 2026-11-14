@@ -3676,8 +3676,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3710,7 +3708,6 @@ dependencies = [
  "wayland-client",
  "wayland-cursor",
  "wayland-protocols",
- "wayland-protocols-plasma",
  "wayland-protocols-wlr",
  "x11rb",
  "xkbcommon",
