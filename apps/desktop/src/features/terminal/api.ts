@@ -252,6 +252,12 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
     case 19:
       requireHostSequence(sequence, "automation event");
       return { kind: "automationChanged", sequence };
+    // Chat and session history: this desktop shows neither, so each only
+    // advances the sequence.
+    case 20:
+    case 21:
+      requireHostSequence(sequence, "chat or history event");
+      return { kind: "protocolProgress", sequence };
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }

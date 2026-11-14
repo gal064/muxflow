@@ -3960,3 +3960,18 @@ fn a_held_wakeup_turn_is_not_blocked_by_idle_but_is_by_a_permission() {
         v1::AgentLifecycleState::Blocked as i32
     );
 }
+
+/// Every agent snapshot says whether agents on this host start as chats, and
+/// a host that was never told says Terminal rather than nothing.
+#[test]
+fn an_agent_snapshot_carries_the_hosts_agent_mode() {
+    let runtime = runtime("agent-mode");
+    // This process's host was never told, and no test tells it otherwise.
+    assert_eq!(
+        runtime.snapshot_for("server-a").agent_mode,
+        i32::from(v1::ChatAgentMode::Terminal)
+    );
+    let state = runtime.state.lock().unwrap();
+    let chat = snapshot::build(&state, "server-a", &[], v1::ChatAgentMode::Chat);
+    assert_eq!(chat.agent_mode, i32::from(v1::ChatAgentMode::Chat));
+}

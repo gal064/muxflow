@@ -22,6 +22,8 @@ import {
   type ServerHello,
   type VoiceResponse,
 } from "./gen/envelope_pb";
+import type { ChatEvent } from "./gen/chat_pb";
+import type { HistoryEvent } from "./gen/history_pb";
 import { logAgentTransitions } from "../features/agents/diagnostics";
 import { deriveAgentIdentityPromotion, type AgentIdentityPromotion } from "../features/agents/agentIdentityPromotion";
 import { requestTerminalSeed, subscribeFull } from "./requests";
@@ -148,6 +150,10 @@ export interface HostConnectionOptions {
   onFileEvent?: (event: HostEvent) => void;
   /** VOICE_PROVISION, VOICE_REPLY (docs/mobile/voice-mode-plan.md); payload in `event.voice`. */
   onVoiceEvent?: (event: HostEvent) => void;
+  /** CHAT: one change to a pane this connection opened with `chatOpen`. */
+  onChatEvent?: (event: ChatEvent) => void;
+  /** SESSION_HISTORY: the host's session history changed; list it again. */
+  onHistoryEvent?: (event: HistoryEvent) => void;
   onToast?: (message: string) => void;
   /** Fires on every transition to `connected`; open terminals re-attach here (§7.6 step 5). */
   onConnected?: () => void;
@@ -695,6 +701,12 @@ export class HostConnection {
       case EventKind.VOICE_REPLY:
       case EventKind.VOICE_REPLY_TEXT:
         this.options.onVoiceEvent?.(event);
+        break;
+      case EventKind.CHAT:
+        if (event.chat) this.options.onChatEvent?.(event.chat);
+        break;
+      case EventKind.SESSION_HISTORY:
+        if (event.history) this.options.onHistoryEvent?.(event.history);
         break;
       case EventKind.TERMINAL_CLIPBOARD_WRITE:
         break;

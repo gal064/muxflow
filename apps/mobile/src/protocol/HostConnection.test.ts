@@ -16,9 +16,11 @@ import {
   type Envelope,
   type HostEvent,
 } from "./gen/envelope_pb";
+import { ChatItemKind, ChatTurnState, type ChatEvent } from "./gen/chat_pb";
+import type { HistoryEvent } from "./gen/history_pb";
 import { HostConnection, HostError, type HostConnectionOptions } from "./HostConnection";
 import { jsBackgroundTimer } from "./backgroundTimer";
-import { terminalInput, voiceTranscribe } from "./requests";
+import { chatLoadOlder, terminalInput, voiceTranscribe } from "./requests";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "./testing/fakeTransport";
 import { createSessionStore, type SessionStore } from "../store/sessionStore";
 import { createNotificationAttention } from "../features/notifications/attention";
@@ -98,7 +100,7 @@ describe("handshake (§7.3)", () => {
     const transport = h.transports[0]!;
     const [hello, subscribe] = transport.drain();
     expect(hello?.requestId).toBe(1n);
-    expect(hello?.protocolMajor).toBe(4);
+    expect(hello?.protocolMajor).toBe(5);
     expect(hello?.payload.case).toBe("clientHello");
     if (hello?.payload.case !== "clientHello") throw new Error("unreachable");
     expect(hello.payload.value.bulkConnection).toBe(false);
@@ -127,10 +129,10 @@ describe("handshake (§7.3)", () => {
     const h = harness();
     h.connection.connect();
     await settle();
-    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 5 }));
+    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 6 }));
     expect(h.store.getState().connection).toMatchObject({
       state: "incompatible",
-      message: "This host's Muxflow helper speaks protocol v5; this app needs v4. Update Muxflow on this phone, or update the helper from Muxflow desktop.",
+      message: "This host's Muxflow helper speaks protocol v6; this app needs v5. Update Muxflow on this phone, or update the helper from Muxflow desktop.",
     });
     expect(h.transports[0]!.closed).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -363,6 +365,54 @@ describe("ordered events (§7.4)", () => {
     // Neither is a file or agent event, and neither is logged as ignored.
     expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);
     expect(h.store.getState().agents["a1"]).toBeUndefined();
+  });
+
+  it("routes CHAT and SESSION_HISTORY to their callbacks, in order, with u64 revisions intact", async () => {
+    const chats: ChatEvent[] = [];
+    const histories: HistoryEvent[] = [];
+    const h = harness({ onChatEvent: (event) => chats.push(event), onHistoryEvent: (event) => histories.push(event) });
+    const transport = await connectHappily(h);
+    const revision = (1n << 53n) + 1n;
+    transport.feed(event(EventKind.CHAT, 1n, {
+      scope: "%1",
+      chat: { paneId: "%1", revision, change: { case: "item", value: { id: "a1", kind: ChatItemKind.ASSISTANT, streaming: true } } },
+    }));
+    transport.feed(event(EventKind.CHAT, 2n, {
+      scope: "%1",
+      chat: { paneId: "%1", revision: revision + 1n, change: { case: "delta", value: { itemId: "a1", textAppend: "Done." } } },
+    }));
+    transport.feed(event(EventKind.CHAT, 3n, {
+      scope: "%1",
+      chat: { paneId: "%1", revision: revision + 2n, change: { case: "state", value: { paneId: "%1", turn: ChatTurnState.IDLE } } },
+    }));
+    transport.feed(event(EventKind.SESSION_HISTORY, 4n, { history: { generation: 9n } }));
+    // An event that lost its payload is dropped rather than delivered empty.
+    transport.feed(event(EventKind.CHAT, 5n, { scope: "%1" }));
+
+    expect(chats.map((chat) => [chat.revision - revision, chat.change.case])).toEqual([[0n, "item"], [1n, "delta"], [2n, "state"]]);
+    const delta = chats[1]?.change;
+    expect(delta?.case === "delta" && delta.value.textAppend).toBe("Done.");
+    expect(histories.map((history) => history.generation)).toEqual([9n]);
+    expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);
+  });
+
+  it("answers a chat request with Response.chat, and a refusal with the host's error code", async () => {
+    const h = harness();
+    const transport = await connectHappily(h);
+    transport.drain();
+    const target = { paneId: "%1", expectedServerIdentity: "server-a" };
+    const page = h.connection.request(chatLoadOlder(target, "m9"));
+    await settle();
+    const sent = transport.drain().at(-1)!;
+    expect(sent.payload.case === "request" && sent.payload.value.chat?.olderCursor).toBe("m9");
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ chat: { older: [{ id: "m8" }], olderCursor: "" } }) }, { requestId: sent.requestId }));
+    expect((await page).chat?.older.map((item) => item.id)).toEqual(["m8"]);
+
+    const stale = h.connection.request(chatLoadOlder(target, "gone"));
+    await settle();
+    const refused = transport.drain().at(-1)!;
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ ok: false, errorCode: "chat_cursor_invalid", displayMessage: "Reopen the chat." }) }, { requestId: refused.requestId }));
+    await expect(stale).rejects.toMatchObject({ code: "chat_cursor_invalid", message: "Reopen the chat." });
   });
 
   it("carries Response.voice on a refused voice request, so the caller can read operationId and retryable", async () => {

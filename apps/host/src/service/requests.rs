@@ -27,10 +27,12 @@ use super::{
 
 mod active_root_dispatch;
 mod agent_dispatch;
+mod chat_dispatch;
 mod dispatcher;
 mod file_stream_dispatch;
 mod filesystem_dispatch;
 pub(super) mod git_dispatch;
+mod history_dispatch;
 pub(super) mod operation_policy;
 mod tmux_action_dispatch;
 mod voice_dispatch;

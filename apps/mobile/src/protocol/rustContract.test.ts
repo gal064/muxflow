@@ -81,4 +81,18 @@ describe("Rust-produced framed protobuf", () => {
     expect(reply.audio.byteLength).toBe(0);
     expect(reply.replyAtUnixMillis).toBe((1n << 53n) + 7n);
   });
+
+  it("preserves a chat event's pane, u64 revision and change", () => {
+    const payload = decode("chat");
+    expect(payload.case).toBe("event");
+    if (payload.case !== "event") throw new Error("wrong event payload");
+    expect(payload.value.kind).toBe(EventKind.CHAT);
+    const chat = payload.value.chat!;
+    expect(chat.paneId).toBe("%3");
+    expect(chat.revision).toBe((1n << 53n) + 3n);
+    expect(chat.change).toEqual(expect.objectContaining({ case: "delta" }));
+    if (chat.change.case !== "delta") throw new Error("wrong chat change");
+    expect(chat.change.value.itemId).toBe("a1");
+    expect(chat.change.value.textAppend).toBe("héllo");
+  });
 });

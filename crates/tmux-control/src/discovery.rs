@@ -59,6 +59,9 @@ pub struct Pane {
     /// has announced none: tmux starts every pane titled with the hostname,
     /// which names nothing about the pane.
     pub title: String,
+    /// The chat adapter whose conversation fills this pane; empty for a
+    /// terminal pane.
+    pub chat_adapter_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,6 +377,7 @@ fn parse_pane(line: &str) -> Result<Pane, DiscoverError> {
         pane_pid,
         start_command: value[12].into(),
         title: value[13].into(),
+        chat_adapter_id: String::new(),
     })
 }
 
