@@ -8,12 +8,15 @@
 //! [`view::agents_list`]; [`view::AgentsSurface`] carries the dialogs.
 
 pub mod activation;
+pub mod history;
+pub mod history_view;
 pub mod labels;
 pub mod list;
 pub mod model;
 pub mod notify;
 pub mod runtime;
 pub mod setup;
+pub mod snooze;
 pub mod sound;
 pub mod view;
 pub mod wire;
@@ -78,6 +81,7 @@ pub fn init(cx: &mut App) {
         });
     })));
     commands::on_command("agents.jumpUnread", cx, |_, cx| jump_to_unread(cx));
+    commands::on_command("agents.history", cx, history_view::open);
 }
 
 /// Starts the runtime against the running controller. Called from
@@ -101,6 +105,7 @@ pub fn start(
         notifications: notifications.clone(),
         app_state: app_state.clone(),
     });
+    history::start(&controller, backend.clone(), cx);
     let saved = load_app_state(&app_state);
     let runtime = cx.new(|_| {
         let mut runtime = AgentRuntime::new(Rc::new(BackendTransport(backend)), effects);
