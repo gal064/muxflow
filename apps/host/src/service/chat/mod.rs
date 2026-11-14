@@ -40,7 +40,7 @@ mod tests;
 mod websocket;
 
 pub(crate) use convert::{agent_hooked, agents_detected};
-pub(crate) use pane::SIDE as SIDE_OPTION;
+pub(crate) use pane::{ADAPTER as CHAT_OPTION, SIDE as SIDE_OPTION};
 use provider::{Change, ChatProvider, ChatSession, ChatSink};
 pub(crate) use provider::{ChatError, SessionCommand};
 
@@ -73,6 +73,11 @@ const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// oldest are dropped past either.
 const MAX_TIMELINE_ITEMS: usize = 2_000;
 const MAX_TIMELINE_BYTES: usize = 32 * 1024 * 1024;
+/// The longest title a chat takes from a message, in characters.
+const MAX_TITLE_CHARS: usize = 60;
+/// The longest name of the provider's own it takes: a fork's is its source's
+/// title and a suffix, and is not to be cut back to that title.
+const MAX_NAME_CHARS: usize = 120;
 
 const SETTINGS_LABEL: &str = "settings";
 
@@ -94,6 +99,10 @@ struct Pane {
     items: Vec<v1::ChatItem>,
     /// The timeline has dropped its oldest items.
     trimmed: bool,
+    /// The provider's own name for the conversation, when it has one.
+    name: String,
+    /// What the pane was last titled.
+    title: String,
     /// The connections that opened this pane.
     subscribers: BTreeSet<u64>,
     /// Absent only while the provider is connecting.
@@ -285,6 +294,8 @@ impl ChatRuntime {
                 catalog,
                 items,
                 trimmed: false,
+                name: String::new(),
+                title: String::new(),
                 subscribers: BTreeSet::new(),
                 session: None,
             };
@@ -557,34 +568,46 @@ fn now_unix_millis() -> i64 {
 }
 
 impl Panes {
-    /// Applies one change and sends it to the pane's subscribers.
-    pub(super) fn publish(&mut self, key: &PaneKey, change: Change) {
-        let Some(pane) = self.0.get_mut(key) else {
-            return;
-        };
-        let Some(change) = pane.apply(change) else {
-            return;
-        };
+    /// Applies one change and sends it to the pane's subscribers. Answers
+    /// the title the pane is to have from now on, when the change gives it
+    /// another.
+    pub(super) fn publish(&mut self, key: &PaneKey, change: Change) -> Option<String> {
+        let pane = self.0.get_mut(key)?;
+        let streamed = matches!(change, Change::Delta(_));
+        let change = pane.apply(change)?;
         pane.emit(change);
         if pane.trim() {
             pane.state.history_complete = false;
             pane.emit(Change::State(pane.state.clone()));
         }
+        // Text that streams in is never a title's.
+        if streamed { None } else { pane.retitle() }
+    }
+
+    /// Takes the provider's own name for the pane's conversation, empty when
+    /// it has none. Answers the pane's new title, when that changes it.
+    pub(super) fn name(&mut self, key: &PaneKey, name: &str) -> Option<String> {
+        let pane = self.0.get_mut(key)?;
+        pane.name = title_line(name, MAX_NAME_CHARS).unwrap_or_default();
+        pane.retitle()
     }
 
     /// Replaces the pane's timeline, and sends its subscribers the snapshot
     /// that replaces what they hold. Nothing happens when the timeline is
-    /// already that.
-    pub(super) fn reset(&mut self, key: &PaneKey, mut items: Vec<v1::ChatItem>, complete: bool) {
-        let Some(pane) = self.0.get_mut(key) else {
-            return;
-        };
+    /// already that. Answers the pane's new title, when that changes it.
+    pub(super) fn reset(
+        &mut self,
+        key: &PaneKey,
+        mut items: Vec<v1::ChatItem>,
+        complete: bool,
+    ) -> Option<String> {
+        let pane = self.0.get_mut(key)?;
         items.retain_mut(bound_item);
         // One item per id: the first stays.
         let mut ids = BTreeSet::new();
         items.retain(|item| ids.insert(item.id.clone()));
         if pane.items == items && pane.state.history_complete == complete {
-            return;
+            return None;
         }
         pane.items = items;
         pane.trimmed = false;
@@ -595,10 +618,36 @@ impl Panes {
         pane.subscribers.retain(|connection_id| {
             send_required_control_event_to(*connection_id, snapshot.clone()) != Delivery::Gone
         });
+        pane.retitle()
     }
 }
 
 impl Pane {
+    /// The title the pane is to have, when it is not the one it was last
+    /// given: the provider's name for the conversation, else the first line
+    /// of its first message. That is how the tab, the agent's row and the
+    /// session history come to name the conversation: a chat's agent writes
+    /// no title of its own to the pane. Until there is either, the pane
+    /// keeps the title it has, which is the agent's name from when it became
+    /// a chat.
+    fn retitle(&mut self) -> Option<String> {
+        let title = if !self.name.is_empty() {
+            self.name.clone()
+        } else if self.trimmed {
+            // The first message is no longer held.
+            return None;
+        } else {
+            let user = i32::from(v1::ChatItemKind::User);
+            let first = self.items.iter().find(|item| item.kind == user)?;
+            title_line(&first.text, MAX_TITLE_CHARS)?
+        };
+        if title == self.title {
+            return None;
+        }
+        self.title.clone_from(&title);
+        Some(title)
+    }
+
     /// Numbers a change that has been applied and sends it to every
     /// subscriber. A connection that has gone is forgotten; one whose queue is
     /// full is told to resync, and opens the chat again when it has.
@@ -947,6 +996,20 @@ fn invalid(message: &str) -> ChatError {
 
 fn unavailable() -> ChatError {
     ChatError::new("chat_unavailable", "This pane is not running a chat.")
+}
+
+/// The first line of `text` that says anything, as a title: without control
+/// characters, and cut to `max_chars`.
+fn title_line(text: &str, max_chars: usize) -> Option<String> {
+    let line = text
+        .lines()
+        .map(|line| line.replace(char::is_control, " "))
+        .find(|line| !line.trim().is_empty())?;
+    let line = line.trim();
+    Some(match line.char_indices().nth(max_chars) {
+        Some((end, _)) => format!("{}…", line[..end].trim_end()),
+        None => line.to_owned(),
+    })
 }
 
 /// Cuts `text` to at most `limit` bytes, on a character boundary. True when it

@@ -393,6 +393,17 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     replay.play(&mut lines, "turn/completed");
     // The pane is told which thread is its own, for the daemon that is next.
     assert!(matches!(replay.jobs.as_slice(), [Job::Tag { thread, .. }] if thread == THREAD));
+    // It goes by the conversation's first message, until the thread is
+    // given a name; another thread's name is not this chat's.
+    assert_eq!(replay.titles, ["Reply with exactly: ok"]);
+    let named = |thread: &str, name: &str| {
+        json!({"method": "thread/name/updated",
+               "params": {"threadId": thread, "threadName": name}})
+        .to_string()
+    };
+    replay.agent(&named("0c0de000-0000-7000-8000-00000000ffff", "Another"));
+    replay.agent(&named(THREAD, "Say ok"));
+    assert_eq!(replay.titles, ["Reply with exactly: ok", "Say ok"]);
     replay
         .client
         .assert_answered("m1", "Reply with exactly: ok", "ok");
@@ -465,6 +476,13 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     replay.client.assert_settled();
     assert_eq!(replay.client.items, shown, "{:#?}", replay.client.outline());
     assert_eq!(replay.jobs.len(), 1);
+    // The agent runtime is told which thread a chat came back to: the
+    // server's hooks name it only once a turn runs.
+    assert_eq!(
+        replay.reports.last().unwrap(),
+        &json!({"hook_event_name": "SessionStart", "session_id": THREAD})
+    );
+    let reported = replay.reports.len();
 
     // A long answer, and the link lost in the middle of it.
     replay.send(
@@ -481,6 +499,8 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     replay.connect(&tag(THREAD, Launch::default()));
     replay.play(&mut lines, "@thread/resume");
     // The turn is still the server's, and what was said of it still shown.
+    // A thread in a turn is one the server's hooks speak for.
+    assert_eq!(replay.reports.len(), reported);
     assert_eq!(replay.client.state.turn, i32::from(Turn::Working));
     assert_eq!(replay.client.items.last().unwrap(), &said);
 

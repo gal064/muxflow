@@ -22,9 +22,9 @@ use tmux_agent_protocol::v1;
 
 use super::{
     ChatRuntime, PaneKey, SessionCommand, pane,
-    provider::{ChatProvider, Launch},
+    provider::{ChatProvider, Launch, Resume},
 };
-use crate::service::agents::adapters;
+use crate::service::{agents::adapters, history::History};
 
 /// The oldest a process may be when it is seen and still be replaced. Its
 /// user has typed nothing into it yet.
@@ -50,9 +50,9 @@ enum Trigger {
     /// The agent's process is in the pane, beneath the pane's own process
     /// `pane_pid`.
     Seen { pane_pid: u32 },
-    /// The agent said it started; `resumed` is the session it said it
-    /// resumed.
-    Hooked { resumed: Option<String> },
+    /// The agent said it started, on `session`; `resumed` when it said that
+    /// is a session it resumed.
+    Hooked { session: String, resumed: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,10 +133,8 @@ pub(crate) fn agent_hooked(event: &v1::AgentHookEvent, active_server_identity: &
     if text("hook_event_name") != Some("SessionStart") {
         return;
     }
-    // A session also "starts" when it is cleared or compacted, which is the
-    // same agent carrying on.
     let source = text(adapters::SESSION_START_SOURCE_FIELD).unwrap_or("startup");
-    if !matches!(source, "startup" | "resume") {
+    if !is_start(source) {
         return;
     }
     if !hook_is_fresh(event.occurred_at_unix_millis, super::now_unix_millis()) {
@@ -154,9 +152,18 @@ pub(crate) fn agent_hooked(event: &v1::AgentHookEvent, active_server_identity: &
         },
         adapter_id,
         trigger: Trigger::Hooked {
-            resumed: (source == "resume" && !session.is_empty()).then(|| session.to_owned()),
+            session: session.to_owned(),
+            resumed: source == "resume",
         },
     });
+}
+
+/// Whether a `SessionStart` that gives this as its source is an agent
+/// starting: on a new session, on one it resumed, or on its own copy of one
+/// (`--fork-session`). A session also "starts" when it is cleared or
+/// compacted, which is the same agent carrying on.
+fn is_start(source: &str) -> bool {
+    matches!(source, "startup" | "resume" | "fork")
 }
 
 /// A hook that does not say when it happened may have happened at any time.
@@ -285,10 +292,13 @@ fn convert(candidate: &Candidate) {
             return;
         }
     }
-    let resumed = match trigger {
-        Trigger::Hooked { resumed } => resumed.as_deref(),
-        Trigger::Seen { .. } => None,
+    // The session the agent said it is on, when it said.
+    let session = match trigger {
+        Trigger::Hooked { session, .. } => session.as_str(),
+        Trigger::Seen { .. } => "",
     };
+    let resumed = matches!(trigger, Trigger::Hooked { resumed: true, .. } if !session.is_empty())
+        .then_some(session);
     let Some((program, arguments)) = split_program(&agent.argv) else {
         return;
     };
@@ -306,6 +316,12 @@ fn convert(candidate: &Candidate) {
         }
         return;
     }
+    // The pane goes by the agent's name until its conversation names it:
+    // the title it has is the terminal's.
+    if let Some(adapter) = adapters::by_id(adapter_id) {
+        pane::set_title(&key.pane_id, adapter.display_name());
+    }
+    note_replaced(&key.pane_id, adapter_id, &launch, session, tag.side);
     runtime.restart(key, adapter_id);
     super::topology_changed();
     if !prompt.trim().is_empty() {
@@ -334,7 +350,34 @@ pub(super) fn restart_agent(
     let tag = pane::read(pane_id).context("the pane is gone")?;
     let agent = find_agent(Path::new("/proc"), tag.pid, provider.adapter_id())
         .context("the agent is not running")?;
-    replace(pane_id, provider, &agent, launch, rewound_to)
+    replace(pane_id, provider, &agent, launch, rewound_to)?;
+    note_replaced(
+        pane_id,
+        provider.adapter_id(),
+        launch,
+        &tag.session,
+        tag.side,
+    );
+    Ok(())
+}
+
+/// Tells the session history that the agent in a pane was replaced by one
+/// started from `launch`. `session` is the one the agent that went was on,
+/// when that is known: unless the new agent carries it on, it is no session
+/// of its own any more. In a side fork's pane (`side`), the session that
+/// takes its place is that fork.
+fn note_replaced(pane_id: &str, adapter_id: &str, launch: &Launch, session: &str, side: bool) {
+    let carried_on = matches!(&launch.resume, Resume::Session { id, fork: false } if id == session);
+    if carried_on {
+        return;
+    }
+    let history = History::global();
+    if !session.is_empty() {
+        history.replaced(adapter_id, session);
+    }
+    if side {
+        history.hide_pane(pane_id);
+    }
 }
 
 /// Starts `launch` in the pane in place of `agent`, in its folder and with
@@ -725,6 +768,80 @@ mod tests {
         assert_eq!(hooked(None, Some(600)), Verdict::Leave);
         // Started before Chat mode came on. It may say it started again.
         assert_eq!(hooked(Some(8), Some(5)), Verdict::Leave);
+    }
+
+    #[test]
+    fn an_agent_starts_on_a_new_session_a_resumed_one_or_a_copy() {
+        // What Claude gives as the source of a `SessionStart`.
+        for source in ["startup", "resume", "fork"] {
+            assert!(is_start(source), "{source}");
+        }
+        // The same agent carrying on.
+        for source in ["clear", "compact", ""] {
+            assert!(!is_start(source), "{source}");
+        }
+    }
+
+    /// The store is the process's: the sessions here are this test's own.
+    #[test]
+    fn the_history_is_told_which_session_a_replaced_agent_left_behind() {
+        let listed = |session: &str| {
+            let entries = History::global().list().entries;
+            entries
+                .iter()
+                .any(|entry| entry.native_session_id == session)
+        };
+        let seen = |session: &str, pane_id: &str| crate::service::history::Seen {
+            adapter_id: "claude-code".into(),
+            native_session_id: session.into(),
+            pane_id: pane_id.into(),
+            ..Default::default()
+        };
+        let observe = |sessions: &[(&str, &str)]| {
+            let sessions = sessions.iter();
+            History::global().observe(
+                sessions
+                    .map(|(session, pane)| seen(session, pane))
+                    .collect(),
+            );
+        };
+        let launch = |resume| Launch {
+            resume,
+            ..Default::default()
+        };
+        let on = |id: &str, fork| Resume::Session {
+            id: id.into(),
+            fork,
+        };
+        observe(&[("convert-new", "%901"), ("convert-kept", "%902")]);
+
+        // A terminal agent replaced by a chat on a session of its own, and
+        // one whose chat carries its session on.
+        note_replaced(
+            "%901",
+            "claude-code",
+            &launch(Resume::Fresh),
+            "convert-new",
+            false,
+        );
+        let kept = launch(on("convert-kept", false));
+        note_replaced("%902", "claude-code", &kept, "convert-kept", false);
+        assert!(!listed("convert-new"));
+        assert!(listed("convert-kept"));
+
+        // A side fork's agent, replaced by a chat that copies the source
+        // itself: neither the terminal's copy nor the chat's is listed. A
+        // rewind that keeps the chat's session leaves the pane to it.
+        History::global().hide_pane("%903");
+        observe(&[("convert-kept", "%902"), ("fork-terminal", "%903")]);
+        let copy = launch(on("fork-source", true));
+        note_replaced("%903", "claude-code", &copy, "fork-terminal", true);
+        observe(&[("convert-kept", "%902"), ("fork-chat", "%903")]);
+        let same = launch(on("fork-chat", false));
+        note_replaced("%903", "claude-code", &same, "fork-chat", true);
+        observe(&[("convert-kept", "%902"), ("fork-later", "%903")]);
+        assert!(!listed("fork-terminal") && !listed("fork-chat"));
+        assert!(listed("fork-later"));
     }
 
     #[test]
