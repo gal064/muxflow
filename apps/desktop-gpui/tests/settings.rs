@@ -146,7 +146,7 @@ fn saved(cx: &mut TestAppContext, path: &Path, check: impl Fn(&Value) -> bool) -
 }
 
 #[gpui_kit::test]
-fn the_shortcut_and_the_gear_open_settings_with_its_six_tabs(cx: &mut TestAppContext) {
+fn the_shortcut_and_the_gear_open_settings_with_its_seven_tabs(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = write_state(dir.path(), json!({}));
     let handle = open_app(&state, cx);
@@ -158,6 +158,7 @@ fn the_shortcut_and_the_gear_open_settings_with_its_six_tabs(cx: &mut TestAppCon
             "Connection",
             "Workspace",
             "Terminal",
+            "Agents",
             "Appearance",
             "Sounds",
             "Accessibility",
@@ -625,6 +626,7 @@ fn each_settings_section_is_found_by_role_and_name_and_pressed(cx: &mut TestAppC
         "Connection",
         "Workspace",
         "Terminal",
+        "Agents",
         "Appearance",
         "Sounds",
         "Accessibility",

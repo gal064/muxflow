@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use desktop_core::platform::{EventBody, EventSink};
+use desktop_core::{
+    connection::chat::{self, ChatEvent},
+    platform::{EventBody, EventSink},
+};
 use futures::channel::mpsc::UnboundedSender;
 use serde::Deserialize;
 use tmux_control::TmuxSnapshot;
@@ -20,7 +23,7 @@ pub struct SnapshotEvent {
     pub server_identity: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BridgeEvent {
     GenerationEpoch(u64),
     TopologyDirty {
@@ -64,6 +67,8 @@ pub enum BridgeEvent {
     GitService {
         payload: String,
     },
+    /// One change to a chat this connection opened; the chat feature reads it.
+    Chat(Box<ChatEvent>),
     /// A valid frame this module has no reaction to.
     Ignored,
 }
@@ -219,8 +224,17 @@ pub fn decode_frame(frame: &[u8]) -> Result<BridgeEvent, String> {
             let payload = text(data, "Git event payload")?;
             Ok(BridgeEvent::GitService { payload })
         }
-        // 20 and 21 are chat and session history, which nothing here reads yet.
-        1 | 2 | 8 | 9 | 11 | 18 | 20 | 21 => Ok(BridgeEvent::Ignored),
+        20 => {
+            require_host_sequence(sequence, "chat event")?;
+            require_pane_id(&label, "chat event")?;
+            let event = chat::decode_event(data)?;
+            if event.pane_id != label {
+                return Err("chat event names another pane than its frame".into());
+            }
+            Ok(BridgeEvent::Chat(Box::new(event)))
+        }
+        // 21 is session history, which nothing here reads yet.
+        1 | 2 | 8 | 9 | 11 | 18 | 21 => Ok(BridgeEvent::Ignored),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
@@ -527,13 +541,36 @@ mod tests {
             decode_frame(&frame(2, "%1", 4, b"output")),
             Ok(BridgeEvent::Ignored)
         );
-        // Chat and session history, until something here reads them.
-        for (kind, label) in [(20, "%1"), (21, "history")] {
-            assert_eq!(
-                decode_frame(&frame(kind, label, 4, b"\x08\x01")),
-                Ok(BridgeEvent::Ignored)
-            );
-        }
+        // Session history, until something here reads it.
+        assert_eq!(
+            decode_frame(&frame(21, "history", 4, b"\x08\x01")),
+            Ok(BridgeEvent::Ignored)
+        );
+    }
+
+    #[test]
+    fn decodes_a_chat_event_for_the_pane_its_frame_names() {
+        use desktop_core::connection::chat::{ChatChange, ChatItemDelta};
+        let event = ChatEvent {
+            pane_id: "%3".into(),
+            revision: 7,
+            change: Some(ChatChange::Delta(ChatItemDelta {
+                item_id: "a1".into(),
+                text_append: "more".into(),
+            })),
+        };
+        // Its protobuf: pane_id, revision, and the delta in field 4.
+        let payload = b"\x0a\x02%3\x10\x07\x22\x0a\x0a\x02a1\x12\x04more".to_vec();
+        assert_eq!(
+            decode_frame(&frame(20, "%3", 4, &payload)),
+            Ok(BridgeEvent::Chat(Box::new(event)))
+        );
+        // A chat event is a host event of its own, for one pane, and says something.
+        assert!(decode_frame(&frame(20, "%3", 0, &payload)).is_err());
+        assert!(decode_frame(&frame(20, "%4", 4, &payload)).is_err());
+        assert!(decode_frame(&frame(20, "chat", 4, &payload)).is_err());
+        assert!(decode_frame(&frame(20, "%3", 4, b"\xff\xff")).is_err());
+        assert!(decode_frame(&frame(20, "%3", 4, b"")).is_err());
     }
 
     #[test]
