@@ -185,6 +185,28 @@ pub fn active_status(cx: &App) -> Option<Rc<StatusSnapshot>> {
     cx.try_global::<Git>()?.panel.read(cx).status(cx)
 }
 
+/// The panel, once the connection runs. A chat's details card reads the active
+/// repository through it and acts on it.
+pub fn panel(cx: &App) -> Option<Entity<GitPanel>> {
+    Some(cx.try_global::<Git>()?.panel.clone())
+}
+
+/// Opens the right panel on Source Control, listing `scope`.
+pub fn show(scope: panel::Scope, window: &mut Window, cx: &mut App) {
+    if let Some(panel) = panel(cx) {
+        panel.update(cx, |panel, cx| panel.set_scope(scope, cx));
+    }
+    crate::commands::run("view.showGit", window, cx);
+}
+
+/// Opens Source Control on the commit form, with the keyboard in its message.
+pub fn start_commit(window: &mut Window, cx: &mut App) {
+    if let Some(panel) = panel(cx) {
+        panel.update(cx, |panel, cx| panel.start_commit(cx));
+    }
+    crate::commands::run("view.showGit", window, cx);
+}
+
 /// Opens one file's changes in the active workspace's Git diff tab, as a
 /// click on its Git row does. Chat's file-edit rows call this. `path` is
 /// absolute or relative to the active repository's root. Uncommitted changes
