@@ -128,6 +128,7 @@ for qualified in "$package_root"/bin/muxflow-host-linux-x86_64 "$package_root"/b
   [[ -f "$qualified" ]] && install -m 0755 "$qualified" "$stage_dir/$(basename "$qualified")"
 done
 install -m 0755 "$package_root/uninstall.sh" "$stage_dir/uninstall.sh"
+install -m 0644 "$package_root/THIRD-PARTY-LICENSES" "$stage_dir/THIRD-PARTY-LICENSES"
 install -m 0644 "$package_root/SHA256SUMS" "$stage_dir/SHA256SUMS"
 printf '%s\n' "$owner" > "$stage_dir/.package-owner"
 if $upgrading && [[ -f "$lib_dir/.created-dirs" ]]; then

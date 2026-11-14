@@ -106,6 +106,7 @@ install -m 0755 release/linux/uninstall.sh "$package_root/uninstall.sh"
 install -m 0644 release/linux/muxflow.desktop.in "$package_root/share/applications/muxflow.desktop.in"
 install -m 0644 release/linux/icon.png "$package_root/share/icons/hicolor/256x256/apps/muxflow.png"
 install -m 0644 LICENSE "$package_root/LICENSE" 2>/dev/null || true
+node release/third-party-licenses.mjs "$package_root/THIRD-PARTY-LICENSES"
 
 (
   cd "$package_root"
