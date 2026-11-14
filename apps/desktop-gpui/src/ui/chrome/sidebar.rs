@@ -241,7 +241,7 @@ fn workspace_row(
                 DisplayState::Blocked | DisplayState::Done | DisplayState::Working
             )
         });
-        state_indicator(state.unwrap_or(DisplayState::Idle), glyphs, 7., cx)
+        state_indicator(state.unwrap_or(DisplayState::Idle), glyphs, 8., ink, cx)
     } else {
         // Working alone, and always as motion: the lines below carry the rest.
         let state = if agents.working {
@@ -249,7 +249,35 @@ fn workspace_row(
         } else {
             DisplayState::Idle
         };
-        state_indicator(state, false, 7., cx)
+        state_indicator(state, false, 8., ink, cx)
+    };
+    // Tauri rings the active row's state dot in accent ink: on the accent block
+    // a red or a green dot would dissolve. A working mark takes the ink itself.
+    let ringed = selected
+        && compact
+        && match agents.state {
+            Some(DisplayState::Blocked | DisplayState::Done) => true,
+            Some(DisplayState::Working) => glyphs,
+            _ => false,
+        };
+    let indicator = if ringed {
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .absolute()
+                    .top(ui(-1.5))
+                    .left(ui(-1.5))
+                    .right(ui(-1.5))
+                    .bottom(ui(-1.5))
+                    .rounded_full()
+                    .bg(palette.accent_ink),
+            )
+            .child(indicator)
+            .into_any_element()
+    } else {
+        indicator
     };
     // Waiting agents: inline after a compact row's marks, else at the right edge.
     let unread = (agents.unread > 0).then(|| {
@@ -435,6 +463,7 @@ fn workspace_row(
                                             glyphs,
                                             meta,
                                             ring,
+                                            selected,
                                             cx,
                                         )
                                     }))
@@ -466,6 +495,7 @@ fn workspace_row(
                                 glyphs,
                                 meta,
                                 ring,
+                                selected,
                                 cx,
                             ))
                             .child(div().min_w_0().truncate().child(agent.name.clone()))
