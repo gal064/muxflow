@@ -40,14 +40,12 @@ const edit = (name, pattern, replacement) => {
 };
 // The first "version" key is the top-level one in each of these files.
 const topLevelVersion = /("version":\s*)"[^"]*"/;
-edit("apps/desktop/src-tauri/tauri.conf.json", topLevelVersion, `$1"${version}"`);
-edit("apps/desktop/package.json", topLevelVersion, `$1"${version}"`);
 edit("apps/mobile/package.json", topLevelVersion, `$1"${version}"`);
 edit("apps/mobile/app.json", topLevelVersion, `$1"${version}"`);
 if (requestedBuild) edit("apps/mobile/app.json", /("buildNumber":\s*)"[^"]*"/, `$1"${requestedBuild}"`);
 edit("apps/mobile/app.json", /("versionCode":\s*)\d+/, `$1${major * 10000 + minor * 100 + patch}`);
 const cargoVersion = /^(\[package\][^[]*?^version = )"[^"]+"/m;
-edit("apps/desktop/src-tauri/Cargo.toml", cargoVersion, `$1"${version}"`);
+edit("apps/desktop-gpui/Cargo.toml", cargoVersion, `$1"${version}"`);
 edit("apps/host/Cargo.toml", cargoVersion, `$1"${version}"`);
 NODE
 

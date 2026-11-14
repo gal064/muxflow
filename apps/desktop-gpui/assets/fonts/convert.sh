@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates the TTFs here from the desktop app's woff2 files.
+# Regenerates the TTFs here from the woff2 files beside them.
 #
 #   - JetBrains Mono: woff2 is a lossless wrapper, so the glyphs are identical.
 #   - Inter: GPUI's Linux text system does not honor variable weights, so the
@@ -12,7 +12,7 @@
 # Usage: ./convert.sh   (needs `uv`; fonttools and brotli are fetched on demand)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$here/../../../desktop/src/assets/fonts"
+src="$here"
 
 for f in JetBrainsMono-Regular JetBrainsMono-Bold JetBrainsMono-Italic JetBrainsMono-BoldItalic; do
   uv run --quiet --no-project --with fonttools --with brotli python -I -c '
@@ -45,6 +45,3 @@ instance InterVariable 600 Inter-SemiBold SemiBold
 instance InterVariable 700 Inter-Bold Bold
 instance InterVariable-Italic 400 Inter-Italic Italic
 instance InterVariable-Italic 700 Inter-BoldItalic "Bold Italic"
-
-cp "$src/LICENSE.txt" "$here/LICENSE-JetBrainsMono.txt"
-cp "$src/LICENSE-Inter.txt" "$here/LICENSE-Inter.txt"

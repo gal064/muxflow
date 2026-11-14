@@ -4,7 +4,7 @@ import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter,
 
 /**
  * The adapter marks, drawn from the desktop's geometry (`agentIconPaths.ts`,
- * pinned to `AgentIdentity.tsx` by a test). Claude's four strokes and Codex's
+ * pinned to the desktop's `agents/view.rs` by a test). Claude's four strokes and Codex's
  * blossom are drawn to the same optical weight, not the same box: the blossom
  * fills its viewBox edge to edge, so the desktop insets it ~14% about its own
  * centre, and that transform comes along verbatim.

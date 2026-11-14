@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "apps/desktop/src-tauri",
   "apps/desktop-gpui",
   "apps/host",
   "crates/desktop-core",
