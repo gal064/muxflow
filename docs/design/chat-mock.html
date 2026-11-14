@@ -1,0 +1,689 @@
+<title>Muxflow Chat Design</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a review document. Each section is a short brief, then a mock drawn with Muxflow's own palette and metrics. */
+:root{
+  --page:#eeeef1;--bg:#fafafa;--raised:#f4f4f5;--hair:#e4e4e7;--border:#d4d4d8;--hover:#ececee;--sel:#ffffff;
+  --ink-strong:#18181b;--ink:#27272a;--dim:#71717b;--faint:#85858e;
+  --accent:#2f6fe0;--wash:#2f6fe01f;--ok:#16a34a;--warn:#b45309;--danger:#dc2626;--working:#d97706;--done:#0e7490;
+  --add:#16a34a1f;--del:#dc26261c;--shadow:0 14px 34px #18181b24;
+  --ui:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --page:#1f2329;--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;--hover:#2f343e;--sel:#353b45;
+  --ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;
+  --accent:#7aa6da;--wash:#7aa6da24;--ok:#28c840;--warn:#febc2e;--danger:#cc6566;--working:#f0c674;--done:#8abeb7;
+  --add:#28c84024;--del:#cc656626;--shadow:0 18px 44px #00000070;color-scheme:dark}}
+:root[data-theme="dark"]{
+  --page:#1f2329;--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;--hover:#2f343e;--sel:#353b45;
+  --ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;
+  --accent:#7aa6da;--wash:#7aa6da24;--ok:#28c840;--warn:#febc2e;--danger:#cc6566;--working:#f0c674;--done:#8abeb7;
+  --add:#28c84024;--del:#cc656626;--shadow:0 18px 44px #00000070;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--page);color:var(--ink);font-family:var(--ui);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding-block:36px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:44px}
+h1{font-size:28px;font-weight:600;letter-spacing:-.5px;color:var(--ink-strong);margin:0;text-wrap:balance}
+h2{font-size:19px;font-weight:600;letter-spacing:-.2px;color:var(--ink-strong);margin:0;text-wrap:balance}
+h3{font-size:13px;font-weight:600;color:var(--ink-strong);margin:0}
+p{margin:0;max-width:68ch}
+.lede{color:var(--dim);font-size:15px}
+.kicker{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:600}
+section{display:flex;flex-direction:column;gap:14px}
+.brief{display:flex;flex-direction:column;gap:8px}
+ul.pts{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px;max-width:74ch}
+ul.pts b,p b{color:var(--ink-strong);font-weight:600}
+code{font-family:var(--mono);font-size:12px;background:var(--raised);border:1px solid var(--hair);border-radius:4px;padding:0 4px}
+.toc{display:flex;flex-wrap:wrap;gap:6px 8px}
+.toc a{font-size:12.5px;color:var(--ink);text-decoration:none;border:1px solid var(--border);border-radius:999px;padding:3px 10px;background:var(--bg)}
+.toc a:hover,.toc a:focus-visible{border-color:var(--accent);color:var(--accent);outline:none}
+.scroll{overflow-x:auto;border-radius:10px}
+.cap{font-size:12.5px;color:var(--dim);max-width:80ch}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+@media(max-width:860px){.grid2,.grid3{grid-template-columns:minmax(0,1fr)}}
+.tile{display:flex;flex-direction:column;gap:8px;min-width:0}
+
+/* ---- mock window ---- */
+.win{min-width:980px;border:1px solid var(--border);border-radius:10px;background:var(--bg);overflow:hidden;font-size:13.5px;line-height:1.45;color:var(--ink)}
+.win.small{min-width:0}
+.tbar{height:34px;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--hair);color:var(--dim);font-size:12.5px}
+.dots{display:flex;gap:6px}.dots i{width:10px;height:10px;border-radius:50%;background:var(--border);display:block}
+.tbar .sp{flex:1}
+.body{display:grid;grid-template-columns:216px minmax(0,1fr)}
+.side{border-right:1px solid var(--hair);padding:10px 8px;display:flex;flex-direction:column;gap:3px;min-height:520px}
+.lab{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding:8px 8px 4px;display:flex;align-items:center;justify-content:space-between}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;min-width:0}
+.row.on{background:var(--sel);box-shadow:inset 0 0 0 1px var(--hair)}
+.row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .meta{font-size:11px;color:var(--faint);white-space:nowrap}
+.chip{flex:none;width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:600;font-family:var(--mono);background:var(--raised);border:1px solid var(--border);color:var(--dim)}
+.st{flex:none;width:8px;height:8px;border-radius:50%}
+.st.work{background:var(--working)}.st.block{background:var(--danger)}.st.idle{background:var(--border)}.st.done{background:var(--done)}.st.sleep{background:transparent;border:1.5px dashed var(--faint)}
+.ibtn{flex:none;height:22px;min-width:22px;padding:0 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--dim);font-size:11px;display:inline-grid;place-items:center;white-space:nowrap}
+.ibtn.hot{border-color:var(--accent);color:var(--accent);background:var(--wash)}
+.main{display:flex;flex-direction:column;min-width:0}
+.tabs{height:34px;display:flex;align-items:stretch;border-bottom:1px solid var(--hair);font-size:12.5px;color:var(--dim)}
+.tab{display:flex;align-items:center;gap:7px;padding:0 12px;border-right:1px solid var(--hair);white-space:nowrap}
+.tab.on{background:var(--sel);color:var(--ink-strong)}
+.tabs .sp{flex:1}
+.tabs .acts{display:flex;align-items:center;gap:6px;padding:0 8px}
+.seg{display:flex;border:1px solid var(--border);border-radius:5px;overflow:hidden;font-size:11px}
+.seg span{padding:2px 8px;color:var(--dim)}.seg span.on{background:var(--wash);color:var(--accent)}
+
+/* ---- chat ---- */
+.chat{position:relative;display:flex;flex-direction:column;min-height:486px}
+.tl{flex:1;display:flex;flex-direction:column;gap:14px;padding:18px 0 12px;width:min(640px,100%);margin:0 auto}
+.chat.wide .tl,.chat.wide .comp{margin-left:max(24px,calc((100% - 252px - 640px)/2))}
+.u{align-self:flex-end;max-width:82%;background:var(--raised);border:1px solid var(--hair);border-radius:12px 12px 3px 12px;padding:8px 12px;color:var(--ink-strong);position:relative}
+.u .ed{position:absolute;left:-52px;top:6px;font-size:11px;color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:1px 6px;background:var(--bg)}
+.a{color:var(--ink);max-width:100%}
+.a p{max-width:none}.a p+p{margin-top:8px}
+.tool{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);border:1px solid var(--hair);border-radius:7px;padding:5px 9px;background:var(--bg);min-width:0}
+.tool .k{font-family:var(--mono);font-size:11px;color:var(--faint);flex:none}
+.tool .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:12px;color:var(--ink)}
+.tool .r{flex:none;font-size:11px}
+.okc{color:var(--ok)}.badc{color:var(--danger)}.wkc{color:var(--working)}
+.card{border:1px solid var(--border);border-radius:9px;background:var(--bg);overflow:hidden}
+.card .hd{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--hair);font-size:12.5px;color:var(--ink-strong)}
+.card .hd .sp{flex:1}.card .hd small{color:var(--faint);font-size:11px}
+.card.ask{border-color:var(--danger)}.card.ask .hd{background:var(--del)}
+.card .bd{padding:9px 10px;display:flex;flex-direction:column;gap:8px}
+.cmd{font-family:var(--mono);font-size:12px;background:var(--raised);border:1px solid var(--hair);border-radius:5px;padding:5px 8px;color:var(--ink-strong);overflow-x:auto;white-space:nowrap}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+.b{font-size:12px;padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--ink);white-space:nowrap}
+.b.pri{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:500}
+.b.ghost{border-color:transparent;color:var(--dim)}
+.diff{font-family:var(--mono);font-size:11.5px;line-height:1.55;overflow-x:auto}
+.diff div{padding:0 10px;white-space:pre}
+.diff .h{color:var(--faint);background:var(--raised);border-block:1px solid var(--hair)}
+.diff .p{background:var(--add)}.diff .m{background:var(--del)}
+.diff .n{color:var(--faint);display:inline-block;width:30px;text-align:right;margin-right:10px;user-select:none}
+.comp{width:min(640px,100%);margin:0 auto 14px;border:1px solid var(--border);border-radius:11px;background:var(--bg);box-shadow:0 1px 0 var(--hair);position:relative}
+.comp .ta{padding:10px 12px 4px;min-height:44px;color:var(--faint)}
+.comp .ta.txt{color:var(--ink-strong)}
+.comp .bar{display:flex;align-items:center;gap:6px;padding:6px 8px 8px}
+.pill{font-size:11.5px;border:1px solid var(--border);border-radius:999px;padding:2px 9px;color:var(--ink);white-space:nowrap;background:var(--bg)}
+.pill.q{border-style:dashed;color:var(--dim)}
+.comp .bar .sp{flex:1}
+.ctx{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.meter{width:54px;height:4px;border-radius:2px;background:var(--hair);overflow:hidden}.meter i{display:block;height:100%;width:21%;background:var(--dim)}
+.send{width:26px;height:26px;border-radius:7px;background:var(--accent);color:var(--bg);display:grid;place-items:center;font-size:13px;font-weight:600}
+.send.stop{background:var(--danger)}
+.banner{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink);background:var(--wash);border-bottom:1px solid var(--hair);padding:6px 12px;border-radius:10px 10px 0 0}
+.banner .sp{flex:1}
+.pop{border:1px solid var(--border);border-radius:9px;background:var(--raised);box-shadow:var(--shadow);overflow:hidden;font-size:12.5px}
+.pop .it{display:flex;align-items:baseline;gap:10px;padding:5px 10px;min-width:0}
+.pop .it.on{background:var(--wash)}
+.pop .it b{font-family:var(--mono);font-weight:500;font-size:12px;color:var(--ink-strong);white-space:nowrap}
+.pop .it span{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.pop .it em{font-style:normal;font-size:10.5px;color:var(--faint);white-space:nowrap}
+.pop .sec{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding:7px 10px 3px}
+.pad{padding:14px;display:flex;flex-direction:column;gap:10px}
+.opt{display:flex;gap:9px;align-items:flex-start;padding:6px 8px;border:1px solid var(--hair);border-radius:7px}
+.opt.on{border-color:var(--accent);background:var(--wash)}
+.opt i{flex:none;width:13px;height:13px;border-radius:50%;border:1.5px solid var(--faint);margin-top:3px}
+.opt.on i{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 3px var(--bg)}
+.opt b{display:block;color:var(--ink-strong);font-weight:500}
+.opt span{color:var(--dim);font-size:12px}
+.gitwin{display:grid;grid-template-columns:minmax(0,1fr) 232px}
+.gitwin>.tabs,.gitwin>.pad{grid-column:1}
+.gitwin>.gp{grid-column:2;grid-row:1/span 2;border-left:1px solid var(--hair);padding:8px;display:flex;flex-direction:column;gap:3px;font-size:12.5px}
+.vbar{margin:0 10px 12px;border:1px solid var(--accent);background:var(--wash);border-radius:16px;padding:10px 12px;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink)}
+.vbar .big{width:40px;height:40px;border-radius:50%;background:var(--accent);color:var(--bg);display:grid;place-items:center;font-family:var(--mono);font-size:10px;flex:none}
+
+/* ---- details card ---- */
+.dcard{position:absolute;top:14px;right:14px;width:238px;border:1px solid var(--border);border-radius:10px;background:var(--bg);box-shadow:var(--shadow);font-size:12.5px}
+.dcard.static{position:static;box-shadow:none}
+.dcard .g{padding:8px 10px;display:flex;flex-direction:column;gap:7px;border-bottom:1px solid var(--hair)}
+.dcard .g:last-child{border-bottom:0}
+.dcard .l{display:flex;align-items:center;gap:8px;min-width:0}
+.dcard .l .v{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink-strong)}
+.dcard .l .x{color:var(--faint);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.gl{flex:none;width:14px;text-align:center;color:var(--faint);font-family:var(--mono);font-size:11px}
+.bar2{flex:1;height:4px;border-radius:2px;background:var(--hair);overflow:hidden}.bar2 i{display:block;height:100%;width:21%;background:var(--dim)}
+
+/* ---- terminal mock ---- */
+.term{font-family:var(--mono);font-size:12px;line-height:1.55;padding:12px 14px;color:var(--ink);min-height:180px;white-space:pre;overflow-x:auto}
+.term .d{color:var(--faint)}.term .hl{color:var(--accent)}
+
+/* ---- phone ---- */
+.phones{display:flex;flex-wrap:wrap;gap:22px;justify-content:flex-start}
+.ph{width:252px;flex:none;border:1px solid var(--border);border-radius:26px;background:var(--bg);overflow:hidden;display:flex;flex-direction:column;font-size:13px;line-height:1.45}
+.ph .top{display:flex;align-items:center;gap:8px;padding:12px 14px 9px;border-bottom:1px solid var(--hair);font-size:12.5px;color:var(--ink-strong)}
+.ph .top .sp{flex:1}
+.ph .sc{flex:1;padding:12px;display:flex;flex-direction:column;gap:10px;min-height:340px}
+.ph .u{max-width:88%;font-size:13px}.ph .a{font-size:13px}
+.ph .cmp{margin:0 10px 12px;border:1px solid var(--border);border-radius:16px;padding:7px 8px 7px 12px;display:flex;align-items:center;gap:8px;color:var(--faint);font-size:12.5px}
+.ph .cmp .sp{flex:1}
+.mic{width:28px;height:28px;border-radius:50%;border:1px solid var(--border);display:grid;place-items:center;color:var(--dim);font-size:11px;font-family:var(--mono)}
+.phcap{font-size:12px;color:var(--dim);width:252px}
+
+/* ---- tables & diagram ---- */
+.tbl{overflow-x:auto;border:1px solid var(--border);border-radius:9px;background:var(--bg)}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:620px}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--hair);vertical-align:top}
+th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600;background:var(--raised)}
+tr:last-child td{border-bottom:0}
+td b{color:var(--ink-strong);font-weight:600}
+.tag{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.04em;border-radius:4px;padding:0 6px;border:1px solid var(--border);white-space:nowrap}
+.tag.y{color:var(--ok);border-color:var(--ok)}.tag.n{color:var(--warn);border-color:var(--warn)}
+.flow{display:flex;align-items:stretch;gap:0;min-width:820px}
+.box{flex:1;border:1px solid var(--border);border-radius:9px;background:var(--bg);padding:10px 12px;display:flex;flex-direction:column;gap:4px;font-size:12.5px}
+.box h3{font-size:12.5px}.box span{color:var(--dim)}
+.box.t{border-style:dashed}
+.arr{flex:none;width:44px;display:grid;place-items:center;color:var(--faint);font-family:var(--mono);font-size:11px;text-align:center}
+ol.steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:5px;max-width:74ch}
+</style>
+
+<div class="wrap">
+
+<header class="brief">
+  <span class="kicker">Muxflow · T064 · for review</span>
+  <h1>Chat for agents, inside tmux</h1>
+  <p class="lede">The design for structured chat and everything agreed with it: the details card, the Git view, History, Snooze and the phone. Final draft: every decision is settled and recorded at the end. Mocks use sample data. Nothing here is built yet.</p>
+  <nav class="toc" aria-label="Sections">
+    <a href="#chat">Chat view</a><a href="#pieces">Chat pieces</a><a href="#btw">By the way</a><a href="#switch">Terminal or Chat mode</a><a href="#card">Details card</a><a href="#changes">Git view</a><a href="#history">History</a><a href="#snooze">Snooze</a><a href="#phone">Phone</a><a href="#runs">How it runs</a><a href="#decide">Decisions</a><a href="#plan">Build plan and QA</a>
+  </nav>
+</header>
+
+<!-- ============ 1 CHAT VIEW ============ -->
+<section id="chat">
+  <div class="brief">
+    <h2>Chat view</h2>
+    <p>A chat is another way to look at a terminal tab. The tab, its tmux window and its place in the workspace do not change. Only what fills the tab changes.</p>
+    <ul class="pts">
+      <li><b>One column, 640px wide,</b> centred. Your messages sit on the right in a bubble; the agent's text runs unboxed on the left, rendered as Markdown.</li>
+      <li><b>Tool calls are single rows</b> that expand on click. File edits are rows too; clicking one opens that file in the Git diff tab.</li>
+      <li><b>The composer</b> holds the model and effort pills, the context meter and Send. Send becomes Stop while the agent is working.</li>
+      <li><b>Status is unchanged.</b> The Agents list, notifications and the tab's attention badge work as they do for terminal agents.</li>
+      <li><b>File links</b> come from Markdown links and from inline code that is a path existing on the host. They show the file name and open the full path. Chat text has no terminal wrapping, so links are not cut short.</li>
+    </ul>
+  </div>
+  <div class="scroll"><div class="win">
+    <div class="tbar"><span class="dots"><i></i><i></i><i></i></span><span>‹ ›</span><span class="sp"></span><span>devbox</span><span class="sp"></span><span>⚙</span></div>
+    <div class="body">
+      <aside class="side">
+        <div class="lab">Workspaces</div>
+        <div class="row on"><span class="nm">1 · muxflow</span><span class="meta">4</span></div>
+        <div class="row"><span class="nm">2 · checksum</span><span class="meta">2</span></div>
+        <div class="row"><span class="nm">3 · site</span><span class="meta">1</span></div>
+        <div class="lab" style="margin-top:10px">Agents <span class="ibtn hot" title="History">◷ History</span></div>
+        <div class="row on"><span class="chip">CC</span><span class="st block"></span><span class="nm">Wrapped link bug</span><span class="meta">muxflow</span></div>
+        <div class="row"><span class="chip">CX</span><span class="st work"></span><span class="nm">Git panel hunks</span><span class="meta">muxflow</span></div>
+        <div class="row"><span class="chip">CC</span><span class="st done"></span><span class="nm">Release notes</span><span class="meta">site</span></div>
+        <div class="row"><span class="chip">CC</span><span class="st idle"></span><span class="nm">Voice cleanup</span><span class="meta">muxflow</span></div>
+      </aside>
+      <div class="main">
+        <div class="tabs">
+          <div class="tab">zsh</div><div class="tab on"><span class="chip">CC</span>Wrapped link bug</div><div class="tab"><span class="chip">CX</span>Git panel hunks</div>
+          <span class="sp"></span>
+          <div class="acts"><span class="ibtn hot" title="Session details">Details</span></div>
+        </div>
+        <div class="chat wide">
+          <div class="tl">
+            <div class="u">The link detector misses paths that wrap inside Claude's boxed output. Find out why.</div>
+            <div class="a"><p>The detector joins rows that the terminal marks as soft-wrapped. Boxed output is hard-wrapped by the agent, so it takes the second path, which needs a delimiter or an indented continuation.</p></div>
+            <div class="tool"><span class="k">read</span><span class="t">crates/terminal-interactions/src/links.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><span class="k">run</span><span class="t">cargo test -p terminal-interactions links</span><span class="r okc">14 passed</span></div>
+            <div class="a"><p>A path that breaks right after a <code>/</code> inside a box border is dropped, because the border character ends the continuation. I can add that case and a fixture for it.</p></div>
+            <div class="card ask">
+              <div class="hd">Auto mode is asking: edit this file?<span class="sp"></span><small>waiting for you</small></div>
+              <div class="bd">
+                <div class="cmd">crates/terminal-interactions/src/links.rs</div>
+                <div class="btns"><span class="b pri">Allow</span><span class="b ghost">Deny</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="comp">
+            <div class="ta">Reply, or type / for commands</div>
+            <div class="bar"><span class="pill">Opus 5.5 ▾</span><span class="pill">High ▾</span><span class="pill">Auto ▾</span><span class="seg"><span class="on">Standard</span><span>Fast</span></span><span class="sp"></span><span class="ctx"><span class="meter"><i></i></span>209k / 1M</span><span class="send">↑</span></div>
+          </div>
+          <div class="dcard">
+            <div class="g"><div class="l"><span class="gl">▣</span><span class="v">devbox</span></div><div class="l"><span class="gl">/</span><span class="v">~/dev/muxflow</span></div></div>
+            <div class="g"><div class="l"><span class="gl">⑂</span><span class="v">gpui/chat</span><span class="x">▾</span></div><div class="l"><span class="gl">○</span><span class="v">Commit…</span></div><div class="l"><span class="gl">±</span><span class="v">Changes <span style="color:var(--faint)">vs origin/main</span></span><span class="x"><span class="okc">+182</span> <span class="badc">−41</span></span></div></div>
+            <div class="g"><div class="l"><span style="color:var(--faint);font-size:11px">Context</span><span class="bar2"><i></i></span><span class="x">209k / 1M</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <p class="cap">The whole window. The selected agent is waiting for an answer, so its row shows the blocked dot and the request appears as a card in the conversation. The <b>History</b> button is in the Agents header, and the <b>Details</b> toggle sits at the right of the tab strip.</p>
+</section>
+
+<!-- ============ 2 PIECES ============ -->
+<section id="pieces">
+  <div class="brief">
+    <h2>Chat pieces</h2>
+    <p>Each piece below is driven by typed data from the provider, not by reading the terminal screen.</p>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3>Permissions: Full or Auto</h3>
+      <div class="win small"><div class="pad">
+        <div class="pop" style="max-width:320px"><div class="sec">Permissions</div><div class="it on"><b style="font-family:var(--ui)">Auto</b><span>The provider approves actions it judges safe</span></div><div class="it"><b style="font-family:var(--ui)">Full</b><span>No checks and no sandbox</span></div></div>
+        <div class="card ask"><div class="hd">Auto mode is asking: run this command?<span class="sp"></span><small>waiting for you</small></div><div class="bd"><div class="cmd">git push --force origin gpui/chat</div><div class="btns"><span class="b pri">Allow</span><span class="b ghost">Deny</span></div></div></div>
+      </div></div>
+      <p class="cap">Chat has two modes and no manual approval. The session starts in the mode its launch flags ask for, or in Auto. If Auto declines to decide, a plain Allow / Deny card appears so the turn does not hang.</p>
+    </div>
+    <div class="tile">
+      <h3>Question from the agent</h3>
+      <div class="win small"><div class="pad">
+        <div class="card"><div class="hd">How should the wrapped-path fix be scoped?<span class="sp"></span><small>1 of 2</small></div><div class="bd">
+          <div class="opt on"><i></i><div><b>Boxed output only</b><span>Strip box borders before joining rows. Smallest change, no effect on plain output.</span></div></div>
+          <div class="opt"><i></i><div><b>Any hard-wrapped path</b><span>Also join rows without a border when the next row continues a path. Catches more, with some risk of joining two separate paths.</span></div></div>
+          <div class="opt"><i></i><div><b>Other</b><span>Type your own answer.</span></div></div>
+          <div class="btns"><span class="b pri">Submit</span><span class="b ghost">Skip</span></div></div></div>
+      </div></div>
+      <p class="cap">One option per row with its description, so long answers stay readable. Radio buttons for a single choice, checkboxes when several are allowed, and an "Other" row with a text field.</p>
+    </div>
+    <div class="tile">
+      <h3>Slash commands and skills</h3>
+      <div class="win small"><div class="pad">
+        <div class="pop">
+          <div class="sec">Commands</div>
+          <div class="it on"><b>/compact</b><span>Summarise the conversation to free context</span></div>
+          <div class="it"><b>/clear</b><span>Start over in this session</span></div>
+          <div class="sec">Skills</div>
+          <div class="it"><b>/code-review</b><span>Review the current diff for bugs</span><em>[level] [target]</em></div>
+          <div class="it"><b>/diagnose-crash</b><span>Find out why a program crashed</span></div>
+        </div>
+        <div class="comp" style="margin:0;width:100%"><div class="ta txt">/co</div><div class="bar"><span class="pill">Opus 5.5 ▾</span><span class="pill">High ▾</span><span class="sp"></span><span class="send">↑</span></div></div>
+      </div></div>
+      <p class="cap">The list comes from the provider when the chat opens and refreshes when it reports a change. On this machine Claude returned 78 entries with descriptions and argument hints. Nothing is hard-coded.</p>
+    </div>
+    <div class="tile">
+      <h3>Edit an earlier message</h3>
+      <div class="win small"><div class="pad">
+        <div class="u" style="align-self:flex-end;margin-left:60px"><span class="ed">Edit</span>Find out why wrapped paths are missed.</div>
+        <div class="comp" style="margin:0;width:100%"><div class="banner">Editing an earlier message. Sending removes everything after it. Files on disk stay as they are.<span class="sp"></span><span class="b ghost">Cancel</span></div><div class="ta txt">Find out why wrapped paths are missed, and only look at boxed output.</div><div class="bar"><span class="pill">Opus 5.5 ▾</span><span class="sp"></span><span class="send">↑</span></div></div>
+      </div></div>
+      <p class="cap">Hovering one of your messages shows Edit. The text returns to the composer; sending rewinds the conversation to that point and continues from the edited message.</p>
+    </div>
+    <div class="tile">
+      <h3>Model, effort and speed</h3>
+      <div class="win small"><div class="pad">
+        <div class="pop" style="max-width:300px">
+          <div class="sec">Model</div>
+          <div class="it on"><b>Opus 5.5</b><span>Default</span></div>
+          <div class="it"><b>Fable 5.2</b><span></span></div>
+          <div class="it"><b>Sonnet 5.5</b><span></span></div>
+          <div class="sec">Effort</div>
+          <div class="it"><b>Low · Medium · High · Xhigh · Max</b></div>
+          <div class="sec">Speed</div>
+          <div class="it"><span class="seg"><span>Standard</span><span class="on">Fast</span></span></div>
+        </div>
+      </div></div>
+      <p class="cap">Models and their effort levels are read from the installed CLI. A change applies from the next message. The Standard / Fast toggle shows when the selected model supports fast mode.</p>
+    </div>
+    <div class="tile">
+      <h3>Working, and file edits</h3>
+      <div class="win small"><div class="pad">
+        <div class="tool"><span class="k">edit</span><span class="t">crates/terminal-interactions/src/links.rs</span><span class="r"><span class="okc">+3</span> <span class="badc">−1</span></span></div>
+        <div class="tool"><span class="k">run</span><span class="t">cargo test -p terminal-interactions links</span><span class="r wkc">running</span></div>
+        <div class="comp" style="margin:0;width:100%"><div class="ta">Send a follow-up while it works</div><div class="bar"><span class="pill">Opus 5.5 ▾</span><span class="sp"></span><span class="send stop">■</span></div></div>
+      </div></div>
+      <p class="cap">A file edit is one row with its line counts; clicking it opens that file in the Git diff tab. While a turn runs, Send becomes Stop, and a message sent mid-turn reaches the agent without waiting for the turn to end.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2b BTW ============ -->
+<section id="btw">
+  <div class="brief">
+    <h2>By the way</h2>
+    <p>A side question that does not touch the main conversation. Claude answers one question in place and Codex forks the thread, so Muxflow takes over <code>/btw</code> and <code>/side</code> and handles them one way for both: fork the conversation and open the fork as a split beside the chat.</p>
+    <ul class="pts">
+      <li><b>How you ask:</b> type <code>/btw</code> or <code>/side</code> and the question. Muxflow's own entries replace the provider's in the slash list, for any provider that can fork.</li>
+      <li><b>What happens:</b> Muxflow forks the conversation with the fork it already has ("Branch conversation"), opens it in a tmux split beside the chat, and sends your question as its first message.</li>
+      <li><b>It is a normal session.</b> You can ask follow-ups, and it has its own row in the Agents list, titled with the original name and "(fork)", the same as a fork from the Branch button. It has the same permissions as the session it came from, and it is left out of History.</li>
+      <li><b>The main turn is not interrupted.</b> The fork starts from the last finished reply.</li>
+      <li><b>On the phone</b> there are no splits, so the fork opens as its own chat screen with a back arrow to the original.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <div class="win small"><div class="tabs"><div class="tab on"><span class="chip">CC</span>Wrapped link bug</div><span class="sp"></span></div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:12px;padding:14px;align-items:start">
+          <div style="display:flex;flex-direction:column;gap:10px;min-width:0"><div class="u" style="align-self:flex-end">Add the fixture and run the tests.</div><div class="tool"><span class="k">run</span><span class="t">cargo test links</span><span class="r wkc">running</span></div></div>
+          <div class="card" style="border-color:var(--accent)"><div class="hd"><span class="chip">CC</span>Wrapped link bug (fork)<span class="sp"></span></div><div class="bd">
+            <div class="u" style="align-self:flex-end;font-size:12.5px">Which file holds the soft-wrap join?</div>
+            <div class="a" style="font-size:12.5px">It is in <code>links.rs</code>, in <code>terminal_links_for_buffer_line</code>. It joins up to 128 rows using the terminal's wrap flag.</div>
+            <div class="comp" style="margin:0;width:100%"><div class="ta" style="min-height:30px;padding:6px 9px">Follow up</div></div></div></div>
+        </div>
+      </div>
+      <p class="cap">Claude: the fork opens as a split on the right while the main turn keeps running on the left.</p>
+    </div>
+    <div class="tile">
+      <div class="win small"><div class="tabs"><div class="tab on"><span class="chip">CX</span>Git panel hunks</div><span class="sp"></span></div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:12px;padding:14px;align-items:start">
+          <div style="display:flex;flex-direction:column;gap:10px;min-width:0"><div class="u" style="align-self:flex-end">Render hunks only in the diff tab.</div><div class="tool"><span class="k">edit</span><span class="t">git/diff_view.rs</span><span class="r wkc">working</span></div></div>
+          <div class="card" style="border-color:var(--accent)"><div class="hd"><span class="chip">CX</span>Git panel hunks (fork)<span class="sp"></span></div><div class="bd">
+            <div class="u" style="align-self:flex-end;font-size:12.5px">Does the host already send a patch?</div>
+            <div class="a" style="font-size:12.5px">Yes. <code>GitDiff</code> has a <code>patch</code> field; the desktop drops it today.</div>
+            <div class="comp" style="margin:0;width:100%"><div class="ta" style="min-height:30px;padding:6px 9px">Follow up</div></div></div></div>
+        </div>
+      </div>
+      <p class="cap">Codex: the same thing. One behaviour for both providers.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3 SWITCH ============ -->
+<section id="switch">
+  <div class="brief">
+    <h2>Terminal mode or Chat mode</h2>
+    <p>Agents still start from a terminal. You type <code>claude</code>, <code>codex</code> or your alias, and Muxflow detects the agent by its running process, as it does today. One setting decides what you get.</p>
+    <ul class="pts">
+      <li><b>One mode for the host:</b> Terminal or Chat, set in the desktop app's Settings. The default is Terminal.</li>
+      <li><b>No switching a session.</b> A session is a terminal or a chat for its whole life.</li>
+      <li><b>Changing the mode</b> affects agents started afterwards. Sessions already running stay as they are.</li>
+      <li><b>The phone follows the host.</b> Its Settings shows the mode read-only and says to change it in the desktop app.</li>
+      <li><b>pi</b> stays a terminal in both modes for now. Chat for pi is tracked as T066.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <div class="win small">
+        <div class="tabs"><div class="tab on"><span class="chip">CC</span>Wrapped link bug</div><span class="sp"></span></div>
+        <div class="term"><span class="d">~/dev/muxflow $</span> claude
+<span class="hl">✻</span> Welcome back
+
+<span class="d">›</span> Find out why wrapped paths are missed.
+<span class="d">  The detector joins rows that the terminal marks…</span>
+
+<span class="d">› </span></div>
+      </div>
+      <p class="cap">Terminal mode: the agent's own terminal UI, as today.</p>
+    </div>
+    <div class="tile">
+      <div class="win small">
+        <div class="tabs"><div class="tab on"><span class="chip">CC</span>Wrapped link bug</div><span class="sp"></span></div>
+        <div class="pad" style="min-height:180px">
+          <div class="u" style="align-self:flex-end">Find out why wrapped paths are missed.</div>
+          <div class="a"><p>The detector joins rows that the terminal marks as soft-wrapped…</p></div>
+          <div class="comp" style="margin:auto 0 0;width:100%"><div class="ta">Reply, or type / for commands</div><div class="bar"><span class="pill">Opus 5.5 ▾</span><span class="sp"></span><span class="send">↑</span></div></div>
+        </div>
+      </div>
+      <p class="cap">Chat mode: the same command gives a chat, in the same tab.</p>
+    </div>
+  </div>
+  <div class="brief">
+    <h3>What happens when an agent starts in Chat mode</h3>
+    <ul class="pts">
+      <li>The pane restarts running the agent headless, before you have typed a prompt, so nothing is lost.</li>
+      <li>If you started it with a resume, such as <code>claude -r</code>, the chat opens on that conversation with its earlier messages.</li>
+      <li>The pane restarts with the agent's environment and directory, so a virtualenv or exported variables carry over. The original shell and its command history do not; closing the chat leaves a fresh shell in the pane.</li>
+      <li>Flags that only make sense in a terminal are dropped. Model, permission mode and extra directories carry over.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 4 CARD ============ -->
+<section id="card">
+  <div class="brief">
+    <h2>Details card</h2>
+    <p>Chat sessions only. It floats at the top right of the chat area, and is not shown beside terminals.</p>
+    <ul class="pts">
+      <li><b>Host and folder.</b> Clicking the folder reveals it in the Files panel.</li>
+      <li><b>Branch.</b> A menu of local branches with a filter. Switching runs a normal checkout; if Git refuses, the error is shown and nothing changes.</li>
+      <li><b>Commit…</b> opens the Git panel's commit form.</li>
+      <li><b>Changes vs origin/main</b> shows lines added and removed against the default branch, and opens the Git panel in that scope.</li>
+      <li><b>Context</b> shows tokens used against the model's window.</li>
+      <li><b>Auto-hide.</b> The card shows only when the chat area is at least 940px wide, so the 640px column and the card never overlap. Below that it is hidden and the Details button opens it as a popover.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <div class="win small"><div class="tabs"><div class="tab on"><span class="chip">CC</span>Wrapped link bug</div><span class="sp"></span><div class="acts"><span class="ibtn hot">Details</span></div></div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 238px;gap:14px;padding:14px;align-items:start">
+          <div style="display:flex;flex-direction:column;gap:10px"><div class="u" style="align-self:flex-end">Add the fixture.</div><div class="a"><p>Added a boxed-output fixture and the failing case.</p></div></div>
+          <div class="dcard static"><div class="g"><div class="l"><span class="gl">▣</span><span class="v">devbox</span></div></div><div class="g"><div class="l"><span class="gl">⑂</span><span class="v">gpui/chat</span><span class="x">▾</span></div><div class="l"><span class="gl">±</span><span class="v">Changes</span><span class="x"><span class="okc">+182</span> <span class="badc">−41</span></span></div></div><div class="g"><div class="l"><span class="bar2"><i></i></span><span class="x">209k / 1M</span></div></div></div>
+        </div>
+      </div>
+      <p class="cap">Wide: the card sits beside the conversation.</p>
+    </div>
+    <div class="tile">
+      <div class="win small" style="max-width:420px"><div class="tabs"><div class="tab on"><span class="chip">CC</span>Wrapped link bug</div><span class="sp"></span><div class="acts"><span class="ibtn">Details</span></div></div>
+        <div class="pad"><div class="u" style="align-self:flex-end">Add the fixture.</div><div class="a"><p>Added a boxed-output fixture and the failing case.</p></div></div>
+      </div>
+      <p class="cap">Narrow: the card is hidden. The Details button stays and opens the same card as a popover.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5 CHANGES ============ -->
+<section id="changes">
+  <div class="brief">
+    <h2>Git view</h2>
+    <p>An improvement to the existing Git view, for terminal and chat sessions alike. The Git panel stays as the file list. The diff it opens shows only the changed hunks, in one tab that is reused.</p>
+    <ul class="pts">
+      <li><b>One diff tab.</b> Clicking a file in the Git panel shows it in the same tab, the way file previews work, instead of opening another tab.</li>
+      <li><b>One file at a time,</b> as in VS Code's source control. The tab shows the hunks of the file you clicked. Each hunk collapses, and Collapse all has a button and a shortcut.</li>
+      <li><b>Scope at the top of the Git panel:</b> Uncommitted, or against origin/main. The panel lists the files for the scope you pick.</li>
+      <li><b>Hunks come from Git itself,</b> with three lines of context, so staging or discarding a hunk acts on exactly what is shown. Those buttons appear only in the Uncommitted scope.</li>
+      <li><b>Show whole file</b> opens today's full-file diff for that file.</li>
+      <li>"Only this session's changes" is not in this version. It needs per-session edit tracking and can follow once chat reports edits.</li>
+    </ul>
+  </div>
+  <div class="scroll"><div class="win gitwin" style="min-width:900px">
+    <div class="tabs"><div class="tab"><span class="chip">CC</span>Wrapped link bug</div><div class="tab on"><i>Git diff</i></div><span class="sp"></span><div class="acts"><span class="ibtn">Collapse all</span></div></div>
+    <div class="pad">
+      <div class="card"><div class="hd">▾ <span style="font-family:var(--mono);font-size:12px">crates/terminal-interactions/src/links.rs</span><span class="sp"></span><small><span class="okc">+3</span> <span class="badc">−1</span></small><span class="ibtn">Show whole file</span></div>
+        <div class="diff"><div class="h">@@ -171,7 +171,9 @@ fn continuation_start<span style="float:right">Stage · Discard</span></div><div><span class="n">172</span>    let trimmed = row.trim_start();</div><div class="m"><span class="n">173</span>-   if trimmed.is_empty() { return None; }</div><div class="p"><span class="n">173</span>+   let trimmed = trimmed.trim_start_matches(BOX_EDGE);</div><div class="p"><span class="n">174</span>+   let trimmed = trimmed.trim_start();</div><div class="p"><span class="n">175</span>+   if trimmed.is_empty() { return None; }</div><div><span class="n">176</span>    Some(trimmed)</div></div></div>
+    </div>
+    <div class="gp">
+      <div class="seg" style="align-self:flex-start;margin:2px 0 6px"><span>Files</span><span class="on">Git</span><span>Ports</span></div>
+      <div class="seg" style="align-self:flex-start;margin-bottom:6px"><span class="on">Uncommitted</span><span>vs origin/main</span></div>
+      <div class="lab" style="padding-left:2px">Changes · 3</div>
+      <div class="row on"><span class="nm" style="font-family:var(--mono);font-size:12px">links.rs</span><span class="meta"><span class="okc">+3</span> <span class="badc">−1</span></span></div>
+      <div class="row"><span class="nm" style="font-family:var(--mono);font-size:12px">links_tests.rs</span><span class="meta"><span class="okc">+28</span></span></div>
+      <div class="row"><span class="nm" style="font-family:var(--mono);font-size:12px">troubleshooting.md</span><span class="meta"><span class="okc">+4</span> <span class="badc">−2</span></span></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ============ 6 HISTORY ============ -->
+<section id="history">
+  <div class="brief">
+    <h2>History</h2>
+    <p>A searchable list of sessions Muxflow has seen on this host, It is an overlay, not a tab. Open it from the History button in the Agents header, from the command palette, or with a shortcut.</p>
+    <ul class="pts">
+      <li><b>What is stored:</b> provider, session id, the tab's latest title, workspace, folder and last activity. Up to 1,000 sessions in one JSON file on the host; the oldest drop off.</li>
+      <li><b>Search</b> matches titles, workspace and provider, using the same fuzzy matching as Quick Open.</li>
+      <li><b>Enter</b> focuses the session if it is still running. Otherwise it resumes it in a new tab in the workspace of the same name. If that workspace no longer exists, Muxflow creates it in the session's folder.</li>
+      <li><b>Forks made by <code>/btw</code></b> are left out of History.</li>
+      <li><b>Grouped:</b> snoozed sessions first, each with its wake time and a Wake now button, then every other session by last activity.</li>
+      <li>Sessions that ran while the host helper was not running are not listed. Resuming from the shell still works for those.</li>
+    </ul>
+  </div>
+  <div class="scroll"><div class="win" style="min-width:680px;max-width:720px">
+    <div class="pad" style="gap:0;padding:0">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--hair)"><span style="color:var(--faint)">⌕</span><span style="flex:1;color:var(--ink-strong)">link</span></div>
+      <div class="lab" style="padding:8px 12px 2px">Snoozed</div>
+      <div class="row" style="border-radius:0;padding:8px 12px"><span class="chip">CC</span><span class="st sleep"></span><span class="nm">Docs <b>link</b> checker</span><span class="meta">site · wakes Mon 09:00</span><span class="ibtn">Wake now</span></div>
+      <div class="lab" style="padding:8px 12px 2px">Sessions</div>
+      <div class="row on" style="border-radius:0;padding:8px 12px"><span class="chip">CC</span><span class="st block"></span><span class="nm">Wrapped <b>link</b> bug</span><span class="meta">muxflow · running</span></div>
+      <div class="row" style="border-radius:0;padding:8px 12px"><span class="chip">CX</span><span class="st idle"></span><span class="nm">File <b>link</b>s on mobile</span><span class="meta">muxflow · yesterday</span></div>
+      <div class="row" style="border-radius:0;padding:8px 12px"><span class="chip">CC</span><span class="st idle"></span><span class="nm">OSC 8 hyper<b>link</b> support</span><span class="meta">muxflow · 12 Oct</span></div>
+      <div style="display:flex;gap:14px;padding:7px 12px;border-top:1px solid var(--hair);font-size:11px;color:var(--faint)"><span>↵ Open or resume</span><span>⌘↵ Resume in a split</span><span>Esc Close</span></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ============ 7 SNOOZE ============ -->
+<section id="snooze">
+  <div class="brief">
+    <h2>Snooze</h2>
+    <p>Snoozing closes the session, which frees its memory, and brings it back to your attention later. Closing a tab already keeps the session in History, so there is no separate Settle.</p>
+    <ul class="pts">
+      <li><b>Where:</b> the agent row's menu and the tab's menu.</li>
+      <li><b>When:</b> the intervals are set in Settings. The defaults are in 1 hour, in 3 hours, tomorrow at 09:00 and Monday at 09:00, plus a time you pick.</li>
+      <li><b>At wake time</b> the session reappears at the top of the Agents list with a "Woke" mark and a notification. Nothing starts until you click it; clicking resumes it.</li>
+      <li><b>Wake now</b> is on each snoozed session at the top of History.</li>
+      <li>An agent that is working or blocked cannot be snoozed.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <div class="win small"><div class="pad">
+        <div class="row on"><span class="chip">CC</span><span class="st idle"></span><span class="nm">Docs link checker</span><span class="meta">site</span></div>
+        <div class="pop" style="max-width:240px;margin-left:40px"><div class="it"><b style="font-family:var(--ui)">Focus pane</b></div><div class="it"><b style="font-family:var(--ui)">Rename tab…</b></div><div class="it on"><b style="font-family:var(--ui)">Snooze</b><span></span><em>▸</em></div><div class="sec">Wake</div><div class="it"><b style="font-family:var(--ui)">In 1 hour</b></div><div class="it"><b style="font-family:var(--ui)">In 3 hours</b></div><div class="it on"><b style="font-family:var(--ui)">Tomorrow, 09:00</b></div><div class="it"><b style="font-family:var(--ui)">Monday, 09:00</b></div><div class="it"><b style="font-family:var(--ui)">Pick a time…</b></div></div>
+      </div></div>
+      <p class="cap">Snoozing from the agent row.</p>
+    </div>
+    <div class="tile">
+      <div class="win small"><div class="pad">
+        <div class="lab" style="padding-left:0">Agents <span class="ibtn">History</span></div>
+        <div class="row" style="box-shadow:inset 0 0 0 1px var(--accent);background:var(--wash)"><span class="chip">CC</span><span class="st sleep"></span><span class="nm">Docs link checker</span><span class="meta" style="color:var(--accent)">Woke · click to resume</span></div>
+        <div class="row"><span class="chip">CX</span><span class="st work"></span><span class="nm">Git panel hunks</span><span class="meta">muxflow</span></div>
+        <div class="row"><span class="chip">CC</span><span class="st idle"></span><span class="nm">Voice cleanup</span><span class="meta">muxflow</span></div>
+      </div></div>
+      <p class="cap">After the wake time. The row is a placeholder; no process is running until you click it.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 8 PHONE ============ -->
+<section id="phone">
+  <div class="brief">
+    <h2>Phone</h2>
+    <p>The phone renders the same chat data as the desktop. A chat session opens as chat; a terminal session opens as a terminal, as today.</p>
+    <ul class="pts">
+      <li><b>Chat screen:</b> messages, tool rows, permission and question cards, and a composer with slash commands.</li>
+      <li><b>Voice in a chat</b> is a mode you turn on: the composer is replaced by the voice bar and replies are read aloud.</li>
+      <li><b>The Voice screen stays</b> for terminal sessions, as today.</li>
+      <li><b>Details:</b> a button in the header opens branch, changes and context as a sheet.</li>
+      <li><b>History and Snooze:</b> a History screen with search, and Snooze in the long-press menu on an agent.</li>
+      <li><b>The protocol version is bumped.</b> The phone app and the host release together, and an older app is told to update.</li>
+    </ul>
+  </div>
+  <div class="phones">
+    <div><div class="ph"><div class="top">‹ <b>Wrapped link bug</b><span class="sp"></span><span class="mic" title="Read replies aloud">♪</span><span class="mic" title="Details">i</span></div><div class="sc"><div class="u" style="align-self:flex-end">Find out why wrapped paths are missed.</div><div class="a">The detector joins rows that the terminal marks as soft-wrapped. Boxed output is hard-wrapped by the agent.</div><div class="tool"><span class="k">run</span><span class="t">cargo test links</span><span class="r okc">ok</span></div></div><div class="cmp">Reply<span class="sp"></span><span class="mic">mic</span><span class="send">↑</span></div></div><p class="phcap">Chat</p></div>
+    <div><div class="ph"><div class="top">‹ <b>Wrapped link bug</b><span class="sp"></span><span class="mic">i</span></div><div class="sc"><div class="a">I can add that case and a fixture for it.</div><div class="card ask"><div class="hd">Edit a file?</div><div class="bd"><div class="cmd">links.rs</div><div class="btns"><span class="b pri">Allow</span><span class="b">This session</span><span class="b ghost">Deny</span></div></div></div></div><div class="cmp">Reply<span class="sp"></span><span class="mic">mic</span><span class="send">↑</span></div></div><p class="phcap">Permission request</p></div>
+    <div><div class="ph"><div class="top">‹ <b>Wrapped link bug</b><span class="sp"></span><span class="mic" style="border-color:var(--accent);color:var(--accent)" title="Voice mode is on">♪</span><span class="mic">i</span></div><div class="sc"><div class="u" style="align-self:flex-end">Add the fixture and run the tests.</div><div class="a">Added a boxed-output fixture. All fourteen link tests pass.</div><div class="tool"><span class="k">play</span><span class="t">Reply · 0:07</span><span class="r">1.5×</span></div></div><div class="vbar"><span class="big">mic</span><span>Hold to talk. Swipe left to lock, right to cancel.</span></div></div><p class="phcap">Voice mode, inside the chat</p></div>
+    <div><div class="ph"><div class="top"><b>History</b><span class="sp"></span><div class="seg"><span class="on">All</span><span>Snoozed</span></div></div><div class="sc" style="gap:4px"><div class="cmp" style="margin:0 0 6px">Search sessions</div><div class="row"><span class="chip">CC</span><span class="nm">Wrapped link bug</span><span class="meta">running</span></div><div class="row"><span class="chip">CX</span><span class="nm">File links on mobile</span><span class="meta">yesterday</span></div><div class="row"><span class="chip">CC</span><span class="nm">Docs link checker</span><span class="meta">Mon 09:00</span></div><div class="row"><span class="chip">CC</span><span class="nm">Release notes</span><span class="meta">9 Nov</span></div></div></div><p class="phcap">History</p></div>
+  </div>
+</section>
+
+<!-- ============ 9 HOW IT RUNS ============ -->
+<section id="runs">
+  <div class="brief">
+    <h2>How it runs</h2>
+    <p>tmux still owns every agent. A chat is a tmux pane running the agent headless instead of its terminal UI, and the host helper talks to that pane over a local socket.</p>
+  </div>
+  <div class="scroll"><div class="flow">
+    <div class="box t"><h3>tmux pane (Claude)</h3><span>A Muxflow pipe runs the unmodified <code>claude</code> binary in its JSON mode and relays its input and output to a socket. The pipe knows nothing about the protocol.</span></div>
+    <div class="arr">socket</div>
+    <div class="box"><h3>Host helper</h3><span>Speaks each provider's protocol and turns it into one set of chat events: messages, tool calls, requests, usage, commands, models.</span></div>
+    <div class="arr">existing<br>link</div>
+    <div class="box"><h3>Desktop and phone</h3><span>Subscribe to one chat and render it. They send messages, answers, Stop, rewind and model changes back.</span></div>
+  </div></div>
+  <div class="scroll"><div class="flow">
+    <div class="box t"><h3>tmux pane (Codex)</h3><span><code>codex app-server</code> listening on a socket. No pipe needed. One server per chat pane, so status is attributed to the right pane.</span></div>
+    <div class="arr">socket</div>
+    <div class="box" style="border-style:dotted"><h3>Same host helper</h3><span>If the helper restarts or updates, the panes keep running. The new helper finds them by a tag on the pane and reconnects.</span></div>
+    <div class="arr"></div>
+    <div class="box" style="border-style:dotted"><h3>Hooks, unchanged</h3><span>Working, blocked and idle still come from the same hooks, so the Agents list and notifications need no second pipeline.</span></div>
+  </div></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Assumption</th><th>Status</th><th>How I know</th></tr></thead>
+    <tbody>
+      <tr><td>Claude lists commands, skills, models and effort levels without a prompt</td><td><span class="tag y">Checked</span></td><td>Ran it here: 78 commands, the model list and effort levels came back, with no usage spent.</td></tr>
+      <tr><td>Claude's hooks fire in headless mode</td><td><span class="tag y">Checked</span></td><td>The session-start hook ran in the same probe.</td></tr>
+      <tr><td>Both providers can fork a conversation into a new session</td><td><span class="tag y">Exists today</span></td><td>Muxflow's "Branch conversation" already does this for Claude and Codex.</td></tr>
+      <tr><td>Claude can resume at a chosen message</td><td><span class="tag y">Flag exists</span></td><td>The installed CLI accepts a resume-at-message flag. Not yet run end to end.</td></tr>
+      <tr><td>Codex supports rewind, model and effort per turn, skills list, approvals, questions, token usage</td><td><span class="tag y">In schema</span></td><td>Generated the protocol schema from the installed version (0.169.0).</td></tr>
+      <tr><td>Codex app-server can listen on a socket</td><td><span class="tag y">Checked</span></td><td>Listed in its options.</td></tr>
+      <tr><td>Claude's fast mode can be turned on in headless mode</td><td><span class="tag n">To verify</span></td><td>The opt-in setting is in the binary; it has not been run.</td></tr>
+      <tr><td>Questions and Auto-mode requests round-trip through Claude's JSON mode</td><td><span class="tag n">To verify</span></td><td>The flag for it exists; the exchange has not been run.</td></tr>
+      <tr><td>Hooks from a per-pane Codex server are attributed to that pane</td><td><span class="tag n">To verify</span></td><td>Expected, because the server inherits the pane's environment.</td></tr>
+      <tr><td>Memory of one Codex server per chat</td><td><span class="tag y">Measured</span></td><td>About 270 MB per chat, the same as a Codex terminal session today. A shared server would save about 100 MB per chat and can come later.</td></tr>
+      <tr><td>Earlier Claude messages load from the saved conversation file</td><td><span class="tag n">To verify</span></td><td>The file is undocumented. If it cannot be read, the chat opens with "Earlier messages are not available" and works from there.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="brief">
+    <h3>Adding another agent</h3>
+    <p>Everything is shared except one provider module per agent. The host already keeps a table of agents for launch, resume and fork; chat extends that same table.</p>
+    <ul class="pts">
+      <li><b>What a provider supplies:</b> the command that runs it headless in a pane, a translation from its messages into Muxflow's chat events, a translation of send, stop, answer, rewind and model changes back into its protocol, and a way to load earlier messages.</li>
+      <li><b>What it declares:</b> a capability list, such as rewind, sending mid-turn, model and effort choice, questions, and whether it can fork. The desktop and phone show or hide controls from that list, so an agent without rewind simply has no Edit button.</li>
+      <li><b>What is never repeated:</b> the pipe, pane tagging, reconnect after a helper restart, the wire messages, and both chat UIs.</li>
+      <li><b>One shared test set.</b> Every provider runs the same tests against recorded sessions, so a new agent is checked the same way as Claude and Codex.</li>
+      <li><b>Many agents at once.</b> Several agents speak the Agent Client Protocol; Orca uses it for seven of them. One provider for that protocol would cover all of them. pi has its own JSON mode and would be a separate, small provider (T066).</li>
+    </ul>
+  </div>
+  <div class="brief">
+    <h3>Staying inside Anthropic's terms</h3>
+    <ul class="pts">
+      <li>The installed <code>claude</code> binary runs unmodified, with the login you already did in it.</li>
+      <li>Muxflow never reads, copies or stores its credentials, and never calls Anthropic's API itself.</li>
+      <li>The feature is not named after Claude Code and uses none of its branding.</li>
+      <li>I still recommend asking Anthropic to confirm this use before the chat ships to other users.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ 10 DECISIONS ============ -->
+<section id="decide">
+  <div class="brief">
+    <h2>Decisions</h2>
+    <p>All settled. This is the record.</p>
+    <p><b>Follow-up tickets:</b> chat for pi (T066), opening in an external editor (T067), and citing a selection into the chat (T068).</p>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th>Decision</th><th>What we do</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td><b>Terminal or Chat</b></td><td>One host-wide mode, set in the desktop app. No per-session switching.</td><td>Changing it affects agents started afterwards. Running sessions stay as they are.</td></tr>
+      <tr><td><b>Default mode</b></td><td>Terminal.</td><td>The phone follows the host and shows the mode read-only.</td></tr>
+      <tr><td><b>Rewind and files</b></td><td>Rewind the conversation only. Files on disk stay as they are.</td><td>The banner says so.</td></tr>
+      <tr><td><b>Codex servers</b></td><td>One per chat pane.</td><td>Measured at about 270 MB per chat. Sharing is a later optimisation.</td></tr>
+      <tr><td><b>Where a resumed session opens</b></td><td>The workspace with the same name. If none exists, Muxflow creates it in the session's folder.</td><td></td></tr>
+      <tr><td><b>Permissions in chat</b></td><td>Full or Auto. No manual approval.</td><td>Taken from the launch flags, otherwise Auto. A plain Allow / Deny card appears if Auto declines to decide.</td></tr>
+      <tr><td><b>Speed</b></td><td>A Standard / Fast toggle in the composer.</td><td>Shown when the model supports it.</td></tr>
+      <tr><td><b>Git diff tab</b></td><td>One reused tab, one file at a time, hunks only.</td><td>Scope switch in the Git panel.</td></tr>
+      <tr><td><b><code>/btw</code> and <code>/side</code></b></td><td>Muxflow forks the session and opens it in a split.</td><td>Same permissions as the original. Titled "name (fork)". Left out of History.</td></tr>
+      <tr><td><b>Snooze</b></td><td>Closes the session and brings it back as a placeholder at wake time.</td><td>Intervals set in Settings. Not allowed while working or blocked.</td></tr>
+      <tr><td><b>Voice</b></td><td>A mode inside chat. The Voice screen stays for terminal sessions.</td><td></td></tr>
+      <tr><td><b>Protocol version</b></td><td>Bumped.</td><td>Phone and host release together.</td></tr>
+      <tr><td><b>Links</b></td><td>Fixed in chat, from Markdown links and inline code paths. No terminal link work.</td><td>Chat links open directly from the rendered message.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============ 11 PLAN ============ -->
+<section id="plan">
+  <div class="brief">
+    <h2>Build plan and QA</h2>
+    <p>The wire contract lands first, by itself, because every other piece depends on it. After that the work runs in parallel, each stream in its own worktree, merged into <code>gpui/chat</code>. Each stream gets its own implement-and-review cycle, and there is one manual QA at the end.</p>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th>Stream</th><th>What it delivers</th><th>Needs</th></tr></thead>
+    <tbody>
+      <tr><td><b>A · Contract</b></td><td>The chat, history, snooze and branch-summary messages, with generated code for desktop and phone.</td><td>Nothing. Lands first.</td></tr>
+      <tr><td><b>B · Host chat</b></td><td>The pipe, the provider interface with Claude and Codex behind it, conversion at start in Chat mode, and reconnect after a helper restart.</td><td>A</td></tr>
+      <tr><td><b>C · Desktop chat</b></td><td>The chat view per pane, cards, composer, autocomplete, rewind, file links, <code>/btw</code>, and the model, effort, speed and permission controls.</td><td>A. Builds against recorded events until B lands.</td></tr>
+      <tr><td><b>D · Card and Changes</b></td><td>The details card, branch menu, changes summary, and the hunks-only diff in one reused tab.</td><td>A</td></tr>
+      <tr><td><b>E · History and Snooze</b></td><td>The session store on the host, the History overlay, and Snooze with wake.</td><td>A</td></tr>
+      <tr><td><b>F · Phone</b></td><td>Chat, History and Snooze screens, and voice mode inside chat. The Voice screen stays for terminal sessions.</td><td>A. Builds against recorded events until B lands.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="brief">
+    <h3>Manual QA, once, at the end</h3>
+    <p>One run through the real app against the devbox host, driven by a fresh agent that only reports what it sees:</p>
+    <ol class="steps">
+      <li>Set the host to Chat mode. Open a terminal and type your <code>claude</code> alias. The tab becomes a chat.</li>
+      <li>Ask for a file edit in Auto mode. An edit row appears; clicking it opens that file's hunks in the Git diff tab.</li>
+      <li>Start a long turn and press Stop. The agent goes idle.</li>
+      <li>Edit the first message and resend. Everything after it is gone and the new reply follows.</li>
+      <li>Type <code>/</code> and confirm a skill installed on the host is listed.</li>
+      <li>Restart the host helper mid-turn. The chat reconnects and the turn finishes.</li>
+      <li>Ask a <code>/btw</code> question mid-turn. A fork opens in a split and the main turn keeps running.</li>
+      <li>Repeat steps 1 to 4 with <code>codex</code>.</li>
+      <li>Close the tab, find the session in History, resume it. Snooze it for one minute and confirm it wakes as a placeholder.</li>
+      <li>Set the host back to Terminal mode. A new <code>claude</code> starts as a terminal, and the running chat is unaffected.</li>
+    </ol>
+  </div>
+</section>
+
+</div>
