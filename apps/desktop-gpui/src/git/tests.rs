@@ -256,7 +256,13 @@ fn routes_only_root_token_bound_status_events() {
 #[test]
 fn rejects_stale_or_mismatched_diff_identity() {
     let fake = Fake::new(|_| Some(Ok(diff_response("repo", b"other.txt", 2))));
-    let error = block_on(client::diff(fake.transport(), scope("t", 1), unstaged_a())).unwrap_err();
+    let error = block_on(client::diff(
+        fake.transport(),
+        scope("t", 1),
+        unstaged_a(),
+        false,
+    ))
+    .unwrap_err();
     assert_eq!(error, "Host returned a stale Git diff identity.");
 
     // The diff matches, but the status it was read against is another
@@ -266,7 +272,13 @@ fn rejects_stale_or_mismatched_diff_identity() {
         response["status"] = status_in("other", 2, vec![]);
         Some(Ok(response))
     });
-    let error = block_on(client::diff(fake.transport(), scope("t", 1), unstaged_a())).unwrap_err();
+    let error = block_on(client::diff(
+        fake.transport(),
+        scope("t", 1),
+        unstaged_a(),
+        false,
+    ))
+    .unwrap_err();
     assert_eq!(
         error,
         "Host returned a Git diff status for a different repository."
@@ -276,8 +288,13 @@ fn rejects_stale_or_mismatched_diff_identity() {
 #[test]
 fn carries_the_authoritative_status_a_diff_was_read_against_in_one_round_trip() {
     let fake = Fake::new(|_| Some(Ok(diff_response("repo", b"a.txt", 7))));
-    let (diff, status) =
-        block_on(client::diff(fake.transport(), scope("t", 1), unstaged_a())).unwrap();
+    let (diff, status) = block_on(client::diff(
+        fake.transport(),
+        scope("t", 1),
+        unstaged_a(),
+        false,
+    ))
+    .unwrap();
     assert_eq!(fake.operations(), ["diff"]);
     assert_eq!(fake.requests.borrow()[0].path, b"a.txt");
     assert_eq!(status.generation, 7);
@@ -1492,4 +1509,271 @@ fn an_open_diff_says_its_file_no_longer_changed_after_a_stage_and_commit(cx: &mu
             .is_some_and(|element| element.visible())
     });
     assert!(said, "This file no longer has unstaged changes.");
+}
+
+// The hunks view and the default-branch scope.
+
+const TWO_HUNKS: &str = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@ fn first\n-one\n+ONE\n two\n three\n@@ -10,2 +10,3 @@\n ten\n+ten and a half\n eleven\n\\ No newline at end of file\n";
+
+#[test]
+fn splits_git_s_patch_into_the_host_s_hunks_each_drawable_alone() {
+    let hunks = split_hunks("dir/a.txt", TWO_HUNKS);
+    assert_eq!(
+        hunks
+            .iter()
+            .map(|hunk| (
+                hunk.header.as_str(),
+                hunk.key.as_str(),
+                hunk.added,
+                hunk.removed
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("@@ -1,3 +1,3 @@ fn first", "1/a.txt", 1, 1),
+            ("@@ -10,2 +10,3 @@", "2/a.txt", 1, 0),
+        ]
+    );
+    for hunk in &hunks {
+        let files = gpui_kit::component::diff::DiffFile::parse(&hunk.patch).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path().as_ref(), hunk.key);
+    }
+    assert!(hunks[1].patch.ends_with("\\ No newline at end of file\n"));
+    // A name the patch header could misread is replaced, as for the whole file.
+    assert_eq!(split_hunks("a b", TWO_HUNKS)[0].key, "1/file");
+    assert!(split_hunks("a.txt", "Binary files a and b differ\n").is_empty());
+    // A type change is two sections: the second's header joins no hunk.
+    let type_change = "diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\ndiff --git a/x b/x\nnew file mode 120000\n--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+target\n";
+    let hunks = split_hunks("x", type_change);
+    assert_eq!(
+        hunks
+            .iter()
+            .map(|hunk| (hunk.added, hunk.removed))
+            .collect::<Vec<_>>(),
+        [(0, 1), (1, 0)]
+    );
+    assert!(!hunks[0].patch.contains("diff --git"));
+}
+
+#[test]
+fn reads_the_patch_the_base_target_and_the_branch_summary() {
+    let mut response = diff_response("repo", b"a.txt", 1);
+    response["diff"]["target"] = json!("base");
+    response["diff"]["patch"] = json!(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        TWO_HUNKS
+    ));
+    let request = DiffRequest {
+        target: Target::Base,
+        ..unstaged_a()
+    };
+    let (diff, _) = model::response_diff(model::response(response).unwrap(), &request).unwrap();
+    assert_eq!(diff.target, Target::Base);
+    assert_eq!(diff.patch, TWO_HUNKS.as_bytes());
+
+    let summary = model::response_branch_summary(
+        model::response(json!({ "branchSummary": {
+            "baseRef": "origin/main", "mergeBaseOid": "abc",
+            "files": [{ "path": A, "displayPath": "a.txt", "kind": "untracked", "added": 3 }],
+            "totalFileCount": "4", "added": "10", "removed": "2",
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(summary.base_ref.as_deref(), Some("origin/main"));
+    assert_eq!(summary.files[0].kind, ChangeKind::Untracked);
+    assert_eq!(summary.files[0].as_entry().path, A);
+    assert_eq!(
+        (summary.total_file_count, summary.added, summary.removed),
+        (4, 10, 2)
+    );
+    let none =
+        model::response_branch_summary(model::response(json!({ "branchSummary": {} })).unwrap())
+            .unwrap();
+    assert_eq!(none, BranchSummary::default());
+    assert!(
+        model::response_branch_summary(
+            model::response(json!({ "branchSummary": { "files": [{ "path": "not base64!" }] } }))
+                .unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn shows_every_file_and_side_in_one_reused_tab() {
+    let mut state = PersistedAppState::default();
+    let status = parse(status_in(
+        "repo",
+        1,
+        vec![
+            entry(A, "a.txt", "modified", "modified"),
+            entry(B, "dir/b.txt", "none", "modified"),
+        ],
+    ));
+    let mut ids = ["only", "unused", "unused"].into_iter();
+    let mut open = |state: &mut PersistedAppState, entry: &StatusEntry, target| {
+        open_git_diff_tab(state, &place(), entry, target, &status, true, || {
+            ids.next().unwrap().into()
+        })
+    };
+    let (a, b) = (status.entries[0].clone(), status.entries[1].clone());
+    assert_eq!(open(&mut state, &a, Target::Unstaged), "only");
+    assert_eq!(open(&mut state, &b, Target::Unstaged), "only");
+    assert_eq!(state.app_tabs[0].git_path.as_deref(), Some(B));
+    assert_eq!(state.app_tabs[0].title, "b.txt (unstaged)");
+    assert_eq!(open(&mut state, &a, Target::Staged), "only");
+    assert_eq!(open(&mut state, &a, Target::Base), "only");
+    assert_eq!(state.app_tabs[0].git_target, Some(Target::Base));
+    assert_eq!(state.app_tabs[0].title, "a.txt (branch)");
+    assert_eq!(state.app_tabs.len(), 1);
+}
+
+fn with_hunks(command: &GitCommand) -> Option<Result<Value, String>> {
+    Some(Ok(match command.operation.as_str() {
+        "diff" => {
+            let mut response = diff_response("repo", b"a.txt", 1);
+            response["diff"]["target"] = json!(command.diff_target);
+            response["diff"]["hunkCount"] = json!(2);
+            response["diff"]["patch"] = json!(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                TWO_HUNKS
+            ));
+            response
+        }
+        "mutate" => applied(2),
+        _ => json!({ "status": status(1) }),
+    }))
+}
+
+#[gpui_kit::test]
+fn draws_the_hunks_and_stages_the_one_asked_for(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, with_hunks);
+    let view = diff_view(&panel, "repo", cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.hunk_headers()),
+        ["@@ -1,3 +1,3 @@ fn first", "@@ -10,2 +10,3 @@"]
+    );
+    assert!(view.update(cx, |view, cx| view.collapse_all(true, cx)));
+    assert!(!view.update(cx, |view, cx| view.collapse_all(false, cx)));
+
+    view.update(cx, |view, cx| view.stage_hunk(1, cx));
+    cx.run_until_parked();
+    let mutate = panel.fake.requests.borrow()[2].clone();
+    assert_eq!(mutate.operation, "mutate");
+    assert_eq!(mutate.hunk_index, 1);
+
+    // The whole file is today's diff, drawn from both sides.
+    view.update(cx, |view, cx| view.show_whole_file(cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |view, _| view.hunk_headers()).is_empty());
+    assert_eq!(view.read_with(cx, |view, _| view.shown()), (true, None));
+}
+
+#[gpui_kit::test]
+fn a_collapsed_hunk_stays_collapsed_after_another_is_staged(cx: &mut TestAppContext) {
+    // Once the first hunk is staged, the second is all that is left, and its
+    // `@@` line has moved.
+    let mut staged = false;
+    let panel = Panel::new(cx, move |command| {
+        let generation = if staged { 2 } else { 1 };
+        Some(Ok(match command.operation.as_str() {
+            "diff" => {
+                let mut response = diff_response("repo", b"a.txt", generation);
+                let patch = if staged {
+                    "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -11,2 +11,3 @@\n ten\n+ten and a half\n eleven\n\\ No newline at end of file\n"
+                } else {
+                    TWO_HUNKS
+                };
+                response["diff"]["patch"] = json!(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    patch
+                ));
+                response
+            }
+            "mutate" => {
+                staged = true;
+                applied(2)
+            }
+            _ => json!({ "status": status(generation) }),
+        }))
+    });
+    let view = diff_view(&panel, "repo", cx);
+    view.update(cx, |view, cx| view.collapse_hunk(1, cx));
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.collapsed_hunks(cx)),
+        [false, true]
+    );
+
+    view.update(cx, |view, cx| view.stage_hunk(0, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.hunk_headers()),
+        ["@@ -11,2 +11,3 @@"]
+    );
+    assert_eq!(
+        view.read_with(cx, |view, cx| view.collapsed_hunks(cx)),
+        [true]
+    );
+}
+
+#[gpui_kit::test]
+fn reads_a_default_branch_diff_the_status_knows_nothing_about(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        let clean = json!({ "status": status_in("repo", 1, vec![]) });
+        with_hunks(command).map(|answer| {
+            answer.map(|value| {
+                if command.operation == "diff" {
+                    value
+                } else {
+                    clean.clone()
+                }
+            })
+        })
+    });
+    panel.point_at("t", 1, cx);
+    let mut tab = tab("repo");
+    tab.git_target = Some(Target::Base);
+    let owner = panel.panel.clone();
+    let view = cx.new(|cx| GitDiffView::new(owner, tab, cx));
+    cx.run_until_parked();
+    let diff = panel.fake.requests.borrow()[1].clone();
+    assert_eq!(
+        (diff.operation.as_str(), diff.diff_target.as_str()),
+        ("diff", "base")
+    );
+    assert_eq!(view.read_with(cx, |view, _| view.hunk_headers()).len(), 2);
+}
+
+#[gpui_kit::test]
+fn lists_the_default_branch_changes_only_while_that_scope_is_shown(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        Some(Ok(match command.operation.as_str() {
+            "branchSummary" => json!({ "branchSummary": {
+                "baseRef": "origin/main",
+                "files": [{ "path": A, "displayPath": "a.txt", "kind": "modified", "added": 2 }],
+                "totalFileCount": "1", "added": "2", "removed": "0",
+            }}),
+            _ => json!({ "status": status(1) }),
+        }))
+    });
+    panel.point_at("t", 1, cx);
+    assert_eq!(panel.fake.count("branchSummary"), 0);
+    panel.panel.update(cx, |panel, cx| {
+        panel.set_scope(super::panel::Scope::Branch, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(panel.fake.count("branchSummary"), 1);
+    let summary = panel.panel.read_with(cx, |panel, _| panel.branch_summary());
+    assert_eq!(summary.unwrap().files[0].display_path, "a.txt");
+
+    // A status that moved reads it again; one that did not, does not.
+    let watch_id = panel.fake.requests.borrow()[0].watch_id.clone();
+    for generation in [1, 2] {
+        panel.store.update(cx, |store, cx| {
+            store.handle_event(watch_event(&watch_id, "t", generation), cx)
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(panel.fake.count("branchSummary"), 2);
 }
