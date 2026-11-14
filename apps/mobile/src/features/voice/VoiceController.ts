@@ -5,9 +5,10 @@
 // session. The session outlives the screen: `voiceRegistry` keeps the
 // controller until `endSession()`; the screen `focus()`es and `blur()`s it.
 
+import { create } from "@bufbuild/protobuf";
 import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "../../protocol/backgroundTimer";
 import { HostError, type HostConnection } from "../../protocol/HostConnection";
-import type { VoiceSpeech } from "../../protocol/gen/envelope_pb";
+import { VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "../../protocol/requests";
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
@@ -64,6 +65,16 @@ export interface VoiceControllerOptions {
   canSubmit?: (paneId: string) => boolean;
   /** iOS: holds off suspension while an utterance is on its way to the pane. The answer ends the hold. */
   keepAlive?: () => () => void;
+  /**
+   * Delivers a transcript instead of typing it into the terminal. A chat
+   * sends it as a message (docs/design/chat-plan.md §5 F).
+   */
+  submit?: (text: string) => Promise<void>;
+  /**
+   * Whether the host pushes this pane's replies (VOICE_SESSION). Default true.
+   * A chat reads its own replies aloud with `speakReply`, so it registers nothing.
+   */
+  registerWithHost?: boolean;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -86,6 +97,8 @@ export const MAX_UTTERANCE_MS = 115_000;
  * lets go on the last syllable, so an immediate stop loses the final word.
  */
 export const TAIL_HOLD_MS = 350;
+/** VOICE_SPEAK refuses longer text (`MAX_SPEAK_CHARS` in apps/host/src/service/voice.rs). */
+export const MAX_SPEAK_CHARS = 32 * 1024;
 /** A warm host answers in ~1 s; a cold sidecar may take up to 120 s to load (§4.3). */
 export const TRANSCRIBE_TIMEOUT_MS = 70_000;
 export const SPEAK_TIMEOUT_MS = 60_000;
@@ -165,6 +178,11 @@ export class VoiceController {
     return this.disposed;
   }
 
+  /** Transcripts go to `options.submit` (a chat) rather than into the terminal. */
+  get submitsToChat(): boolean {
+    return this.options.submit !== undefined;
+  }
+
   /** Its Voice screen is on display. */
   get isFocused(): boolean {
     return this.focused;
@@ -197,9 +215,9 @@ export class VoiceController {
     if (this.disposed) return;
     this.focused = true;
     this.log("screen.focus");
-    this.wantRegistered = true;
+    this.wantRegistered = this.options.registerWithHost !== false;
     void this.refreshStatus(true);
-    void this.registerSession();
+    if (this.wantRegistered) void this.registerSession();
     this.arm();
     this.playUnplayedIfListening();
   }
@@ -535,6 +553,14 @@ export class VoiceController {
     const outgoing = this.message("you", text);
     live.appendMessage(this.sessionKey, outgoing);
     try {
+      if (this.options.submit) {
+        await this.options.submit(text);
+        this.log(`submission.ack message=${outgoing.id} chars=${text.length} elapsedMs=${this.now() - startedAt}`);
+        this.options.haptics?.sent();
+        this.options.tones?.sent();
+        this.setPhaseIfAlive("idle");
+        return;
+      }
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
       // The terminal Send's shape (`TerminalController.submitText`): the text as
@@ -685,6 +711,36 @@ export class VoiceController {
     } catch (error) {
       this.fail("speak", error);
     }
+  }
+
+  /**
+   * A chat's finished reply, read aloud: VOICE_SPEAK, then the same path as a
+   * pushed reply. `at` is the reply's own time, so a repeat of it is matched.
+   */
+  async speakReply(markdown: string, at: number): Promise<void> {
+    if (this.disposed) return;
+    const connection = this.liveConnection();
+    if (!connection) return;
+    const text = markdown.slice(0, MAX_SPEAK_CHARS);
+    const operationId = newOperationId();
+    this.log(`speak.request operation=${operationId} reply chars=${text.length}`);
+    let speech: VoiceSpeech | undefined;
+    let failure = "";
+    try {
+      const response = await connection.request(voiceSpeak(operationId, text), { timeoutMs: SPEAK_TIMEOUT_MS });
+      speech = response.voice?.speech;
+      if (!speech || speech.audio.byteLength === 0) failure = "The host returned no audio.";
+    } catch (error) {
+      failure = describe(error);
+    }
+    if (this.disposed) return;
+    const replyAtUnixMillis = BigInt(Math.round(at));
+    if (speech && !failure) {
+      this.onVoiceReply({ ...speech, displayMarkdown: markdown, truncated: speech.truncated || text.length < markdown.length, replyAtUnixMillis });
+      return;
+    }
+    // The text still shows, with the Retry a failed synthesis gets.
+    this.onVoiceReply(create(VoiceSpeechSchema, { displayMarkdown: markdown, speechText: text, replyAtUnixMillis }), failure);
   }
 
   // ---- playback ---------------------------------------------------------------

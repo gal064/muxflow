@@ -27,10 +27,14 @@ interface WorkspaceActionsSheetProps {
   close?: { label: string; target: CloseTarget } | undefined;
   /** The row's pin toggle, above its close; `pinned` is what the tap writes. */
   pin?: { label: string; target: PinTarget; pinned: boolean } | undefined;
+  /** Called once the sheet has finished closing. */
+  onClosed?: (() => void) | undefined;
+  /** An agent row's Snooze, above its close; `blocked` says why it cannot be snoozed now. */
+  snooze?: { blocked: string | undefined; onPress(): void } | undefined;
 }
 
 /** The hold shortcuts shared by workspace, window and agent rows. */
-export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, close, pin }: WorkspaceActionsSheetProps) {
+export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, onClosed, close, pin, snooze }: WorkspaceActionsSheetProps) {
   const router = useRouter();
   const connected = useSession((state) => state.connection.state === "connected");
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
@@ -118,7 +122,7 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, cl
   }, [onDismiss]);
 
   return (
-    <Sheet onDismiss={onDismiss} title={title} visible={visible}>
+    <Sheet onClosed={onClosed} onDismiss={onDismiss} title={title} visible={visible}>
       <SheetAction busy={creating === "terminal"} disabled={!connected || !sessionId || creating !== null} label="New terminal" onPress={() => void createWindow("terminal")} />
       <Hairline />
       <SheetAction busy={creating === "agent"} disabled={!connected || !sessionId || creating !== null} label="New agent" onPress={() => void createWindow("agent")} />
@@ -127,6 +131,13 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, cl
         <>
           <Hairline />
           <SheetAction busy={false} disabled={!connected} label={pin.label} onPress={() => void runPin(pin.target, pin.pinned)} />
+        </>
+      ) : null}
+      {snooze ? (
+        <>
+          <Hairline />
+          <SheetAction busy={false} disabled={!connected || snooze.blocked !== undefined} label="Snooze…" onPress={() => { onDismiss(); snooze.onPress(); }} />
+          {snooze.blocked ? <Text style={styles.command}>{snooze.blocked}</Text> : null}
         </>
       ) : null}
       {close ? (
@@ -148,7 +159,8 @@ function SheetAction({ label, onPress, disabled, busy, danger }: { label: string
   );
 }
 
-function waitForPane(paneId: string, timeoutMs: number): Promise<boolean> {
+/** Settles true once `paneId` is in the topology, false after `timeoutMs`. */
+export function waitForPane(paneId: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     if (sessionStore.getState().panes[paneId]) return resolve(true);
     const timer = setTimeout(() => {
