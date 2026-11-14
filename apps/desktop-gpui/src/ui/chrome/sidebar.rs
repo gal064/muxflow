@@ -7,9 +7,9 @@ use std::rc::Rc;
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, WeakEntity, Window,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
     assets::IconName,
     base::{Disableable, HandleEdge, TestSupportExt},
     component::{
@@ -350,10 +350,11 @@ fn workspace_row(
         })
         .relative()
         .min_h(ui(28.))
-        .pl(ui(8.))
-        .pr(ui(8.))
-        .py(ui(4.))
-        .mb(ui(1.))
+        // Tauri's `.workspace-button`, and its one-line `.compact` form.
+        .px(ui(if compact { 8. } else { 10. }))
+        .pt(ui(if compact { 4. } else { 8. }))
+        .pb(ui(if compact { 4. } else { 9. }))
+        .mb(ui(if compact { 1. } else { 2. }))
         .gap(ui(6.))
         .items_start()
         .rounded(ui(RADIUS_ROW))
@@ -416,7 +417,7 @@ fn workspace_row(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .gap(ui(2.))
+                .gap(ui(if compact { 2. } else { 4. }))
                 .text_size(ui(TYPE_ROW))
                 .font_weight(FontWeight(WEIGHT_ROW))
                 .text_color(ink)
@@ -455,7 +456,8 @@ fn workspace_row(
                                 h_flex()
                                     .flex_none()
                                     .items_center()
-                                    .gap(ui(3.))
+                                    // Each badge overhangs its mark by 3.5px.
+                                    .gap(ui(7.))
                                     .children(agents.agents.iter().map(|agent| {
                                         agent_mark(
                                             &agent.adapter_id,
@@ -479,36 +481,41 @@ fn workspace_row(
                         })
                         .children(inline_unread),
                 )
+                // Tauri's `.workspace-activity`: 12.5px lines, 1px apart.
                 .when(!compact, |this| {
-                    this.children(agents.agents.iter().map(|agent| {
-                        h_flex()
-                            .min_w_0()
-                            .items_center()
-                            .gap(ui(6.))
-                            .pl(ui(18.))
-                            .text_size(ui(TYPE_SECONDARY))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(meta)
-                            .child(agent_mark(
-                                &agent.adapter_id,
-                                agent.state,
-                                glyphs,
-                                meta,
-                                ring,
-                                selected,
-                                cx,
-                            ))
-                            .child(div().min_w_0().truncate().child(agent.name.clone()))
-                    }))
-                })
-                .when(!compact && agents.overflow > 0, |this| {
                     this.child(
-                        div()
-                            .pl(ui(31.))
-                            .text_size(ui(TYPE_SECONDARY))
+                        v_flex()
+                            .min_w_0()
+                            .gap(ui(1.))
+                            .text_size(ui(12.5))
+                            .line_height(relative(1.35))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(meta)
-                            .child(format!("…{} more", agents.overflow)),
+                            .children(agents.agents.iter().map(|agent| {
+                                h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap(ui(6.))
+                                    .pl(ui(18.))
+                                    .child(agent_mark(
+                                        &agent.adapter_id,
+                                        agent.state,
+                                        glyphs,
+                                        meta,
+                                        ring,
+                                        selected,
+                                        cx,
+                                    ))
+                                    .child(div().min_w_0().truncate().child(agent.name.clone()))
+                            }))
+                            .when(agents.overflow > 0, |this| {
+                                this.child(
+                                    div()
+                                        // Under the names: indent, mark and gap.
+                                        .pl(ui(18. + 13. + 6.))
+                                        .child(format!("…{} more", agents.overflow)),
+                                )
+                            }),
                     )
                 }),
         )
@@ -557,7 +564,12 @@ pub(crate) fn host_letter(letter: &str, selected: bool, palette: &Palette) -> im
 
 /// A block's label and a hairline filling the rest of the line. The first
 /// sits right under the section header, which already gives the space above.
-fn list_divider(id: &'static str, label: &'static str, first: bool, cx: &App) -> AnyElement {
+pub(crate) fn list_divider(
+    id: impl Into<ElementId>,
+    label: &str,
+    first: bool,
+    cx: &App,
+) -> AnyElement {
     let palette = theme::palette(cx);
     h_flex()
         .id(id)
