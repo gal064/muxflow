@@ -1142,6 +1142,13 @@ impl AgentRuntime {
         let retired_codex_agent_ids = result.retired_codex_agent_ids.clone();
         drop(state);
         self.retire_codex_runtime_state(&retired_codex_agent_ids);
+        // In Chat mode an agent that has just started becomes a chat.
+        crate::service::chat::agents_detected(
+            identity,
+            detected
+                .values()
+                .map(|(pane, adapter)| (*pane, adapter.kind())),
+        );
         Ok(result.changed)
     }
 

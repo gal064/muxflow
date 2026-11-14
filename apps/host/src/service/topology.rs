@@ -346,9 +346,12 @@ impl TopologyActor {
         // must not suppress the resulting agent-state refresh.
         // A fresh look at tmux is what can say a chat nobody has open has
         // lost its pane.
-        crate::service::chat::ChatRuntime::global().forget_closed(None, &identity, |pane_id| {
+        let chats = crate::service::chat::ChatRuntime::global();
+        chats.forget_closed(None, &identity, |pane_id| {
             current.panes.iter().any(|pane| pane.id == pane_id)
         });
+        // And what can say a pane has become one.
+        chats.adopt(&identity, &current.panes);
         let agent_changed = match crate::service::agents::AgentRuntime::global()
             .reconcile_topology(&current, &identity)
         {
