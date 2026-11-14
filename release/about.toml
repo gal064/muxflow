@@ -1,0 +1,32 @@
+# cargo-about configuration for release/third-party-licenses.mjs. Which licence
+# may be used at all is decided by deny.toml; this only says which text to ship
+# when a crate offers a choice (the first accepted one wins) and which crates
+# count as shipped. Apache-2.0 comes first: its text needs no copyright line,
+# so it stays complete for the many crates that package no licence file.
+
+accepted = [
+  "Apache-2.0",
+  "MIT",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
+]
+
+# Every platform a shipped binary runs on: the Linux packages carry the macOS
+# helper and the macOS app carries both Linux helpers.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+]
+
+# Only what is compiled into the binaries.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
