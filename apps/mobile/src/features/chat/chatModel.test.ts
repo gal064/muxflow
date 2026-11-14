@@ -171,6 +171,7 @@ describe("the slash list", () => {
     const skill = groups[0]!.commands[0]!;
     expect(withPickedCommand("look at this with $c", skill)).toBe("look at this with $code-review ");
     expect(withPickedCommand("/c", skill)).toBe("/code-review ");
+    expect(withPickedCommand("/review this with $c", skill)).toBe("/review this with $code-review ");
     // No skill is marked: the agent's own commands stand in.
     const unmarked = catalog();
     unmarked.commands = unmarked.commands.filter((command) => command.kind !== ChatCommandKind.SKILL);

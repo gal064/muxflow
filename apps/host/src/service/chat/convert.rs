@@ -13,7 +13,6 @@
 
 use std::{
     collections::BTreeSet,
-    path::Path,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
@@ -22,6 +21,7 @@ use tmux_agent_protocol::v1;
 
 use super::{
     ChatRuntime, PaneKey, SessionCommand, pane,
+    processes::{self, MAX_ENVIRONMENT_BYTES, Processes},
     provider::{ChatProvider, Launch, Resume},
 };
 use crate::service::{agents::adapters, history::History};
@@ -38,8 +38,6 @@ const MAX_HOOK_AGE_MILLIS: i64 = 10_000;
 /// longer is not the one that just said it started, but one that resumed
 /// another session or started an agent of its own.
 const MAX_HOOKED_AGE: Duration = Duration::from_secs(20);
-const MAX_ARGV_BYTES: usize = 64 * 1024;
-const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PROCESSES: usize = 32;
 const MAX_DEPTH: usize = 4;
 /// Agents seen and left alone, remembered so each is looked at once.
@@ -257,12 +255,12 @@ fn convert(candidate: &Candidate) {
     if runtime.agent_mode() != v1::ChatAgentMode::Chat {
         return;
     }
-    let proc_root = Path::new("/proc");
+    let processes = processes::system();
     let seen = matches!(trigger, Trigger::Seen { .. });
     // Every look at tmux sees the same agents again: one that was left alone
     // is known by its process, before anything is asked of tmux.
     if let Trigger::Seen { pane_pid } = trigger {
-        let known = find_agent(proc_root, *pane_pid, adapter_id)
+        let known = find_agent(&processes, *pane_pid, adapter_id)
             .is_some_and(|agent| work().declined.contains(&(key.clone(), agent.pid)));
         if known {
             return;
@@ -273,7 +271,7 @@ fn convert(candidate: &Candidate) {
     let Some(tag) = pane::read(&key.pane_id).filter(|tag| tag.adapter.is_empty()) else {
         return;
     };
-    let Some(agent) = find_agent(proc_root, tag.pid, adapter_id) else {
+    let Some(agent) = find_agent(&processes, tag.pid, adapter_id) else {
         return;
     };
     if seen && work().declined.contains(&(key.clone(), agent.pid)) {
@@ -348,7 +346,7 @@ pub(super) fn restart_agent(
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     let tag = pane::read(pane_id).context("the pane is gone")?;
-    let agent = find_agent(Path::new("/proc"), tag.pid, provider.adapter_id())
+    let agent = find_agent(&processes::system(), tag.pid, provider.adapter_id())
         .context("the agent is not running")?;
     replace(pane_id, provider, &agent, launch, rewound_to)?;
     note_replaced(
@@ -392,12 +390,14 @@ fn replace(
     use anyhow::Context;
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
 
-    let process = Path::new("/proc").join(agent.pid.to_string());
-    let environment = std::fs::read(process.join("environ")).context("read the environment")?;
+    let processes = processes::system();
+    let environment = processes
+        .environment(agent.pid)
+        .context("read the environment")?;
     if environment.len() > MAX_ENVIRONMENT_BYTES {
         anyhow::bail!("the agent's environment is too large");
     }
-    let started_in = std::fs::read_link(process.join("cwd")).context("read the folder")?;
+    let started_in = processes.folder(agent.pid).context("read the folder")?;
     let cwd = if launch.cwd.is_empty() {
         started_in
     } else {
@@ -452,10 +452,10 @@ pub(super) fn agent_variables(
     adapter_id: &str,
     names: &[&str],
 ) -> Vec<Option<std::ffi::OsString>> {
-    let proc_root = Path::new("/proc");
+    let processes = processes::system();
     let environment = pane::read(pane_id)
-        .and_then(|tag| find_agent(proc_root, tag.pid, adapter_id))
-        .and_then(|agent| std::fs::read(proc_root.join(agent.pid.to_string()).join("environ")).ok())
+        .and_then(|tag| find_agent(&processes, tag.pid, adapter_id))
+        .and_then(|agent| processes.environment(agent.pid).ok())
         .filter(|bytes| bytes.len() <= MAX_ENVIRONMENT_BYTES)
         .map(|bytes| crate::chat_pipe::parse_environment(&bytes))
         .unwrap_or_default();
@@ -493,7 +493,7 @@ struct Agent {
 /// The pane's agent: the process nearest the pane's own that is one of
 /// `adapter_id`'s. Looking stops at the first agent of any adapter, since
 /// what runs beneath an agent is that agent's business.
-fn find_agent(proc_root: &Path, root_pid: u32, adapter_id: &str) -> Option<Agent> {
+fn find_agent(processes: &impl Processes, root_pid: u32, adapter_id: &str) -> Option<Agent> {
     if root_pid == 0 {
         return None;
     }
@@ -503,62 +503,26 @@ fn find_agent(proc_root: &Path, root_pid: u32, adapter_id: &str) -> Option<Agent
         if visited.len() >= MAX_PROCESSES || !visited.insert(pid) {
             continue;
         }
-        let process = proc_root.join(pid.to_string());
-        if let Some(argv) = read_argv(&process.join("cmdline"))
+        if let Some(argv) = processes.argv(pid)
             && let Some(adapter) = adapters::detect_argv(&argv)
         {
             return (adapter.kind() == adapter_id).then(|| Agent {
                 pid,
-                age: process_age(proc_root, pid),
+                age: processes.age(pid),
                 argv,
             });
         }
         if depth >= MAX_DEPTH {
             continue;
         }
-        let children = process.join("task").join(pid.to_string()).join("children");
-        if let Ok(children) = std::fs::read_to_string(children) {
-            queue.extend(
-                children
-                    .split_ascii_whitespace()
-                    .filter_map(|pid| pid.parse().ok())
-                    .map(|pid| (pid, depth + 1)),
-            );
-        }
+        queue.extend(
+            processes
+                .children(pid)
+                .into_iter()
+                .map(|pid| (pid, depth + 1)),
+        );
     }
     None
-}
-
-/// A whole command line, or nothing: one that was cut short may have lost
-/// the argument that says what the agent was asked to do.
-fn read_argv(cmdline: &Path) -> Option<Vec<String>> {
-    let bytes = std::fs::read(cmdline).ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_ARGV_BYTES {
-        return None;
-    }
-    bytes
-        .strip_suffix(&[0])
-        .unwrap_or(&bytes)
-        .split(|byte| *byte == 0)
-        .map(|argument| String::from_utf8(argument.to_vec()).ok())
-        .collect()
-}
-
-fn process_age(proc_root: &Path, pid: u32) -> Option<Duration> {
-    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
-    // The command name is in parentheses and may hold anything; the fields
-    // are counted from after it. `starttime` is the 22nd of them all.
-    let after_name = &stat[stat.rfind(')')? + 1..];
-    let start_ticks: f64 = after_name.split_ascii_whitespace().nth(19)?.parse().ok()?;
-    let uptime = std::fs::read_to_string(proc_root.join("uptime")).ok()?;
-    let uptime: f64 = uptime.split_ascii_whitespace().next()?.parse().ok()?;
-    // SAFETY: `sysconf` reads a constant of the running system.
-    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks_per_second <= 0 {
-        return None;
-    }
-    let age = uptime - start_ticks / ticks_per_second as f64;
-    Some(Duration::from_secs_f64(age.max(0.0)))
 }
 
 /// How many values a command-line option takes.
@@ -856,7 +820,13 @@ mod tests {
         assert!(!hook_is_fresh(0, now));
     }
 
-    fn process(root: &Path, pid: u32, argv: &[&str], children: &[u32], start_ticks: u64) {
+    fn process(
+        root: &std::path::Path,
+        pid: u32,
+        argv: &[&str],
+        children: &[u32],
+        start_ticks: u64,
+    ) {
         let directory = root.join(pid.to_string());
         let task = directory.join("task").join(pid.to_string());
         std::fs::create_dir_all(&task).unwrap();
@@ -892,13 +862,13 @@ mod tests {
         // An agent started by the agent is not the pane's.
         process(root.path(), 13, &["codex", "exec", "x"], &[], 999 * ticks);
 
-        let agent = find_agent(root.path(), 10, "claude-code").unwrap();
+        let agent = find_agent(&processes::Proc(root.path()), 10, "claude-code").unwrap();
         assert_eq!(agent.pid, 12);
         // An empty argument is an argument.
         assert_eq!(agent.argv, ["claude", "--model", "opus", ""]);
         assert_eq!(agent.age, Some(Duration::from_secs(5)));
-        assert!(find_agent(root.path(), 10, "codex").is_none());
-        assert!(find_agent(root.path(), 11, "claude-code").is_none());
-        assert!(find_agent(root.path(), 0, "claude-code").is_none());
+        assert!(find_agent(&processes::Proc(root.path()), 10, "codex").is_none());
+        assert!(find_agent(&processes::Proc(root.path()), 11, "claude-code").is_none());
+        assert!(find_agent(&processes::Proc(root.path()), 0, "claude-code").is_none());
     }
 }

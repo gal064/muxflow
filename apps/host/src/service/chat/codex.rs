@@ -680,45 +680,40 @@ impl Codex {
     /// a slash is handed over as the skill, not as its name, and each one
     /// named with `$` anywhere is handed over beside the text.
     fn input(&self, text: &str) -> Value {
-        let named = text.strip_prefix('/').and_then(|rest| {
+        let leading = text.strip_prefix('/').and_then(|rest| {
             let (name, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             let skill = self.skills.iter().find(|(skill, _, _)| skill == name)?;
             Some((skill, rest.trim()))
         });
-        match named {
-            Some(((name, _, path), rest)) => {
-                let mut input = vec![json!({"type": "skill", "name": name, "path": path})];
-                if !rest.is_empty() {
-                    input.push(json!({"type": "text", "text": rest}));
-                }
-                Value::Array(input)
-            }
-            None => {
-                let mut input = vec![json!({"type": "text", "text": text})];
-                let mut named: Vec<&str> = Vec::new();
-                for (at, _) in text.match_indices('$') {
-                    let inside = text[..at]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|before| before.is_alphanumeric() || before == '$');
-                    let rest = &text[at + 1..];
-                    let end = rest
-                        .find(|c: char| !(c.is_alphanumeric() || "-_:.".contains(c)))
-                        .unwrap_or(rest.len());
-                    // A name does not end in the sentence's own punctuation.
-                    let name = rest[..end].trim_end_matches(['.', ':']);
-                    let skill = self.skills.iter().find(|(skill, _, _)| skill == name);
-                    if let Some((name, _, path)) = skill
-                        && !inside
-                        && !named.contains(&name.as_str())
-                    {
-                        named.push(name);
-                        input.push(json!({"type": "skill", "name": name, "path": path}));
-                    }
-                }
-                Value::Array(input)
+        let item = |name: &str, path: &str| json!({"type": "skill", "name": name, "path": path});
+        let (mut input, text, mut named) = match leading {
+            Some(((name, _, path), rest)) => (vec![item(name, path)], rest, vec![name.as_str()]),
+            None => (Vec::new(), text, Vec::new()),
+        };
+        if !text.is_empty() {
+            input.push(json!({"type": "text", "text": text}));
+        }
+        for (at, _) in text.match_indices('$') {
+            let inside = text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|before| before.is_alphanumeric() || before == '$');
+            let rest = &text[at + 1..];
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || "-_:.".contains(c)))
+                .unwrap_or(rest.len());
+            // A name does not end in the sentence's own punctuation.
+            let name = rest[..end].trim_end_matches(['.', ':']);
+            let skill = self.skills.iter().find(|(skill, _, _)| skill == name);
+            if let Some((name, _, path)) = skill
+                && !inside
+                && !named.contains(&name.as_str())
+            {
+                named.push(name);
+                input.push(item(name, path));
             }
         }
+        Value::Array(input)
     }
 
     fn send(&mut self, held: Held, out: &mut Output) {
