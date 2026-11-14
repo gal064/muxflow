@@ -224,6 +224,12 @@ pub struct ShellPreferences {
     pub default_markdown_view: Option<AppTabViewMode>,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
+    /// The wake times the Snooze menu offers, as Settings writes them (`1h`,
+    /// `tomorrow 09:00`). `None` is "never set": the defaults apply. Only the
+    /// GPUI app has it, so it is left out of the frontend's contract, and
+    /// `None` is not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze_times: Option<Vec<String>>,
 }
 
 /// What a new workspace on one host profile starts with.
@@ -772,6 +778,7 @@ mod tests {
                     maximized: false,
                     scale_factor_milli: Some(2_000),
                 }),
+                snooze_times: Some(vec!["30m".into(), "tomorrow 08:30".into()]),
             },
             commands: CommandPreferences {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),

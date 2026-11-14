@@ -523,6 +523,7 @@ fn row_menu(row: &AgentListRow, cx: &App) -> Vec<Entry> {
         .disabled(!can_branch(row, cx))
         .into(),
     );
+    entries.push(super::history_view::snooze_entry(&row.agent, cx));
     entries.push(Entry::Separator);
     entries.extend(move_entries(row, cx));
     entries
@@ -1146,7 +1147,9 @@ impl RenderOnce for AgentsList {
                 .child(text)
                 .into_any_element()
         };
-        let mut body: Vec<AnyElement> = Vec::new();
+        // Snoozed sessions whose time came, above everything: nothing runs
+        // until one is clicked.
+        let mut body: Vec<AnyElement> = super::history_view::woke_rows(cx);
         if rows.is_empty() {
             // Under the filter this list is not the whole host, so it must not
             // claim to be: the bell still counts every agent.

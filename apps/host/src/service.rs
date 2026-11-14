@@ -25,6 +25,7 @@ mod active_root;
 pub(crate) mod agents;
 pub(crate) mod chat;
 mod filesystem;
+pub(crate) mod history;
 use filesystem::FileService;
 mod git;
 use git::GitService;
