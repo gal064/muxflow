@@ -14,6 +14,7 @@ use desktop_core::{
         self, ConnectionSpec, ProfileStore, TerminalClients,
         agent::{AgentCommand, agent_request},
         automation::{AutomationCommand, automation_request},
+        chat::{ChatRequest, ChatResponse, chat_request},
         delivery_ack,
         files::{
             self, FileIoManager, editor_manager,
@@ -131,6 +132,14 @@ pub trait TerminalBackend: Send + Sync {
         _command: AutomationCommand,
     ) -> BoxFuture<'static, Result<Value, String>> {
         futures::future::ready(Err("automations are unavailable here".to_owned())).boxed()
+    }
+    /// One chat request (`chat_request`), answered with the host's response.
+    fn chat_request(
+        &self,
+        _client_id: String,
+        _request: ChatRequest,
+    ) -> BoxFuture<'static, Result<ChatResponse, String>> {
+        futures::future::ready(Err("chat is unavailable here".to_owned())).boxed()
     }
     /// Starts an editor read or write (`start_file_read`, `start_file_write`),
     /// reporting its frames to `events`. Answers with the transfer id.
@@ -416,6 +425,15 @@ impl TerminalBackend for NativeBackend {
     ) -> BoxFuture<'static, Result<Value, String>> {
         let clients = self.clients.clone();
         spawned(async move { automation_request(client_id, command, &clients).await })
+    }
+
+    fn chat_request(
+        &self,
+        client_id: String,
+        request: ChatRequest,
+    ) -> BoxFuture<'static, Result<ChatResponse, String>> {
+        let clients = self.clients.clone();
+        spawned(async move { chat_request(client_id, request, &clients).await })
     }
 
     fn start_file_io(

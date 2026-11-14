@@ -17,6 +17,7 @@ use desktop_core::{
     app_state::{AppStateStore, PersistedAppState, load_app_state, reset_app_state},
     connection::{
         ConnectionSpec, ProfileStore,
+        chat::ChatEvent,
         helper::{HelperInstallReport, HelperRollback},
         profiles::{
             HostProfile, delete_host_profile, list_host_profiles, reset_host_profiles,
@@ -67,11 +68,12 @@ use super::{
 mod tests;
 
 /// Whether an event can change what this module derives. A file event changes
-/// nothing of its own: the Explorer reads it from the event alone.
+/// nothing of its own: the Explorer reads it from the event alone, as a chat
+/// pane reads a chat event.
 fn settles(event: &BridgeEvent) -> bool {
     !matches!(
         event,
-        BridgeEvent::Ignored | BridgeEvent::FileService { .. }
+        BridgeEvent::Ignored | BridgeEvent::FileService { .. } | BridgeEvent::Chat(_)
     )
 }
 
@@ -135,6 +137,15 @@ pub enum ConnectionEvent {
     FileService { payload: String },
     /// A Git watch's status or error; the Git feature routes it by root token.
     GitService { payload: String },
+    /// One change to a chat a pane of this host opened.
+    Chat {
+        profile_id: String,
+        event: Box<ChatEvent>,
+    },
+    /// A host's link is connected again after a resync or a reconnect. Chat
+    /// events may have been dropped meanwhile, with nothing later to show it,
+    /// so every open chat asks for its snapshot again.
+    LinkRestored { profile_id: String },
 }
 
 pub struct AgentServiceFrame {
@@ -182,6 +193,8 @@ struct LinkRuntime {
     /// workspace started. Until it is back, or drops for real, that is no
     /// outage to show.
     adopting_first_server: bool,
+    /// How many times the link came back to connected.
+    restores: u64,
 }
 
 pub struct ConnectionController {
@@ -396,6 +409,15 @@ impl ConnectionController {
 
     pub fn link(&self, profile_id: &str) -> Option<&HostLink> {
         self.links.link(profile_id)
+    }
+
+    /// How many times a host's link has come back to connected: the count
+    /// [`ConnectionEvent::LinkRestored`] was last sent at. Whoever asked the
+    /// host again at this count has nothing to ask again for that event.
+    pub fn link_restores(&self, profile_id: &str) -> u64 {
+        self.runtimes
+            .get(profile_id)
+            .map_or(0, |runtime| runtime.restores)
     }
 
     pub fn active_profile_id(&self) -> String {
@@ -1847,6 +1869,10 @@ impl ConnectionController {
             BridgeEvent::GitService { payload } => {
                 cx.emit(ConnectionEvent::GitService { payload });
             }
+            BridgeEvent::Chat(event) => cx.emit(ConnectionEvent::Chat {
+                profile_id: profile_id.to_owned(),
+                event,
+            }),
             BridgeEvent::Ignored => {}
         }
     }
@@ -1958,8 +1984,20 @@ impl ConnectionController {
             profile_id: profile_id.to_owned(),
             action: HostAction::Connection { phase },
         });
+        let was_connected = self
+            .runtimes
+            .get(profile_id)
+            .is_some_and(|runtime| runtime.phase == ConnectionPhase::Connected);
         // Per event: a batch can hold `resyncing` and `connected` together.
         self.observe_transitions(cx);
+        if phase == ConnectionPhase::Connected && !was_connected {
+            if let Some(runtime) = self.runtimes.get_mut(profile_id) {
+                runtime.restores += 1;
+            }
+            cx.emit(ConnectionEvent::LinkRestored {
+                profile_id: profile_id.to_owned(),
+            });
+        }
         if phase == ConnectionPhase::Connected {
             if let Some(runtime) = self.runtimes.get_mut(profile_id) {
                 runtime.adopting_first_server = false;

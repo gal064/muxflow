@@ -96,6 +96,7 @@ pub fn start(cx: &mut App) -> Result<(), String> {
         cx,
     );
     crate::automations::start(controller.clone(), backend.clone(), cx);
+    crate::chat::start(controller.clone(), backend.clone(), cx);
     crate::git::start(controller.clone(), backend, cx);
     crate::ports::start(controller.clone(), cx);
 
