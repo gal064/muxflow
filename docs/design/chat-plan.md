@@ -218,7 +218,8 @@ What differs from the plan above:
 Known limits: a prompt given on the command line is given again to the chat's
 agent, though the terminal session that was replaced may have begun on it, and
 a side fork in Chat mode therefore leaves the fork the terminal made behind,
-unused; conversion reads `/proc`, so it does nothing on macOS; a request
+unused; conversion on a macOS host is written but has run on no Mac yet (see
+"After the owner's first questions"); a request
 Codex was waiting on is not shown again after a daemon restart (stop the turn);
 Codex history arrives as one message (bounded at 64 MiB) and is not paged; Codex
 keeps nothing of an answer that was stopped part of the way; `codex resume
@@ -973,3 +974,29 @@ Known limits, recorded and not fixed:
   agent's row and History, are right on any host.
 - A chat with no name and no message keeps the title it has: after a rewind
   to the first message, the old first line until the next message.
+
+## After the owner's first questions
+
+- **Skills are named with `$`, anywhere in a message.** Codex: every `$name`
+  that is one of the folder's skills is handed to the server as a skill item
+  beside the text, which is sent as typed; a name inside a word (`a$name`) or
+  one that is no skill is text. `/name` at the start still hands the skill
+  over in place of its name. Claude: a leading `$name` that is one of the
+  agent's commands is sent as `/name`, the agent's own way. Claude Code has no
+  way to be handed a skill in the middle of a message, so there `$name` is
+  text. No wire change.
+- **The list opens on `$` too.** Desktop: in the word the cursor ends,
+  anywhere in the message. Phone: in the draft's last word. It offers skills
+  only. Claude says which of its commands are skills in its first turn, so
+  until then `$` offers all of its commands. `/` is unchanged: the start of
+  the message, commands and skills.
+- **Conversion on a macOS host.** What conversion reads of the agent's
+  process (command line, children, age, environment, folder) is behind
+  `chat/processes.rs`: `/proc` on Linux, `KERN_PROCARGS2` and `proc_pidinfo`
+  on macOS. The parsing of what macOS keeps is unit-tested on Linux and the
+  module compiles for `aarch64-apple-darwin`; the whole helper cannot be
+  cross-built here (its C dependencies need a Mac compiler), and nothing has
+  run on a Mac. Owner's pass: on a Mac host in Chat mode, start `claude` and
+  `codex` in a terminal and check each becomes a chat in the folder it was
+  started in, with the flags and variables it was started with (for example
+  `ANTHROPIC_MODEL=... claude --model ...` from a subfolder).

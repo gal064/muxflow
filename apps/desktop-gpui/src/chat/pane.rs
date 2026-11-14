@@ -864,7 +864,10 @@ impl ChatPane {
             // A skill named in the middle of a message: only its word changes.
             Some(query) if query.skill => {
                 let named = format!("${} ", command.name);
-                let after = text[cursor..].strip_prefix(' ').unwrap_or(&text[cursor..]);
+                // The whole word, when the cursor is inside it.
+                let after = &text[cursor..];
+                let after = &after[after.find(char::is_whitespace).unwrap_or(after.len())..];
+                let after = after.strip_prefix(' ').unwrap_or(after);
                 let end = query.start + named.len();
                 let text = format!("{}{named}{after}", &text[..query.start]);
                 self.composer.update(cx, |composer, cx| {

@@ -32,6 +32,7 @@ mod codex;
 mod convert;
 mod items;
 mod pane;
+mod processes;
 mod provider;
 mod scripted;
 mod session;

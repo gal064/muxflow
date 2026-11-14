@@ -348,7 +348,7 @@ export function slashMatches(catalog: ChatCatalog | undefined, draft: string): C
 
 /** The draft once `command` is taken from the list: the name it was being typed as, finished. */
 export function withPickedCommand(draft: string, command: ChatCommand): string {
-  const skill = draft.startsWith("/") ? null : SKILL_WORD.exec(draft);
+  const skill = /^\/\S*$/.test(draft) ? null : SKILL_WORD.exec(draft);
   if (!skill) return `/${command.name} `;
   return `${draft.slice(0, draft.length - skill[1]!.length - 1)}$${command.name} `;
 }

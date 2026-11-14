@@ -96,7 +96,14 @@ pub fn suggestions<'a>(catalog: &'a ChatCatalog, query: &Query) -> Vec<&'a ChatC
         .iter()
         .filter(offered)
         .filter_map(|command| {
-            let score = fuzzy_match(&command.name, query.word)?.score;
+            // A `$` is in ordinary text too (`$PATH`, a price): only a name
+            // that starts as it does is offered for one.
+            let score = if query.skill {
+                let name = command.name.to_lowercase();
+                name.starts_with(&query.word.to_lowercase()).then_some(0)?
+            } else {
+                fuzzy_match(&command.name, query.word)?.score
+            };
             Some((section(command), score, command))
         })
         .collect();
@@ -186,7 +193,8 @@ mod tests {
             .into_iter()
             .map(|command| command.name.as_str())
             .collect();
-        assert_eq!(names, ["code-review", "diagnose-crash"]);
+        assert_eq!(names, ["code-review"]);
+        assert!(suggestions(&marked, &query("my $rev", 7).unwrap()).is_empty());
 
         // No skill is marked: the agent's own commands stand in.
         let mut unmarked = catalog();
