@@ -286,7 +286,7 @@ impl Card {
         } else {
             // The caret says the row is a menu; the faint `.x` is too slight.
             extra("\u{25be}".into(), p)
-                .text_size(ui(12.))
+                .text_size(ui(13.))
                 .text_color(p.chrome_dim)
         };
         let trigger = action("chat-details-branch", format!("Branch: {name}"), p)
@@ -353,7 +353,7 @@ impl Card {
             div()
                 .px(ui(6.))
                 .py(ui(4.))
-                .text_size(ui(12.))
+                .text_size(ui(13.))
                 .text_color(p.chrome_faint)
                 .child(text)
                 .into_any_element()
@@ -377,7 +377,7 @@ impl Card {
                             .px(ui(6.))
                             .py(ui(3.))
                             .justify_start()
-                            .text_size(ui(12.5))
+                            .text_size(ui(13.5))
                             .accessibility_label(name.clone())
                             // A label of its own, since Kit centres `label`.
                             .child(div().w_full().min_w_0().truncate().child(name.clone()))
@@ -491,7 +491,7 @@ impl Card {
                             .aria_label(SharedString::from(error.clone()))
                             .pl(ui(26.))
                             .pr(ui(4.))
-                            .text_size(ui(11.5))
+                            .text_size(ui(12.5))
                             .text_color(p.danger)
                             .line_clamp(3)
                             .text_ellipsis()
@@ -515,7 +515,7 @@ impl Card {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(ui(11.))
+                            .text_size(ui(12.))
                             .text_color(p.chrome_faint)
                             .child("Context"),
                     )
@@ -548,7 +548,7 @@ impl Card {
             .rounded(ui(10.))
             .bg(p.chrome_bg)
             .shadow(toast::shadow(&p))
-            .text_size(ui(12.5))
+            .text_size(ui(13.5))
             .line_height(gpui_kit::relative(1.45))
             .text_color(p.chrome_ink)
             // Nothing under the card takes a press meant for it.
@@ -581,7 +581,7 @@ impl Render for Card {
             .px(ui(9.))
             .py(ui(3.))
             .border_1()
-            .text_size(ui(12.))
+            .text_size(ui(13.))
             .map(|button| {
                 if open {
                     button
@@ -646,7 +646,7 @@ fn glyph(mark: &'static str, p: &Palette) -> impl IntoElement {
         .flex()
         .justify_center()
         .font_family(fonts::MONO)
-        .text_size(ui(11.))
+        .text_size(ui(12.))
         .text_color(p.chrome_faint)
         .child(mark)
 }
@@ -656,7 +656,7 @@ fn extra(text: SharedString, p: &Palette) -> gpui_kit::Div {
     div()
         .flex_none()
         .whitespace_nowrap()
-        .text_size(ui(11.))
+        .text_size(ui(12.))
         .text_color(p.chrome_faint)
         .child(text)
 }
@@ -706,7 +706,7 @@ fn changes_row(
             h_flex()
                 .flex_none()
                 .gap(ui(4.))
-                .text_size(ui(11.))
+                .text_size(ui(12.))
                 .child(div().text_color(p.ok).child(format!("+{}", summary.added)))
                 .child(
                     div()
@@ -755,7 +755,7 @@ fn action(id: &'static str, name: String, p: &Palette) -> Button {
         .px(ui(4.))
         .py(ui(2.))
         .justify_start()
-        .text_size(ui(12.5))
+        .text_size(ui(13.5))
         .text_color(p.chrome_ink_strong)
 }
 

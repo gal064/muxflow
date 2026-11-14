@@ -41,7 +41,7 @@ use super::{
 
 /// The rows of the command list on show before it scrolls.
 const SLASH_ROWS: f32 = 9.;
-const SLASH_ROW_HEIGHT: f32 = 26.;
+const SLASH_ROW_HEIGHT: f32 = 27.;
 
 /// `209k / 1M`: a token count as the meter says it.
 pub(super) fn tokens(count: u64) -> String {
@@ -88,7 +88,7 @@ fn pill(
         .border_color(p.chrome_border)
         .rounded_full()
         .bg(p.chrome_bg)
-        .text_size(ui(11.5))
+        .text_size(ui(12.5))
         .text_color(p.chrome_ink)
         .disabled(off);
     if off { pill.opacity(0.42) } else { pill }
@@ -348,7 +348,7 @@ impl ChatPane {
                 .border_color(p.chrome_border)
                 .rounded(ui(5.))
                 .overflow_hidden()
-                .text_size(ui(11.))
+                .text_size(ui(12.))
                 .when(off, |toggle| toggle.opacity(0.42))
                 .child(half(
                     "chat-speed-standard",
@@ -380,7 +380,7 @@ impl ChatPane {
             .aria_label(SharedString::from(format!("Context used: {text}")))
             .flex_none()
             .gap(ui(6.))
-            .text_size(ui(11.))
+            .text_size(ui(12.))
             .text_color(p.chrome_faint)
             .child(
                 div()
@@ -420,7 +420,7 @@ impl ChatPane {
             .rounded(ui(7.))
             .bg(ground)
             .text_color(p.chrome_bg)
-            .text_size(ui(13.))
+            .text_size(ui(14.))
             .font_weight(FontWeight::SEMIBOLD)
             .flex()
             .items_center()
@@ -468,7 +468,7 @@ impl ChatPane {
                     .px(ui(10.))
                     .pt(ui(7.))
                     .pb(ui(3.))
-                    .text_size(ui(10.5))
+                    .text_size(ui(11.5))
                     .text_color(p.chrome_faint)
                     .child(here.title().to_uppercase())
             });
@@ -493,7 +493,7 @@ impl ChatPane {
                             .flex_none()
                             .font_family(fonts::MONO)
                             .font_weight(FontWeight::MEDIUM)
-                            .text_size(ui(12.))
+                            .text_size(ui(13.))
                             .text_color(p.chrome_ink_strong)
                             .child(SharedString::from(format!("{sigil}{}", command.name))),
                     )
@@ -509,7 +509,7 @@ impl ChatPane {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(ui(10.5))
+                                .text_size(ui(11.5))
                                 .text_color(p.chrome_faint)
                                 .child(SharedString::from(command.argument_hint.clone())),
                         )
@@ -539,7 +539,7 @@ impl ChatPane {
             .rounded(ui(9.))
             .bg(p.chrome_raised)
             .shadow_lg()
-            .text_size(ui(12.5))
+            .text_size(ui(13.5))
             .pb(ui(4.))
             .children(rows)
             .into_any_element()
@@ -579,7 +579,7 @@ impl ChatPane {
                 .border_b_1()
                 .border_color(p.chrome_hairline)
                 .bg(p.accent_wash)
-                .text_size(ui(12.))
+                .text_size(ui(13.))
                 .text_color(p.chrome_ink)
                 .child(div().flex_1().min_w_0().child(
                     "Editing an earlier message. Sending removes everything after it. Files on disk stay as they are.",
@@ -589,7 +589,7 @@ impl ChatPane {
                         .label("Cancel")
                         .ghost()
                         .xsmall()
-                        .text_size(ui(12.))
+                        .text_size(ui(13.))
                         .text_color(p.chrome_dim)
                         .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
                 )
@@ -615,7 +615,7 @@ impl ChatPane {
                 .aria_label(text.clone())
                 .px(ui(12.))
                 .pt(ui(8.))
-                .text_size(ui(12.))
+                .text_size(ui(13.))
                 .text_color(ink)
                 .child(text)
         });
@@ -704,7 +704,7 @@ impl ChatPane {
                     .px(ui(2.))
                     .pt(ui(10.))
                     .pb(ui(4.))
-                    .text_size(ui(13.5))
+                    .text_size(ui(14.5))
                     .text_color(p.chrome_ink_strong),
             );
         div()
