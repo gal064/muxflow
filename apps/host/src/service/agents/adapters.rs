@@ -33,8 +33,8 @@ pub(crate) const LAST_ASSISTANT_MESSAGE_FIELD: &str = "last_assistant_message";
 /// Set when the hook cut the message at its 32 KiB bound.
 pub(crate) const LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD: &str = "last_assistant_message_truncated";
 /// How a `SessionStart` began, as the agent reports it (`startup`, `resume`,
-/// `clear`, `compact`). Chat mode resumes the named session when it is
-/// `resume`.
+/// `fork`, `clear`, `compact`). Chat mode resumes the named session when it
+/// is `resume`.
 pub(crate) const SESSION_START_SOURCE_FIELD: &str = "source";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed event set or entry configuration changes. An

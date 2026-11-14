@@ -16,7 +16,7 @@ use super::provider::Launch;
 use crate::service::{snapshot::tmux_command, tmux_actions::escaped_format_literal};
 
 /// The chat adapter's id. Its presence is what makes a pane a chat.
-pub(super) const ADAPTER: &str = "@muxflow-chat";
+pub(crate) const ADAPTER: &str = "@muxflow-chat";
 /// The unix socket the pane's agent talks over.
 pub(super) const SOCKET: &str = "@muxflow-chat-socket";
 /// The agent's own id for the conversation, once it is known.
@@ -25,15 +25,15 @@ pub(super) const SESSION: &str = "@muxflow-chat-session";
 /// conversation still ends with it until a new message follows. An agent
 /// that needs no such mark leaves it unset.
 pub(super) const REWOUND_TO: &str = "@muxflow-chat-at";
-/// Set on a pane opened for a side question, so that it is never listed as a
-/// session of its own.
+/// Set on a pane opened for a side question, so that what its chat runs is
+/// never listed as a session of its own.
 pub(crate) const SIDE: &str = "@muxflow-chat-side";
 
 /// How the chat was started, so it can be started again the same way: a
 /// [`Launch`] as JSON, in hex so that no byte of it means anything to tmux.
 pub(super) const START: &str = "@muxflow-chat-start";
 
-const TAG_OPTIONS: [&str; 5] = [ADAPTER, SOCKET, SESSION, REWOUND_TO, START];
+const TAG_OPTIONS: [&str; 6] = [ADAPTER, SOCKET, SESSION, REWOUND_TO, START, SIDE];
 const SEPARATOR: &str = "__MUXFLOW_CHAT_FIELD_4E1B__";
 
 /// What tmux says about one pane.
@@ -45,6 +45,8 @@ pub(super) struct Tag {
     pub(super) session: String,
     pub(super) rewound_to: String,
     pub(super) launch: Launch,
+    /// The pane was opened for a side question.
+    pub(super) side: bool,
     /// The pane's own process, which the agent runs beneath.
     pub(super) pid: u32,
     pub(super) cwd: String,
@@ -58,6 +60,7 @@ pub(super) fn read(pane_id: &str) -> Option<Tag> {
         "#{@muxflow-chat-session}",
         "#{@muxflow-chat-at}",
         "#{@muxflow-chat-start}",
+        "#{@muxflow-chat-side}",
         "#{pane_pid}",
         "#{pane_current_path}",
     ]
@@ -79,6 +82,7 @@ pub(super) fn read(pane_id: &str) -> Option<Tag> {
         session: next()?,
         rewound_to: next()?,
         launch: decode_launch(&next()?),
+        side: !next()?.is_empty(),
         pid: next()?.parse().ok()?,
         cwd: next()?,
     })
@@ -156,9 +160,30 @@ pub(super) fn set(pane_id: &str, options: &[(&str, &str)]) -> anyhow::Result<()>
     run(command)
 }
 
-/// Makes the pane a terminal again.
+/// Makes the pane a terminal again, with no title: the shell that follows
+/// the agent gives it its own.
 pub(super) fn untag(pane_id: &str) {
+    set_title(pane_id, "");
     let _ = set(pane_id, &TAG_OPTIONS.map(|name| (name, "")));
+}
+
+/// Gives the pane a title, as an agent in a terminal gives its own: a
+/// chat's agent runs behind a pipe and writes nothing to the pane. Where
+/// windows are named after pane titles, that names the tab.
+pub(super) fn set_title(pane_id: &str, title: &str) {
+    if let Ok(mut command) = tmux_command() {
+        let _ = command.args(title_arguments(pane_id, title)).output();
+    }
+}
+
+fn title_arguments(pane_id: &str, title: &str) -> [String; 5] {
+    // tmux reads a title as a format, and ends a command at an argument that
+    // ends in a semicolon unless a backslash comes before it.
+    let mut title = escaped_format_literal(title);
+    if title.ends_with(';') {
+        title.insert(title.len() - 1, '\\');
+    }
+    ["select-pane", "-t", pane_id, "-T", &title].map(str::to_owned)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -308,6 +333,15 @@ mod tests {
         );
         assert_eq!(decode_launch(""), Launch::default());
         assert_eq!(decode_launch("zz"), Launch::default());
+    }
+
+    #[test]
+    fn a_title_means_the_characters_in_it_to_the_last_one() {
+        assert_eq!(
+            title_arguments("%7", "Fix #{pane_id}; now;"),
+            ["select-pane", "-t", "%7", "-T", "Fix ##{pane_id}; now\\;"]
+        );
+        assert_eq!(title_arguments("%7", "")[4], "");
     }
 
     #[test]

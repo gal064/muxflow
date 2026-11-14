@@ -1235,6 +1235,54 @@ async fn what_a_provider_publishes_is_bounded_and_numbered() {
     assert_eq!(appended, streamed);
 }
 
+/// What a publish answers is the title its pane is to be given: nothing
+/// else sets one on a chat's pane.
+#[tokio::test]
+async fn a_chat_is_titled_by_its_name_or_else_by_its_first_message() {
+    use v1::ChatItemKind::{Assistant, User};
+    let directory = tempfile::tempdir().unwrap();
+    let (_runtime, _connection, sink) = quiet_runtime(&directory);
+    // Nothing names a conversation nobody has said anything in.
+    assert_eq!(
+        sink.publish(Change::Item(item("a0", Assistant, "Hi"))),
+        None
+    );
+    let long = format!("\n  Fix the {} tests\tnow\nand the docs", "x".repeat(80));
+    let title = sink.publish(Change::Item(item("m1", User, &long))).unwrap();
+    assert_eq!(title, format!("Fix the {}…", "x".repeat(52)));
+    // Only a change of title is one, and streamed text is never a title's.
+    assert_eq!(sink.publish(Change::Item(item("m2", User, "More"))), None);
+    let streaming = v1::ChatItem {
+        streaming: true,
+        ..item("a1", Assistant, "")
+    };
+    assert_eq!(sink.publish(Change::Item(streaming)), None);
+    let delta = v1::ChatItemDelta {
+        item_id: "a1".into(),
+        text_append: "On it".into(),
+    };
+    assert_eq!(sink.publish(Change::Delta(delta)), None);
+
+    // The first message is gone: the next one to be first names the chat.
+    let all = v1::ChatTruncate::default();
+    assert_eq!(sink.publish(Change::Truncate(all)), None);
+    let edited = sink.publish(Change::Item(item("m3", User, "Fix the docs")));
+    assert_eq!(edited.as_deref(), Some("Fix the docs"));
+    // The provider's own name for the conversation comes first, and gives
+    // way again when it is taken back.
+    assert_eq!(sink.name("Release\nplan").as_deref(), Some("Release"));
+    assert_eq!(sink.publish(Change::Item(item("m4", User, "More"))), None);
+    assert_eq!(sink.name("").as_deref(), Some("Fix the docs"));
+    // A fork is named after its source's title, and keeps what tells them
+    // apart.
+    let fork = format!("{title} (fork)");
+    assert_eq!(sink.name(&fork), Some(fork.clone()));
+    assert_eq!(sink.name("").as_deref(), Some("Fix the docs"));
+    // A conversation read from the agent's record is titled as it is read.
+    let read = vec![item("h1", User, "Earlier"), item("h2", Assistant, "Yes")];
+    assert_eq!(sink.reset(read, true).as_deref(), Some("Earlier"));
+}
+
 #[tokio::test]
 async fn an_item_published_again_is_an_update_in_place_and_keeps_its_kind() {
     let directory = tempfile::tempdir().unwrap();

@@ -56,9 +56,11 @@ struct Entry {
     snoozed_until: i64,
     woke: bool,
     chat: bool,
-    /// A `/btw` or `/side` copy, which opens in a split beside its source
-    /// ([`History::hide_pane`]). Never listed.
-    fork: bool,
+    /// Not a session of its own: a `/btw` or `/side` copy, which opens in a
+    /// split beside its source ([`History::hide_pane`]), or one the chat
+    /// runtime put another in the place of ([`History::replaced`]). Never
+    /// listed.
+    hidden: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -103,8 +105,8 @@ struct Inner {
     /// Only activity times changed since the last write.
     activity: bool,
     written_at: i64,
-    /// Panes opened for a side fork; the first session seen in each is kept
-    /// out of the list.
+    /// Panes a side fork is to run in; the first session seen in each that is
+    /// not hidden already is kept out of the list.
     side_panes: BTreeSet<String>,
     /// Resumes placed and not yet seen running, until when they count.
     resuming: BTreeMap<Key, i64>,
@@ -187,15 +189,41 @@ impl History {
     }
 
     /// Marks the pane a side fork (`/btw`, `/side`) opened in: the session
-    /// it comes to run is a fork, and is not listed.
+    /// it comes to run is a fork, and is not listed. Marked again when the
+    /// fork's agent is replaced by one on another session, which is then
+    /// the fork.
     pub(crate) fn hide_pane(&self, pane_id: &str) {
         self.inner().side_panes.insert(pane_id.to_owned());
+    }
+
+    /// The chat runtime put another session in this one's place, in its
+    /// pane: a terminal agent's, replaced by its chat as it started, or a
+    /// conversation a rewind started over. It is no session of its own and
+    /// is never listed, also when it is reported after this.
+    pub(crate) fn replaced(&self, adapter_id: &str, native_session_id: &str) {
+        if native_session_id.is_empty() || native_session_id.len() > MAX_SESSION_ID_BYTES {
+            return;
+        }
+        let mut inner = self.inner();
+        let entry = inner
+            .entries
+            .entry(key(adapter_id, native_session_id))
+            .or_insert_with(|| Entry {
+                adapter_id: bounded(adapter_id),
+                native_session_id: native_session_id.to_owned(),
+                ..Entry::default()
+            });
+        if !std::mem::replace(&mut entry.hidden, true) {
+            inner.generation += 1;
+            inner.dirty = true;
+        }
     }
 
     /// Takes in every running agent that has a native session. `seen` is the
     /// whole set: a session missing from it is not running.
     pub(crate) fn observe(&self, seen: Vec<Seen>) {
         let mut inner = self.inner();
+        let inner = &mut *inner;
         let mut changed = false;
         let mut activity = false;
         let mut running = BTreeMap::new();
@@ -209,9 +237,6 @@ impl History {
             }
             let key = key(&seen.adapter_id, &seen.native_session_id);
             let started = primed && !inner.running.contains_key(&key);
-            // The first session in a side fork's pane is the fork; whatever
-            // runs there later is not.
-            let side = inner.side_panes.remove(&seen.pane_id);
             inner.resuming.remove(&key);
             let entry = inner.entries.entry(key.clone()).or_insert_with(|| {
                 changed = true;
@@ -226,7 +251,12 @@ impl History {
             if !seen.title.is_empty() {
                 entry.title = bounded(&seen.title);
             }
-            entry.fork |= side;
+            // The first session in a side fork's pane is the fork; whatever
+            // runs there later is not. One hidden already is what the fork
+            // took the place of.
+            if !entry.hidden && inner.side_panes.remove(&seen.pane_id) {
+                entry.hidden = true;
+            }
             if !seen.workspace_name.is_empty() {
                 entry.workspace_name = bounded(&seen.workspace_name);
             }
@@ -268,17 +298,17 @@ impl History {
             inner.dirty = true;
         }
         if changed || ran {
-            trim(&mut inner);
+            trim(inner);
         }
     }
 
-    /// Every session but forks, newest first.
+    /// Every session that is one of its own, newest first.
     pub(crate) fn list(&self) -> v1::HistoryResponse {
         let inner = self.inner();
         let mut entries: Vec<v1::HistoryEntry> = inner
             .entries
             .iter()
-            .filter(|(_, entry)| !entry.fork)
+            .filter(|(_, entry)| !entry.hidden)
             .map(|(key, entry)| wire_entry(entry, inner.running.get(key)))
             .collect();
         entries.sort_by(|left, right| {

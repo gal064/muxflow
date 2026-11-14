@@ -96,6 +96,8 @@ pub(super) enum Action<J> {
     Report(serde_json::Value),
     /// The pane's process was replaced: connect to the new one.
     Reconnect,
+    /// Give the pane this title.
+    Title(String),
 }
 
 /// Where a dialect puts what it has to say.
@@ -119,7 +121,8 @@ impl<J> Out<J> {
             },
             change => {
                 self.flush();
-                self.sink.publish(change);
+                let title = self.sink.publish(change);
+                self.retitle(title);
             }
         }
     }
@@ -127,7 +130,22 @@ impl<J> Out<J> {
     /// Replaces the timeline with the conversation as it was read.
     pub(super) fn reset(&mut self, items: Vec<v1::ChatItem>, complete: bool) {
         self.deltas.clear();
-        self.sink.reset(items, complete);
+        let title = self.sink.reset(items, complete);
+        self.retitle(title);
+    }
+
+    /// Says what the agent calls the conversation; empty when it has no
+    /// name for it.
+    pub(super) fn name(&mut self, name: &str) {
+        let title = self.sink.name(name);
+        self.retitle(title);
+    }
+
+    /// The pane is titled by the session's task, in the order asked.
+    fn retitle(&mut self, title: Option<String>) {
+        if let Some(title) = title {
+            let _ = self.actions.send(Action::Title(title));
+        }
     }
 
     pub(super) fn flush(&mut self) {
@@ -402,9 +420,18 @@ async fn without_link<D: Dialect>(
             let key = key.clone();
             blocking(move || report(&key, adapter_id, &payload)).await;
         }
+        Action::Title(title) => retitle(key, title).await,
         Action::Write(_) | Action::Reconnect => {}
     }
     Some(())
+}
+
+/// Titles the pane, and has every connection look at tmux again: a title
+/// alone is a change tmux tells nobody of.
+async fn retitle(key: &PaneKey, title: String) {
+    let pane_id = key.pane_id.clone();
+    blocking(move || pane::set_title(&pane_id, &title)).await;
+    super::topology_changed();
 }
 
 async fn drive<D: Dialect>(
@@ -527,6 +554,10 @@ async fn drive<D: Dialect>(
                     Some(Action::Reconnect) => {
                         wait = Wait::Start;
                         break;
+                    }
+                    Some(Action::Title(title)) => {
+                        retitle(&key, title).await;
+                        Some(((), false))
                     }
                     None => return,
                 },

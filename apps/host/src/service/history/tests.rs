@@ -91,6 +91,60 @@ fn a_side_fork_is_never_listed_and_a_branch_is() {
 }
 
 #[test]
+fn a_session_the_chat_runtime_replaced_is_never_listed() {
+    let (_directory, history) = store();
+    let in_pane = |session: &str, at| Seen {
+        pane_id: "%1".into(),
+        ..seen(session, "Fix tests", at)
+    };
+    // An agent that ran in the pane earlier and was quit stays listed.
+    history.observe(vec![in_pane("quit", 1)]);
+    history.observe(Vec::new());
+    // A terminal agent starts there and is replaced by its chat, which is
+    // on another session. The agents service goes on reporting the first
+    // until the second says it started.
+    history.observe(vec![in_pane("terminal", 2)]);
+    history.replaced("claude-code", "terminal");
+    history.observe(vec![in_pane("terminal", 3)]);
+    history.observe(vec![in_pane("chat", 4)]);
+    let listed = |history: &History| -> Vec<String> {
+        let entries = history.list().entries.into_iter();
+        entries.map(|entry| entry.native_session_id).collect()
+    };
+    assert_eq!(listed(&history), ["chat", "quit"]);
+    // One that is replaced before it was ever reported is not listed when
+    // it is, and none of it is forgotten by a restart.
+    history.replaced("claude-code", "late");
+    history.observe(vec![in_pane("chat", 5), seen("late", "Fix tests", 6)]);
+    history.maintain(7);
+    assert_eq!(
+        listed(&History::load(history.path.clone())),
+        ["chat", "quit"]
+    );
+}
+
+#[test]
+fn a_side_fork_that_becomes_a_chat_is_still_not_listed() {
+    let (_directory, history) = store();
+    let fork = |session: &str, at| Seen {
+        pane_id: "%2".into(),
+        ..seen(session, "Fix tests (fork)", at)
+    };
+    history.hide_pane("%2");
+    history.observe(vec![seen("source", "Fix tests", 1), fork("terminal", 2)]);
+    // The fork's agent is replaced by its chat, which copies the source
+    // again: the pane is marked once more, for the chat's session.
+    history.replaced("claude-code", "terminal");
+    history.hide_pane("%2");
+    history.observe(vec![seen("source", "Fix tests", 3), fork("terminal", 4)]);
+    history.observe(vec![seen("source", "Fix tests", 5), fork("chat", 6)]);
+    assert_eq!(titles(&history), ["Fix tests"]);
+    // Whatever runs in the pane after the fork is a session of its own.
+    history.observe(vec![fork("later", 7)]);
+    assert_eq!(titles(&history), ["Fix tests (fork)", "Fix tests"]);
+}
+
+#[test]
 fn a_snooze_due_while_its_session_runs_ends_without_waking() {
     let (_directory, history) = store();
     history.observe(vec![seen("s1", "Fix tests", 1)]);
