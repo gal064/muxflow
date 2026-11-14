@@ -1,5 +1,8 @@
 # Multi-host desktop: design contract
 
+Written for the Tauri app; the file names below are that app's. The native
+app keeps the behavior.
+
 Show workspaces and agents from several hosts at once in the desktop sidebar,
 each tagged with a one-letter host mark. The wire protocol and the host helper
 do not change; mobile is untouched. Only the desktop changes.

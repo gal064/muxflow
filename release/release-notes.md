@@ -7,7 +7,7 @@ workspaces carry over, and hosts and phones need no change.
 On Linux it draws with the GPU through Vulkan, so it needs the Vulkan loader and
 a driver (`libvulkan1` and `mesa-vulkan-drivers` on Debian and Ubuntu). The
 installer checks for the loader. If the window does not open, see
-[troubleshooting](https://github.com/gal064/muxflow/blob/main/docs/troubleshooting.md#the-window-does-not-open-on-linux).
+[troubleshooting](https://github.com/gal064/muxflow/blob/{{TAG}}/docs/troubleshooting.md#the-window-does-not-open-on-linux).
 
 ## Install
 

@@ -24,9 +24,9 @@ configuration/state directory. That separate destructive step is intentionally
 not part of package uninstall.
 
 An upgrade from a release before the native desktop can leave the old web
-view's cache behind: `~/.cache/dev.muxflow.desktop` on Linux,
-`~/Library/Caches/dev.muxflow.desktop` and `~/Library/WebKit/dev.muxflow.desktop`
-on macOS. Nothing reads it any more, so it is safe to delete.
+view's cache in `~/.cache/dev.muxflow.desktop`. Nothing reads it any more, so
+it is safe to delete.
+
 # macOS
 
 Run `release/macos/uninstall.sh`. It removes only the ownership-marked app,
@@ -45,3 +45,8 @@ release/macos/uninstall.sh "$HOME/Applications"
 
 `ADE_MACOS_APPLICATIONS_DIR` selects a single directory the same way, and an
 explicit argument takes precedence over it.
+
+An upgrade from a release before the native desktop can leave the old web
+view's cache in `~/Library/Caches/dev.muxflow.desktop` and
+`~/Library/WebKit/dev.muxflow.desktop`. Nothing reads it any more, so it is
+safe to delete.

@@ -223,8 +223,7 @@ fn mounted_with<'a>(
         reading::init(cx);
     });
     let fake = Fake::default();
-    let backend: Arc<dyn muxflow::connection_ui::backend::TerminalBackend> =
-        Arc::new(fake.clone());
+    let backend: Arc<dyn muxflow::connection_ui::backend::TerminalBackend> = Arc::new(fake.clone());
     let link = cx.new(|cx| TerminalLink::new("qa".into(), backend, cx));
     let link_for_pane = link.clone();
     let (pane, visual) = cx.add_window_view(|window, cx| {

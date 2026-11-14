@@ -36,7 +36,7 @@ jobs:
         # (ALSA for its agent sounds). Mesa's software Vulkan (lavapipe) is for its
         # offscreen frame test.
         run: >-
-          .github/scripts/apt-install.sh tmux
+          .github/scripts/apt-install.sh tmux pkg-config
           libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers libasound2-dev
       # Installs the toolchain pinned in rust-toolchain.toml.
       - run: rustup show active-toolchain || rustup toolchain install

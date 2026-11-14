@@ -184,8 +184,8 @@ pub struct NativeNotifications {
 }
 
 /// UserNotifications throws NSInternalInconsistencyException for any
-/// process outside a real .app bundle — `tauri dev` runs the bare target
-/// binary — so bundle-less runs must never touch the notification center.
+/// process outside a real .app bundle — `cargo run -p muxflow` runs the bare
+/// target binary — so bundle-less runs must never touch the notification center.
 ///
 /// Reading the executable path is deliberate: it needs no new objc2 features
 /// and cannot itself throw.

@@ -1,5 +1,8 @@
 # Port forwarding: design contract
 
+Written for the Tauri app; the file names below are that app's. The native
+app keeps the behavior.
+
 A **Ports** tab in the right panel, beside Files and Git. Type a port and it is
 forwarded from the SSH host to the same port on this machine. Only the desktop
 changes: the wire protocol and the host helper do not, so mobile
