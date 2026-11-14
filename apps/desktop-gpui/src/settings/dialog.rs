@@ -615,7 +615,14 @@ fn set_text(input: &Entity<InputState>, text: String, window: &mut Window, cx: &
     }
 }
 
+/// Help under a control: Tauri's `.settings-hint`, 6px under the control (with
+/// its group's 5px gap) and 16px over the next row (with the tab's 12px gap).
 fn hint<T: Into<SharedString>>(text: T, cx: &App) -> impl IntoElement + use<T> {
+    div().mt(ui(1.)).mb(ui(4.)).child(note(text, cx))
+}
+
+/// The same text in a stack of actions, where Tauri sets no margin on it.
+fn note<T: Into<SharedString>>(text: T, cx: &App) -> impl IntoElement + use<T> {
     div()
         .text_size(ui(TYPE_SECONDARY))
         .line_height(ui(TYPE_SECONDARY * 1.5))
@@ -654,7 +661,7 @@ fn setting_check<F: Fn(bool, &mut Window, &mut App) + 'static>(
     cx: &App,
 ) -> impl IntoElement + use<F> {
     v_flex()
-        .gap(ui(4.))
+        .gap(ui(5.))
         .child(
             Checkbox::new(id)
                 .label(label)
@@ -716,7 +723,7 @@ pub fn agent_setup_row(cx: &App) -> impl IntoElement + use<> {
             !status.available,
             &theme::palette(cx),
         ))
-        .child(hint(agent_setup_hint(status), cx))
+        .child(note(agent_setup_hint(status), cx))
 }
 
 impl SettingsDialog {
@@ -749,7 +756,7 @@ impl SettingsDialog {
         ));
         tab.child(
             v_flex()
-                .gap(ui(4.))
+                .gap(ui(5.))
                 .child(caption("Default Markdown view", cx))
                 .child(radios(
                     "settings-markdown-view",
@@ -769,7 +776,7 @@ impl SettingsDialog {
                 .child(legend_for_host(&host_label, cx))
                 .child(
                     v_flex()
-                        .gap(ui(4.))
+                        .gap(ui(5.))
                         .child(caption("Start in directory", cx))
                         .child(
                             Input::new(&self.start_directory)
@@ -783,7 +790,7 @@ impl SettingsDialog {
                 )
                 .child(
                     v_flex()
-                        .gap(ui(4.))
+                        .gap(ui(5.))
                         .child(caption("Run command in first tab", cx))
                         .child(
                             Input::new(&self.startup_command)
@@ -801,7 +808,7 @@ impl SettingsDialog {
             .gap(ui(12.))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(caption("Font size", cx))
                     .child(
                         div().w(ui(120.)).child(
@@ -869,7 +876,7 @@ impl SettingsDialog {
             .gap(ui(12.))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(legend("Theme", cx))
                     .child(radios("settings-theme", "Theme", &THEMES, prefs.theme, |theme, window, cx| {
                         update(|prefs| prefs.theme = theme, window, cx);
@@ -878,7 +885,7 @@ impl SettingsDialog {
             )
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(caption("Interface size", cx))
                     .child(radios("settings-ui-scale", "Interface size", scales, prefs.ui_scale, |scale, window, cx| {
                         update(|prefs| prefs.ui_scale = scale, window, cx);
@@ -899,7 +906,7 @@ impl SettingsDialog {
             ))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(legend("Markdown appearance", cx))
                     .child(radios(
                         "settings-markdown-appearance",
@@ -963,7 +970,7 @@ impl SettingsDialog {
             ))
             .child(
                 v_flex()
-                    .gap(ui(4.))
+                    .gap(ui(5.))
                     .child(caption("Volume", cx))
                     .child(self.volume_slider(window, cx)),
             )
@@ -984,7 +991,7 @@ impl SettingsDialog {
                         !can_test,
                         &theme::palette(cx),
                     ))
-                    .child(hint(notification_status_hint(self.notification_status.as_deref()), cx))
+                    .child(note(notification_status_hint(self.notification_status.as_deref()), cx))
                     .children(self.test_failure.as_ref().map(|failure| {
                         SurfaceError::new("settings-test-failure", failure.clone())
                             .summary("The test notification could not be sent.")
@@ -993,7 +1000,7 @@ impl SettingsDialog {
                         div()
                             .id("settings-test-sent")
                             .role(Role::Status)
-                            .child(hint(
+                            .child(note(
                                 "Sent. If nothing appeared, check System Settings → Notifications → Muxflow.",
                                 cx,
                             ))
