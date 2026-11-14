@@ -540,6 +540,101 @@ merged) and merges back into `gpui/chat`. One manual QA at the end.
 - Done when: every piece in the mock works against the scripted provider, with
   view tests in the style of the existing `tests.rs` files.
 
+### As built by stream C
+
+`apps/desktop-gpui/src/chat/`: `model.rs` holds one chat by the client rules
+of §4, `pane.rs` is the pane's state and every request it sends, `view.rs`
+the timeline, `cards.rs` the permission and question cards, `composer.rs` the
+composer with its pills, meter and command list, `slash.rs` and `links.rs`
+the text rules behind them, `open.rs` where a link or an edit row goes.
+
+- **Where a chat is drawn.** `TerminalSurface` mounts a `ChatPane` in the
+  pane's box in place of a `TerminalPane` when the pane has a
+  `chat_adapter_id`. Such a pane is never mounted on the terminal engine, so
+  it has no grid, no seed and no resize of its own. A pane that changes kind,
+  or whose server changes, is mounted again.
+- **Following a chat.** The bridge hands chat events (frame kind 20) to the
+  controller as `ConnectionEvent::Chat`. A pane sends `OPEN` when it mounts,
+  when a change was lost, when a rewind names an item it does not hold, and
+  when the link comes back (`ConnectionEvent::LinkRestored`, raised once per
+  connection after `RESYNC_REQUIRED` or a reconnect). It sends one `OPEN` per
+  gap and waits five seconds from then for the snapshot before asking again.
+  An `OPEN` refused with `chat_queue_full` or `chat_server_changed` is sent
+  again every 250 ms, twenty times; any other refusal is shown with "Try
+  again", in place of a chat not yet held and under one that is, which then
+  says it may be out of date. `CLOSE` is sent when the pane's last view goes.
+- **Sending.** A sent message is drawn at once as a dimmed bubble, under the
+  `client_message_id` the request carries, and the host's USER item with that
+  id takes its place. A refusal puts the text back in the composer, above
+  anything typed since, and says why. The same text sent again goes under
+  the same id, so `chat_message_duplicate` means the first one arrived.
+  Editing an earlier message sends `REWIND` and, once that is answered,
+  `SEND`, also when the pane has left the screen meanwhile; if the rewind is
+  refused nothing is sent and the text stays. The draft is kept per pane
+  while the app runs; the scroll position is not.
+- **Answers** name the request the card showed. A card pressed as another
+  request takes its place answers nothing.
+- **Older pages** load when the top of the timeline is reached, by the three
+  rules of §4. After a page that fails, the row at the top offers "Load
+  earlier messages" instead of asking again by itself.
+- **File links.** An inline code span that looks like a path is asked of the
+  host with `resolveTerminalFile`, one at a time, at most 512 per chat, only
+  once the item has stopped streaming; one that resolves is drawn as a link
+  and opens as a terminal's path does. A Markdown link whose target is a
+  path is a link without asking, and shows the file's name when its label is
+  the path. A web link asks before it opens. An image is drawn as its alt
+  text.
+- **Edit rows** show `+N −M` and open the file's diff in the Git diff tab when
+  the file is in the active repository, and the file itself otherwise. The
+  one function that does it is `chat::open::changes` (`chat/open.rs`), which
+  is where `git::open_file_diff` goes once both are merged.
+- **Slash commands.** `/` at the start of the composer lists the catalog's
+  commands and skills, fuzzy matched; Up, Down, Enter, Tab and Escape work in
+  the list. `/btw <text>` and `/side <text>` send `SIDE_FORK` and move to the
+  pane the host names, also mid-turn with a provider that takes no message
+  then.
+- **Copying.** The agent's prose is selected and copied as text is. A
+  message of the user's, a tool row, its output and a permission card's
+  command are copied whole from their right-click menu.
+- **Tool output** opens under its row, 260px at most. It is the Kit's scroll
+  area, so the wheel over it moves the output and not the conversation.
+- **Keyboard.** Enter sends and Shift+Enter makes a new line. Tab and
+  Shift+Tab leave the composer. Every control is a tab
+  stop that Enter and Space press: Edit, tool rows that open, the cards'
+  options and buttons, the pills, Standard / Fast, Send and Stop.
+- **Agent mode** is its own section of Settings, "Agents", after Terminal,
+  for the host on screen: `SET_MODE`, shown from the `agentMode` of the agent snapshot.
+  Stream E adds the snooze intervals to that section.
+
+What differs from the mock:
+
+- The detail of a permission card wraps instead of being cut, so the whole
+  command is read before it is allowed.
+- Choosing Full asks first ("Run with no checks and no sandbox?").
+- A card with several questions shows them one at a time; "Submit" moves to
+  the next and sends after the last, and "Back" returns to the one before.
+- The send button is Stop only while the turn is WORKING. Enter then sends
+  the message into the turn when the provider can take one.
+- The column keeps a 16px gutter in a narrow pane, and the pills wrap under
+  each other there.
+- The pills open the app's own menus: no section heading, a tick on the
+  current choice, the description in the same line. Model, effort and speed
+  are each their own control, as in the mock's window, not the one popover
+  of its "Model, effort and speed" tile, and no model is marked "Default".
+- `WorkingIcon` is not used: the mock draws no working mark, and Stop and
+  the composer's placeholder say that the agent works.
+- The Agents section of Settings says that pi stays a terminal.
+
+**For stream D2.** `chat::set_details_card` publishes the card:
+`Rc<dyn Fn(&DetailsContext, &mut Window, &mut App) -> Option<AnyElement>>`,
+called on every draw of a chat with the profile, the server, the tmux pane,
+the usage and the chat's width. The chat places what it returns 14px from
+its top right corner, 238px wide, and moves its column left when the chat is
+at least `chat::DETAILS_ROOM` (940px) wide; under that whatever is returned
+lies over the conversation, so the card returns nothing there unless the
+Details button opened it. The card draws its own frame and notifies the
+window when what it would return changes.
+
 ### D — Git view and details card
 
 - Host: branch summary against the default branch, branch list, checkout, and

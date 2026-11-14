@@ -25,6 +25,7 @@
 //! | [`window_state`] | Window geometry, restored and saved |
 //! | [`terminal`] | Terminal panes: engine link, element, sizing, and the input, reading and integration seams |
 //! | [`agents`] | Agents list, agent status, notifications, sounds and host hook setup |
+//! | [`chat`] | An agent's pane as a conversation: the chat view, its composer and the host's agent mode |
 //! | [`automations`] | The host's scheduled agent runs, as a right-panel segment |
 //! | [`dragdrop`] | Dragging tabs, documents and panes onto tabs, workspaces and pane edges |
 //! | [`editor`] | File tabs on the Kit code editor: read, autosave, find, grammars; document-tab surface routing |
@@ -40,6 +41,7 @@
 pub mod agents;
 pub mod app;
 pub mod automations;
+pub mod chat;
 pub mod commands;
 pub mod connection_ui;
 pub mod context_menu;
