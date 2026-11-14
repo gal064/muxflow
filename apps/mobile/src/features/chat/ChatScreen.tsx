@@ -15,7 +15,7 @@ import { agentForPane, agentTitle } from "../agents/agentViews";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { notificationAttention } from "../notifications/attention";
 import { waitForPane } from "../terminal/WorkspaceActionsSheet";
-import { sideQuestion, slashMatches } from "./chatModel";
+import { sideQuestion, slashMatches, withPickedCommand } from "./chatModel";
 import { chatClient, chatStore, setVoiceMode } from "./chatRuntime";
 import { refusalText } from "./refusals";
 import { ChatView } from "./ui/ChatView";
@@ -127,7 +127,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     void run(() => chatClient.setOptions(paneId, options));
   }, [paneId, run]);
 
-  const pickCommand = useCallback((command: ChatCommand) => setDraft(`/${command.name} `), []);
+  const pickCommand = useCallback((command: ChatCommand) => setDraft((current) => withPickedCommand(current, command)), []);
   const edit = useCallback((item: ChatItem) => {
     setEditing(item);
     setDraft(item.text);

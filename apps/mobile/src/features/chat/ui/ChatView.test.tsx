@@ -13,7 +13,7 @@ import { VoiceController } from "../../voice/VoiceController";
 import { VoiceRecorderCoordinator } from "../../voice/recorderCoordinator";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse } from "../../voice/testing";
 import { voiceStore } from "../../voice/voiceStore";
-import { newChatPane, slashMatches, type ChatPane } from "../chatModel";
+import { newChatPane, slashMatches, withPickedCommand, type ChatPane } from "../chatModel";
 import {
   chatItems,
   itemEvent,
@@ -56,7 +56,7 @@ function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy
       onDraft={setDraft}
       onEdit={(item) => { calls.edits.push(item.id); setEditing(item); setDraft(item.text); }}
       onLoadOlder={() => { calls.older += 1; }}
-      onPickCommand={(command) => setDraft(`/${command.name} `)}
+      onPickCommand={(command) => setDraft((current) => withPickedCommand(current, command))}
       onRetry={() => undefined}
       onSend={() => { calls.send.push(draft); setDraft(""); }}
       onSetOptions={(options) => calls.options.push(options)}

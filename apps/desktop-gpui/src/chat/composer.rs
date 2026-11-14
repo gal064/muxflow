@@ -450,9 +450,11 @@ impl ChatPane {
             .into_any_element()
     }
 
-    /// `.pop`: the commands a typed `/word` matches, in their sections.
+    /// `.pop`: the commands a typed `/word` or `$word` matches, in their
+    /// sections, named with the sigil they were asked for with.
     fn slash_list(
         &self,
+        sigil: char,
         suggestions: &[ChatCommand],
         p: &Palette,
         cx: &mut Context<Self>,
@@ -477,7 +479,7 @@ impl ChatPane {
                     .id(("chat-command", index))
                     .test_support()
                     .role(Role::ListBoxOption)
-                    .aria_label(SharedString::from(format!("/{}", command.name)))
+                    .aria_label(SharedString::from(format!("{sigil}{}", command.name)))
                     .aria_selected(on)
                     .items_baseline()
                     .gap(ui(10.))
@@ -493,7 +495,7 @@ impl ChatPane {
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(ui(12.))
                             .text_color(p.chrome_ink_strong)
-                            .child(SharedString::from(format!("/{}", command.name))),
+                            .child(SharedString::from(format!("{sigil}{}", command.name))),
                     )
                     .child(
                         div()
@@ -562,7 +564,7 @@ impl ChatPane {
         // An agent that is not running takes no options either.
         let off =
             !self.is_live() || !self.chat.is_held() || self.connection() != ChatConnection::Ready;
-        let suggestions = self.slash_suggestions(cx);
+        let (sigil, suggestions) = self.slash_suggestions(cx);
         let banner = self.editing.is_some().then(|| {
             // `.banner`.
             h_flex()
@@ -728,7 +730,7 @@ impl ChatPane {
                         p.chrome_hairline.into(),
                     )])
                     .when(open, |composer| {
-                        composer.child(self.slash_list(&suggestions, p, cx))
+                        composer.child(self.slash_list(sigil, &suggestions, p, cx))
                     })
                     .children(banner)
                     .children(notice)

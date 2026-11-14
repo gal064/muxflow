@@ -812,6 +812,21 @@ async fn a_skill_named_at_the_start_of_a_message_is_handed_over_as_the_skill() {
 }
 
 #[tokio::test]
+async fn skills_named_with_a_dollar_anywhere_are_handed_over_beside_the_text() {
+    let (mut replay, _lines) = opened(Launch::default());
+    let text = "Write them up with $release-notes. Not $unknown, a$release-notes or $release-notes again";
+    replay.send("m1", text);
+    assert_eq!(
+        replay.last_asked("turn/start")["params"]["input"],
+        json!([
+            {"type": "text", "text": text},
+            {"type": "skill", "name": "release-notes",
+             "path": "/work/.codex/skills/release-notes/SKILL.md"},
+        ])
+    );
+}
+
+#[tokio::test]
 async fn what_the_server_asks_is_answered_or_refused() {
     let (mut replay, _lines) = opened(Launch::default());
     // The account's tokens are not the chat's to give.
