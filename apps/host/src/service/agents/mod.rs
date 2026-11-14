@@ -15,6 +15,7 @@ mod claude_session;
 mod codex_authority;
 pub(crate) mod codex_config;
 mod fallback;
+mod history_feed;
 mod hooks;
 mod identity;
 mod ingest;
@@ -1137,6 +1138,7 @@ impl AgentRuntime {
                 .unwrap()
                 .retain(|agent_id, _| !observed.contains(agent_id));
         }
+        history_feed::observe(&state, Some(topology));
         let retired_codex_agent_ids = result.retired_codex_agent_ids.clone();
         drop(state);
         self.retire_codex_runtime_state(&retired_codex_agent_ids);
@@ -1184,7 +1186,9 @@ impl AgentRuntime {
     }
 
     fn persist_locked(&self, state: &StoredState) -> anyhow::Result<()> {
-        store::persist(&self.state_path, state)
+        store::persist(&self.state_path, state)?;
+        history_feed::observe(state, None);
+        Ok(())
     }
 }
 

@@ -1829,7 +1829,7 @@ async fn open_send_answer_rewind_and_load_older_over_the_wire() {
         })
         .await;
     let response = bystander.answer(request).await;
-    assert!(response.ok && response.history.unwrap().entries.is_empty());
+    assert!(response.ok && response.history.is_some());
     let request = bystander.chat(chat(v1::ChatAction::Close, PANE)).await;
     assert!(bystander.answer(request).await.ok);
 
@@ -1915,9 +1915,16 @@ async fn refusals_name_their_reason_over_the_wire() {
             history(v1::HistoryAction::Unspecified),
             "history_invalid_request",
         ),
-        (history(v1::HistoryAction::Resume), "history_unavailable"),
-        (history(v1::HistoryAction::Snooze), "history_unavailable"),
-        (history(v1::HistoryAction::Wake), "history_unavailable"),
+        // An action that names no recorded session.
+        (
+            history(v1::HistoryAction::Resume),
+            "history_invalid_request",
+        ),
+        (
+            history(v1::HistoryAction::Snooze),
+            "history_invalid_request",
+        ),
+        (history(v1::HistoryAction::Wake), "history_invalid_request"),
     ] {
         let request_id = client.send(request).await;
         let response = client.answer(request_id).await;

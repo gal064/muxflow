@@ -10,18 +10,21 @@ use super::super::{
     SequencerControl,
     agents::{
         AgentRuntime, HookIngestFailure, HookManager,
-        adapters::{AgentAdapter, LaunchSpec},
+        adapters::{AgentAdapter, LaunchSpec, fork_name},
         publish,
     },
     filesystem::validate_root_token,
+    history::{History, tab_title},
     snapshot::{server_identity, tmux_command},
+    tmux_actions::escaped_format_literal,
+    tmux_config::NAME_LOCK_OPTION,
 };
 use super::{response_error, send_response};
 
 // tmux normalizes literal control characters in `-F` strings to `_`, so tabs
 // cannot delimit placement IDs portably. Exact tmux IDs contain only their
 // sigil and decimal digits, making `:` an unambiguous cross-version separator.
-const PLACEMENT_FORMAT: &str = "#{session_id}:#{window_id}:#{pane_id}";
+pub(super) const PLACEMENT_FORMAT: &str = "#{session_id}:#{window_id}:#{pane_id}";
 
 pub(super) async fn handle(
     request_id: u64,
@@ -254,7 +257,7 @@ fn launch_agent(
     let adapter = super::super::agents::adapters::by_id(&request.adapter_id)
         .context("supported agent adapter is required")?;
     let placement = placement_for(request, action)?;
-    let (root, source_title) = {
+    let (root, source_title, fork_tab_name) = {
         let baseline = topology_baseline.lock().unwrap();
         let (snapshot, baseline_identity) = baseline
             .as_ref()
@@ -265,20 +268,32 @@ fn launch_agent(
         validate_placement_target(request, placement, snapshot)?;
         if branch {
             let source = branch_source(request, snapshot)?;
+            let window_name = snapshot
+                .windows
+                .iter()
+                .find(|window| window.id == source.window_id)
+                .map_or("", |window| window.name.as_str());
             // A tab with a locked name publishes no pane title: that name is
             // the one its agent goes by.
             let title = if source.title.is_empty() {
-                snapshot
-                    .windows
-                    .iter()
-                    .find(|window| window.id == source.window_id)
-                    .map_or("", |window| window.name.as_str())
+                window_name
             } else {
                 source.title.as_str()
             };
-            (source.current_path.clone(), title.to_owned())
+            // The copy's tab says what it is a copy of, as its row does.
+            let shown = tab_title(&source.title, window_name);
+            let fork_tab_name = fork_name(if shown.is_empty() {
+                adapter.display_name()
+            } else {
+                &shown
+            });
+            (
+                source.current_path.clone(),
+                title.to_owned(),
+                Some(fork_tab_name),
+            )
         } else {
-            (request.active_root.clone(), String::new())
+            (request.active_root.clone(), String::new(), None)
         }
     };
     let launch_argv = agent_launch_argv(launch_spec(
@@ -319,10 +334,43 @@ fn launch_agent(
     let stdout =
         String::from_utf8(output.stdout).context("tmux returned non-UTF-8 placement IDs")?;
     let ids = parse_placement_ids(&stdout)?;
+    if let Some(name) = fork_tab_name {
+        if split {
+            // A fork in a split is a side question (`/btw`, `/side`), which
+            // History leaves out. Its tab is the source's, so it keeps its name.
+            History::global().hide_pane(&ids.2);
+        } else {
+            name_fork_tab(&ids.1, &name);
+        }
+    }
     // Invalidate the cached topology. The topology actor will publish the
     // authoritative post-launch snapshot and process detection result.
     *topology_baseline.lock().unwrap() = None;
     Ok(ids)
+}
+
+/// Names a branch's tab `<name> (fork)` and locks it, as a rename from the
+/// tab menu does, so the agent's own title cannot take it back and History
+/// knows the copy for a fork. A tab left unnamed is not worth failing a
+/// branch that already opened.
+fn name_fork_tab(window_id: &str, name: &str) {
+    let Ok(mut command) = tmux_command() else {
+        return;
+    };
+    command.args([
+        "set-option",
+        "-w",
+        "-t",
+        window_id,
+        NAME_LOCK_OPTION,
+        "1",
+        ";",
+        "rename-window",
+        "-t",
+        window_id,
+        &escaped_format_literal(name),
+    ]);
+    let _ = command.output();
 }
 
 fn launch_spec(
@@ -340,7 +388,7 @@ fn launch_spec(
     }
 }
 
-fn parse_placement_ids(stdout: &str) -> anyhow::Result<(String, String, String)> {
+pub(super) fn parse_placement_ids(stdout: &str) -> anyhow::Result<(String, String, String)> {
     let ids = stdout.trim_end().split(':').collect::<Vec<_>>();
     if ids.len() != 3 {
         bail!("tmux omitted launch placement identity");
@@ -434,7 +482,7 @@ fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {
 /// `/bin/sh` is named here because tmux would otherwise hand one string to the
 /// user's own shell, and not every shell can parse `${SHELL:-...}`. Separate
 /// arguments make tmux run it directly.
-fn agent_launch_argv(launch: LaunchSpec) -> [String; 3] {
+pub(super) fn agent_launch_argv(launch: LaunchSpec) -> [String; 3] {
     let agent_command = std::iter::once(launch.program.to_owned())
         .chain(launch.arguments)
         .map(|argument| shell_quote(&argument))
