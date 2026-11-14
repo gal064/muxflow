@@ -18,8 +18,8 @@ use std::{
 };
 
 use gpui_kit::{
-    App, EntityId, Global, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Subscription,
-    Window, WindowId, div, svg,
+    App, EntityId, Global, Hsla, IntoElement, RenderOnce, Styled, Subscription, Window, WindowId,
+    svg,
 };
 
 use crate::theme::metrics::ui;
@@ -95,8 +95,59 @@ fn wake(id: WindowId, cx: &mut App) {
     }
 }
 
-/// A working agent: Tauri's spinner ring, a ring at 35 % with its top quarter
-/// in full colour, held still. Nothing about it asks for a frame.
+/// The running mark every working agent wears. Swapping the design is this
+/// one line.
+pub const WORKING_MARK: WorkingMark = WorkingMark::OpenArc;
+
+/// Designs for the running mark. It holds still (see the module doc), so it
+/// must read as "running" without moving, in full ink at 8px.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "the designs not picked stay one line away")]
+pub enum WorkingMark {
+    /// Three quarters of a ring, as a spinner caught mid-turn.
+    OpenArc,
+    /// A ring with its right half filled.
+    HalfDisc,
+    /// Three dots in a row, as a typing indicator.
+    Dots,
+}
+
+impl WorkingMark {
+    /// The mark in a box of `size` CSS pixels, drawn in one colour.
+    fn svg(self, size: f32) -> String {
+        let c = size / 2.;
+        let stroke = (size / 6.).max(1.5);
+        let r = c - stroke / 2.;
+        let body = match self {
+            // From twelve o'clock round to nine, clockwise.
+            Self::OpenArc => format!(
+                r#"<path d="M{c} {top}A{r} {r} 0 1 1 {left} {c}"/>"#,
+                top = c - r,
+                left = c - r
+            ),
+            Self::HalfDisc => format!(
+                r##"<circle cx="{c}" cy="{c}" r="{r}"/><path d="M{c} {top}A{r} {r} 0 0 1 {c} {bottom}Z" fill="#000" stroke="none"/>"##,
+                top = c - r,
+                bottom = c + r,
+            ),
+            Self::Dots => [0.18, 0.5, 0.82]
+                .map(|x| {
+                    format!(
+                        r##"<circle cx="{}" cy="{c}" r="{}" fill="#000" stroke="none"/>"##,
+                        size * x,
+                        size * 0.12
+                    )
+                })
+                .concat(),
+        };
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" fill="none" stroke="#000" stroke-width="{stroke}" stroke-linecap="round">{body}</svg>"##
+        )
+    }
+}
+
+/// A working agent: [`WORKING_MARK`] in full ink, held still. Nothing about it
+/// asks for a frame.
 #[derive(IntoElement)]
 pub struct WorkingIcon {
     size: f32,
@@ -104,7 +155,7 @@ pub struct WorkingIcon {
 }
 
 impl WorkingIcon {
-    /// `size` in CSS pixels, as Tauri's `.spinner` box; the ring is 1.5 px.
+    /// `size` in CSS pixels: the box a state dot of that size takes.
     pub fn new(size: f32, color: impl Into<Hsla>) -> Self {
         Self {
             size,
@@ -115,45 +166,12 @@ impl WorkingIcon {
 
 impl RenderOnce for WorkingIcon {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let (ring, arc) = ring_svgs(self.size);
-        div()
-            .relative()
+        svg()
+            .data(WORKING_MARK.svg(self.size).as_bytes())
             .flex_none()
             .size(ui(self.size))
-            .child(
-                svg()
-                    .data(ring.as_bytes())
-                    .absolute()
-                    .size_full()
-                    .text_color(self.color.opacity(0.35)),
-            )
-            .child(
-                svg()
-                    .data(arc.as_bytes())
-                    .absolute()
-                    .size_full()
-                    .text_color(self.color),
-            )
+            .text_color(self.color)
     }
-}
-
-/// The ring and its top quarter (the CSS top border, corner to corner), in a
-/// box of `size` CSS pixels with a 1.5 px stroke.
-fn ring_svgs(size: f32) -> (String, String) {
-    let c = size / 2.;
-    let r = c - 0.75;
-    let d = r * std::f32::consts::FRAC_1_SQRT_2;
-    let head = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" fill="none" stroke="#000" stroke-width="1.5">"##
-    );
-    let ring = format!(r#"{head}<circle cx="{c}" cy="{c}" r="{r}"/></svg>"#);
-    let arc = format!(
-        r#"{head}<path d="M{x0} {y}A{r} {r} 0 0 1 {x1} {y}"/></svg>"#,
-        x0 = c - d,
-        x1 = c + d,
-        y = c - d,
-    );
-    (ring, arc)
 }
 
 #[cfg(test)]
@@ -161,7 +179,8 @@ pub(crate) mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui_kit::{
-        AnyElement, Context, Render, TestAppContext, WindowHandle, WindowVisibility, px, size,
+        AnyElement, Context, ParentElement, Render, TestAppContext, WindowHandle, WindowVisibility,
+        div, px, size,
     };
 
     use super::*;
@@ -283,14 +302,35 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_quarter_arc_is_the_top_border() {
-        let (ring, arc) = ring_svgs(9.);
-        assert!(
-            ring.contains(r#"<circle cx="4.5" cy="4.5" r="3.75"/>"#),
-            "{ring}"
-        );
-        // From the top-left diagonal to the top-right one, clockwise.
-        assert!(arc.contains("A3.75 3.75 0 0 1"), "{arc}");
-        assert!(arc.contains(r#"viewBox="0 0 9 9""#), "{arc}");
+    fn every_working_mark_draws_and_fills_its_box() {
+        use std::sync::Arc;
+        let renderer = gpui_kit::SvgRenderer::new(Arc::new(()));
+        for mark in [
+            WorkingMark::OpenArc,
+            WorkingMark::HalfDisc,
+            WorkingMark::Dots,
+        ] {
+            for size in [8., 10.] {
+                let image = renderer
+                    .render_single_frame(mark.svg(size).as_bytes(), 4.)
+                    .unwrap_or_else(|error| panic!("{mark:?} at {size}: {error}"));
+                let width = image.size(0).width.0 as usize;
+                let painted: Vec<usize> = image
+                    .as_bytes(0)
+                    .unwrap()
+                    .chunks(4)
+                    .enumerate()
+                    .filter(|(_, pixel)| pixel[3] > 0)
+                    .map(|(index, _)| index % width)
+                    .collect();
+                // Edge to edge across its box, so it is as wide as a state dot.
+                let (left, right) = (painted.iter().min(), painted.iter().max());
+                assert!(left.is_some_and(|x| *x <= width / 8), "{mark:?} at {size}");
+                assert!(
+                    right.is_some_and(|x| *x >= width * 7 / 8),
+                    "{mark:?} at {size}"
+                );
+            }
+        }
     }
 }

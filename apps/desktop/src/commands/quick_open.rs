@@ -509,7 +509,7 @@ impl QuickOpen {
                         )))
                         .role(Role::Image)
                         .aria_label(format!("Agent {}", state.word()))
-                        .child(state_indicator(state, glyphs, 7., cx))
+                        .child(state_indicator(state, glyphs, colors.chrome_ink, cx))
                         .test_support(),
                 )
             })
