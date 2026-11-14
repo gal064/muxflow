@@ -30,7 +30,7 @@ wait "$driver_pid" "$image_pid"
 
 # This lane needs exactly one thing from the release archive: the Linux helper
 # binary it copies into the container. Building that archive requires a Linux
-# host (it links a WebKitGTK desktop), so on macOS take the helper from
+# host, so on macOS take the helper from
 # release/linux/build-compatible-host.sh instead — the same reproducible builder
 # every other gate validates, and now also the source of the helper shipped in
 # the macOS package (M10-E047, M10-E048).

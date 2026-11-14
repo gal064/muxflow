@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Builds the package twice and exercises install, upgrade and uninstall.
+# Run it on the release baseline (Ubuntu 24.04): verify-package.sh refuses a
+# desktop that needs a newer glibc, so it stops at once on a newer
+# distribution. CI's `linux-package` job covers that check;
+# release/linux/build-and-install.sh is the local build for a newer machine.
+
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root"
+# Fail before two clean builds rather than after them.
+glibc=$(ldd --version | sed -n '1s/.* //p')
+[[ "$(printf '%s\n2.39\n' "$glibc" | sort -V | tail -n 1)" == 2.39 ]] || {
+  echo "glibc $glibc is newer than the release baseline 2.39: run this on Ubuntu 24.04" >&2
+  exit 78
+}
 source tests/release/storage.sh
 phase8_storage_begin "$repo_root" phase8-package
 run_root=$PHASE8_WORK_DIR
@@ -35,8 +47,6 @@ mkdir -p "$source_b"
 # build product even in a new all-untracked development checkout.
 git ls-files --cached --others --exclude-standard -z \
   | tar --null --verbatim-files-from -T - -cf - | tar -xf - -C "$source_b"
-ln -s "$repo_root/node_modules" "$source_b/node_modules"
-ln -s "$repo_root/apps/desktop/node_modules" "$source_b/apps/desktop/node_modules"
 mkdir -p "$source_b/tmp"
 (
   cd "$source_b"
