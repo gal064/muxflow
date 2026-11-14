@@ -332,6 +332,14 @@ mod tests {
     fn linux_chords_resolve_with_ghostty_fallbacks() {
         let none = ShortcutOverrides::new();
         assert_eq!(
+            id_on(Platform::Mac, "cmd-shift-w", &none),
+            Some("window.closeNonAgent")
+        );
+        assert_eq!(
+            id_on(Platform::Linux, "ctrl-shift-w", &none),
+            Some("window.closeNonAgent")
+        );
+        assert_eq!(
             id_on(Platform::Linux, "ctrl-shift-o", &none),
             Some("pane.splitRight")
         );
