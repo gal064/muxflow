@@ -174,14 +174,14 @@ More in the [troubleshooting guide](./docs/troubleshooting.md).
 
 ## Build from source
 
-Requirements: Rust 1.97.1, Node.js 24, pnpm 11, tmux 3.3+, and the
-[Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requirements: Rust 1.97.1 and tmux 3.3+. On Linux, the desktop also needs a few
+development packages and a Vulkan driver; see [setup](./docs/setup.md#build-from-source).
+Node.js 24 and pnpm 11 are only for the mobile app and the release scripts.
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm test:transport:local
 tmux new-session -s work
-pnpm tauri dev
+cargo build -p muxflow-host
+cargo run -p muxflow
 ```
 
 Package builds: `pnpm release:linux -- x86_64`, `pnpm release:macos`, and
@@ -191,6 +191,7 @@ Package builds: `pnpm release:linux -- x86_64`, `pnpm release:macos`, and
 ## Documentation
 
 - [Setup](./docs/setup.md) and [SSH hosts](./docs/remote-host.md)
+- [Desktop architecture](./docs/desktop-architecture.md)
 - [Key bindings](./docs/keybindings.md)
 - [Agent hooks](./docs/agent-hooks.md)
 - [Automations](./docs/automations.md): scheduled agent runs

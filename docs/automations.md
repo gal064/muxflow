@@ -444,21 +444,14 @@ server_identity_from_command}`, the `tmux_actions` command helpers, and
 
 ### Desktop right-panel extensions
 
-`apps/desktop/src/features/shell/panelExtensions.ts`:
+`apps/desktop/src/ui/chrome/layout.rs` lists the extensions beside the
+built-in surfaces:
 
-```ts
-export interface PanelExtension {
-  id: string;                  // "automations"
-  label: string;               // "Automations"
-  settingLabel: string;        // "Show Automations"
-  settingHint: string;
-  Component: ComponentType<PanelExtensionProps>;
-}
-export const PANEL_EXTENSIONS: readonly PanelExtension[] = [/* automations */];
+```rust
+const EXTENSION_LABELS: [(&str, &str); 1] = [("automations", "Automations")];
 ```
 
-`PanelExtensionProps` gives an extension the shown hosts (profile, label, live
-client id, connected), the active host, `onOpenPane` and `onMessage`.
+`panel_surfaces` puts the enabled ones after Files, Git and Ports.
 
 The built-in places read this list:
 
@@ -467,10 +460,9 @@ The built-in places read this list:
   whole load. It is now a string defaulting to `"files"`, plus
   `enabled_panel_extensions`. The contract (`persistedAppState.contract.json`)
   and its tests changed with it.
-- `PanelSurface` in `types.ts` is a string. Normalization keeps a built-in
-  surface or an enabled extension's, and falls back to `files` otherwise.
-- `RightPanel` and `AppRightPanel` render the enabled extensions after the
-  built-ins; arrow-key cycling uses the visible list, and a surface that isn't
+- The saved surface is a string. `resolved_surface` keeps a built-in surface
+  or an enabled extension's, and falls back to `files` otherwise.
+- The right panel renders the enabled extensions after the built-ins; arrow-key cycling uses the visible list, and a surface that isn't
   showable displays Files.
 - The Settings Workspace tab renders one checkbox per extension.
 - There are no `view.show*` commands for extensions, so the command registry
@@ -541,12 +533,11 @@ Compatibility:
 - Bridge: `crates/desktop-core/src/connection/automation.rs`, an `automation_request`
   command modeled on `connection/agent.rs`. The event goes through `bridge.rs`
   and `event_frame.rs` (kind byte 19, no payload), is decoded in
-  `features/terminal/api.ts`, and `useAppConnectionController.ts` hands it to
-  `publishAutomationChanged` for every host, like agent events, not only the
-  active one like git events.
-- `apps/desktop/src/features/automations/`: `AutomationsPanel.tsx` (list,
-  detail and history), `AutomationEditor.tsx`, `api.ts`, `types.ts`,
-  `cronText.ts`, plus tests.
+  `connection_ui/bridge_events.rs`, and the connection controller emits
+  `AutomationChanged` for every host, like agent events, not only the active
+  one like git events.
+- `apps/desktop/src/automations/`: `panel.rs` and `view.rs` (list, detail,
+  history and the editor), `model.rs`, plus tests.
 - The panel is host-scoped, using each `HostLink`'s client, the local host
   included. Only the host chooser is copied from Ports, which talks over SSH
   directly.
@@ -558,7 +549,7 @@ Compatibility:
   runs" preview; Delete, Cancel, "Save and run now", Save.
 - Mock 3, detail and history: each run's number, start, duration, status chip
   and final message, plus "Open tab" while the window exists. Open tab follows
-  the agent row's path (`selectOnHost` and `resolveTerminalDestination`).
+  the agent row's path.
 - Mock 4, edge states: empty (shows the file path), the file can't be read
   (banner with the error over the last version that loaded, which is what
   still runs), host disconnected (the reboot note). One change from the mock:
@@ -580,16 +571,17 @@ If the feature isn't used:
    (`APP_SHELL`, `resolved_start_directory` and the others in
    `tmux_actions.rs`, `send_input_batch` in `terminal.rs`), or clippy reports
    them unused.
-2. Delete `apps/desktop/src/features/automations/`, its entry in
-   `PANEL_EXTENSIONS`, and the `.automation*` rules in `styles.css`.
+2. Delete `apps/desktop/src/automations/`, its `start` call in
+   `connection_ui/mod.rs`, and its entry in `EXTENSION_LABELS`.
 3. Delete `crates/protocol/proto/automation.proto` and its line in
    `crates/protocol/build.rs`. In `envelope.proto`, remove the import and the
    five additions, and reserve their numbers. Remove the `operation_policy`
    entry and the `dispatcher` arm.
-4. Delete `crates/desktop-core/src/connection/automation.rs`, its shim in `commands/connection.rs`, its `generate_handler!`
-   entry, the event mapping in `bridge.rs` and `event_frame.rs`, the decode in
-   `features/terminal/api.ts` and its test, and the `automationChanged`
-   branch in `useAppConnectionController.ts`.
+4. Delete `crates/desktop-core/src/connection/automation.rs`, the
+   `automation_request` call in `connection_ui/backend.rs`, the event mapping
+   in `bridge.rs` and `event_frame.rs`, the decode in
+   `connection_ui/bridge_events.rs` and its test, and the `AutomationChanged`
+   event in the connection controller.
 5. Regenerate the mobile protocol types.
 6. Delete this file, `docs/design/automations-mock.html`, and their links.
 
@@ -641,5 +633,5 @@ command (`curl -sI https://example.com`) without asking.
   connects. A minute that came due during the restart is skipped.
 - **Saved settings across builds:** a desktop build from before the
   panel-extension change can't read a saved extension panel. Builds ship in
-  lockstep, but a developer running `pnpm tauri dev` beside an installed older
+  lockstep, but a developer running `cargo run -p muxflow` beside an installed older
   build should back up the app state first.

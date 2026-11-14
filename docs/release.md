@@ -10,7 +10,8 @@ contracts. The Docker SSH suites, the transfer and scale matrices, performance,
 and packaged desktop journeys are not part of it; they are the manual
 release-candidate gates listed below.
 
-The desktop app, the host helper and the mobile app share one `X.Y.Z` version.
+The desktop app, the host helper and the mobile app share one `X.Y.Z` version;
+the desktop's copy is `apps/desktop/Cargo.toml`.
 Change it only with `release/set-version.sh X.Y.Z [IOS_BUILD_NUMBER]`, which rewrites every copy
 and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
 `release/check-version.sh` verifies them. The wire protocol version in
@@ -167,8 +168,8 @@ The `release` environment holds these secrets:
 ## Architectures and artifacts
 
 `release/linux/build-package.sh` creates a deterministic rootless archive for
-the requested architecture. The archive contains the GPUI desktop (installed
-as `bin/muxflow`), a Debian 12
+the requested architecture. The archive contains the desktop
+(`bin/muxflow`), a Debian 12
 baseline remote helper, desktop integration, installer/uninstaller, and a
 SHA-256 manifest. Docker is required for the conservative helper build unless a
 separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied. The desktop builds
@@ -225,7 +226,12 @@ Node 24, Rust 1.97.1, uv, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
 ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
 `MUXFLOW_LINUX_HELPERS_DIR`, which needs no Docker), and runs
-format/architecture/package verification. Use `release/macos/install.sh` for a
+format/architecture/package verification. The `.app` is assembled by hand:
+`cargo build -p muxflow` gives `Contents/MacOS/muxflow`, `muxflow-host` goes
+beside it, and the Linux helpers, `release/macos/icon.icns` and the
+`package-owner` marker go in `Contents/Resources`. `release/macos/Info.plist`
+supplies the bundle keys, with the version from `apps/desktop/Cargo.toml`.
+Use `release/macos/install.sh` for a
 transactional install or upgrade into `/Applications` and
 `release/macos/uninstall.sh` for confined removal. With no argument the
 installer publishes the bundle it just built and then deletes that build copy,

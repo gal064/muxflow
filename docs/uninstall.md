@@ -22,6 +22,11 @@ leaving broken hook commands. Remove the hooks through the app and retry.
 To remove local app state later, inspect and manually delete the application's
 configuration/state directory. That separate destructive step is intentionally
 not part of package uninstall.
+
+An upgrade from a release before the native desktop can leave the old web
+view's cache behind: `~/.cache/dev.muxflow.desktop` on Linux,
+`~/Library/Caches/dev.muxflow.desktop` and `~/Library/WebKit/dev.muxflow.desktop`
+on macOS. Nothing reads it any more, so it is safe to delete.
 # macOS
 
 Run `release/macos/uninstall.sh`. It removes only the ownership-marked app,

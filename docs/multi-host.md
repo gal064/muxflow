@@ -2,7 +2,7 @@
 
 Show workspaces and agents from several hosts at once in the desktop sidebar,
 each tagged with a one-letter host mark. The wire protocol and the host helper
-do not change; mobile is untouched. Only the desktop (React + Tauri) changes.
+do not change; mobile is untouched. Only the desktop changes.
 
 ## Vocabulary
 

@@ -16,22 +16,21 @@ or stores SSH credentials.
 
 ## Build from source
 
-Install the pinned Rust 1.97.1 toolchain, Node.js 24, pnpm 11.18, tmux, Git, and the Tauri 2
-Linux prerequisites. On Debian/Ubuntu the GUI development packages include
-`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, and `librsvg2-dev`.
+Install the pinned Rust 1.97.1 toolchain, tmux and Git. On Debian/Ubuntu the
+desktop needs `pkg-config`, `libxkbcommon-x11-dev`, `libwayland-dev`,
+`libfontconfig-dev` and `libasound2-dev` to build, and the Vulkan loader with a
+driver to run (`libvulkan1` and `mesa-vulkan-drivers`). Node.js 24 and pnpm
+11.18 are only needed for the mobile app and the release scripts.
 
 ```sh
-pnpm install --frozen-lockfile
 cargo fmt --all -- --check
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo clippy --workspace --all-targets -- -D warnings
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --workspace --all-targets
-pnpm check
-pnpm test
-pnpm build
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
 
-Run a development build with `pnpm tauri dev`. tmux remains authoritative; the
-application attaches to an existing server and closing the window detaches.
+Run a development build with `cargo build -p muxflow-host` and then
+`cargo run -p muxflow`. tmux remains authoritative; the application attaches to
+an existing server and closing the window detaches.
 
 ## Install the internal package
 
@@ -70,7 +69,8 @@ user configuration.
 # macOS
 
 Development and the internal package require macOS 14 or newer, Xcode Command
-Line Tools, Rust 1.97.1, Node 24, pnpm 11, tmux 3.3 or newer, and Git. Homebrew
+Line Tools, Rust 1.97.1, Node 24 (the package script reads the notary's answer
+with it), tmux 3.3 or newer, and Git. Homebrew
 installations under `/opt/homebrew` are supported from the non-interactive app
 environment. Muxflow searches the application environment, macOS path registry,
 and the standard Homebrew, MacPorts, and pkgsrc prefixes without starting a
