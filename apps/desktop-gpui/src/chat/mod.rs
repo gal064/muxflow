@@ -18,6 +18,7 @@
 
 mod cards;
 mod composer;
+mod details;
 mod links;
 pub mod model;
 mod open;
@@ -203,6 +204,7 @@ fn publish(controller: &Entity<ConnectionController>, cx: &mut App) {
 /// Called once from [`crate::features::init`].
 pub fn init(cx: &mut App) {
     cx.set_global(AgentModes::default());
+    details::init(cx);
     settings::set_agent_mode_change(Rc::new(|chat, _, cx| set_agent_mode(chat, cx)), cx);
 }
 
