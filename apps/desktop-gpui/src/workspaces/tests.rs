@@ -870,14 +870,18 @@ fn terminal_tabs_are_as_wide_as_in_tauri(cx: &mut TestAppContext) {
         };
         (
             tab("workspace-tab-terminal:@2") - tab("workspace-tab-terminal:@1"),
-            width(crate::fonts::MONO, 11., "1"),
-            width(crate::fonts::SANS, 13., "editor"),
+            width(crate::fonts::MONO, crate::theme::metrics::TYPE_META, "1"),
+            width(
+                crate::fonts::SANS,
+                crate::theme::metrics::TYPE_MENU,
+                "editor",
+            ),
         )
     });
     let expected = px(14.) + number + px(6.) + title + px(2.) + px(18.) + px(4.);
-    // Layout rounds the tab to whole pixels.
+    // Layout rounds the number and the title each up to whole pixels.
     assert!(
-        (pitch - expected).abs() < px(1.),
+        (pitch - expected).abs() < px(2.),
         "pitch {pitch:?}, expected {expected:?}"
     );
 }
