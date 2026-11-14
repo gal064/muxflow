@@ -339,6 +339,8 @@ pub(in crate::service::chat) struct Replay<D: Dialect> {
     /// What it told the agent runtime of the agent's state.
     pub(in crate::service::chat) reports: Vec<Value>,
     pub(in crate::service::chat) reconnects: usize,
+    /// The titles it had its pane given, in order.
+    pub(in crate::service::chat) titles: Vec<String>,
     pub(in crate::service::chat) client: Client,
     _directory: tempfile::TempDir,
 }
@@ -377,6 +379,7 @@ impl<D: Dialect + Wire> Replay<D> {
             jobs: Vec::new(),
             reports: Vec::new(),
             reconnects: 0,
+            titles: Vec::new(),
             client,
             _directory: directory,
         }
@@ -405,6 +408,7 @@ impl<D: Dialect + Wire> Replay<D> {
                 Action::Job(job) => self.jobs.push(job),
                 Action::Report(payload) => self.reports.push(payload),
                 Action::Reconnect => self.reconnects += 1,
+                Action::Title(title) => self.titles.push(title),
             }
         }
         while let Ok(message) = self.connection.events.try_recv() {

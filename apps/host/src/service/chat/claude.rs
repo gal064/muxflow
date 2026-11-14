@@ -1494,6 +1494,8 @@ impl Dialect for Claude {
             self.rewind = None;
         }
         self.reader = Reader::default();
+        // A session started under a name goes by it.
+        out.name(&self.launch.name);
         // A request the agent waited on is asked again when it answers:
         // losing the link is no word that the agent stopped waiting.
         self.reported_blocked = false;
