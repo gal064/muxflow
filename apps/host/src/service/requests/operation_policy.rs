@@ -142,9 +142,10 @@ impl OperationPolicy {
             v1::Operation::ReconcileTerminalUpload => {
                 (Lane::Bulk, Scheduling::Inline, Handler::Filesystem)
             }
-            v1::Operation::GitStatus | v1::Operation::GitDiff => {
-                (Lane::Control, Scheduling::Detached, Handler::Git)
-            }
+            v1::Operation::GitStatus
+            | v1::Operation::GitDiff
+            | v1::Operation::GitBranchSummary
+            | v1::Operation::GitBranches => (Lane::Control, Scheduling::Detached, Handler::Git),
             // Diff bodies are the only Git payload large enough to matter to
             // terminal latency, so they alone take the independent bulk lane.
             // Detached so a body read cannot block
@@ -156,7 +157,8 @@ impl OperationPolicy {
             | v1::Operation::PrepareGitDiscard
             | v1::Operation::GitMutation
             | v1::Operation::GitCommit
-            | v1::Operation::GitPush => (Lane::Control, Scheduling::Detached, Handler::Git),
+            | v1::Operation::GitPush
+            | v1::Operation::GitCheckout => (Lane::Control, Scheduling::Detached, Handler::Git),
             v1::Operation::AgentSnapshot | v1::Operation::AgentDiagnostics => {
                 (Lane::Control, Scheduling::Inline, Handler::Agent)
             }
@@ -298,6 +300,9 @@ mod tests {
             (GitMutation, C, Dd, GH),
             (GitCommit, C, Dd, GH),
             (GitPush, C, Dd, GH),
+            (GitBranchSummary, C, Dd, GH),
+            (GitBranches, C, Dd, GH),
+            (GitCheckout, C, Dd, GH),
             (AgentSnapshot, C, I, AH),
             (AgentDiagnostics, C, I, AH),
             (AgentAction, C, I, AH),

@@ -34,6 +34,7 @@ const MAX_CONFIRMATIONS: usize = 1024;
 /// this one.
 const MAX_TRACKED_REPOSITORIES: usize = 8;
 
+mod branch;
 mod command;
 use command::{command_state, truthful_command_result};
 mod content;
@@ -921,6 +922,9 @@ fn validate_mutation_target(
     mutation: v1::GitMutationKind,
 ) -> anyhow::Result<()> {
     let target = v1::GitDiffTarget::try_from(request.diff_target).unwrap_or_default();
+    if target == v1::GitDiffTarget::Base {
+        bail!("the default-branch diff is read only");
+    }
     match mutation {
         v1::GitMutationKind::StageHunk if target != v1::GitDiffTarget::Unstaged => {
             bail!("staging a hunk requires an unstaged source diff")

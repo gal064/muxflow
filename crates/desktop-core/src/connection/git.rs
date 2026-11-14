@@ -44,6 +44,8 @@ pub struct GitCommand {
     pub commit_message: String,
     #[serde(default)]
     pub watch_id: String,
+    #[serde(default)]
+    pub branch: String,
 }
 
 /// Async so the host round trip never runs on the WebView's main thread. Git
@@ -93,6 +95,7 @@ pub async fn git_request(
         confirmation_token: command.confirmation_token,
         commit_message: command.commit_message,
         watch_id: command.watch_id,
+        branch: command.branch,
         // Deferred diff bodies never travel on the control lane.
         content: None,
     };
@@ -134,6 +137,9 @@ fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
         "mutate" => Ok(v1::Operation::GitMutation),
         "commit" => Ok(v1::Operation::GitCommit),
         "push" => Ok(v1::Operation::GitPush),
+        "branchSummary" => Ok(v1::Operation::GitBranchSummary),
+        "branches" => Ok(v1::Operation::GitBranches),
+        "checkout" => Ok(v1::Operation::GitCheckout),
         _ => Err(format!("unsupported Git operation {value}")),
     }
 }
@@ -145,6 +151,7 @@ fn operation_requires_epoch(operation: v1::Operation) -> bool {
             | v1::Operation::GitMutation
             | v1::Operation::GitCommit
             | v1::Operation::GitPush
+            | v1::Operation::GitCheckout
     )
 }
 
@@ -153,6 +160,7 @@ fn diff_target_from_name(value: &str) -> Result<v1::GitDiffTarget, String> {
         "" => Ok(v1::GitDiffTarget::Unspecified),
         "unstaged" => Ok(v1::GitDiffTarget::Unstaged),
         "staged" => Ok(v1::GitDiffTarget::Staged),
+        "base" => Ok(v1::GitDiffTarget::Base),
         _ => Err(format!("unsupported Git diff target {value}")),
     }
 }
@@ -187,6 +195,9 @@ pub(crate) fn git_response_json(value: &v1::GitResponse) -> Value {
         "diff": value.diff.as_ref().map(diff_json),
         "confirmation": value.confirmation.as_ref().map(|item| json!({ "token": item.token, "expiresUnixMillis": item.expires_unix_millis.to_string() })),
         "command": value.command.as_ref().map(command_json),
+        "branchSummary": value.branch_summary.as_ref().map(branch_summary_json),
+        "branches": value.branches.as_ref().map(|list| json!({ "branches": list.branches,
+            "current": list.current, "truncated": list.truncated })),
     })
 }
 
@@ -228,8 +239,9 @@ fn status_entry_json(value: &v1::GitStatusEntry) -> Value {
 fn diff_json(value: &v1::GitDiff) -> Value {
     json!({ "repository": value.repository.as_ref().map(repository_json), "target": diff_target_name(value.target),
         "path": value.path, "originalPath": value.original_path, "displayPath": value.display_path,
-        // The patch is deliberately not serialized: only hunk mutation needs
-        // it, and the host re-derives it there in process.
+        // The hunks the tab draws; a hunk index sent back names one of them.
+        // Base64, as paths are, rather than an array of numbers.
+        "patch": BASE64.encode(&value.patch),
         "oldContent": value.old_content, "newContent": value.new_content,
         "sourceGeneration": value.source_generation, "binary": value.binary, "tooLarge": value.too_large,
         "oldMissing": value.old_missing, "newMissing": value.new_missing, "hunkCount": value.hunk_count,
@@ -241,6 +253,16 @@ fn diff_json(value: &v1::GitDiff) -> Value {
 /// over the bulk lane using exactly these two facts.
 fn content_ref_json(value: &v1::GitDiffContentRef) -> Value {
     json!({ "size": value.size.to_string(), "contentDigest": value.content_digest })
+}
+
+/// Paths as base64, as a status entry carries them.
+fn branch_summary_json(value: &v1::GitBranchSummary) -> Value {
+    json!({ "baseRef": value.base_ref, "mergeBaseOid": value.merge_base_oid,
+        "files": value.files.iter().map(|file| json!({ "path": BASE64.encode(&file.path),
+            "displayPath": String::from_utf8_lossy(&file.path), "kind": change_kind_name(file.kind),
+            "added": file.added, "removed": file.removed, "binary": file.binary })).collect::<Vec<_>>(),
+        "totalFileCount": value.total_file_count.to_string(),
+        "added": value.added.to_string(), "removed": value.removed.to_string() })
 }
 
 fn command_json(value: &v1::GitCommandResult) -> Value {
@@ -285,6 +307,7 @@ fn diff_target_name(value: i32) -> &'static str {
     match v1::GitDiffTarget::try_from(value).unwrap_or_default() {
         v1::GitDiffTarget::Staged => "staged",
         v1::GitDiffTarget::Unstaged => "unstaged",
+        v1::GitDiffTarget::Base => "base",
         _ => "unspecified",
     }
 }
@@ -393,5 +416,48 @@ mod tests {
         assert_eq!(operation, v1::Operation::GitPush);
         assert!(operation_requires_epoch(operation));
         assert!(operation_from_name("pushh").is_err());
+    }
+
+    /// The default-branch scope and the branch switch reach their operations,
+    /// and a switch, like any other command, is bound to the connection.
+    #[test]
+    fn branch_operations_and_the_base_target_cross_the_hop() {
+        assert_eq!(
+            operation_from_name("branchSummary").unwrap(),
+            v1::Operation::GitBranchSummary
+        );
+        assert!(!operation_requires_epoch(v1::Operation::GitBranchSummary));
+        assert!(operation_requires_epoch(
+            operation_from_name("checkout").unwrap()
+        ));
+        assert_eq!(
+            diff_target_from_name("base").unwrap(),
+            v1::GitDiffTarget::Base
+        );
+        let value = git_response_json(&v1::GitResponse {
+            diff: Some(v1::GitDiff {
+                target: v1::GitDiffTarget::Base.into(),
+                patch: b"@@ -1 +1 @@\n".to_vec(),
+                ..Default::default()
+            }),
+            branch_summary: Some(v1::GitBranchSummary {
+                base_ref: "origin/main".into(),
+                files: vec![v1::GitBranchFile {
+                    path: b"src/\xff.rs".to_vec(),
+                    kind: v1::GitChangeKind::Untracked.into(),
+                    added: 3,
+                    ..Default::default()
+                }],
+                total_file_count: u64::MAX,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(value["diff"]["target"], "base");
+        assert_eq!(value["diff"]["patch"], "QEAgLTEgKzEgQEAK");
+        let summary = &value["branchSummary"];
+        assert_eq!(summary["files"][0]["path"], "c3JjL/8ucnM=");
+        assert_eq!(summary["files"][0]["kind"], "untracked");
+        assert_eq!(summary["totalFileCount"], u64::MAX.to_string());
     }
 }

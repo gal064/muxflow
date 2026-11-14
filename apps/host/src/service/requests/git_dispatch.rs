@@ -123,6 +123,34 @@ pub(super) async fn handle(
             Ok(command) => git_response(&operation_id, |v| v.command = Some(command)),
             Err(error) => git_error(operation, &error),
         },
+        v1::Operation::GitBranchSummary => match context
+            .git
+            .branch_summary(&git_request, Some(Arc::clone(&cancellation)))
+            .await
+        {
+            Ok(summary) => git_response(&operation_id, |v| v.branch_summary = Some(summary)),
+            Err(error) => git_error(operation, &error),
+        },
+        v1::Operation::GitBranches => match context
+            .git
+            .branches(&git_request, Some(Arc::clone(&cancellation)))
+            .await
+        {
+            Ok(branches) => git_response(&operation_id, |v| v.branches = Some(branches)),
+            Err(error) => git_error(operation, &error),
+        },
+        v1::Operation::GitCheckout => match context
+            .git
+            .checkout(
+                git_request,
+                context.connection_epoch,
+                Arc::clone(&cancellation),
+            )
+            .await
+        {
+            Ok(command) => git_response(&operation_id, |v| v.command = Some(command)),
+            Err(error) => git_error(operation, &error),
+        },
         _ => unreachable!(),
     };
     send_response(context.control_tx, request_id, response).await;

@@ -329,6 +329,7 @@ fn diff_target(value: &str) -> Result<v1::GitDiffTarget, String> {
     match value {
         "unstaged" => Ok(v1::GitDiffTarget::Unstaged),
         "staged" => Ok(v1::GitDiffTarget::Staged),
+        "base" => Ok(v1::GitDiffTarget::Base),
         _ => Err(format!("unsupported Git diff target {value}")),
     }
 }

@@ -109,6 +109,8 @@ pub enum AppTabKind {
 pub enum GitDiffTarget {
     Staged,
     Unstaged,
+    /// The working tree against the default branch's merge base.
+    Base,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
