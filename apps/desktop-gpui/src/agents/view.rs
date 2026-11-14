@@ -36,11 +36,11 @@ use crate::{
         self, Palette,
         metrics::{
             NARROW_DIALOGS, RADIUS_CONTROL, RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW,
-            TYPE_SECONDARY, narrower_than, ui,
+            TYPE_SECONDARY, WEIGHT_ROW, narrower_than, ui,
         },
     },
     ui::{
-        chrome::host_letter,
+        chrome::{host_letter, list_divider},
         dialog::{self, Action, Prose},
         icons::Glyph,
         motion,
@@ -855,10 +855,10 @@ fn agent_row(
         .min_w_0()
         .items_center()
         .gap(ui(6.))
-        .px(ui(7.))
-        .py(ui(5.))
+        .p(ui(7.))
         .rounded(ui(RADIUS_CONTROL))
         .text_size(ui(TYPE_ROW))
+        .font_weight(FontWeight(WEIGHT_ROW))
         .text_color(ink)
         .when(selected, |this| this.bg(palette.accent))
         .when(!selected && !unavailable, |this| {
@@ -1048,19 +1048,6 @@ fn heading(
         .into_any_element()
 }
 
-fn divider_label(text: &str, cx: &App) -> AnyElement {
-    let palette = theme::palette(cx);
-    div()
-        .mx(ui(9.))
-        .mt(ui(2.))
-        .mb(ui(4.))
-        .text_size(ui(TYPE_LABEL))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(palette.chrome_faint)
-        .child(text.to_uppercase())
-        .into_any_element()
-}
-
 fn group_box(children: Vec<AnyElement>) -> AnyElement {
     v_flex()
         .mx(ui(5.))
@@ -1215,7 +1202,12 @@ impl RenderOnce for AgentsList {
                             if block.is_empty() {
                                 continue;
                             }
-                            body.push(divider_label(label, cx));
+                            body.push(list_divider(
+                                SharedString::from(format!("agents-divider-{label}")),
+                                label,
+                                body.is_empty(),
+                                cx,
+                            ));
                             body.extend(block.into_iter().map(|group| render_group(group, cx)));
                         }
                     } else {
@@ -1224,7 +1216,12 @@ impl RenderOnce for AgentsList {
                 }
                 AgentSortMode::Pinned => {
                     for (label, half) in group_by_pin(&rows) {
-                        body.push(divider_label(label, cx));
+                        body.push(list_divider(
+                            SharedString::from(format!("agents-divider-{label}")),
+                            label,
+                            body.is_empty(),
+                            cx,
+                        ));
                         body.push(group_box(
                             half.iter()
                                 .map(|row| {
