@@ -20,12 +20,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The desktop crate's build script checks that externalBin sidecars exist;
-  # only the packaging scripts stage the host helper.
-  TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
-  # vite's production build of the desktop (Monaco included) can exceed
-  # Node's default heap on the 7 GB macOS runners.
-  NODE_OPTIONS: --max-old-space-size=6144
   # `cargo test` spends minutes compiling and seconds running. Keep backtraces,
   # drop the rest of the debug info. Opt level stays: at 0 test threads overflow.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -38,17 +32,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system packages
         timeout-minutes: 14
-        # The X11, xkb, Wayland and ALSA development files are for the GPUI app
+        # The X11, xkb, Wayland and ALSA development files are for the desktop app
         # (ALSA for its agent sounds). Mesa's software Vulkan (lavapipe) is for its
         # offscreen frame test.
         run: >-
-          .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
+          .github/scripts/apt-install.sh tmux
           libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers libasound2-dev
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
       # Installs the toolchain pinned in rust-toolchain.toml.
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -63,13 +52,9 @@ jobs:
             tests/release/protocol-driver
             tests/performance/runtime/perf-driver
       - uses: astral-sh/setup-uv@v6
-      - run: pnpm install --frozen-lockfile
 
       - name: Rust formatting
         run: cargo fmt --all -- --check
-      # The desktop crate embeds the built frontend.
-      - name: Build the desktop frontend
-        run: pnpm build
       - name: Rust lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Point Vulkan at lavapipe only
@@ -97,7 +82,7 @@ jobs:
         run: uv run --python 3.12 --no-project --no-config python -m unittest apps/host/src/service/voice/test_sidecar.py
 
   # Apart from `linux` so the two run side by side. The live tests build and
-  # drive the host, which needs tmux and cargo but not the desktop's webkit.
+  # drive the host, which needs tmux and cargo but not the desktop's system packages.
   typescript:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -126,8 +111,6 @@ jobs:
           bash tests/release/test-build-apk.sh
       - name: TypeScript
         run: |
-          pnpm check
-          pnpm test
           pnpm mobile:check
           pnpm mobile:test
           pnpm --filter @muxflow/terminal-interactions check
@@ -161,18 +144,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: brew install tmux
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: pnpm install --frozen-lockfile
-      - name: Build the desktop frontend
-        run: pnpm build
       - name: Rust lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Rust tests
@@ -191,15 +166,11 @@ jobs:
       - name: Install system packages
         timeout-minutes: 14
         run: .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev
-      # The package scripts read the version with `node`.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
       - run: rustup show active-toolchain || rustup toolchain install
       - name: Build and verify the package
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
-          version=$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml)
           release/linux/build-package.sh x86_64
           release/linux/verify-package.sh "tmp/release/muxflow-$version-linux-x86_64.tar.gz"
 

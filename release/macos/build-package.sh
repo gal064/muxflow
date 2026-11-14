@@ -64,14 +64,14 @@ CARGO_INCREMENTAL=0 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release
 # install over it keeps its identity: the GPUI binary ships as `muxflow`, the
 # helper beside it, and the Linux helpers, icon and owner marker in Resources.
 app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
-version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
+version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml)
 dmg="$CARGO_TARGET_DIR/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
 resources="$app/Contents/Resources"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$resources"
 install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-gpui" "$app/Contents/MacOS/muxflow"
 install -m 0755 "$CARGO_TARGET_DIR/release/muxflow-host" "$app/Contents/MacOS/muxflow-host"
-install -m 0644 apps/desktop/src-tauri/icons/icon.icns release/macos/package-owner "$resources/"
+install -m 0644 release/macos/icon.icns release/macos/package-owner "$resources/"
 sed "s/@VERSION@/$version/g" release/macos/Info.plist > "$app/Contents/Info.plist"
 
 # The shipped Linux helpers are produced by release/linux/build-compatible-host.sh,

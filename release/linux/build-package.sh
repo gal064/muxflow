@@ -35,7 +35,7 @@ case "$arch" in
     ;;
 esac
 
-version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
+version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml)
 source_date_epoch=${SOURCE_DATE_EPOCH:-1704067200}
 output_dir=${ADE_RELEASE_OUTPUT_DIR:-"$repo_root/tmp/release"}
 mkdir -p "$repo_root/tmp" "$output_dir"
@@ -104,7 +104,7 @@ fi
 install -m 0755 release/linux/install.sh "$package_root/install.sh"
 install -m 0755 release/linux/uninstall.sh "$package_root/uninstall.sh"
 install -m 0644 release/linux/muxflow.desktop.in "$package_root/share/applications/muxflow.desktop.in"
-install -m 0644 apps/desktop/src-tauri/icons/icon.png "$package_root/share/icons/hicolor/256x256/apps/muxflow.png"
+install -m 0644 release/linux/icon.png "$package_root/share/icons/hicolor/256x256/apps/muxflow.png"
 install -m 0644 LICENSE "$package_root/LICENSE" 2>/dev/null || true
 
 (

@@ -33,8 +33,8 @@ export async function buildMarkdownBundle() {
 export async function buildTerminalBundle() {
   const repo = path.resolve(MOBILE_ROOT, "../..");
   const xtermCss = await readFile(path.join(MOBILE_ROOT, "node_modules/@xterm/xterm/css/xterm.css"), "utf8");
-  // The desktop's own woff2 (apps/desktop/src/assets/fonts): same family, same release.
-  const fontDir = path.join(repo, "apps/desktop/src/assets/fonts");
+  // The desktop's own woff2 (apps/desktop-gpui/assets/fonts): same family, same release.
+  const fontDir = path.join(repo, "apps/desktop-gpui/assets/fonts");
   const face = async (file, weight) => {
     const b64 = (await readFile(path.join(fontDir, file))).toString("base64");
     return `@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: ${weight}; src: url(data:font/woff2;base64,${b64}) format("woff2"); }`;

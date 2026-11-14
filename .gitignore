@@ -12,9 +12,6 @@ out/
 .svelte-kit/
 coverage/
 target/
-**/src-tauri/gen/
-apps/desktop/src-tauri/binaries/linux-helpers/muxflow-host-linux-*
-apps/desktop/src-tauri/binaries/muxflow-host-*
 
 # Tool caches
 .cache/
