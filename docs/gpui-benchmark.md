@@ -2,7 +2,8 @@
 
 **Decision (2026-11-11): commit to GPUI.** The owner accepted it after the Linux run below.
 
-The harness is `tests/performance/app-bench/` (branch `gpui/app-bench`). Both apps are
+The harness was `tests/performance/app-bench/` (branch `gpui/app-bench`). It builds both
+apps from one commit, so the cutover removed it; it is still in commit `3828748`. Both apps are
 release builds of the same commit, run against the same local host and the same SSH host,
 with the same scenarios. The SSH host is a 4 vCPU Debian 13 cloud VM about 29 ms away.
 

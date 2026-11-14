@@ -64,7 +64,8 @@ misses which command path the frontend uses.
 
 ## Measurement method
 
-`tests/performance/runtime/macos/pixels.swift` is one unchanged instrument for
+`tests/performance/runtime/macos/pixels.swift` (removed at the cutover with the Tauri app;
+still in commit `3828748`) is one unchanged instrument for
 both apps. It posts genuine HID keys/clicks, captures the exact application
 window through ScreenCaptureKit, and observes pixels. Capture requests 120 fps;
 that is not a claim of 120 distinct display frames or a photodiode measurement.

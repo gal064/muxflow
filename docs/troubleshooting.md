@@ -71,10 +71,8 @@ masks to `0x1f` directly, and terminals have long aliased Ctrl+/ onto the same
 byte. So a program that binds Ctrl+/ (undo in Emacs, comment-toggle in several
 editors) and a program that binds Ctrl+_ are binding the same input.
 
-Muxflow sends `0x1f` for Ctrl+/ explicitly, because xterm.js has no mapping for
-that key and would otherwise send nothing at all. Ctrl+_ is left to xterm.js,
-which already encodes it correctly. Ctrl+Shift+/ (Ctrl+?) is a different key and
-is unaffected.
+Muxflow sends `0x1f` for both. Ctrl+Shift+/ (Ctrl+?) is a different key and is
+unaffected.
 
 # A Mac as an SSH host
 
@@ -101,6 +99,17 @@ is unaffected.
   is also an SSH host shares one helper between both, and only when both are
   the same Muxflow version. Update both machines to the same release.
 
+# The window does not open on Linux
+
+The desktop draws with the GPU through Vulkan. Without a working Vulkan driver it
+exits at start; run `muxflow` from a terminal to see the error. Check the driver
+with `vulkaninfo --summary` (from `vulkan-tools`). Install the loader and your
+GPU's driver: on Debian and Ubuntu `libvulkan1` and `mesa-vulkan-drivers`, on
+Fedora `vulkan-loader` and `mesa-vulkan-drivers`, on Arch `vulkan-icd-loader` and
+the driver for your GPU. A virtual machine or an old GPU without Vulkan can use
+Mesa's software driver (lavapipe, in `mesa-vulkan-drivers`); it works, but
+draws more slowly and uses more CPU.
+
 # macOS package and permissions
 
 The macOS build is ad-hoc signed and not notarized, so Gatekeeper blocks a
@@ -126,12 +135,11 @@ notification does not arrive.
   Notifications → Muxflow.
 - *"macOS did not answer"* — the running binary is not a bundle the system will
   register, so the permission query never comes back. There is no framework
-  status for this; the silence *is* the symptom. `pnpm tauri dev` runs an
-  unbundled binary, and a plain `tauri build` bundle can also be rejected when
-  its signature seal is broken (M10-E016). **Only the output of
-  `release/macos/build-package.sh` is expected to deliver notifications**; that
-  script is what removes `LSRequiresCarbon` and re-signs the bundle. Verify a
-  bundle with `release/macos/verify-package.sh`.
+  status for this; the silence *is* the symptom. `cargo run -p muxflow` runs an
+  unbundled binary, and a bundle whose signature seal is broken can also be
+  rejected (M10-E016). **Only the output of `release/macos/build-package.sh` is
+  expected to deliver notifications**; that script assembles and signs the
+  bundle. Verify a bundle with `release/macos/verify-package.sh`.
 - *"…did not report a notification permission this app understands"* — on Linux,
   no notification daemon is answering on the session bus. On macOS, a permission
   state newer than this build.
