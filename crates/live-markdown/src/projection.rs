@@ -96,7 +96,7 @@ fn plain_lines(src: &str) -> Node {
     })
 }
 
-fn parse_inline(src: &str) -> Node {
+pub(crate) fn parse_inline(src: &str) -> Node {
     let mut options = ParseOptions::gfm();
     options.constructs = Constructs {
         block_quote: false,
@@ -110,6 +110,24 @@ fn parse_inline(src: &str) -> Node {
         ..Constructs::gfm()
     };
     markdown::to_mdast(src, &options).expect("plain markdown cannot fail to parse")
+}
+
+fn is_html_break(node: &Node) -> bool {
+    let Node::Html(html) = node else { return false };
+    matches!(
+        html.value.to_ascii_lowercase().as_str(),
+        "<br>" | "<br/>" | "<br />"
+    )
+}
+
+fn html_breaks(node: &Node, out: &mut Vec<Range<usize>>) {
+    if is_html_break(node) {
+        out.push(pos(node));
+    } else if let Some(children) = node.children() {
+        for child in children {
+            html_breaks(child, out);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,6 +308,22 @@ struct LeafB {
 }
 
 impl LeafB {
+    fn point(&mut self, at: usize) {
+        let disp = self.leaf.text.len();
+        self.leaf.segs.push(Seg {
+            src: at..at,
+            disp: disp..disp,
+            kind: SegKind::Text,
+        });
+    }
+
+    fn cell_break(&mut self, range: Range<usize>, style: &Style) {
+        // Both sides are caret stops, including an otherwise empty cell.
+        self.point(range.start);
+        self.replaced(range.clone(), "\n", style);
+        self.point(range.end);
+    }
+
     fn visible(&mut self, src: &str, r: Range<usize>, style: &Style) {
         if r.is_empty() {
             return;
@@ -674,6 +708,9 @@ impl<'a> Builder<'a> {
                 Node::ImageReference(n) if n.reference_kind != mdast::ReferenceKind::Shortcut => {
                     self.image(l, p.clone(), style)
                 }
+                Node::Html(_) if self.rendered_only && is_html_break(node) => {
+                    l.cell_break(p.clone(), style);
+                }
                 Node::Break(_) => self.hard_break(l, p.clone(), style),
                 _ => l.visible(self.src, p.clone(), style),
             }
@@ -793,15 +830,33 @@ impl<'a> Builder<'a> {
     fn inline_code(&self, l: &mut LeafB, range: Range<usize>, style: &Style) {
         let text = &self.src[range.clone()];
         let ticks = text.bytes().take_while(|b| *b == b'`').count();
+        let content = &text[ticks..text.len() - ticks];
+        // Split table code spans may need spaces to separate literal
+        // backticks from their delimiters; CommonMark strips one pair.
+        let padding = usize::from(
+            self.rendered_only
+                && content.starts_with(' ')
+                && content.ends_with(' ')
+                && content.bytes().any(|b| b != b' '),
+        );
         let active = self.touching(range.start, range.end);
         let inner = Style {
             code: true,
             ..style.clone()
         };
         // Revealed backticks sit inside the chip, as Tauri's mark spans them.
-        self.marker(l, range.start..range.start + ticks, active, &inner);
-        l.visible(self.src, range.start + ticks..range.end - ticks, &inner);
-        self.marker(l, range.end - ticks..range.end, active, &inner);
+        self.marker(
+            l,
+            range.start..range.start + ticks + padding,
+            active,
+            &inner,
+        );
+        l.visible(
+            self.src,
+            range.start + ticks + padding..range.end - ticks - padding,
+            &inner,
+        );
+        self.marker(l, range.end - ticks - padding..range.end, active, &inner);
     }
 
     fn block(&mut self, node: &Node, depth: usize) {
@@ -1142,11 +1197,21 @@ impl<'a> Builder<'a> {
                 };
                 let bytes = src.as_bytes();
                 let mut inner_end = cell.to;
-                while inner_end < span.to && bytes[inner_end] == b' ' {
+                while inner_end < span.to && matches!(bytes[inner_end], b' ' | b'\t') {
                     inner_end += 1;
                 }
                 let limit = match self.active.cell_typed_end {
-                    Some(end) if end > cell.to && end <= inner_end => end,
+                    Some(end)
+                        if end > cell.to
+                            && end <= inner_end
+                            && self
+                                .active
+                                .ranges
+                                .iter()
+                                .any(|r| r.start >= cell.from && r.end <= inner_end) =>
+                    {
+                        end
+                    }
                     _ => cell.to,
                 };
                 let leaf = self.table_cell(cell.from, cell.to, limit, reveal);
@@ -1215,7 +1280,27 @@ impl<'a> Builder<'a> {
                 .any(|r| r.start >= from && r.end <= limit)
         {
             // The cell holding the caret or selection shows its own source.
-            l.visible(src, from..limit, &plain);
+            let ast = parse_inline(&src[from..limit]);
+            let mut breaks = Vec::new();
+            html_breaks(&ast, &mut breaks);
+            let mut cursor = from;
+            for range in breaks {
+                let range = from + range.start..from + range.end;
+                // A source selection inside the tag (e.g. Find) can still
+                // reveal and edit it; ordinary caret motion treats it whole.
+                let inside = self.active.ranges.iter().any(|r| {
+                    !r.is_empty()
+                        && ((r.start > range.start && r.start < range.end)
+                            || (r.end > range.start && r.end < range.end))
+                });
+                if inside {
+                    continue;
+                }
+                l.visible(src, cursor..range.start, &plain);
+                l.cell_break(range.clone(), &plain);
+                cursor = range.end;
+            }
+            l.visible(src, cursor..limit, &plain);
         } else if from < to {
             let ast = parse_inline(&src[from..to]);
             let inner = ast
@@ -2050,6 +2135,25 @@ mod tests {
             assert_eq!(p.tables.len(), 1);
             assert_eq!(p.tables[0].src, 0..29);
         }
+    }
+
+    #[test]
+    fn cell_breaks_have_stable_source_positions_and_leave_literal_tags_alone() {
+        let src = "| a | b |\n|---|---|\n| one<br>two<BR />three | `<br>` \\<br> |";
+        let start = src.find("one").unwrap();
+        for caret in [None, Some(start), Some(start + 7)] {
+            let p = at(src, caret);
+            let leaf = p.tables[0].cells[2].leaf;
+            assert_eq!(p.leaves[leaf].text, "one\ntwo\nthree");
+            assert_eq!(p.from_display(leaf, 3), start + 3);
+            assert_eq!(p.from_display(leaf, 4), start + 7);
+            assert_eq!(p.locate(start + 7), Some((leaf, 4)));
+            assert_eq!(p.leaf_selection(leaf, &(start + 3..start + 7)), Some(3..4));
+            assert_eq!(p.leaves[p.tables[0].cells[3].leaf].text, "<br> <br>");
+        }
+        let literal = src.find('`').unwrap();
+        let p = at(src, Some(literal));
+        assert_eq!(p.leaves[p.tables[0].cells[3].leaf].text, "`<br>` \\<br>");
     }
 
     #[test]

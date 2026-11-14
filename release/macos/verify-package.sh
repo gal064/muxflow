@@ -23,6 +23,17 @@ if /usr/libexec/PlistBuddy -c 'Print :LSRequiresCarbon' "$plist" >/dev/null 2>&1
 fi
 grep -Fxq "$owner" "$resources/package-owner"
 
+# The licence notices the shipped crates require (release/third-party-licenses.mjs):
+# present, with the Apache-2.0 text and the GPUI and terminal crates it covers.
+notices="$resources/THIRD-PARTY-LICENSES"
+[[ -s "$notices" ]] \
+  && grep -Fq 'TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION' "$notices" \
+  && grep -Eq '^gpui-pre [0-9]' "$notices" \
+  && grep -Eq '^alacritty_terminal [0-9]' "$notices" || {
+  echo "THIRD-PARTY-LICENSES is missing or incomplete" >&2
+  exit 65
+}
+
 desktop_file=$(file "$desktop")
 host_file=$(file "$host")
 [[ "$desktop_file" == *Mach-O*arm64* ]]
