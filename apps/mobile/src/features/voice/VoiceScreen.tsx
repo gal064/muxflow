@@ -22,15 +22,12 @@ import { BackIcon } from "../../ui/components/MediaIcons";
 import { useSession } from "../../ui/hooks";
 import { colors, fixedChromeText, metrics, radii, typeScale } from "../../ui/tokens";
 import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
-import { createExpoFiles } from "./files";
-import { createExpoHaptics } from "./haptics";
 import { MicButton } from "./MicButton";
 import { bigPaneHeight } from "./paneLayout";
-import { createExpoPlayer } from "./player";
-import { createExpoRecorder } from "./recorder";
 import { ReplyPlayer } from "./ReplyPlayer";
+import { sharedAudio } from "./sharedAudio";
 import { SpeedButton } from "./SpeedButton";
-import { createExpoTones } from "./tones";
+import { voiceHint } from "./voiceHint";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { muxflowSsh } from "../../ssh/MuxflowSsh";
@@ -44,14 +41,6 @@ export interface VoiceScreenProps {
   agentId: string;
   paneId: string;
   sessionId: string;
-}
-
-// The one recorder, player, file and haptics adapter for the app, created when
-// the first Voice screen renders (§2c: nothing audio-related loads before that).
-let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics>; tones: ReturnType<typeof createExpoTones> } | undefined;
-function sharedAudio() {
-  audio ??= { recorder: createExpoRecorder(log), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
-  return audio;
 }
 
 /** Voice — design.md §9.11. Header, message list, readiness card, the talk pane. */
@@ -150,21 +139,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   // dictated text there after the host has confirmed the agent's departure.
   const gone = !agent || !agent.present;
   // One phrase per condition, matching the readiness card above the mic.
-  const hint = !connected
-    ? "Not connected"
-    : gone
-      ? "This agent no longer exists"
-      : readiness === "unknown"
-        ? "Checking voice on the host…"
-        : readiness === "uvMissing"
-          ? "Needs uv on the host"
-          : readiness === "provisioning"
-            ? "Setting up voice on the host…"
-            : readiness === "modelMissing"
-              ? "Voice isn't set up on this host"
-              : recorderError
-                ? "Microphone unavailable: allow the microphone permission for Muxflow"
-                : "";
+  const hint = voiceHint({ connected, gone, readiness, recorderError });
   const micDisabled = hint !== "";
 
   const endSession = useCallback(() => {
