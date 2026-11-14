@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isPiAdapter, PI_ICON, PIN_ICON } from "./agentIconPaths";
+import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isOpencodeAdapter, isPiAdapter, OPENCODE_ICON, PI_ICON, PIN_ICON } from "./agentIconPaths";
 
 const desktopSrc = resolve(__dirname, "../../../../desktop/src");
 const identity = readFileSync(resolve(desktopSrc, "features/agents/AgentIdentity.tsx"), "utf8");
@@ -35,22 +35,31 @@ describe("agent icon geometry matches the desktop's AgentIdentity.tsx byte-for-b
   it("pi: pi.dev's mark, its viewBox and its inset", () => {
     expect(paths[2]).toBe(PI_ICON.path);
     expect(viewBoxes[2]).toBe(PI_ICON.viewBox);
-    expect(attrs(identity, "transform")).toEqual([CODEX_ICON.transform, PI_ICON.transform]);
+    expect(attrs(identity, "transform")).toEqual([CODEX_ICON.transform, PI_ICON.transform, OPENCODE_ICON.transform]);
     expect(identity).toContain('data-icon-source="pi-favicon"');
   });
 
+  it("OpenCode: the brand frame and the block inside it", () => {
+    expect(paths[3]).toBe(OPENCODE_ICON.frame);
+    expect(paths[4]).toBe(OPENCODE_ICON.block);
+    expect(viewBoxes[3]).toBe(OPENCODE_ICON.viewBox);
+    expect(identity).toContain('data-icon-source="opencode-brand"');
+    expect(identity).toContain('opacity=".5"');
+    expect(OPENCODE_ICON.blockOpacity).toBe(0.5);
+  });
+
   it("generic: the face", () => {
-    expect(paths[3]).toBe(GENERIC_ICON.mouth);
-    expect(viewBoxes[3]).toBe(GENERIC_ICON.viewBox);
+    expect(paths[5]).toBe(GENERIC_ICON.mouth);
+    expect(viewBoxes[4]).toBe(GENERIC_ICON.viewBox);
     const circles = [...identity.matchAll(/<circle cx="([^"]*)" cy="([^"]*)" r="([^"]*)" \/>/g)].map((m) => ({ cx: Number(m[1]), cy: Number(m[2]), r: Number(m[3]) }));
     expect(circles).toEqual([GENERIC_ICON.face, ...GENERIC_ICON.eyes]);
     expect(css).toMatch(/\.agent-icon\.claude, \.agent-icon\.generic \{[^}]*stroke-width: 1\.35/);
     expect(GENERIC_ICON.strokeWidth).toBe(1.35);
   });
 
-  it("the desktop file has exactly these four icons", () => {
-    expect(paths).toHaveLength(4);
-    expect(viewBoxes).toHaveLength(4);
+  it("the desktop file has exactly these five icons", () => {
+    expect(paths).toHaveLength(6);
+    expect(viewBoxes).toHaveLength(5);
   });
 
   it("pin: the desktop Icon set's pin, at its stroke width", () => {
@@ -66,6 +75,7 @@ describe("agent icon geometry matches the desktop's AgentIdentity.tsx byte-for-b
     expect(identity).not.toContain('adapterId === "claude"');
     expect(identity).toContain('adapterId === "codex"');
     expect(identity).toContain('adapterId === "pi"');
+    expect(identity).toContain('adapterId === "opencode"');
     expect(isClaudeAdapter("claude-code")).toBe(true);
     expect(isClaudeAdapter("claude")).toBe(false);
     expect(isClaudeAdapter("codex")).toBe(false);
@@ -74,5 +84,7 @@ describe("agent icon geometry matches the desktop's AgentIdentity.tsx byte-for-b
     expect(isCodexAdapter("other")).toBe(false);
     expect(isPiAdapter("pi")).toBe(true);
     expect(isPiAdapter("pip")).toBe(false);
+    expect(isOpencodeAdapter("opencode")).toBe(true);
+    expect(isOpencodeAdapter("open-code")).toBe(false);
   });
 });

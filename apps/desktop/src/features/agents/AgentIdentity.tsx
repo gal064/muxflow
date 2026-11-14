@@ -37,6 +37,19 @@ export function AgentIcon({ adapterId }: { adapterId: AgentAdapterId }) {
       </g>
     </svg>;
   }
+  if (adapterId === "opencode") {
+    return <svg aria-hidden="true" className="agent-icon opencode" data-agent-icon="opencode" data-icon-source="opencode-brand" viewBox="0 0 24 24">
+      {/* OpenCode's brand mark: a frame with the solid block resting inside
+          it, scaled into a 24-unit box at the mark's own ratios. The brand
+          draws that block a half-tone under the frame; one fused silhouette
+          would be a 90%-ink blob that smudges at 12px, so the block keeps a
+          half opacity instead. */}
+      <g transform="translate(12 12) scale(.78) translate(-12 -12)">
+        <path d="M22 24H2V0h20zM17 4.8H7v14.4h10z" />
+        <path d="M17 9.6H7v9.6h10z" opacity=".5" />
+      </g>
+    </svg>;
+  }
   return <svg aria-hidden="true" className="agent-icon generic" data-agent-icon="agent" viewBox="0 0 16 16">
     <circle cx="8" cy="8" r="5.5" /><circle cx="6" cy="7" r=".8" /><circle cx="10" cy="7" r=".8" /><path d="M5.5 10h5" />
   </svg>;
