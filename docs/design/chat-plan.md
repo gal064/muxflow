@@ -508,6 +508,74 @@ merged) and merges back into `gpui/chat`. One manual QA at the end.
 - Done when: a closed session resumes from History into the right workspace, and
   a one-minute snooze wakes as a placeholder after a daemon restart.
 
+#### As built by stream E
+
+- **Store.** `service/history/` keeps `sessions.json` in the state directory:
+  provider, session id, title, workspace, folder, last activity, wake time,
+  `woke`, `chat` and a sticky `fork` flag, at most 1,000 entries (the least
+  recently active go first; a running, snoozed or woke one never does). Which
+  sessions run is held in memory only. Entries are written by the daemon's 2 s
+  pass when they changed, activity times alone at most once a minute; a snooze,
+  a wake and a resume are written before they answer. An unreadable file is
+  kept aside as `sessions.json.unreadable`. Titles and workspace names are cut
+  to 1 KiB, a longer folder is not kept, and a session id over 256 bytes is not
+  recorded, so a full listing stays far under a frame.
+- **Feed.** The agents service reports every record that has a native session
+  and a pane after each state write (`persist_locked`) and after each topology
+  reconcile (`agents/history_feed.rs`, two one-line calls in `agents/mod.rs`);
+  a record a late hook made for a closed pane is not a running session. The
+  reconcile is what knows a pane's folder and chat tag. A session that was
+  missing and runs again, however it was started, ends its snooze and its
+  placeholder; the first look after a restart is a baseline, not a start, but
+  ends the placeholder of a session it finds running.
+- **Title.** The pane's own title, else the tab's name, without the status
+  ticker and skipping an adapter's name or an id (the desktop's
+  `agent_session_label` rule) or a shell's name, which tmux gives a tab a
+  resume opens. A generic title keeps the last good one.
+- **Folder.** A pane's folder and chat tag come from the last topology
+  reconciled, kept by the feed, so a session id learned by hook afterwards
+  gets them at once.
+- **Forks.** Branch now names its new tab `<name> (fork)` on the host and locks
+  the name, for Claude and Codex alike (`agent_dispatch::name_fork_tab`), so a
+  fork's row and tab say so on every client, and it is listed in History like
+  any session. A Branch placed in a split is a side question: its tab is the
+  source's and is not renamed, and the first session that comes to run in its
+  pane is marked a fork for good and never listed (`History::hide_pane`).
+  `placement_for` still sends every Branch to a new tab: stream B's `SIDE_FORK`
+  gets this once it lets Branch take a split.
+- **Actions.** `RESUME`, and `SNOOZE` when it closes a pane, check the server
+  identity and topology generation as an agent launch does
+  (`history_server_changed`, `history_topology_changed`). `RESUME` refuses a running session
+  (`history_running`), and one already being placed until its agent reports
+  in or 30 s pass; it opens a tab in the workspace named like the entry's,
+  or creates that workspace in the entry's folder first (a shell tab, then the
+  agent's), and refuses a folder that is gone (`history_resume_failed`).
+  `SNOOZE` refuses a Working or Blocked agent (`history_agent_busy`), records
+  the wake time, then kills the agent's pane; a pane that will not close puts
+  back the snooze state it had, and a pane already gone counts as closed. A
+  snooze that comes due while its session runs (started while the helper was
+  down) just ends, with no placeholder or notification; after a start, the
+  wake check waits for the agents service's first look, or 10 s. A snooze is limited to the coming year. `WAKE` ends a snooze
+  now and leaves the woke placeholder, with no notification. Other refusals:
+  `history_unknown_session`, `history_not_saved`, `history_snooze_failed`.
+- **Events.** A `HistoryEvent` goes out after every action, after the 2 s pass
+  ends a snooze (`woke` names those, for the notification), and when a woke
+  session runs again. Not for titles or activity: clients list on open.
+- **Desktop.** History opens from the Agents header's History button, the
+  palette (`agents.history`) and ⌘Y / Ctrl+Shift+H, on the host on screen. It
+  follows Quick Open: one field, fuzzy search over title, workspace and
+  provider, Snoozed first by wake time with Wake now, then Sessions newest
+  first. Enter focuses a running session or resumes it. Woke placeholders sit
+  above the Agents list; a click resumes. Snooze is a submenu in the agent
+  row's menu and in a terminal tab's menu (only for a tab holding one agent).
+  Settings → Workspace has a Snooze section: the wake times, comma separated
+  (`30m`, `3h`, `18:30`, `tomorrow 09:00`, `mon 09:00`), stored in app state as
+  `snoozeTimes`; Pick a time… takes the same spelling.
+- **Not built, against the mock.** "⌘↵ Resume in a split": `RESUME` carries no
+  placement. A woke notification is not clickable; the placeholder is what
+  resumes. A woke placeholder cannot be dismissed except by resuming it.
+  Sessions that ran while the helper was down are not listed, as the mock says.
+
 ### F — Phone
 
 - `apps/mobile/src/features/chat/` and `app/chat/[paneId].tsx`: timeline, cards,

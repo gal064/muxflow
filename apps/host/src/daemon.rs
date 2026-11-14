@@ -102,6 +102,8 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
                 // would withdraw a state the very next line was about to
                 // restore, and publish both.
                 service::agents::maintain();
+                // Snoozes end on the host's clock, connected or not.
+                service::history::maintain();
             })
             .await;
         }

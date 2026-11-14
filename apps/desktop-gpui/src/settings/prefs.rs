@@ -50,6 +50,8 @@ pub struct Prefs {
     pub agent_sounds: AgentSoundPreferences,
     /// By host profile id; a host with nothing to say has no entry.
     pub workspace_defaults: BTreeMap<String, WorkspaceDefaults>,
+    /// The Snooze menu's wake times, in `agents::snooze`'s spelling.
+    pub snooze_times: Vec<String>,
 }
 
 /// A terminal size typed or stored, held to what Settings offers.
@@ -129,6 +131,9 @@ impl Prefs {
                         .then(|| (host.clone(), usable))
                 })
                 .collect(),
+            snooze_times: crate::agents::snooze::parse_list(
+                &shell.snooze_times.as_deref().unwrap_or_default().join(","),
+            ),
         }
     }
 
@@ -151,6 +156,7 @@ impl Prefs {
         shell.default_markdown_view = Some(self.default_markdown_view);
         shell.enabled_panel_extensions = Some(self.enabled_panel_extensions.clone());
         shell.agent_sounds = Some(self.agent_sounds);
+        shell.snooze_times = Some(self.snooze_times.clone());
         state.workspace_defaults = self.workspace_defaults.clone();
     }
 
@@ -234,6 +240,9 @@ mod tests {
                 enabled_panel_extensions: vec!["automations".to_owned()],
                 agent_sounds: DEFAULT_SOUNDS,
                 workspace_defaults: BTreeMap::new(),
+                snooze_times: crate::agents::snooze::DEFAULT_TIMES
+                    .map(str::to_owned)
+                    .to_vec(),
             }
         );
     }

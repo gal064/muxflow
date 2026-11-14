@@ -137,7 +137,9 @@ fn the_registry_matches_registry_ts() {
             format!("Alt+{digit}"),
         );
     }
-    assert_eq!(COMMANDS.len(), 64 + 18);
+    // Plus the one command the Tauri app does not have: History.
+    assert!(command_by_id("agents.history").is_some());
+    assert_eq!(COMMANDS.len(), 64 + 1 + 18);
 }
 
 /// id, macOS key, Linux key, `-` for none. Pins the defaults independently of
@@ -153,6 +155,7 @@ view.showGit Meta+Shift+G Ctrl+Shift+G
 focus.back Meta+[ Ctrl+[
 focus.forward Meta+] Ctrl+]
 agents.jumpUnread Meta+Shift+U Ctrl+Shift+U
+agents.history Meta+Y Ctrl+Shift+H
 session.new Meta+N Ctrl+N
 tab.previous Meta+Shift+[ Ctrl+Shift+[
 tab.next Meta+Shift+] Ctrl+Shift+]
@@ -190,7 +193,7 @@ fn the_default_keymaps_are_pinned() {
         assert_eq!(shown(Platform::Mac), mac, "{} on macOS", command.id);
         assert_eq!(shown(Platform::Linux), linux, "{} on Linux", command.id);
     }
-    assert_eq!(pinned.len(), 29);
+    assert_eq!(pinned.len(), 30);
 }
 
 #[test]
@@ -312,7 +315,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
     press(handle, "secondary-k", cx);
     assert!(dialog_open(handle, cx));
     with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 64);
+        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 65);
         for command in palette_commands() {
             // The title bar may name a control the same as a command.
             let rows = window.find_all_by_label(command.title);
@@ -367,6 +370,7 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             "focus.back",
             "focus.forward",
             "agents.jumpUnread",
+            "agents.history",
             "agents.toggleSort",
             "workspaces.showPinnedOnly",
             "workspace.select1",
@@ -574,7 +578,7 @@ fn shortcut_editor_edits_conflicts_and_saves(cx: &mut TestAppContext) {
         })
     };
     with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::TextInput).len(), 82);
+        assert_eq!(window.find_all_by_role(Role::TextInput).len(), 83);
         let value = window.find_by_label(field).value().map(str::to_owned);
         assert_eq!(value.as_deref(), Some(&*format!("{PRIMARY}+K")));
     });

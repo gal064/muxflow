@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn leaves_chords_the_keymap_never_claimed_alone() {
         assert_eq!(
-            disposition("cmd-y", false, false, true),
+            disposition("cmd-j", false, false, true),
             ShortcutDisposition::Ignore
         );
     }

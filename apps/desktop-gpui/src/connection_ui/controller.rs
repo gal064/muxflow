@@ -135,6 +135,12 @@ pub enum ConnectionEvent {
     FileService { payload: String },
     /// A Git watch's status or error; the Git feature routes it by root token.
     GitService { payload: String },
+    /// A host's session history changed. Every shown host's, as the Agents
+    /// list shows each one's woke sessions.
+    History {
+        profile_id: String,
+        event: desktop_core::connection::history::HistoryEvent,
+    },
 }
 
 pub struct AgentServiceFrame {
@@ -1847,6 +1853,10 @@ impl ConnectionController {
             BridgeEvent::GitService { payload } => {
                 cx.emit(ConnectionEvent::GitService { payload });
             }
+            BridgeEvent::History(event) => cx.emit(ConnectionEvent::History {
+                profile_id: profile_id.to_owned(),
+                event,
+            }),
             BridgeEvent::Ignored => {}
         }
     }
