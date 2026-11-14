@@ -186,6 +186,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space for the release build
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: Install system packages
         timeout-minutes: 14
         run: .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev
