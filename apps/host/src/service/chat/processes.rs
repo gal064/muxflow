@@ -308,4 +308,47 @@ mod tests {
         let long = vec![b'a'; MAX_ARGV_BYTES];
         assert!(started_with(&kept(1, &[&long[..], b"\0"].concat())).is_none());
     }
+
+    /// On a Mac: a real process, started with known arguments, variables and
+    /// folder, reads back as exactly those.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_running_process_reads_as_it_was_started() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("100")
+            .env_clear()
+            .env("A", "1")
+            .env("EMPTY", "")
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(folder.path())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // Between the fork and the exec it is still this process's copy.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while Darwin.argv(pid).is_none_or(|argv| argv[0] != "/bin/sleep")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let read = (
+            Darwin.argv(pid),
+            Darwin
+                .environment(pid)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map_err(|error| error.to_string()),
+            Darwin.folder(pid).map_err(|error| error.to_string()),
+            Darwin.age(pid),
+            Darwin.children(std::process::id()),
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let (argv, environment, started_in, age, children) = read;
+        assert_eq!(argv.unwrap(), ["/bin/sleep", "100"]);
+        assert_eq!(environment.unwrap(), "A=1\0EMPTY=\0PATH=/usr/bin:/bin\0");
+        assert_eq!(started_in.unwrap(), folder.path().canonicalize().unwrap());
+        assert!(age.unwrap() < Duration::from_secs(30), "{age:?}");
+        assert!(children.contains(&pid), "{children:?}");
+    }
 }
