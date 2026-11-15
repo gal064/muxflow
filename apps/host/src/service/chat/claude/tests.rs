@@ -436,6 +436,56 @@ fn a_message_id_that_is_no_uuid_becomes_one_that_is_always_the_same() {
 
 // --- the recorded session ---------------------------------------------------
 
+#[tokio::test]
+async fn a_failed_result_only_adds_information_not_already_displayed_in_that_turn() {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    let assistant = |id, text| {
+        json!({"type": "assistant", "message": {
+            "id": id, "content": [{"type": "text", "text": text}]
+        }})
+        .to_string()
+    };
+    let result = |text| json!({"type": "result", "is_error": true, "result": text}).to_string();
+    let notices = |replay: &Replay<Claude>| {
+        replay
+            .client
+            .items
+            .iter()
+            .filter(|item| item.kind == i32::from(Kind::Notice))
+            .count()
+    };
+
+    replay.agent(&assistant("billing-1", "Subscription unavailable"));
+    replay.agent(&result("Subscription unavailable"));
+    assert_eq!(notices(&replay), 0);
+    assert_eq!(replay.client.items.len(), 1);
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Idle));
+
+    // The same error on another turn must still be visible.
+    replay.agent(&result("Subscription unavailable"));
+    assert_eq!(notices(&replay), 1);
+    replay.agent(&assistant("billing-2", "Subscription unavailable"));
+    replay.agent(&result("Subscription unavailable"));
+    assert_eq!(notices(&replay), 1);
+
+    // Different details and failures without text are not suppressed.
+    replay.agent(&assistant("partial", "Partial answer"));
+    replay.agent(&result("Network disconnected"));
+    replay.agent(&result(""));
+    assert_eq!(notices(&replay), 3);
+    assert_eq!(
+        replay.client.items.last().unwrap().text,
+        "The turn ended with an error."
+    );
+
+    replay.agent(&assistant("before-reconnect", "Subscription unavailable"));
+    replay.disconnect();
+    replay.connect(&tag(SESSION, ""));
+    replay.agent(&result("Subscription unavailable"));
+    assert_eq!(notices(&replay), 4);
+}
+
 /// The whole recorded conversation, with what a client sees at each step.
 #[tokio::test]
 async fn the_recorded_session_reads_as_the_conversation_it_was() {

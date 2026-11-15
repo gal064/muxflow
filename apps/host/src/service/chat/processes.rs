@@ -14,6 +14,8 @@ pub(super) trait Processes {
     fn children(&self, pid: u32) -> Vec<u32>;
     /// How long ago it started, when that could be read.
     fn age(&self, pid: u32) -> Option<Duration>;
+    /// Stable kernel start stamp, to distinguish reuse of a PID.
+    fn start_stamp(&self, pid: u32) -> Option<u64>;
     /// Its variables as `/proc/<pid>/environ` holds them: each one
     /// `NAME=value` and a zero byte.
     fn environment(&self, pid: u32) -> io::Result<Vec<u8>>;
@@ -64,12 +66,7 @@ impl Processes for Proc<'_> {
     }
 
     fn age(&self, pid: u32) -> Option<Duration> {
-        let stat = std::fs::read_to_string(self.0.join(pid.to_string()).join("stat")).ok()?;
-        // The command name is in parentheses and may hold anything; the
-        // fields are counted from after it. `starttime` is the 22nd of them
-        // all.
-        let after_name = &stat[stat.rfind(')')? + 1..];
-        let start_ticks: f64 = after_name.split_ascii_whitespace().nth(19)?.parse().ok()?;
+        let start_ticks = self.start_stamp(pid)? as f64;
         let uptime = std::fs::read_to_string(self.0.join("uptime")).ok()?;
         let uptime: f64 = uptime.split_ascii_whitespace().next()?.parse().ok()?;
         // SAFETY: `sysconf` reads a constant of the running system.
@@ -79,6 +76,16 @@ impl Processes for Proc<'_> {
         }
         let age = uptime - start_ticks / ticks_per_second as f64;
         Some(Duration::from_secs_f64(age.max(0.0)))
+    }
+
+    fn start_stamp(&self, pid: u32) -> Option<u64> {
+        let stat = std::fs::read_to_string(self.0.join(pid.to_string()).join("stat")).ok()?;
+        // The command name can contain spaces and parentheses.
+        stat[stat.rfind(')')? + 1..]
+            .split_ascii_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()
     }
 
     fn environment(&self, pid: u32) -> io::Result<Vec<u8>> {
@@ -185,6 +192,10 @@ impl Darwin {
 
 #[cfg(target_os = "macos")]
 impl Processes for Darwin {
+    fn start_stamp(&self, pid: u32) -> Option<u64> {
+        let info = Self::info(pid)?;
+        Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    }
     fn argv(&self, pid: u32) -> Option<Vec<String>> {
         Self::started_with(pid).map(|(argv, _)| argv)
     }
@@ -315,8 +326,14 @@ mod tests {
     #[test]
     fn a_running_process_reads_as_it_was_started() {
         let folder = tempfile::tempdir().unwrap();
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("100")
+        let executable = std::env::current_exe().unwrap();
+        let arguments = [
+            "--exact",
+            "service::chat::processes::tests::process_fixture",
+            "--ignored",
+        ];
+        let child = std::process::Command::new(&executable)
+            .args(arguments)
             .env_clear()
             .env("A", "1")
             .env("EMPTY", "")
@@ -324,12 +341,18 @@ mod tests {
             .current_dir(folder.path())
             .spawn()
             .unwrap();
-        let pid = child.id();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Child(child);
+        let pid = child.0.id();
         // Between the fork and the exec it is still this process's copy.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while Darwin.argv(pid).is_none_or(|argv| argv[0] != "/bin/sleep")
-            && std::time::Instant::now() < deadline
-        {
+        while !folder.path().join("ready").exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         let read = (
@@ -342,13 +365,30 @@ mod tests {
             Darwin.age(pid),
             Darwin.children(std::process::id()),
         );
-        child.kill().unwrap();
-        child.wait().unwrap();
+        assert!(
+            folder.path().join("ready").exists(),
+            "fixture did not start"
+        );
+        drop(child);
         let (argv, environment, started_in, age, children) = read;
-        assert_eq!(argv.unwrap(), ["/bin/sleep", "100"]);
+        let expected: Vec<String> = std::iter::once(executable.to_string_lossy().into_owned())
+            .chain(arguments.map(str::to_owned))
+            .collect();
+        assert_eq!(argv.unwrap(), expected);
         assert_eq!(environment.unwrap(), "A=1\0EMPTY=\0PATH=/usr/bin:/bin\0");
         assert_eq!(started_in.unwrap(), folder.path().canonicalize().unwrap());
         assert!(age.unwrap() < Duration::from_secs(30), "{age:?}");
         assert!(children.contains(&pid), "{children:?}");
+    }
+
+    // A system executable can hide its environment on macOS. Spawn this
+    // test binary instead, without depending on a separate compiler or tool.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "spawned by a_running_process_reads_as_it_was_started"]
+    fn process_fixture() {
+        assert_eq!(std::env::var("A").as_deref(), Ok("1"));
+        std::fs::write("ready", "").unwrap();
+        std::thread::sleep(Duration::from_secs(30));
     }
 }

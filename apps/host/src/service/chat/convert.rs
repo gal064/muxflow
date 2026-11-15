@@ -12,7 +12,7 @@
 //! installed or comes too late, its process appearing in the pane.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Mutex, PoisonError},
     time::Duration,
 };
@@ -50,7 +50,12 @@ enum Trigger {
     Seen { pane_pid: u32 },
     /// The agent said it started, on `session`; `resumed` when it said that
     /// is a session it resumed.
-    Hooked { session: String, resumed: bool },
+    Hooked {
+        session: String,
+        resumed: bool,
+        occurred_at: i64,
+        sequence: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,12 +71,69 @@ struct Work {
     queued: BTreeSet<Candidate>,
     /// Agents seen that are not to become chats, by pane and process.
     declined: BTreeSet<(PaneKey, u32)>,
+    /// A new process observed while its startup hook waits for folder trust.
+    awaiting: BTreeMap<PaneKey, (u32, u64)>,
+    /// Recent hook ordering also prevents a detection queued before activity
+    /// from registering that process as still waiting for startup.
+    hooks: BTreeMap<PaneKey, (u64, i64)>,
+    next_hook: u64,
 }
 
 static WORK: Mutex<Work> = Mutex::new(Work {
     queued: BTreeSet::new(),
     declined: BTreeSet::new(),
+    awaiting: BTreeMap::new(),
+    hooks: BTreeMap::new(),
+    next_hook: 0,
 });
+
+impl Work {
+    fn hook(&mut self, key: &PaneKey, at: i64, starts: bool) -> u64 {
+        if self.hooks.len() >= MAX_DECLINED && !self.hooks.contains_key(key) {
+            // Losing ordering evidence must also lose eligibility.
+            self.hooks.clear();
+            self.awaiting.clear();
+        }
+        self.next_hook += 1;
+        self.hooks.insert(key.clone(), (self.next_hook, at));
+        if !starts {
+            self.awaiting.remove(key);
+        }
+        self.next_hook
+    }
+
+    fn await_start(&mut self, key: &PaneKey, agent: &Agent, now: i64) {
+        let (Some(age), Some(stamp)) = (agent.age, agent.start_stamp) else {
+            return;
+        };
+        let born = now.saturating_sub(i64::try_from(age.as_millis()).unwrap_or(i64::MAX));
+        if self.hooks.get(key).is_some_and(|(_, at)| *at >= born) {
+            return;
+        }
+        if self.awaiting.len() >= MAX_DECLINED {
+            self.awaiting.clear();
+        }
+        self.awaiting.insert(key.clone(), (agent.pid, stamp));
+    }
+
+    fn take_start(
+        &mut self,
+        key: &PaneKey,
+        sequence: u64,
+        occurred_at: i64,
+        now: i64,
+    ) -> Option<Option<(u32, u64)>> {
+        if !self.current_start(key, sequence, occurred_at, now) {
+            return None;
+        }
+        Some(self.awaiting.remove(key))
+    }
+
+    fn current_start(&self, key: &PaneKey, sequence: u64, occurred_at: i64, now: i64) -> bool {
+        hook_is_fresh(occurred_at, now)
+            && self.hooks.get(key).map(|(latest, _)| *latest) == Some(sequence)
+    }
+}
 /// One conversion at a time: each reads a pane and then replaces what runs
 /// in it.
 static RUNNING: Mutex<()> = Mutex::new(());
@@ -128,14 +190,18 @@ pub(crate) fn agent_hooked(event: &v1::AgentHookEvent, active_server_identity: &
         return;
     };
     let text = |name: &str| payload.get(name).and_then(serde_json::Value::as_str);
-    if text("hook_event_name") != Some("SessionStart") {
-        return;
-    }
+    let key = PaneKey {
+        server_identity: active_server_identity.to_owned(),
+        pane_id: event.pane_id.clone(),
+    };
     let source = text(adapters::SESSION_START_SOURCE_FIELD).unwrap_or("startup");
-    if !is_start(source) {
-        return;
-    }
-    if !hook_is_fresh(event.occurred_at_unix_millis, super::now_unix_millis()) {
+    let starts = text("hook_event_name") == Some("SessionStart")
+        && is_start(source)
+        && hook_is_fresh(event.occurred_at_unix_millis, super::now_unix_millis());
+    let sequence = work().hook(&key, super::now_unix_millis(), starts);
+    if !starts {
+        // Once a process has done anything beyond startup, a later resume
+        // or nested session must not take over its terminal.
         return;
     }
     let session = if event.native_session_id.is_empty() {
@@ -144,14 +210,13 @@ pub(crate) fn agent_hooked(event: &v1::AgentHookEvent, active_server_identity: &
         &event.native_session_id
     };
     submit(Candidate {
-        key: PaneKey {
-            server_identity: active_server_identity.to_owned(),
-            pane_id: event.pane_id.clone(),
-        },
+        key,
         adapter_id,
         trigger: Trigger::Hooked {
             session: session.to_owned(),
             resumed: source == "resume",
+            occurred_at: event.occurred_at_unix_millis,
+            sequence,
         },
     });
 }
@@ -179,11 +244,14 @@ struct Facts {
     chat_mode_age: Option<Duration>,
     /// It says when it starts, and its hook is installed.
     announces: bool,
+    /// This exact process was observed young and has not emitted another hook.
+    awaiting_start: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     Replace,
+    AwaitStart,
     /// Not this time.
     Leave,
     /// Not this process, however often it is seen.
@@ -198,7 +266,7 @@ fn verdict(facts: &Facts) -> Verdict {
         .is_some_and(|age| facts.chat_mode_age.is_some_and(|on| age >= on));
     if !facts.seen {
         let young = facts.age.is_some_and(|age| age <= MAX_HOOKED_AGE);
-        return if young && !predates_mode {
+        return if (young || (facts.awaiting_start && facts.age.is_some())) && !predates_mode {
             Verdict::Replace
         } else {
             Verdict::Leave
@@ -206,8 +274,12 @@ fn verdict(facts: &Facts) -> Verdict {
     }
     let young = facts.age.is_some_and(|age| age <= MAX_SEEN_AGE) && !predates_mode;
     // One whose hook is installed says it started, and says more.
-    if young && !facts.announces {
-        Verdict::Replace
+    if young {
+        if facts.announces {
+            Verdict::AwaitStart
+        } else {
+            Verdict::Replace
+        }
     } else {
         Verdict::Decline
     }
@@ -255,6 +327,10 @@ fn convert(candidate: &Candidate) {
     if runtime.agent_mode() != v1::ChatAgentMode::Chat {
         return;
     }
+    let mode_epoch = *runtime
+        .chat_since
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let processes = processes::system();
     let seen = matches!(trigger, Trigger::Seen { .. });
     // Every look at tmux sees the same agents again: one that was left alone
@@ -274,6 +350,23 @@ fn convert(candidate: &Candidate) {
     let Some(agent) = find_agent(&processes, tag.pid, adapter_id) else {
         return;
     };
+    let awaiting_start = if let Trigger::Hooked {
+        occurred_at,
+        sequence,
+        ..
+    } = trigger
+    {
+        let Some(waiting) =
+            work().take_start(key, *sequence, *occurred_at, super::now_unix_millis())
+        else {
+            return;
+        };
+        agent
+            .start_stamp
+            .is_some_and(|stamp| waiting == Some((agent.pid, stamp)))
+    } else {
+        false
+    };
     if seen && work().declined.contains(&(key.clone(), agent.pid)) {
         return;
     }
@@ -282,9 +375,15 @@ fn convert(candidate: &Candidate) {
         age: agent.age,
         chat_mode_age: runtime.chat_mode_age(),
         announces: seen && provider.announces_start() && hook_installed(adapter_id),
+        awaiting_start,
     }) {
         Verdict::Replace => {}
         Verdict::Leave => return,
+        Verdict::AwaitStart => {
+            decline(key, agent.pid);
+            work().await_start(key, &agent, super::now_unix_millis());
+            return;
+        }
         Verdict::Decline => {
             decline(key, agent.pid);
             return;
@@ -308,7 +407,48 @@ fn convert(candidate: &Candidate) {
     };
     launch.program = program.to_vec();
     let prompt = std::mem::take(&mut launch.prompt);
-    if replace(&key.pane_id, provider.as_ref(), &agent, &launch, "").is_err() {
+    let guard = || {
+        use anyhow::{Context, ensure};
+        // Keep hook invalidation and mode changes serialized through respawn,
+        // after all launch preparation. Hooks arriving next belong to the
+        // replacement; an activity hook already ingested cancels conversion.
+        let work = work();
+        let mode = runtime.mode.lock().unwrap_or_else(PoisonError::into_inner);
+        ensure!(*mode == Some(v1::ChatAgentMode::Chat), "agent mode changed");
+        ensure!(
+            *runtime
+                .chat_since
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                == mode_epoch,
+            "agent mode changed during conversion"
+        );
+        if let Trigger::Hooked {
+            sequence,
+            occurred_at,
+            ..
+        } = trigger
+        {
+            ensure!(
+                work.current_start(key, *sequence, *occurred_at, super::now_unix_millis()),
+                "startup was superseded"
+            );
+        }
+        let current_tag = pane::read(&key.pane_id)
+            .filter(|tag| tag.adapter.is_empty())
+            .context("the terminal pane was replaced")?;
+        let current =
+            find_agent(&processes, current_tag.pid, adapter_id).context("the agent exited")?;
+        ensure!(
+            current.pid == agent.pid
+                && agent.start_stamp.is_some()
+                && current.start_stamp == agent.start_stamp
+                && current.argv == agent.argv,
+            "the agent process was replaced"
+        );
+        Ok((work, mode))
+    };
+    if replace(&key.pane_id, provider.as_ref(), &agent, &launch, "", guard).is_err() {
         if seen {
             decline(key, agent.pid);
         }
@@ -348,7 +488,7 @@ pub(super) fn restart_agent(
     let tag = pane::read(pane_id).context("the pane is gone")?;
     let agent = find_agent(&processes::system(), tag.pid, provider.adapter_id())
         .context("the agent is not running")?;
-    replace(pane_id, provider, &agent, launch, rewound_to)?;
+    replace(pane_id, provider, &agent, launch, rewound_to, || Ok(()))?;
     note_replaced(
         pane_id,
         provider.adapter_id(),
@@ -380,12 +520,13 @@ fn note_replaced(pane_id: &str, adapter_id: &str, launch: &Launch, session: &str
 
 /// Starts `launch` in the pane in place of `agent`, in its folder and with
 /// its environment, and tags the pane.
-fn replace(
+fn replace<G>(
     pane_id: &str,
     provider: &dyn ChatProvider,
     agent: &Agent,
     launch: &Launch,
     rewound_to: &str,
+    guard: impl FnOnce() -> anyhow::Result<G>,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
@@ -426,18 +567,20 @@ fn replace(
         command.piped.then_some(socket.as_path()),
         &command.argv,
     );
-    let started = pane::respawn(
-        pane_id,
-        &cwd.to_string_lossy(),
-        &line,
-        &[
-            (pane::ADAPTER, provider.adapter_id()),
-            (pane::SOCKET, &socket.to_string_lossy()),
-            (pane::SESSION, &command.session),
-            (pane::REWOUND_TO, rewound_to),
-            (pane::START, &pane::encode_launch(launch)),
-        ],
-    );
+    let started = guard().and_then(|_guard| {
+        pane::respawn(
+            pane_id,
+            &cwd.to_string_lossy(),
+            &line,
+            &[
+                (pane::ADAPTER, provider.adapter_id()),
+                (pane::SOCKET, &socket.to_string_lossy()),
+                (pane::SESSION, &command.session),
+                (pane::REWOUND_TO, rewound_to),
+                (pane::START, &pane::encode_launch(launch)),
+            ],
+        )
+    });
     if started.is_err() {
         let _ = std::fs::remove_file(&environment_path);
     }
@@ -488,6 +631,7 @@ struct Agent {
     argv: Vec<String>,
     /// How long ago it started, when that could be read.
     age: Option<Duration>,
+    start_stamp: Option<u64>,
 }
 
 /// The pane's agent: the process nearest the pane's own that is one of
@@ -509,6 +653,7 @@ fn find_agent(processes: &impl Processes, root_pid: u32, adapter_id: &str) -> Op
             return (adapter.kind() == adapter_id).then(|| Agent {
                 pid,
                 age: processes.age(pid),
+                start_stamp: processes.start_stamp(pid),
                 argv,
             });
         }
@@ -686,6 +831,7 @@ mod tests {
             age: age.map(seconds),
             chat_mode_age: mode.map(seconds),
             announces,
+            awaiting_start: false,
         };
         // Seen: young, started after Chat mode came on, and with no hook to
         // say more.
@@ -707,7 +853,7 @@ mod tests {
         );
         assert_eq!(
             verdict(&facts(true, Some(2), Some(600), true)),
-            Verdict::Decline
+            Verdict::AwaitStart
         );
         // Chat mode was turned on a second ago; the agent is older.
         assert_eq!(
@@ -744,6 +890,78 @@ mod tests {
         for source in ["clear", "compact", ""] {
             assert!(!is_start(source), "{source}");
         }
+    }
+
+    #[test]
+    fn delayed_startup_is_allowed_only_for_an_observed_launch_in_the_same_mode() {
+        let mut facts = Facts {
+            seen: false,
+            age: Some(Duration::from_secs(90)),
+            chat_mode_age: Some(Duration::from_secs(600)),
+            announces: true,
+            awaiting_start: true,
+        };
+        assert_eq!(verdict(&facts), Verdict::Replace);
+        facts.awaiting_start = false;
+        assert_eq!(verdict(&facts), Verdict::Leave);
+        facts.awaiting_start = true;
+        facts.chat_mode_age = Some(Duration::from_secs(10));
+        assert_eq!(verdict(&facts), Verdict::Leave);
+        facts.chat_mode_age = Some(Duration::from_secs(600));
+        facts.age = None;
+        assert_eq!(verdict(&facts), Verdict::Leave);
+        assert!(!hook_is_fresh(1, 20_000));
+        assert!(!hook_is_fresh(0, 1));
+        assert!(hook_is_fresh(19_999, 20_000));
+    }
+
+    #[test]
+    fn startup_waiting_is_bound_to_the_process_and_cancelled_by_activity() {
+        let key = PaneKey {
+            server_identity: "server".into(),
+            pane_id: "%1".into(),
+        };
+        let agent = Agent {
+            pid: 42,
+            argv: vec![],
+            age: Some(Duration::from_secs(2)),
+            start_stamp: Some(123),
+        };
+        let mut work = Work::default();
+        work.await_start(&key, &agent, 10_000);
+        assert_eq!(work.awaiting.get(&key), Some(&(42, 123)));
+        let startup = work.hook(&key, 90_000, true);
+        let newer = work.hook(&key, 90_001, true);
+        assert_eq!(work.take_start(&key, startup, 90_000, 90_002), None);
+        assert_eq!(
+            work.take_start(&key, newer, 90_001, 90_002),
+            Some(Some((42, 123)))
+        );
+        // Activity after launch preparation also cancels the final guard.
+        assert!(work.current_start(&key, newer, 90_001, 90_002));
+        work.hook(&key, 90_003, false);
+        assert!(!work.current_start(&key, newer, 90_001, 90_004));
+        // It is consumed once; a later resume cannot reuse it.
+        assert_eq!(work.awaiting.remove(&key), None);
+
+        let mut work = Work::default();
+        work.await_start(&key, &agent, 10_000);
+        let startup = work.hook(&key, 90_000, true);
+        work.hook(&key, 90_000, false);
+        assert!(!work.awaiting.contains_key(&key));
+        assert_ne!(
+            work.hooks[&key].0, startup,
+            "same-millisecond activity supersedes startup"
+        );
+        // A detection queued before the hook cannot reinstate eligibility.
+        work.await_start(&key, &agent, 90_001);
+        assert!(!work.awaiting.contains_key(&key));
+
+        // A fresh process in the same pane can wait again.
+        work.await_start(&key, &agent, 100_000);
+        let waiting = work.awaiting.remove(&key);
+        assert_ne!(waiting, Some((43, 123)), "different PID");
+        assert_ne!(waiting, Some((42, 124)), "reused PID");
     }
 
     /// The store is the process's: the sessions here are this test's own.
