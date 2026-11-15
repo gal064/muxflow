@@ -594,6 +594,42 @@ describe("TerminalController Send (§9.5)", () => {
     await expect(pending).resolves.toBeUndefined();
   });
 
+  it("sends slash-prefixed text as keys and leaves the slash menu open", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("/");
+
+    const keys = inputFrame(t)!;
+    expect(keys.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: false });
+    expect(Array.from(keys.request.data)).toEqual([0x2f]);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: keys.requestId }));
+    await expect(pending).resolves.toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(SUBMIT_DELAY_MS * 2);
+    expect(inputFrame(t)).toBeUndefined();
+  });
+
+  it("flushes pending text before a chip: slash as keys, other text as paste", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+
+    const slash = h.controller.flushText("/");
+    const keys = inputFrame(t)!;
+    expect(keys.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: false });
+    expect(Array.from(keys.request.data)).toEqual([0x2f]);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: keys.requestId }));
+    await expect(slash).resolves.toBeUndefined();
+
+    const text = h.controller.flushText("cd re");
+    const paste = inputFrame(t)!;
+    expect(paste.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: true });
+    expect(Array.from(paste.request.data)).toEqual(Array.from(new TextEncoder().encode("cd re")));
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: paste.requestId }));
+    await expect(text).resolves.toBeUndefined();
+  });
+
   it("sends an empty Send as one bare CR with no delay", async () => {
     const h = harness();
     const t = await h.connect();

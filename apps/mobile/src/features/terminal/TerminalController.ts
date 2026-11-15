@@ -303,23 +303,37 @@ export class TerminalController {
   }
 
   /**
-   * The input bar's Send (§9.5): the text as one paste, then a CR as a
-   * keystroke. The two are separate requests because the host never merges a
-   * paste with its neighbours, and the CR waits until the paste is acknowledged
-   * plus `SUBMIT_DELAY_MS`, so a composer that treats an Enter inside a fast
-   * burst as a newline sees the CR on its own and submits. A refused paste
-   * sends no CR. Empty text is a bare CR with no delay.
+   * Deliver pending input-bar text before a key chip. Slash-prefixed text is
+   * sent as keys, not a paste, so the agent's slash autocomplete opens; other
+   * text is one paste.
+   */
+  async flushText(text: string): Promise<void> {
+    const body = utf8Encode(text);
+    if (body.length === 0) return;
+    await this.sendInput(body, { paste: !text.startsWith("/") });
+  }
+
+  /**
+   * The input bar's Send (§9.5): slash-prefixed text goes as keys and leaves
+   * the agent's slash menu open (no CR), so chips can choose a command. Other
+   * text goes as one paste, then a CR as a keystroke. The two are separate
+   * requests because the host never merges a paste with its neighbours, and
+   * the CR waits until the paste is acknowledged plus `SUBMIT_DELAY_MS`, so
+   * a composer that treats an Enter inside a fast burst as a newline sees the
+   * CR on its own and submits. A refused paste sends no CR. Empty text is a
+   * bare CR with no delay.
    *
    * Deliberately not gated on `stopped`: a Back during the gap must still
    * deliver the CR, or the pasted text sits unsubmitted in the composer.
    */
   async submitText(text: string): Promise<void> {
     const body = utf8Encode(text);
+    const slash = text.startsWith("/");
     if (body.length > 0) {
-      await this.sendInput(body, { paste: true });
-      await new Promise<void>((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
+      await this.sendInput(body, { paste: !slash });
+      if (!slash) await new Promise<void>((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
     }
-    await this.sendInput(CR);
+    if (!slash) await this.sendInput(CR);
   }
 
   /**
