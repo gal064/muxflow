@@ -724,6 +724,8 @@ pub(super) struct Claude {
     reader: Reader,
     rewind: Option<Rewind>,
     notices: u64,
+    /// Final assistant text already displayed in the current turn.
+    turn_text: BTreeSet<String>,
 }
 
 type Output = Out<Job>;
@@ -1199,8 +1201,11 @@ impl Claude {
                 "" => "The turn ended with an error.",
                 text => text,
             };
-            self.notice(text, out);
+            if !self.turn_text.contains(text) {
+                self.notice(text, out);
+            }
         }
+        self.turn_text.clear();
         self.publish_state(out);
         // No hook of the agent's says that a turn was stopped.
         if stopped && !waited && self.turn() == Turn::Idle {
@@ -1494,6 +1499,7 @@ impl Dialect for Claude {
             self.rewind = None;
         }
         self.reader = Reader::default();
+        self.turn_text.clear();
         // A session started under a name goes by it.
         out.name(&self.launch.name);
         // A request the agent waited on is asked again when it answers:
@@ -1526,6 +1532,9 @@ impl Dialect for Claude {
             "stream_event" if !nested => self.stream_event(&message, out),
             "assistant" if !nested => {
                 for item in self.reader.assistant(&message) {
+                    if item.kind == i32::from(Kind::Assistant) {
+                        self.turn_text.insert(item.text.clone());
+                    }
                     out.publish(Change::Item(item));
                 }
             }
