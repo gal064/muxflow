@@ -48,13 +48,21 @@ tmux -L "$ADE_TMUX_SOCKET_NAME" -f /dev/null new-session -d -s native-before 'sl
 muxflow >"$MUXFLOW_NATIVE_EVIDENCE/app.log" 2>&1 &
 app_pid=$!
 window=
+# X11 publishes the window and PID before mapping finishes. A failed capture
+# during startup is not yet a rendering failure; the bounded loop below still
+# requires a viewable window with nonuniform pixels.
+capture_window() {
+  xwininfo -id "$window" | grep -q 'Map State: IsViewable' &&
+    timeout 5 import -window "$window" "$1"
+}
 for attempt in $(seq 1 30); do
   kill -0 "$app_pid" || { cat "$MUXFLOW_NATIVE_EVIDENCE/app.log"; exit 1; }
   window=$(xwininfo -root -tree | awk '/"Muxflow"/ {print $1; exit}')
   if [[ -n "$window" ]] && xprop -id "$window" _NET_WM_PID | grep -q "= $app_pid$"; then
-    timeout 5 import -window "$window" "$MUXFLOW_NATIVE_EVIDENCE/first.png"
-    colors=$(identify -format '%k' "$MUXFLOW_NATIVE_EVIDENCE/first.png")
-    if (( colors >= 32 )); then break; fi
+    if capture_window "$MUXFLOW_NATIVE_EVIDENCE/first.png"; then
+      colors=$(identify -format '%k' "$MUXFLOW_NATIVE_EVIDENCE/first.png")
+      if (( colors >= 32 )); then break; fi
+    fi
   fi
   sleep 1
 done
@@ -66,12 +74,12 @@ fi
 # Wait for the initial workspace snapshot, then compare only the sidebar's
 # workspace region: clocks and connection latency elsewhere cannot pass this.
 sleep 3
-timeout 5 import -window "$window" "$MUXFLOW_NATIVE_EVIDENCE/before.png"
+capture_window "$MUXFLOW_NATIVE_EVIDENCE/before.png"
 convert "$MUXFLOW_NATIVE_EVIDENCE/before.png" -crop 300x250+0+40 +repage "$MUXFLOW_NATIVE_EVIDENCE/before-sidebar.png"
 tmux -L "$ADE_TMUX_SOCKET_NAME" rename-session -t native-before REDRAW-confirmed
 for attempt in $(seq 1 15); do
   sleep 1
-  timeout 5 import -window "$window" "$MUXFLOW_NATIVE_EVIDENCE/after.png"
+  if ! capture_window "$MUXFLOW_NATIVE_EVIDENCE/after.png"; then continue; fi
   convert "$MUXFLOW_NATIVE_EVIDENCE/after.png" -crop 300x250+0+40 +repage "$MUXFLOW_NATIVE_EVIDENCE/after-sidebar.png"
   if ! compare -metric AE "$MUXFLOW_NATIVE_EVIDENCE/before-sidebar.png" "$MUXFLOW_NATIVE_EVIDENCE/after-sidebar.png" null: 2>"$MUXFLOW_NATIVE_EVIDENCE/changed-pixels.txt"; then
     changed=$(cat "$MUXFLOW_NATIVE_EVIDENCE/changed-pixels.txt")
