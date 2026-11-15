@@ -95,6 +95,8 @@ package_root="$build_root/$package_name"
 mkdir -p "$package_root/bin" "$package_root/share/applications" "$package_root/share/icons/hicolor/256x256/apps"
 install -m 0755 "$binary_dir/muxflow-gpui" "$package_root/bin/muxflow"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host"
+node release/helper-artifact.mjs verify "$host_binary" "$arch"
+install -m 0644 "$host_binary.json" "$package_root/bin/muxflow-host.json"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host-linux-$arch"
 if [[ "$arch" == x86_64 && -n "${ADE_HOST_HELPER_AARCH64_OVERRIDE:-}" ]]; then
   install -m 0755 "$ADE_HOST_HELPER_AARCH64_OVERRIDE" "$package_root/bin/muxflow-host-linux-aarch64"

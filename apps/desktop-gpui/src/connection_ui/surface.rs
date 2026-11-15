@@ -102,7 +102,7 @@ impl ConnectionSurface {
                 state
                     .active_host_state()
                     .is_some_and(|host| host.phase != ConnectionPhase::Connected)
-                    && !state.adopting_first_server(),
+                    && !state.reconnecting_empty_host(),
                 matches!(
                     state.helper(),
                     HelperUpgradeState::Confirming { .. } | HelperUpgradeState::Upgrading { .. }

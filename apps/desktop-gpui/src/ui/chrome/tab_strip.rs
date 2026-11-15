@@ -30,7 +30,10 @@ use gpui_kit::{
 use crate::files::{icons::file_icon, wire::FileKind};
 use crate::ui::icons::Glyph;
 use crate::{
-    agents::view::{adapter_glyph, state_indicator},
+    agents::{
+        model::DisplayState,
+        view::{agent_mark, state_indicator},
+    },
     context_menu::{self, Entry, Item},
     dragdrop::{self, DropTarget, WorkspaceRef},
     fonts,
@@ -267,7 +270,8 @@ impl RenderOnce for TabStrip {
                         label.push(format!("Agent {}", state.word()));
                         dot = Some(*state);
                     }
-                    // The glyph slot holds the agent living in the tab.
+                    // The aggregate's winning agent supplies both the provider
+                    // and its docked state, matching the agents list.
                     let adapter = crate::workspaces::agents::agent_shell(cx)
                         .and_then(|shell| shell.window(&view.host, window_id))
                         .and_then(|agents| agents.attention.as_ref())
@@ -279,7 +283,19 @@ impl RenderOnce for TabStrip {
                                 .items_center()
                                 .gap(ui(3.))
                                 .children(glyph.take())
-                                .child(adapter_glyph(&adapter, palette.chrome_dim))
+                                .child(agent_mark(
+                                    &adapter,
+                                    dot.take().unwrap_or(DisplayState::Idle),
+                                    glyphs,
+                                    palette.chrome_dim,
+                                    if is_active {
+                                        palette.chrome_selected
+                                    } else {
+                                        palette.chrome_bg
+                                    },
+                                    false,
+                                    cx,
+                                ))
                                 .into_any_element(),
                         );
                     }
