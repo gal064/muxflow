@@ -22,6 +22,23 @@ Not in this work: terminal link fixes, pi chat (T066), open in editor (T067),
 cite into chat (T068), idle release, CPU/RAM monitor, per-session change
 tracking, a shared Codex server.
 
+The desktop remembers its latest successful explicit Terminal/Chat choice for
+new hosts. Before exposing a writable connection, it sends SET_MODE with
+`initialize_if_unset`: under the same lock as explicit changes, the host writes
+only when settings are absent and returns its effective mode. Saved choices
+(including Terminal) win; corrupt or unreadable settings fail visibly and are
+never overwritten as a fresh host. Reconnecting or reselecting a mode does not
+restart existing agents or reset the conversion epoch. There is no per-UI
+ownership or continuous synchronization between hosts. “Apply to all hosts”
+is an explicit confirmed batch over saved hosts: connected hosts are changed,
+offline or failed hosts are named in the result and can be retried with the
+same button. Nothing is queued for a later connection.
+
+The conditional field is additive. Previous mobile clients do not set modes,
+so current hosts preserve their behavior. Current mobile clients still do not
+send this field and work with previous hosts. Mode values and mobile operations
+are unchanged; this addition needs no protocol-major bump.
+
 ## 2. Rules that apply to every stream
 
 - Repo rules in `CLAUDE.md` hold: no compatibility arms, desktop and host change

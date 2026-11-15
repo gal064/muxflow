@@ -31,7 +31,9 @@ mod tests;
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
-use desktop_core::connection::chat::{ChatAction, ChatAgentMode, ChatRequest, ChatUsage};
+use desktop_core::connection::chat::{
+    ChatAction, ChatAgentMode, ChatRequest, ChatResponse, ChatUsage,
+};
 use gpui_kit::{AnyElement, App, Entity, Global, Pixels, Window};
 use tmux_control::Pane;
 
@@ -94,7 +96,31 @@ struct AgentModes {
     /// Whether the host makes chats, by profile.
     chat: HashMap<String, bool>,
     /// The change being sent, by profile.
-    changing: HashMap<String, bool>,
+    changing: HashMap<String, ModeChange>,
+    next_change: u64,
+    remembered_change: u64,
+    applying: bool,
+}
+
+#[derive(Clone)]
+struct ModeChange {
+    profile_id: String,
+    client_id: String,
+    epoch: u64,
+    restores: u64,
+    serial: u64,
+    chat: bool,
+}
+
+impl ModeChange {
+    fn current(&self, controller: &ConnectionController) -> bool {
+        controller.link(&self.profile_id).is_some_and(|link| {
+            link.client_id.as_deref() == Some(self.client_id.as_str())
+                && link.connection_epoch == self.epoch
+                && controller.link_restores(&self.profile_id) == self.restores
+                && link.host_state.phase == ConnectionPhase::Connected
+        })
+    }
 }
 
 impl Global for AgentModes {}
@@ -113,8 +139,15 @@ pub fn agent_mode(profile_id: &str, cx: &App) -> Option<bool> {
     modes
         .changing
         .get(profile_id)
-        .or_else(|| modes.chat.get(profile_id))
-        .copied()
+        .map(|change| change.chat)
+        .or_else(|| modes.chat.get(profile_id).copied())
+}
+
+/// The connection handshake's effective mode, before its client is writable.
+pub(crate) fn host_mode_received(profile_id: &str, chat: bool, cx: &mut App) {
+    cx.default_global::<AgentModes>()
+        .chat
+        .insert(profile_id.to_owned(), chat);
 }
 
 /// The `agentMode` of an agent snapshot.
@@ -134,48 +167,22 @@ pub fn set_agent_mode(chat: bool, cx: &mut App) {
         return;
     };
     let controller = chats.controller.clone();
-    let backend = chats.backend.clone();
-    let Some((profile_id, client_id)) = controller.read(cx).active_link().and_then(|link| {
-        (link.host_state.phase == ConnectionPhase::Connected)
-            .then(|| Some((link.profile_id.clone(), link.client_id.clone()?)))
-            .flatten()
-    }) else {
+    let profile_id = controller.read(cx).active_profile_id();
+    if cx.default_global::<AgentModes>().applying {
+        return;
+    }
+    let Some((change, answer)) = begin_mode_change(&profile_id, chat, &controller, cx) else {
         return;
     };
-    let mode = if chat {
-        ChatAgentMode::Chat
-    } else {
-        ChatAgentMode::Terminal
-    };
-    let request = ChatRequest {
-        action: ChatAction::SetMode.into(),
-        mode: mode.into(),
-        ..Default::default()
-    };
-    let answer = backend.chat_request(client_id, request);
-    cx.default_global::<AgentModes>()
-        .changing
-        .insert(profile_id.clone(), chat);
     publish(&controller, cx);
     cx.spawn(async move |cx| {
         let result = answer.await;
         cx.update(|cx| {
-            let modes = cx.default_global::<AgentModes>();
-            modes.changing.remove(&profile_id);
-            match result {
-                Ok(response) => {
-                    let chat = response.mode == i32::from(ChatAgentMode::Chat);
-                    modes.chat.insert(profile_id.clone(), chat);
-                }
-                Err(error) => controller.update(cx, |controller, cx| {
-                    controller.report_status(
-                        format!(
-                            "Could not change the agent mode: {}",
-                            pane::error_message(&error)
-                        ),
-                        cx,
-                    );
-                }),
+            if let Err(error) = finish_mode_change(&change, result, &controller, cx) {
+                controller.update(cx, |controller, cx| {
+                    controller
+                        .report_status(format!("Could not change the agent mode: {error}"), cx)
+                });
             }
             publish(&controller, cx);
         });
@@ -183,8 +190,175 @@ pub fn set_agent_mode(chat: bool, cx: &mut App) {
     .detach();
 }
 
+type ModeAnswer = futures::future::BoxFuture<'static, Result<ChatResponse, String>>;
+
+fn begin_mode_change(
+    profile_id: &str,
+    chat: bool,
+    controller: &Entity<ConnectionController>,
+    cx: &mut App,
+) -> Option<(ModeChange, ModeAnswer)> {
+    let link = controller.read(cx).link(profile_id)?;
+    if link.host_state.phase != ConnectionPhase::Connected {
+        return None;
+    }
+    let client_id = link.client_id.clone()?;
+    let epoch = link.connection_epoch;
+    let restores = controller.read(cx).link_restores(profile_id);
+    let backend = cx.try_global::<Chats>()?.backend.clone();
+    let modes = cx.default_global::<AgentModes>();
+    if modes.changing.contains_key(profile_id) {
+        return None;
+    }
+    modes.next_change += 1;
+    let change = ModeChange {
+        profile_id: profile_id.to_owned(),
+        client_id: client_id.clone(),
+        epoch,
+        restores,
+        serial: modes.next_change,
+        chat,
+    };
+    modes.changing.insert(profile_id.to_owned(), change.clone());
+    let answer = backend.chat_request(
+        client_id,
+        ChatRequest {
+            action: ChatAction::SetMode.into(),
+            mode: if chat {
+                ChatAgentMode::Chat
+            } else {
+                ChatAgentMode::Terminal
+            }
+            .into(),
+            ..Default::default()
+        },
+    );
+    Some((change, answer))
+}
+
+fn finish_mode_change(
+    change: &ModeChange,
+    result: Result<ChatResponse, String>,
+    controller: &Entity<ConnectionController>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let current = change.current(controller.read(cx));
+    let modes = cx.default_global::<AgentModes>();
+    if modes
+        .changing
+        .get(&change.profile_id)
+        .is_none_or(|pending| pending.serial != change.serial)
+    {
+        return Err("The host connection changed. Try again.".into());
+    }
+    modes.changing.remove(&change.profile_id);
+    if !current {
+        return Err("The host connection changed. Try again.".into());
+    }
+    let response = result.map_err(|error| pane::error_message(&error).to_owned())?;
+    let chat = match ChatAgentMode::try_from(response.mode) {
+        Ok(ChatAgentMode::Chat) => true,
+        Ok(ChatAgentMode::Terminal) => false,
+        _ => return Err("The host returned an invalid agent mode.".into()),
+    };
+    modes.chat.insert(change.profile_id.clone(), chat);
+    // Responses from different hosts can arrive in the opposite order to
+    // the user's choices. The latest successful choice stays the default.
+    if change.serial > modes.remembered_change {
+        modes.remembered_change = change.serial;
+        settings::remember_agent_mode(chat, cx);
+    }
+    Ok(())
+}
+
+/// An explicit one-time operation. Offline hosts are reported, never queued.
+pub(crate) fn confirm_apply_to_all(window: &mut Window, cx: &mut App) {
+    let Some(chats) = cx.try_global::<Chats>() else {
+        return;
+    };
+    let controller = chats.controller.clone();
+    let Some(chat) = agent_mode(&controller.read(cx).active_profile_id(), cx) else {
+        return;
+    };
+    let hosts = controller
+        .read(cx)
+        .profiles()
+        .iter()
+        .map(|host| (host.id.clone(), host.label.clone()))
+        .collect::<Vec<_>>();
+    let label = if chat { "Chat" } else { "Terminal" };
+    let names = hosts
+        .iter()
+        .map(|(_, label)| label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    crate::connection_ui::dialog::open_confirmation(crate::connection_ui::dialog::Confirmation {
+        title: "Apply to all hosts?",
+        detail: format!("New agents will open as {label} on: {names}. Agents already running stay as they are.").into(),
+        confirm_label: "Apply to all hosts",
+        destructive: false,
+        on_confirm: Box::new(move |_, cx| apply_to_hosts(chat, hosts.clone(), controller.clone(), cx)),
+    }, window, cx);
+}
+
+fn apply_to_hosts(
+    chat: bool,
+    hosts: Vec<(String, String)>,
+    controller: Entity<ConnectionController>,
+    cx: &mut App,
+) {
+    if cx.default_global::<AgentModes>().applying {
+        return;
+    }
+    cx.default_global::<AgentModes>().applying = true;
+    let mut pending = Vec::new();
+    let mut failures = Vec::new();
+    for (profile, label) in hosts {
+        match begin_mode_change(&profile, chat, &controller, cx) {
+            Some((change, answer)) => pending.push(async move { (label, change, answer.await) }),
+            None => failures.push(format!("{label}: not connected or a change is in progress")),
+        }
+    }
+    publish(&controller, cx);
+    cx.spawn(async move |cx| {
+        let answers = futures::future::join_all(pending).await;
+        cx.update(|cx| {
+            let mut applied = 0;
+            for (label, change, result) in answers {
+                match finish_mode_change(&change, result, &controller, cx) {
+                    Ok(()) => applied += 1,
+                    Err(error) => failures.push(format!("{label}: {error}")),
+                }
+            }
+            cx.default_global::<AgentModes>().applying = false;
+            let label = if chat { "Chat" } else { "Terminal" };
+            let mut message = format!("Applied {label} to {applied} hosts.");
+            if !failures.is_empty() {
+                message.push_str(&format!(" Could not apply to {}. Reconnect those hosts and choose Apply to all hosts again to retry.", failures.join("; ")));
+            }
+            controller.update(cx, |controller, cx| controller.report_status(message, cx));
+            publish(&controller, cx);
+        });
+    }).detach();
+}
+
 /// Tells Settings what the host on screen does, so its control follows.
 fn publish(controller: &Entity<ConnectionController>, cx: &mut App) {
+    let current = controller.read(cx);
+    let stale = cx
+        .try_global::<AgentModes>()
+        .map(|modes| {
+            modes
+                .changing
+                .iter()
+                .filter(|(_, change)| !change.current(current))
+                .map(|(profile, _)| profile.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for profile in stale {
+        cx.default_global::<AgentModes>().changing.remove(&profile);
+    }
     let controller = controller.read(cx);
     let profile_id = controller.active_profile_id();
     let connected = controller.active_link().is_some_and(|link| {
@@ -194,7 +368,7 @@ fn publish(controller: &Entity<ConnectionController>, cx: &mut App) {
         chat: agent_mode(&profile_id, cx).filter(|_| connected),
         changing: cx
             .try_global::<AgentModes>()
-            .is_some_and(|modes| modes.changing.contains_key(&profile_id)),
+            .is_some_and(|modes| modes.applying || modes.changing.contains_key(&profile_id)),
     };
     if settings::agent_mode(cx) != mode {
         settings::publish_agent_mode(mode, cx);

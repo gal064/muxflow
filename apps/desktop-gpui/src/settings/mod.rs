@@ -133,6 +133,46 @@ pub fn update(change: impl FnOnce(&mut Prefs), window: &mut Window, cx: &mut App
         .detach();
 }
 
+/// Records only a successful explicit host choice, without changing other hosts.
+/// Shares the normal preference save snapshot so concurrent settings writes
+/// cannot restore an older default.
+pub(crate) fn remember_agent_mode(chat: bool, cx: &mut App) {
+    if cx.try_global::<Settings>().is_none() {
+        return;
+    }
+    let settings = cx.global_mut::<Settings>();
+    settings.prefs.new_host_chat = chat;
+    *settings.latest.lock().unwrap() = settings.prefs.clone();
+    let latest = settings.latest.clone();
+    let Some(core) = cx.try_global::<Core>() else {
+        return;
+    };
+    let store = core.app_state.clone();
+    let save = on_runtime(
+        async move {
+            update_app_state(&store, move |state| latest.lock().unwrap().apply_to(state)).await
+        },
+        cx.background_executor().clone(),
+    );
+    cx.spawn(async move |cx| {
+        let failure = match save.await {
+            Ok(Ok(())) => return,
+            Ok(Err(failure)) | Err(failure) => failure,
+        };
+        cx.update(|cx| {
+            if let Some(connection) = cx.try_global::<crate::connection_ui::ConnectionUi>() {
+                connection.0.clone().update(cx, |controller, cx| {
+                    controller.report_status(
+                        format!("Could not remember the agent preference: {failure}"),
+                        cx,
+                    );
+                });
+            }
+        });
+    })
+    .detach();
+}
+
 /// What the Connection tab says about "Set up agent status…": whether this
 /// host can be set up, already reports, or has not connected.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -78,6 +78,21 @@ impl FakeHost {
 }
 
 impl TerminalBackend for FakeHost {
+    fn chat_request(
+        &self,
+        _: String,
+        request: desktop_core::connection::chat::ChatRequest,
+    ) -> BoxFuture<'static, Result<desktop_core::connection::chat::ChatResponse, String>> {
+        assert!(request.initialize_if_unset);
+        async move {
+            Ok(desktop_core::connection::chat::ChatResponse {
+                mode: request.mode,
+                ..Default::default()
+            })
+        }
+        .boxed()
+    }
+
     fn spawn_engine(
         &self,
         outputs: std::sync::mpsc::Sender<terminal_engine::EngineOutput>,

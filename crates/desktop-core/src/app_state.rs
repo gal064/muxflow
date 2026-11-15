@@ -217,6 +217,9 @@ pub struct ShellPreferences {
     /// `None` is "never set": the frontend's defaults apply.
     #[serde(default)]
     pub agent_sounds: Option<AgentSoundPreferences>,
+    /// Last explicit agent choice on this desktop, used only for unconfigured hosts.
+    #[serde(default)]
+    pub new_host_chat: Option<bool>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -770,6 +773,7 @@ mod tests {
                     completed: AgentSoundMode::None,
                     volume: 0.45,
                 }),
+                new_host_chat: Some(true),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {

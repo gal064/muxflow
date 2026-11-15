@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -55,6 +55,27 @@ pub struct NativeNotifications {
 const MAX_PENDING_ROUTES: usize = 512;
 const CLOSED_ACTION_GRACE: Duration = Duration::from_secs(5);
 const LISTENER_START_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Installed executables live in <prefix>/lib/muxflow; an unpacked release
+/// lives in <prefix>/bin. Resolve from the executable so custom prefixes do
+/// not depend on the desktop session's icon search path.
+fn notification_icon(executable: Option<&Path>) -> String {
+    let packaged = executable.and_then(|exe| {
+        let directory = exe.parent()?;
+        let prefix = if directory.ends_with("lib/muxflow") {
+            directory.parent()?.parent()?
+        } else if directory.file_name()? == "bin" {
+            directory.parent()?
+        } else {
+            return None;
+        };
+        let icon = prefix.join("share/icons/hicolor/256x256/apps/muxflow.png");
+        icon.is_file()
+            .then(|| icon.to_str().map(str::to_owned))
+            .flatten()
+    });
+    packaged.unwrap_or_else(|| "muxflow".into())
+}
 
 struct PendingRoute {
     route: NotificationRoute,
@@ -280,15 +301,17 @@ impl NativeNotifications {
         } else {
             &[]
         };
+        let icon = notification_icon(std::env::current_exe().ok().as_deref());
+        let desktop_entry = Value::from("muxflow");
         let id = proxy
             .notify(
                 "Muxflow",
                 0,
-                "utilities-terminal",
+                &icon,
                 title,
                 body,
                 actions,
-                HashMap::new(),
+                HashMap::from([("desktop-entry", &desktop_entry)]),
                 15_000,
             )
             .map_err(|error| error.to_string())?;
@@ -310,11 +333,11 @@ impl NativeNotifications {
                 .notify(
                     "Muxflow",
                     id,
-                    "utilities-terminal",
+                    &icon,
                     title,
                     body,
                     &[],
-                    HashMap::new(),
+                    HashMap::from([("desktop-entry", &desktop_entry)]),
                     15_000,
                 )
                 .map_err(|error| error.to_string())?
@@ -403,6 +426,31 @@ impl Drop for ListenerHealthGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_logo_resolves_from_installed_and_unpacked_custom_prefixes() {
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path().join("custom prefix");
+        let icon = prefix.join("share/icons/hicolor/256x256/apps/muxflow.png");
+        std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        std::fs::write(&icon, b"packaged logo").unwrap();
+        for executable in ["lib/muxflow/muxflow", "bin/muxflow"] {
+            assert_eq!(
+                notification_icon(Some(&prefix.join(executable))),
+                icon.to_str().unwrap(),
+            );
+        }
+        std::fs::remove_file(icon).unwrap();
+        assert_eq!(
+            notification_icon(Some(&prefix.join("lib/muxflow/muxflow"))),
+            "muxflow"
+        );
+        assert_eq!(
+            notification_icon(Some(&prefix.join("target/debug/muxflow-gpui"))),
+            "muxflow"
+        );
+        assert_eq!(notification_icon(None), "muxflow");
+    }
 
     #[derive(Default)]
     struct TestSink {
