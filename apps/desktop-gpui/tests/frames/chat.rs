@@ -13,11 +13,11 @@ use desktop_core::{
     connection::{
         ConnectionSpec, ProfileStore,
         chat::{
-            ChatCapabilities, ChatCatalog, ChatChange, ChatCommand, ChatCommandKind,
-            ChatConnection, ChatEvent, ChatItem, ChatItemKind, ChatModel, ChatOption, ChatOptions,
-            ChatPendingRequest, ChatPermissionMode, ChatQuestion, ChatRequest, ChatRequestKind,
-            ChatResponse, ChatSnapshot, ChatSpeed, ChatState, ChatTool, ChatToolKind,
-            ChatToolStatus, ChatTurnState, ChatUsage,
+            ChatAction, ChatAgentMode, ChatCapabilities, ChatCatalog, ChatChange, ChatCommand,
+            ChatCommandKind, ChatConnection, ChatEvent, ChatItem, ChatItemKind, ChatModel,
+            ChatOption, ChatOptions, ChatPendingRequest, ChatPermissionMode, ChatQuestion,
+            ChatRequest, ChatRequestKind, ChatResponse, ChatSnapshot, ChatSpeed, ChatState,
+            ChatTool, ChatToolKind, ChatToolStatus, ChatTurnState, ChatUsage,
         },
         helper::HelperInstallReport,
     },
@@ -34,6 +34,7 @@ use muxflow_gpui::{
     connection_ui::{
         ConnectionUi,
         backend::{ConnectionBackend, EngineChannel, TerminalBackend},
+        connection_reducer::ConnectionPhase,
         controller::{AgentServiceFrame, ConnectionController, ConnectionEvent},
         helper_upgrade::RemoteHelperProbe,
     },
@@ -132,9 +133,27 @@ impl TerminalBackend for Host {
     fn chat_request(
         &self,
         _: String,
-        _: ChatRequest,
+        request: ChatRequest,
     ) -> BoxFuture<'static, Result<ChatResponse, String>> {
-        let refusal = self.0.lock().unwrap().open_refusal.take();
+        let action = ChatAction::try_from(request.action).expect("a known chat action");
+        if action == ChatAction::SetMode {
+            assert!(matches!(
+                ChatAgentMode::try_from(request.mode),
+                Ok(ChatAgentMode::Terminal | ChatAgentMode::Chat)
+            ));
+            return async move {
+                Ok(ChatResponse {
+                    mode: request.mode,
+                    ..Default::default()
+                })
+            }
+            .boxed();
+        }
+        let refusal = if action == ChatAction::Open {
+            self.0.lock().unwrap().open_refusal.take()
+        } else {
+            None
+        };
         async move { refusal.map_or(Ok(ChatResponse::default()), Err) }.boxed()
     }
 
@@ -542,6 +561,21 @@ impl Stage {
             frame(6, "connected", &[]),
             topology(1, 120),
         ]);
+        let controller = stage.controller.clone();
+        stage.cx.update(|cx| {
+            let link = controller
+                .read(cx)
+                .active_link()
+                .expect("the fixture's host");
+            assert!(
+                link.host_state.phase == ConnectionPhase::Connected
+                    && link.host_state.can_mutate
+                    && link.client_id.is_some(),
+                "chat frame fixture did not become writable after startup: {:?}: {}",
+                link.host_state.phase,
+                link.detail,
+            );
+        });
         stage
     }
 
