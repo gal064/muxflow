@@ -312,7 +312,7 @@ mod tests {
     fn a_command_line_that_was_cut_short_is_not_one() {
         assert!(started_with(&kept(3, b"claude\0--resume\0")).is_none());
         assert!(started_with(&kept(2, b"claude\0--resu")).is_none());
-        assert!(started_with(&kept(1, b"claude\0HOME=/Users/d")).is_none());
+        assert!(started_with(&kept(1, b"claude\0HOME=/tmp/fixture")).is_none());
         assert!(started_with(&kept(0, b"claude\0")).is_none());
         assert!(started_with(&kept(1, b"\xff\0")).is_none());
         assert!(started_with(&[1, 0]).is_none());
