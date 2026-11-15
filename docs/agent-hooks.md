@@ -1,7 +1,7 @@
-# Codex, Claude Code and pi hooks
+# Codex, Claude Code, pi and Hermes hooks
 
-Codex, Claude Code and pi are the agent adapters. The app can launch them or
-detect manually started processes.
+Codex, Claude Code, pi and Hermes are the agent adapters. The app can launch them
+or detect manually started processes.
 
 **Hooks are the primary source of lifecycle state.** For Codex, the daemon also
 watches each active child's exact turn in the transcript identified by that
@@ -68,7 +68,7 @@ The same installer is reachable without a UI, which is how it is exercised
 against a copy of a real configuration:
 
 ```
-muxflow-host hook status    [--adapter codex|claude-code|pi] [--home DIR] [--settings-path FILE]
+muxflow-host hook status    [--adapter codex|claude-code|pi|hermes] [--home DIR] [--settings-path FILE]
 muxflow-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
 muxflow-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
 ```
@@ -141,6 +141,39 @@ event name, the session ID and, on `Stop`, the final assistant message are
 sent. The message is left out when the run was aborted. Resume uses
 `pi --session <id>`, and branch uses `pi --fork <id> --name <source name> (fork)`.
 
+## Hermes
+
+Hermes shell hooks live in `~/.hermes/config.yaml` under `hooks:`. Muxflow merges
+one entry for each lifecycle event into that existing YAML file; it does not
+install a plugin or a separate extension. Comments and key order in the file are
+not preserved; unrelated settings are.
+
+Hermes asks for consent the first time each shell hook event runs and stores the
+answer in `~/.hermes/shell-hooks-allowlist.json`. Muxflow cannot pre-approve it.
+Review Hermes' prompt before confirming.
+
+| Hermes event | State |
+| --- | --- |
+| `on_session_start` | idle |
+| `pre_llm_call` | working |
+| `pre_tool_call` | working |
+| `post_tool_call` | working |
+| `pre_approval_request` | blocked |
+| `post_approval_response` | working |
+| `subagent_start` | working |
+| `subagent_stop` | working |
+| `agent_loop_stopped` | idle |
+| `on_session_end` | idle |
+
+`pre_llm_call` is Hermes' UserPromptSubmit equivalent. `on_session_end` fires per
+turn and is observer-only, so it marks idle without ending the pane's session.
+`agent_loop_stopped` marks an interrupted turn. A subagent finishing says the
+parent is still mid-turn, so `subagent_stop` stays working.
+
+Resume uses `hermes --resume <id>`. Branch opens a fresh named session with
+`hermes chat --continue <source name> (fork) --create-if-missing` because Hermes
+has no CLI fork flag.
+
 ## Events taken, and the gaps
 
 Claude Code: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
@@ -158,6 +191,12 @@ positive cache; on a cache miss it re-reads the request's turn context rather
 than caching a negative result. A permission request still unclassified after
 that check and `PreToolUse(request_user_input)` are the observed blocked
 signals. Recorded rather than faked.
+
+Hermes: `on_session_start`, `pre_llm_call`, `pre_tool_call`, `post_tool_call`,
+`pre_approval_request`, `post_approval_response`, `subagent_start`,
+`subagent_stop`, `agent_loop_stopped`, `on_session_end`. Its shell hook payload
+has no event ID or final assistant message, so voice mode gets no `Stop` content
+from Hermes.
 
 One Codex TUI may run more than one logical thread while all of their hook
 processes inherit the same `TMUX_PANE`. Pane ownership therefore does not
@@ -292,7 +331,7 @@ evidence alive. A temporarily unavailable daemon retains only bounded, atomic
 hook state.
 
 One field carries content, for voice mode and automations only: a `Stop` from
-either adapter forwards `last_assistant_message` — the agent's final message
+Codex or Claude Code forwards `last_assistant_message` — the agent's final message
 of the turn — cut at 32 KiB on a character boundary with
 `last_assistant_message_truncated` set when it was cut. The daemon reads it
 once on ingest and hands it to the voice service, to speak to a phone that
@@ -309,5 +348,6 @@ A host that never opened voice mode and runs no automations receives the field
 and drops it.
 
 For validation, use installed `codex --version` / `codex --help`,
-`claude --version` / `claude --help` and `pi --version` / `pi --help` only. Release QA must not send prompts or
+`claude --version` / `claude --help`, `pi --version` / `pi --help` and
+`hermes --version` / `hermes --help` only. Release QA must not send prompts or
 perform network-backed agent work with the user's accounts.
