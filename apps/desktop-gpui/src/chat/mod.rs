@@ -100,6 +100,7 @@ struct AgentModes {
     next_change: u64,
     remembered_change: u64,
     applying: bool,
+    apply_result: Option<String>,
 }
 
 #[derive(Clone)]
@@ -124,6 +125,10 @@ impl ModeChange {
 }
 
 impl Global for AgentModes {}
+
+pub(crate) fn apply_result(cx: &App) -> Option<&str> {
+    cx.try_global::<AgentModes>()?.apply_result.as_deref()
+}
 
 struct Chats {
     controller: Entity<ConnectionController>,
@@ -174,6 +179,7 @@ pub fn set_agent_mode(chat: bool, cx: &mut App) {
     let Some((change, answer)) = begin_mode_change(&profile_id, chat, &controller, cx) else {
         return;
     };
+    cx.default_global::<AgentModes>().apply_result = None;
     publish(&controller, cx);
     cx.spawn(async move |cx| {
         let result = answer.await;
@@ -311,6 +317,7 @@ fn apply_to_hosts(
         return;
     }
     cx.default_global::<AgentModes>().applying = true;
+    cx.default_global::<AgentModes>().apply_result = None;
     let mut pending = Vec::new();
     let mut failures = Vec::new();
     for (profile, label) in hosts {
@@ -336,7 +343,10 @@ fn apply_to_hosts(
             if !failures.is_empty() {
                 message.push_str(&format!(" Could not apply to {}. Reconnect those hosts and choose Apply to all hosts again to retry.", failures.join("; ")));
             }
-            controller.update(cx, |controller, cx| controller.report_status(message, cx));
+            cx.default_global::<AgentModes>().apply_result = Some(message.clone());
+            if !failures.is_empty() {
+                controller.update(cx, |controller, cx| controller.report_status(message, cx));
+            }
             publish(&controller, cx);
         });
     }).detach();

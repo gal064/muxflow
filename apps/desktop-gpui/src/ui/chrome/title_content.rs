@@ -192,6 +192,7 @@ impl RenderOnce for TitleContent {
         // Only while a newer release is published. No dismiss on purpose: it is
         // gone once the app is updated.
         let update = crate::update::available(cx).map(|update| {
+            let installing = crate::update::installing(cx);
             Button::new("title-update")
                 .danger()
                 .xsmall()
@@ -202,11 +203,20 @@ impl RenderOnce for TitleContent {
                 .rounded(ButtonRounded::Large)
                 .text_size(ui(10.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .label(format!("↑ Update {}", update.version))
-                .tooltip(format!(
-                    "Muxflow {} is available. Install the update.",
-                    update.version
-                ))
+                .label(if installing {
+                    format!("Updating {}…", update.version)
+                } else {
+                    format!("↑ Update {}", update.version)
+                })
+                .disabled(installing)
+                .tooltip(if installing {
+                    format!("Installing Muxflow {}…", update.version)
+                } else {
+                    format!(
+                        "Muxflow {} is available. Install the update.",
+                        update.version
+                    )
+                })
                 .on_click(|_, window, cx| crate::update::install(window, cx))
         });
 

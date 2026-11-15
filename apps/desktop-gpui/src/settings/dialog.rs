@@ -1013,6 +1013,7 @@ impl SettingsDialog {
                 off,
                 &theme::palette(cx),
             ))
+            .children(crate::chat::apply_result(cx).map(|message| hint(message.to_owned(), cx)))
     }
 
     fn appearance_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
