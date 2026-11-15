@@ -813,9 +813,7 @@ fn a_second_click_while_installing_is_ignored(cx: &mut TestAppContext) {
     cx.update(|cx| update::start_with(updater, cx));
     cx.run_until_parked();
     let click = |cx: &mut TestAppContext| {
-        with_window(handle, cx, |window, cx| {
-            click_label(window, "↑ Update 0.2.0", cx)
-        });
+        with_window(handle, cx, |window, cx| window.click("title-update", cx));
         cx.run_until_parked();
         with_window(handle, cx, |window, cx| window.has_active_dialog(cx))
     };
@@ -824,6 +822,12 @@ fn a_second_click_while_installing_is_ignored(cx: &mut TestAppContext) {
         window.click("confirmation-confirm", cx)
     });
     cx.run_until_parked();
+    with_window(handle, cx, |window, _| {
+        assert_eq!(
+            window.find_by_label("Updating 0.2.0…").disabled(),
+            Some(true)
+        );
+    });
     // The second click asks nothing and starts nothing.
     assert!(!click(cx));
     assert_eq!(installs.get(), 1);
