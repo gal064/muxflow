@@ -201,7 +201,7 @@ struct LinkRuntime {
     /// The bridge is reconnecting only to attach to the tmux server the first
     /// workspace started. Until it is back, or drops for real, that is no
     /// outage to show.
-    adopting_first_server: bool,
+    reconnecting_empty_host: bool,
     /// How many times the link came back to connected.
     restores: u64,
 }
@@ -498,12 +498,12 @@ impl ConnectionController {
         self.active_link().map(|link| &link.host_state)
     }
 
-    /// The active link is down only to attach to the tmux server its first
-    /// workspace started: not an outage the shell shows.
-    pub fn adopting_first_server(&self) -> bool {
+    /// The active link is adopting its first tmux server or returning to an
+    /// empty host after the last workspace closed: neither is an outage.
+    pub fn reconnecting_empty_host(&self) -> bool {
         self.runtimes
             .get(&self.active_profile_id())
-            .is_some_and(|runtime| runtime.adopting_first_server)
+            .is_some_and(|runtime| runtime.reconnecting_empty_host)
     }
 
     pub fn active_host_label(&self) -> String {
@@ -1938,19 +1938,21 @@ impl ConnectionController {
             json!({ "hostProfileId": profile_id, "event": kind, "detail": detail }),
         );
         let shown = user_facing_bridge_failure(&detail).to_owned();
-        // A host with no tmux server yet: the first workspace starts one, and
-        // the bridge reconnects to attach to it. That is not a lost link.
+        // Creating the first workspace and closing the last one both change
+        // the tmux server identity. Reconnecting clears identity-bound state;
+        // these normal lifecycle transitions are not lost network links.
         let connected = self
             .links
             .link(profile_id)
             .filter(|link| link.host_state.phase == ConnectionPhase::Connected);
-        let adopting = error == Some(SERVER_IDENTITY_CHANGED)
-            && connected.is_some_and(|link| {
-                link.host_state.server_identity.as_deref() == Some(NO_TMUX_SERVER)
-            });
+        let adopting = error == Some(desktop_core::connection::EMPTY_TMUX_SERVER_RECONNECT)
+            || (error == Some(SERVER_IDENTITY_CHANGED)
+                && connected.is_some_and(|link| {
+                    link.host_state.server_identity.as_deref() == Some(NO_TMUX_SERVER)
+                }));
         let was_connected = connected.is_some() && !adopting;
         if let Some(runtime) = self.runtimes.get_mut(profile_id) {
-            runtime.adopting_first_server = adopting;
+            runtime.reconnecting_empty_host = adopting;
         }
         let active = self.is_active(profile_id);
         // An error while the link is up is the link dropping under the app:
@@ -2128,7 +2130,7 @@ impl ConnectionController {
         }
         if phase == ConnectionPhase::Connected {
             if let Some(runtime) = self.runtimes.get_mut(profile_id) {
-                runtime.adopting_first_server = false;
+                runtime.reconnecting_empty_host = false;
             }
             self.dispatch(HostLinksAction::Detail {
                 profile_id: profile_id.to_owned(),

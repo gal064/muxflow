@@ -47,11 +47,20 @@ const ROUTINE: &[&str] = &[
     "Directory rename completed.",
     "Directory delete completed.",
     "Native notification shown without click actions; in-app attention remains available.",
+    "Recommended tmux window naming applied to this host's tmux server.",
+    "automations.json changed on the host; the list is reloaded.",
+    "Notification topology changed while focusing; refreshing once before resolving the exact destination…",
+    "Saved shell state was reset; the invalid original was preserved for recovery.",
+    "Recovered host profiles were reset to Local; the invalid original remains preserved.",
 ];
 
 // Exact success receipts only: a partial close must still explain what failed.
 static CLOSED_TABS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^Closed \d+ tabs?\.$").expect("a valid pattern"));
+
+static REVIEWED_HOOKS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^.+ reviewed hooks (installed|removed)\.$").expect("a valid pattern")
+});
 
 /// Ordinary progress with a variable tail.
 const ROUTINE_PREFIXES: &[&str] = &[
@@ -63,6 +72,10 @@ const ROUTINE_PREFIXES: &[&str] = &[
     "Launching ",
     "Resuming ",
     "Branching ",
+    "Agent status hooks installed on ",
+    "Updated the agent status hooks for ",
+    "Markdown link: ",
+    "Snoozed ",
 ];
 
 /// Bookkeeping that fails as a consequence of something already reported, such
@@ -99,6 +112,7 @@ pub fn notice_for_status(message: &str) -> Option<StatusNotice> {
     if message.is_empty()
         || ROUTINE.contains(&message)
         || CLOSED_TABS.is_match(message)
+        || REVIEWED_HOOKS.is_match(message)
         || ROUTINE_PREFIXES
             .iter()
             .any(|prefix| message.starts_with(prefix))
@@ -274,6 +288,42 @@ mod tests {
             "   ",
         ] {
             assert_eq!(severity(message), None, "{message:?}");
+        }
+    }
+
+    #[test]
+    fn housekeeping_is_quiet_without_hiding_failures_or_requested_notifications() {
+        for message in [
+            "Recommended tmux window naming applied to this host's tmux server.",
+            "Agent status hooks installed on Local.",
+            "Updated the agent status hooks for Codex on this host.",
+            "Claude Code reviewed hooks removed.",
+            "automations.json changed on the host; the list is reloaded.",
+            "Notification topology changed while focusing; refreshing once before resolving the exact destination…",
+            "Markdown link: #section",
+            "Snoozed Codex: tomorrow.",
+            "Saved shell state was reset; the invalid original was preserved for recovery.",
+        ] {
+            assert_eq!(severity(message), None, "{message}");
+        }
+        for message in [
+            "Recommended tmux window naming was not applied: permission denied",
+            "Could not install the agent status hooks on Local.",
+            "Could not update the agent status hooks for Codex on this host.",
+            "Could not reset saved shell state: disk full",
+            "Nothing earlier to go back to.",
+            "Nothing later to go forward to.",
+            "Download queued: /repo/file",
+            "Download preflighting: /repo/file",
+            "Download running: /repo/file",
+            "Download verifying: /repo/file",
+            "Download complete: /Downloads/file",
+            "Download failed: /repo/file",
+            "File paste requires a live terminal connection.",
+            "Wait for the current terminal transfer batch to finish.",
+            "Could not cancel the upload: disconnected",
+        ] {
+            assert!(severity(message).is_some(), "{message}");
         }
     }
 

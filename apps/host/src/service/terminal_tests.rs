@@ -76,7 +76,11 @@ fn a_sizing_claim_stops_waiting_at_its_deadline() {
 
 fn long_lived_attachment_command() -> std::process::Command {
     let mut command = std::process::Command::new("sh");
-    command.args(["-c", "exec sleep 30", "terminal-attachment-startup-fixture"]);
+    command.args([
+        "-c",
+        "printf '%%session-changed $1 fixture\\n'; exec sleep 30",
+        "terminal-attachment-startup-fixture",
+    ]);
     command
 }
 
@@ -127,7 +131,11 @@ impl RecordedClient {
 
     fn command(&self) -> std::process::Command {
         let mut command = std::process::Command::new("sh");
-        command.args(["-c", "exec cat > \"$0\"", &self.path.to_string_lossy()]);
+        command.args([
+            "-c",
+            "printf '%%session-changed $1 fixture\\n'; exec cat > \"$0\"",
+            &self.path.to_string_lossy(),
+        ]);
         command
     }
 
@@ -137,7 +145,7 @@ impl RecordedClient {
         let mut command = std::process::Command::new("sh");
         command.args([
             "-c",
-            "exec 3>&1; exec cat > \"$0\"",
+            "printf '%%session-changed $1 fixture\\n'; exec 3>&1; exec cat > \"$0\"",
             &self.path.to_string_lossy(),
         ]);
         command
@@ -197,6 +205,24 @@ fn clients_with_recorded_client(
     recorded: &RecordedClient,
 ) -> (TerminalClients, mpsc::Receiver<SequencerControl>) {
     clients_with_client_command(recorded, recorded.command())
+}
+
+#[test]
+fn startup_waits_for_attachment_before_sending_control_commands() {
+    let recorded = RecordedClient::new();
+    let mut command = std::process::Command::new("bash");
+    command.args([
+        "-c",
+        "if IFS= read -r -t 0.2 first; then printf 'EARLY:%s\\n' \"$first\" > \"$0\"; else printf '%%session-changed $1 fixture\\n'; fi; exec cat >> \"$0\"",
+        &recorded.path.to_string_lossy(),
+    ]);
+    let (mut clients, _events) = clients_with_client_command(&recorded, command);
+    clients.select_session("$1").unwrap();
+    recorded.wait_for(1, "refresh-client");
+    assert!(
+        !recorded.written().contains("EARLY:"),
+        "capture and sizing commands must wait for the control client to attach"
+    );
 }
 
 fn clients_with_client_command(

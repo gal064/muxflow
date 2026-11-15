@@ -39,6 +39,11 @@ pub fn available(cx: &App) -> Option<AvailableUpdate> {
     cx.try_global::<Update>()?.available.clone()
 }
 
+pub fn installing(cx: &App) -> bool {
+    cx.try_global::<Update>()
+        .is_some_and(|update| update.installing)
+}
+
 /// The real check and install. Called from [`crate::app::run`] only, so a test
 /// window never reaches the network.
 pub fn start(cx: &mut App) {
@@ -117,7 +122,7 @@ fn run_install(update: AvailableUpdate, cx: &mut App) {
         return;
     }
     let install = state.updater.install.clone();
-    crate::editor::report(format!("Updating to Muxflow {}…", update.version), cx);
+    cx.refresh_windows();
     // Before anything is replaced: a save that fails here leaves the app as it was.
     let flush = crate::editor::flush_all(cx);
     cx.spawn(async move |cx| {
@@ -127,6 +132,7 @@ fn run_install(update: AvailableUpdate, cx: &mut App) {
         };
         cx.update(|cx| {
             cx.global_mut::<Update>().installing = false;
+            cx.refresh_windows();
             match result {
                 // Quitting goes through the normal save path; the exit relaunches.
                 Ok(()) => crate::editor::quit(cx),
