@@ -506,8 +506,19 @@ impl ChatRuntime {
             })
     }
 
-    /// Stores the host's agent mode. The next agent snapshot carries it.
+    /// Stores the host's agent mode. Re-selecting it leaves the conversion epoch intact.
     pub(crate) fn set_agent_mode(&self, mode: v1::ChatAgentMode) -> Result<(), ChatError> {
+        self.configure_agent_mode(mode, false).map(|_| ())
+    }
+
+    /// The first desktop initializes a genuinely new host; a saved choice wins.
+    /// Read and write share the explicit setter's lock, so concurrent clients
+    /// cannot overwrite one another's successful initialization.
+    pub(crate) fn configure_agent_mode(
+        &self,
+        mode: v1::ChatAgentMode,
+        initialize_if_unset: bool,
+    ) -> Result<v1::ChatAgentMode, ChatError> {
         let agent_mode = match mode {
             v1::ChatAgentMode::Terminal => "terminal",
             v1::ChatAgentMode::Chat => "chat",
@@ -519,6 +530,48 @@ impl ChatRuntime {
             }
         };
         let mut stored = self.mode.lock().unwrap_or_else(PoisonError::into_inner);
+        if initialize_if_unset {
+            match std::fs::read(&self.settings_path) {
+                Ok(bytes) => {
+                    let settings: Settings = serde_json::from_slice(&bytes).map_err(|error| {
+                        ChatError::new(
+                            "chat_mode_not_loaded",
+                            format!("The saved agent mode could not be read: {error}"),
+                        )
+                    })?;
+                    let saved = match settings.agent_mode.as_str() {
+                        "terminal" => v1::ChatAgentMode::Terminal,
+                        "chat" => v1::ChatAgentMode::Chat,
+                        _ => {
+                            return Err(ChatError::new(
+                                "chat_mode_not_loaded",
+                                "The saved agent mode is invalid.",
+                            ));
+                        }
+                    };
+                    *stored = Some(saved);
+                    return Ok(saved);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(ChatError::new(
+                        "chat_mode_not_loaded",
+                        format!("The saved agent mode could not be read: {error}"),
+                    ));
+                }
+            }
+        }
+        let previous = (*stored).or_else(|| {
+            load_sidecar::<Settings>(&self.settings_path, SETTINGS_LABEL)
+                .ok()
+                .map(|settings| {
+                    if settings.agent_mode == "chat" {
+                        v1::ChatAgentMode::Chat
+                    } else {
+                        v1::ChatAgentMode::Terminal
+                    }
+                })
+        });
         save_sidecar(
             &self.settings_path,
             SETTINGS_LABEL,
@@ -533,12 +586,14 @@ impl ChatRuntime {
             )
         })?;
         *stored = Some(mode);
-        *self
-            .chat_since
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) =
-            (mode == v1::ChatAgentMode::Chat).then(std::time::Instant::now);
-        Ok(())
+        if previous != Some(mode) {
+            *self
+                .chat_since
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) =
+                (mode == v1::ChatAgentMode::Chat).then(std::time::Instant::now);
+        }
+        Ok(mode)
     }
 }
 

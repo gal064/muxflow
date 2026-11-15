@@ -159,6 +159,8 @@ export interface ShellState {
   markdownAppearance: MarkdownAppearance;
   /** Agent notification sounds; absent until first changed, which is the defaults. */
   agentSounds?: AgentSoundPreferences;
+  /** Latest explicit desktop agent choice, used only for unconfigured hosts. */
+  newHostChat?: boolean;
   /** The host most recently picked in the New workspace dialog. */
   newWorkspaceHostProfileId?: string;
   /**
@@ -237,6 +239,7 @@ export const defaultShellState: ShellState = {
   uiScale: 1,
   markdownAppearance: "default",
   agentSounds: undefined,
+  newHostChat: undefined,
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
@@ -314,6 +317,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       uiScale: UI_SCALES.find((scale) => scale === shell?.uiScale) ?? defaultShellState.uiScale,
       markdownAppearance: isMarkdownAppearance(shell?.markdownAppearance) ? shell.markdownAppearance : defaultShellState.markdownAppearance,
       agentSounds: normalizeAgentSoundPreferences(shell?.agentSounds),
+      newHostChat: typeof shell?.newHostChat === "boolean" ? shell.newHostChat : undefined,
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
         : undefined,

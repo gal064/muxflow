@@ -57,7 +57,12 @@ fn dispatch(
         Action::Unspecified => return Err(invalid("Unknown chat action.")),
         Action::SetMode => {
             let mode = v1::ChatAgentMode::try_from(request.mode).unwrap_or_default();
-            runtime.set_agent_mode(mode)?;
+            let mode = if request.initialize_if_unset {
+                runtime.configure_agent_mode(mode, true)?
+            } else {
+                runtime.set_agent_mode(mode)?;
+                mode
+            };
             return Ok(v1::ChatResponse {
                 mode: mode.into(),
                 ..Default::default()

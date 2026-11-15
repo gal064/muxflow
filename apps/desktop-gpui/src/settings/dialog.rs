@@ -958,6 +958,38 @@ impl SettingsDialog {
                             .id("settings-agent-mode-group")
                             .role(Role::RadioGroup)
                             .aria_label("New agents open as")
+                            // The radio primitive does not emit a change for an
+                            // already selected choice. An explicit activation
+                            // still makes it the preference for future hosts.
+                            .on_click(move |_, _, cx| {
+                                if off {
+                                    return;
+                                }
+                                let mode = agent_mode(cx);
+                                if !mode.changing
+                                    && let Some(chat) = mode.chat
+                                {
+                                    crate::chat::set_agent_mode(chat, cx);
+                                }
+                            })
+                            .on_key_up(move |event, _, cx| {
+                                if off
+                                    || event.keystroke.modifiers.modified()
+                                    || !matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    return;
+                                }
+                                // An unchecked radio's synthesized click already
+                                // started its change before this ancestor bubbles.
+                                // Checked radios omit that callback, but an explicit
+                                // keyboard activation must remember their choice too.
+                                let mode = agent_mode(cx);
+                                if !mode.changing
+                                    && let Some(chat) = mode.chat
+                                {
+                                    crate::chat::set_agent_mode(chat, cx);
+                                }
+                            })
                             .child(
                                 RadioGroup::horizontal("settings-agent-mode")
                                     .children([radio("Terminal"), radio("Chat")])
@@ -972,6 +1004,15 @@ impl SettingsDialog {
                     )
                     .child(hint(agent_mode_hint(mode), cx)),
             )
+            .child(dialog::button(
+                Button::new("settings-agent-mode-all")
+                    .label("Apply to all hosts…")
+                    .disabled(off)
+                    .on_click(|_, window, cx| crate::chat::confirm_apply_to_all(window, cx)),
+                Action::Plain,
+                off,
+                &theme::palette(cx),
+            ))
     }
 
     fn appearance_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

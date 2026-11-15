@@ -316,6 +316,9 @@ message ChatRequest {
   ChatOptions options = 10;
   // SET_MODE.
   ChatAgentMode mode = 11;
+  // SET_MODE: write only when this host has no saved settings yet.
+  // The response always returns the effective host mode.
+  bool initialize_if_unset = 12;
 }
 
 message ChatResponse {

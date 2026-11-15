@@ -51,6 +51,22 @@ cd muxflow-*-linux-x86_64
 The desktop and `muxflow-host` helper are installed as siblings. Profiles and
 application state live outside the package directory and survive upgrades.
 
+### Blank window on an older software Vulkan driver
+
+The Debian 12 Mesa 22.3.6 software Vulkan driver can present a blank X11 window
+with the desktop's 32-bit visual, even when `vkcube` works. The same package
+renders correctly with Ubuntu 24.04's Mesa 25.2.8 Vulkan driver. Prefer an updated
+graphics stack. On a software-only test machine with Mesa OpenGL installed, this
+one-launch workaround was also verified:
+
+```sh
+VK_DRIVER_FILES=/dev/null LIBGL_ALWAYS_SOFTWARE=1 muxflow
+```
+
+This disables Vulkan for that process and requests software OpenGL; it is not a
+general hardware-rendering recommendation. OpenGL must be available. The app's
+normal renderer selection is unchanged.
+
 ## First connection
 
 For local use, start or retain any tmux server and select Local. For remote use,

@@ -92,6 +92,7 @@
       "completed": "subtle",
       "volume": 0.3
     },
+    "newHostChat": true,
     "newWorkspaceHostProfileId": "ssh-remote-linux",
     "defaultMarkdownView": "live",
     "windowGeometry": {
