@@ -425,7 +425,7 @@ fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {
     }
 }
 
-/// Runs the agent inside the user's interactive shell, the way a tab's shell
+/// Runs the agent inside the user's interactive login shell, the way a tab's shell
 /// starts. The daemon and the tmux server can hold a bare system `PATH`
 /// (`/usr/bin:/bin`) while the CLIs live in `~/.local/bin` or a node manager,
 /// which only the shell's startup files add. A bare `exec claude` there exits
@@ -444,7 +444,7 @@ fn agent_launch_argv(launch: LaunchSpec) -> [String; 3] {
         "/bin/sh".to_owned(),
         "-c".to_owned(),
         format!(
-            "exec \"${{SHELL:-/bin/sh}}\" -ic {}",
+            "exec \"${{SHELL:-/bin/sh}}\" -lic {}",
             shell_quote(&format!("exec {agent_command}"))
         ),
     ]
@@ -471,12 +471,14 @@ mod tests {
             program: "printf",
             arguments: vec!["%s|".into(), "a b".into(), "it's $(nope)".into()],
         });
-        assert!(command.starts_with("exec \"${SHELL:-/bin/sh}\" -ic "));
+        assert!(command.starts_with("exec \"${SHELL:-/bin/sh}\" -lic "));
         assert_eq!((shell.as_str(), flag.as_str()), ("/bin/sh", "-c"));
+        let home = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(shell)
             .arg(flag)
             .arg(&command)
             .env("SHELL", "/bin/sh")
+            .env("HOME", home.path())
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();
@@ -485,7 +487,7 @@ mod tests {
     }
 
     /// A tmux server started outside a login holds a bare system `PATH`, and
-    /// the agent's directory is only added by the shell's startup file.
+    /// the agent's directory is only added by the login profile, not bashrc.
     #[test]
     fn launched_agent_is_found_on_the_path_the_shell_startup_adds() {
         use std::os::unix::fs::PermissionsExt;
@@ -497,19 +499,31 @@ mod tests {
         std::fs::write(&agent, "#!/bin/sh\n: > \"$HOME/launched\"\n").unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(
-            home.path().join(".bashrc"),
+            home.path().join(".bash_profile"),
             "export PATH=\"$HOME/bin:$PATH\"\n",
         )
         .unwrap();
 
-        let socket = format!("ade-agent-launch-test-{}", std::process::id());
+        struct Server(std::path::PathBuf);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .arg("-S")
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let server = Server(home.path().join("tmux.sock"));
         let tmux = || {
             let mut command = std::process::Command::new("tmux");
             command
                 .env_remove("TMUX")
                 .env("HOME", home.path())
                 .env("SHELL", "/bin/bash")
-                .args(["-L", &socket, "-f", "/dev/null"]);
+                .arg("-S")
+                .arg(&server.0)
+                .args(["-f", "/dev/null"]);
             command
         };
         let started = tmux()
@@ -527,7 +541,6 @@ mod tests {
         while !launched.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let _ = tmux().arg("kill-server").output();
         assert!(launched.exists(), "the agent never started");
     }
 

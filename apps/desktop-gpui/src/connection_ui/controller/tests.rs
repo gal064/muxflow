@@ -1098,6 +1098,44 @@ fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
     assert_eq!(count(&statuses, VERDICT), 0);
 }
 
+#[gpui_kit::test]
+fn closing_the_last_workspace_is_no_lost_link(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
+    let statuses = harness.statuses(cx);
+    harness.publish(
+        cx,
+        0,
+        vec![
+            state_frame("connected"),
+            world("srv-qa", 1, &[("$0", "home")]),
+        ],
+    );
+    harness.publish(
+        cx,
+        0,
+        vec![error_frame(
+            desktop_core::connection::EMPTY_TMUX_SERVER_RECONNECT,
+        )],
+    );
+    assert!(
+        harness
+            .controller
+            .read_with(cx, |state, _| state.reconnecting_empty_host())
+    );
+    harness.publish(
+        cx,
+        0,
+        vec![state_frame("connected"), world("tmux:none", 2, &[])],
+    );
+    assert!(
+        !harness
+            .controller
+            .read_with(cx, |state, _| state.reconnecting_empty_host())
+    );
+    harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
+    assert_eq!(count(&statuses, VERDICT), 0);
+}
+
 /// Only that exact case is excused: a running server replaced, or any other
 /// drop on a host with no server, still counts toward the verdict.
 #[gpui_kit::test]
@@ -2039,6 +2077,42 @@ mod surface {
         harness.publish_visual(&mut visual, 0, error_frame(UNREACHABLE));
         harness.publish_visual(&mut visual, 0, state_frame("disconnected"));
         assert!(strip(&mut visual), "a real drop after it still shows");
+    }
+
+    #[gpui_kit::test]
+    fn closing_the_last_workspace_shows_no_outage_strip(cx: &mut TestAppContext) {
+        let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
+        let mut visual = open(cx, &harness);
+        let strip = |visual: &mut VisualTestContext| {
+            visual
+                .executor()
+                .advance_clock(Duration::from_millis(2 * STRIP_APPEAR_DELAY_MS));
+            visual.run_until_parked();
+            visual.update(|window, _| window.try_find_by_label("Reconnect").is_some())
+        };
+        harness.publish_visual(&mut visual, 0, state_frame("connected"));
+        harness.publish_visual(&mut visual, 0, world("srv-qa", 1, &[("$0", "home")]));
+        harness.publish_visual(
+            &mut visual,
+            0,
+            error_frame(desktop_core::connection::EMPTY_TMUX_SERVER_RECONNECT),
+        );
+        for phase in ["disconnected", "reconnecting"] {
+            harness.publish_visual(&mut visual, 0, state_frame(phase));
+            assert!(
+                !strip(&mut visual),
+                "an empty-host transition is not an outage"
+            );
+        }
+        harness.publish_visual(&mut visual, 0, state_frame("connected"));
+        harness.publish_visual(&mut visual, 0, world("tmux:none", 2, &[]));
+        assert!(!strip(&mut visual));
+        harness.publish_visual(&mut visual, 0, error_frame(UNREACHABLE));
+        harness.publish_visual(&mut visual, 0, state_frame("disconnected"));
+        assert!(
+            strip(&mut visual),
+            "a genuine failure on an empty host still shows"
+        );
     }
 
     #[gpui_kit::test]

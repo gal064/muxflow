@@ -45,6 +45,7 @@ for architecture in aarch64 x86_64; do
     continue
   fi
   [[ -x "$helper" ]]
+  node "$(dirname "$0")/../helper-artifact.mjs" verify "$helper" "$architecture"
   description=$(file "$helper")
   [[ "$description" == *ELF* ]]
   case "$architecture:$description" in

@@ -98,8 +98,8 @@ pub(super) fn launch(
                 &format!("{session_id}:{{end}}"),
                 "-c",
                 &escaped_format_literal(&cwd),
-                APP_SHELL,
             ]);
+            command.args(APP_SHELL);
             let ids = run_for_ids(command, &['@', '%'])?;
             (ids[0].clone(), ids[1].clone())
         }

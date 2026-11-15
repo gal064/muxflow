@@ -186,6 +186,7 @@ jobs:
           for arch in x86_64 aarch64; do
             package=muxflow-${{ needs.version.outputs.version }}-linux-$arch
             tar -xzf "$RUNNER_TEMP/linux/$package.tar.gz" -O "$package/bin/muxflow-host" > "$helpers/muxflow-host-linux-$arch"
+            tar -xzf "$RUNNER_TEMP/linux/$package.tar.gz" -O "$package/bin/muxflow-host.json" > "$helpers/muxflow-host-linux-$arch.json"
           done
           echo "MUXFLOW_LINUX_HELPERS_DIR=$helpers" >> "$GITHUB_ENV"
       - name: Install the signing certificate and notary key

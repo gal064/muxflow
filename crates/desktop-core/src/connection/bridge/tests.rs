@@ -51,6 +51,67 @@ fn event(sequence: u64) -> v1::Envelope {
 }
 
 #[test]
+fn only_a_truly_empty_snapshot_is_an_empty_server_transition() {
+    let client = Arc::new(TerminalClient::new());
+    let channel = TerminalEventChannel::new(
+        Uuid::new_v4(),
+        crate::platform::test_sink(|_| Ok(())),
+        Arc::clone(&client.delivery_window),
+    );
+    let failure = |snapshot: v1::Snapshot| {
+        process_event(
+            envelope(
+                0,
+                1,
+                Payload::Event(v1::HostEvent {
+                    kind: v1::EventKind::TopologySnapshot.into(),
+                    snapshot: Some(snapshot),
+                    ..Default::default()
+                }),
+            ),
+            0,
+            "server-a",
+            &channel,
+            &client,
+        )
+        .unwrap_err()
+    };
+    assert_eq!(
+        failure(v1::Snapshot {
+            server_identity: "tmux:none".into(),
+            ..Default::default()
+        }),
+        super::super::EMPTY_TMUX_SERVER_RECONNECT
+    );
+    for snapshot in [
+        v1::Snapshot {
+            server_identity: "server-b".into(),
+            ..Default::default()
+        },
+        v1::Snapshot {
+            server_identity: "tmux:none".into(),
+            sessions: vec![v1::Session::default()],
+            ..Default::default()
+        },
+        v1::Snapshot {
+            server_identity: "tmux:none".into(),
+            windows: vec![v1::Window::default()],
+            ..Default::default()
+        },
+        v1::Snapshot {
+            server_identity: "tmux:none".into(),
+            panes: vec![v1::Pane::default()],
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            failure(snapshot),
+            "tmux server identity changed; authoritative reconnect required"
+        );
+    }
+}
+
+#[test]
 fn initial_snapshot_barrier_supersedes_events_already_in_its_sequence() {
     assert!(!event_follows_snapshot_barrier(&event(40), 41));
     assert!(!event_follows_snapshot_barrier(&event(41), 41));

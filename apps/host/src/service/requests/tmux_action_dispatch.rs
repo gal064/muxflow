@@ -245,7 +245,6 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             let barrier = *barrier_report.lock().unwrap();
             match result {
                 Ok(Ok(mut outcome)) => {
-                    let selection_required = action_selects_session(action_kind);
                     let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
                     outcome.result.topology_generation = next_generation;
                     *topology_baseline.lock().unwrap() =
@@ -259,26 +258,25 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         next_generation,
                         outcome.server_identity,
                     );
-                    let mut success_response = Some(v1::Response {
+                    let success_response = v1::Response {
                         ok: true,
                         tmux_action_result: Some(outcome.result),
                         ..Default::default()
-                    });
-                    if selection_required {
-                        // This acknowledges that selection and geometry
-                        // reconciliation already landed. Put the ack directly
-                        // before its topology event on the one ordered
-                        // sequencer so the desktop can suppress its generic
-                        // visibility restatement before applying the snapshot.
-                        let depth = send_timed_response(
-                            control_tx,
-                            connection_epoch,
-                            request_id,
-                            success_response.take().expect("success response exists"),
-                        )
-                        .await;
-                        log_timing(flush_discover, execute_elapsed, barrier, depth, "ok");
-                    }
+                    };
+                    // Acknowledge the verified action before publishing its
+                    // topology. Closing the last session changes the server
+                    // identity to tmux:none; the desktop reconnects on that
+                    // snapshot and would discard an acknowledgment behind it
+                    // as an unknown outcome. Selection likewise needs its ack
+                    // first to avoid a redundant visibility restatement.
+                    let depth = send_timed_response(
+                        control_tx,
+                        connection_epoch,
+                        request_id,
+                        success_response,
+                    )
+                    .await;
+                    log_timing(flush_discover, execute_elapsed, barrier, depth, "ok");
                     let _ = event_tx
                         .send(SequencerControl::OrderedEvent(v1::HostEvent {
                             kind: v1::EventKind::TopologySnapshot.into(),
@@ -287,12 +285,6 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                             ..Default::default()
                         }))
                         .await;
-                    if let Some(response) = success_response {
-                        let depth =
-                            send_timed_response(control_tx, connection_epoch, request_id, response)
-                                .await;
-                        log_timing(flush_discover, execute_elapsed, barrier, depth, "ok");
-                    }
                 }
                 Ok(Err(error)) => {
                     let message = error.to_string();
