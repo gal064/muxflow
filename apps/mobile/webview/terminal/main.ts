@@ -170,10 +170,10 @@ async function init(fontSize: number): Promise<void> {
   // alternate screen: a mouse report when the TUI requested one, otherwise
   // an up/down cursor sequence. Keep stdin disabled at rest so the WebView
   // never becomes a second text-input surface; it is opened only around the
-  // synthetic wheel dispatch below.
-  let capturedWheelInput: string[] | undefined;
-  term.onData((data) => capturedWheelInput?.push(data));
-  term.onBinary((data) => capturedWheelInput?.push(data));
+  // synthetic wheel and tap dispatches below.
+  let capturedInput: string[] | undefined;
+  term.onData((data) => capturedInput?.push(data));
+  term.onBinary((data) => capturedInput?.push(data));
   // §7.6.1: reaching the top of the normal buffer asks the app for the
   // scrollback a screen-only seed left behind. The alternate screen has no
   // scrollback, and an empty buffer (nothing above the screen yet, or nothing
@@ -201,7 +201,7 @@ async function init(fontSize: number): Promise<void> {
       if (!element) return;
       const input: string[] = [];
       const wheelEvents = Math.min(Math.abs(rows), MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME);
-      capturedWheelInput = input;
+      capturedInput = input;
       term.options.disableStdin = false;
       try {
         // One line-mode wheel event per row preserves the controller's tuned
@@ -220,7 +220,7 @@ async function init(fontSize: number): Promise<void> {
         }
       } finally {
         term.options.disableStdin = true;
-        capturedWheelInput = undefined;
+        capturedInput = undefined;
       }
       if (input.length > 0) {
         post({ t: "input", b64: btoa(input.join("")) });
@@ -366,6 +366,34 @@ async function init(fontSize: number): Promise<void> {
     } finally {
       selectingLink = false;
     }
+  };
+  /**
+   * A stationary tap, as the pane's program should receive it.
+   *
+   * When a TUI has asked for mouse reporting — which is how OpenCode makes a
+   * collapsed thinking block open on click, and the desktop's real mouse gets
+   * it for free — xterm encodes the synthetic press/release as mouse reports
+   * on the input stream. That stream is only forwarded while captured, so
+   * without the wheel path's open-stdin-and-collect dance around this
+   * dispatch, the tap's reports would fall on the floor. With no program
+   * listening, the gesture stays exactly what it was: links and selection
+   * see the plain DOM events and nothing goes to stdin.
+   */
+  const dispatchTap = (point: { x: number; y: number }) => {
+    if (!term || term.modes.mouseTrackingMode === "none") {
+      dispatchMouseGesture(point, 1, false);
+      return;
+    }
+    const input: string[] = [];
+    capturedInput = input;
+    term.options.disableStdin = false;
+    try {
+      dispatchMouseGesture(point, 1, false);
+    } finally {
+      term.options.disableStdin = true;
+      capturedInput = undefined;
+    }
+    if (input.length > 0) post({ t: "input", b64: btoa(input.join("")) });
   };
   const selectLinkOrWord = (point: { x: number; y: number }) => {
     if (!term) return;
@@ -567,7 +595,7 @@ async function init(fontSize: number): Promise<void> {
     if (decision === "scroll") touchScroll.end(event.timeStamp);
     else if (decision === "tap" && latestTouch) {
       if (hadSelectionAtTouchStart) term?.clearSelection();
-      else dispatchMouseGesture(latestTouch, 1, false);
+      else dispatchTap(latestTouch);
     }
     touchOrigin = undefined;
     latestTouch = undefined;
