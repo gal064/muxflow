@@ -381,6 +381,7 @@ fn a_page_is_asked_again_when_a_change_to_it_was_missed() {
 struct HostState {
     sinks: Vec<Arc<dyn EventSink>>,
     chats: Vec<ChatRequest>,
+    mode_initializations: Vec<ChatRequest>,
     /// Answers for the chat requests to come, in order; then plain success.
     chat_answers: VecDeque<Result<ChatResponse, String>>,
     /// The next chat request is answered only once it is released.
@@ -520,6 +521,16 @@ impl TerminalBackend for FakeHost {
         _: String,
         request: ChatRequest,
     ) -> BoxFuture<'static, Result<ChatResponse, String>> {
+        if request.initialize_if_unset {
+            self.state().mode_initializations.push(request.clone());
+            return async move {
+                Ok(ChatResponse {
+                    mode: request.mode,
+                    ..Default::default()
+                })
+            }
+            .boxed();
+        }
         let mut state = self.state();
         state.chats.push(request);
         let answer = state
@@ -1251,7 +1262,11 @@ fn a_chat_is_closed_when_its_pane_goes(cx: &mut TestAppContext) {
 fn the_hosts_agent_mode_follows_its_snapshot_and_is_changed_by_request(cx: &mut TestAppContext) {
     let mut shell = shell(cx);
     let mode = |shell: &mut Shell| shell.visual.update(|_, cx| settings::agent_mode(cx));
-    assert_eq!(mode(&mut shell).chat, None, "the host has not said");
+    assert_eq!(
+        mode(&mut shell).chat,
+        Some(false),
+        "the handshake supplied the host mode"
+    );
     let controller = shell.controller.clone();
     shell.visual.update(|_, cx| {
         controller.update(cx, |_, cx| {
@@ -1722,4 +1737,225 @@ fn a_wide_chat_shows_its_details_beside_the_conversation(cx: &mut TestAppContext
     shell.settle();
     assert!(shell.shows("chat-details-card"));
     assert!(!shell.shows("chat-details-toggle"));
+}
+
+#[gpui_kit::test]
+fn only_a_successful_explicit_choice_becomes_the_default_for_new_hosts(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell
+        .visual
+        .update(|_, cx| assert!(!settings::get(cx).new_host_chat));
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+    shell.host.refuse_next("could not save host settings");
+    shell
+        .visual
+        .update(|_, cx| super::set_agent_mode(false, cx));
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+}
+
+#[gpui_kit::test]
+fn a_stale_explicit_mode_reply_cannot_change_the_remembered_preference(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.publish(vec![frame(6, "disconnected", &[])]);
+    shell.host.release();
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert!(!settings::get(cx).new_host_chat));
+    shell.publish(vec![frame(6, "connected", &[])]);
+    shell
+        .visual
+        .update(|_, cx| assert_eq!(settings::agent_mode(cx).chat, Some(false)));
+}
+
+#[gpui_kit::test]
+fn applying_to_all_hosts_reports_offline_hosts_without_queuing_changes(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let writer = messages.clone();
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        cx.subscribe(&controller, move |_, event, _| {
+            if let ConnectionEvent::Status(message) = event {
+                writer.lock().unwrap().push(message.clone());
+            }
+        })
+        .detach();
+    });
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| {
+        super::apply_to_hosts(
+            true,
+            vec![
+                ("local".into(), "Local".into()),
+                ("offline".into(), "Offline host".into()),
+            ],
+            controller,
+            cx,
+        )
+    });
+    shell.settle();
+    assert_eq!(shell.host.count(ChatAction::SetMode), 1);
+    assert!(
+        messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.contains("Applied Chat to 1 hosts")
+                && message.contains("Offline host: not connected"))
+    );
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+}
+
+#[gpui_kit::test]
+fn choosing_chat_on_local_initializes_the_next_new_remote_as_chat(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.settle();
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        controller.update(cx, |controller, cx| {
+            controller.add_host(cx);
+            controller.set_ssh_target("new-qa-host".into(), cx);
+            controller.connect(cx);
+        })
+    });
+    shell.settle();
+    let sink = shell.host.state().sinks.last().unwrap().clone();
+    sink.send(EventBody::Raw(frame(6, "connected", &[])))
+        .unwrap();
+    shell.settle();
+    let state = shell.host.state();
+    assert!(state.mode_initializations.len() >= 2);
+    assert_eq!(
+        state.mode_initializations.last().unwrap().mode,
+        i32::from(ChatAgentMode::Chat)
+    );
+}
+
+#[gpui_kit::test]
+fn agent_radios_remember_selected_keyboard_activation_without_duplicating_changes(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let controller = shell.controller.clone();
+    shell.visual.update(|window, cx| {
+        settings::dialog::open_with(settings::dialog::Tab::Agents, Some(controller), window, cx)
+    });
+    shell.settle();
+    fn focus_radio(shell: &mut Shell, index: usize) {
+        for _ in 0..30 {
+            if shell.visual.update(|window, _| {
+                window.within("settings-agent-mode").find(index).focused() == Some(true)
+            }) {
+                return;
+            }
+            shell.visual.update(|window, cx| window.focus_next(cx));
+            shell.settle();
+        }
+        panic!("radio did not receive focus");
+    }
+    focus_radio(&mut shell, 0);
+    for key in ["space", "enter"] {
+        shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+            mode: ChatAgentMode::Terminal.into(),
+            ..Default::default()
+        }));
+        let before = shell.host.count(ChatAction::SetMode);
+        shell.press(key);
+        assert_eq!(shell.host.count(ChatAction::SetMode), before + 1);
+        assert_eq!(
+            shell.host.last(ChatAction::SetMode).mode,
+            i32::from(ChatAgentMode::Terminal)
+        );
+    }
+    focus_radio(&mut shell, 1);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    let before = shell.host.count(ChatAction::SetMode);
+    shell.press("space");
+    assert_eq!(shell.host.count(ChatAction::SetMode), before + 1);
+    assert_eq!(
+        shell.host.last(ChatAction::SetMode).mode,
+        i32::from(ChatAgentMode::Chat)
+    );
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+    // Focus leaves the radio group. Activating Apply only opens its confirmation.
+    shell.visual.update(|window, cx| window.focus_next(cx));
+    shell.settle();
+    shell.press("space");
+    assert_eq!(shell.host.count(ChatAction::SetMode), before + 1);
+}
+
+#[gpui_kit::test]
+fn replies_from_different_hosts_do_not_reverse_the_latest_explicit_preference(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        controller.update(cx, |controller, cx| {
+            controller.add_host(cx);
+            controller.set_ssh_target("another-qa-host".into(), cx);
+            controller.connect(cx);
+        })
+    });
+    shell.settle();
+    let sink = shell.host.state().sinks.last().unwrap().clone();
+    sink.send(EventBody::Raw(frame(6, "connected", &[])))
+        .unwrap();
+    shell.settle();
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Terminal.into(),
+        ..Default::default()
+    }));
+    shell
+        .visual
+        .update(|_, cx| super::set_agent_mode(false, cx));
+    shell.settle();
+    shell.host.release();
+    shell.settle();
+    shell.visual.update(|_, cx| {
+        assert_eq!(super::agent_mode("local", cx), Some(true));
+        assert!(
+            !settings::get(cx).new_host_chat,
+            "the newer Terminal choice wins over the older delayed Chat reply"
+        );
+    });
 }

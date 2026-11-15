@@ -32,6 +32,16 @@ describe("persisted app state contract", () => {
       .toEqual([...Object.keys(defaultShellState), "windowGeometry"].sort());
   });
 
+  it("preserves the remembered agent choice without accepting malformed values", () => {
+    const choice = (newHostChat: unknown) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { newHostChat },
+    }).shell.newHostChat;
+    expect(choice(true)).toBe(true);
+    expect(choice(false)).toBe(false);
+    expect(choice(undefined)).toBeUndefined();
+    expect(choice("chat")).toBeUndefined();
+  });
+
   it("names every field of the two record types that also cross the boundary", () => {
     // `appTabs` carries nineteen fields and `workspaceUi` five. Pinning only
     // the shell object would have left the same silent-drop failure open on the

@@ -294,7 +294,7 @@ The parser is hand-written and adds no dependencies.
    (`resolved_start_directory`). If not, record the run as `failed`.
 2. Write the prompt to `automations/prompts/<id>-<n>.txt`.
 3. Create the tab in the background so it doesn't take focus:
-   `new-window -d -P -F "#{window_id} #{pane_id}" -t <session>: -c <cwd> <APP_SHELL>`.
+   `new-window -d -P -F "#{window_id} #{pane_id}" -t <session>: -c <cwd> /bin/sh -c 'exec "${SHELL:-/bin/sh}" -l'`.
 4. In one tmux call, name the tab `<name> #<n>` and set its window options:
    `@muxflow-automation <id>`, `@muxflow-automation-run <n>`,
    `@muxflow-name-locked 1`, `automatic-rename off`, `allow-rename off`.

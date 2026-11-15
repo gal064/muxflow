@@ -4,7 +4,11 @@ use tmux_agent_protocol::v1;
 use super::super::terminal::validate_tmux_id;
 
 const MAX_NAME_BYTES: usize = 200;
-pub(in crate::service) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
+// Pass a real argv to tmux: the user's default shell may be Fish, which cannot
+// parse the Bourne-shell expansion. Login initialization matches ordinary SSH
+// and loads profile-managed CLI paths before the interactive pane is ready.
+pub(in crate::service) const APP_SHELL: [&str; 3] =
+    ["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"];
 
 /// The whole `new-session` argv, built and judged before a session exists.
 ///
@@ -57,7 +61,7 @@ pub(in crate::service) fn configure_new_session(
             &format!("{}=", crate::service::tmux_config::CODEX_EMBEDDED_ENV),
         ]);
     }
-    command.arg(APP_SHELL);
+    command.args(APP_SHELL);
     Ok(())
 }
 
@@ -150,7 +154,7 @@ pub(super) fn configure_new_window(
         validate_name(&action.name)?;
         command.args(["-n", &escaped_format_literal(&action.name)]);
     }
-    command.arg(APP_SHELL);
+    command.args(APP_SHELL);
     Ok(())
 }
 
@@ -176,7 +180,7 @@ pub(super) fn configure_split(
     // back through `-c` would allow tmux format syntax in a directory name to
     // be reinterpreted and would race a cwd change between discovery/action.
     command.args(["-c", "#{pane_current_path}", "-t", &action.pane_id]);
-    command.arg(APP_SHELL);
+    command.args(APP_SHELL);
     Ok(())
 }
 
@@ -331,9 +335,179 @@ mod tests {
         assert!(validate_name("bad\nkill-server").is_err());
     }
 
+    /// Use the same minimal environment as an SSH-started helper. Every pane
+    /// creation path must load login-only CLI paths, preserve cwd and ignore a
+    /// user's tmux default-command. The argv envelope also works with Fish.
     #[test]
-    fn app_shell_executes_the_configured_shell_directly() {
-        assert_eq!(APP_SHELL, "exec \"${SHELL:-/bin/sh}\"");
+    fn created_panes_load_the_users_login_environment() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            process::Command,
+            time::{Duration, Instant},
+        };
+
+        struct Server(std::path::PathBuf);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .args(["-S"])
+                    .arg(&self.0)
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let tmux_path = Command::new("which").arg("tmux").output().unwrap();
+        assert!(tmux_path.status.success(), "tmux must be installed");
+        let tmux_path = String::from_utf8(tmux_path.stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let mut tested = 0;
+        for shell in [
+            "/bin/bash",
+            "/bin/zsh",
+            "/usr/bin/zsh",
+            "/usr/bin/fish",
+            "/opt/homebrew/bin/fish",
+            "/usr/local/bin/fish",
+            "/bin/sh",
+        ] {
+            if !std::path::Path::new(shell).is_file() {
+                continue;
+            }
+            tested += 1;
+            let home = tempfile::tempdir().unwrap();
+            let cwd = home.path().join("folder with ' quotes");
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&cwd).unwrap();
+            std::fs::create_dir(&bin).unwrap();
+            let agent = bin.join("muxflow-test-agent");
+            std::fs::write(
+                &agent,
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$1\" > \"$HOME/$2\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for file in [".profile", ".bash_profile", ".zprofile"] {
+                std::fs::write(home.path().join(file), "export PATH=\"$HOME/bin:$PATH\"\n")
+                    .unwrap();
+            }
+            let fish_dir = home.path().join(".config/fish");
+            std::fs::create_dir_all(&fish_dir).unwrap();
+            std::fs::write(
+                fish_dir.join("config.fish"),
+                "if status is-login\n set -gx PATH $HOME/bin $PATH\nend\n",
+            )
+            .unwrap();
+            let server = Server(home.path().join("tmux.sock"));
+            let tmux = || {
+                let mut command = Command::new(&tmux_path);
+                command
+                    .env_remove("TMUX")
+                    .env_remove("ZDOTDIR")
+                    .env("HOME", home.path())
+                    .env("XDG_CONFIG_HOME", home.path().join(".config"))
+                    .env("XDG_DATA_HOME", home.path().join(".local/share"))
+                    .env("SHELL", shell)
+                    .env("PATH", "/usr/bin:/bin")
+                    .args(["-S"])
+                    .arg(&server.0)
+                    .args(["-f", "/dev/null"]);
+                command
+            };
+            let mut create = tmux();
+            configure_new_session(
+                &mut create,
+                &v1::TmuxAction {
+                    directory: cwd.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+            let ids = run_for_ids(create, &['$', '@', '%']).unwrap();
+            let configured = tmux()
+                .args(["set-option", "-g", "default-command", "exit 42"])
+                .output()
+                .unwrap();
+            assert!(configured.status.success(), "{configured:?}");
+            let mut window = tmux();
+            configure_new_window(
+                &mut window,
+                &v1::TmuxAction {
+                    session_id: ids[0].clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let window_id = run_for_id(window, '@').unwrap();
+            let window_pane = tmux()
+                .args(["display-message", "-p", "-t", &window_id, "#{pane_id}"])
+                .output()
+                .unwrap();
+            assert!(window_pane.status.success(), "{window_pane:?}");
+            let window_pane = String::from_utf8(window_pane.stdout)
+                .unwrap()
+                .trim()
+                .to_owned();
+            let mut split = tmux();
+            configure_split(
+                &mut split,
+                v1::TmuxActionKind::SplitPaneRight,
+                &v1::TmuxAction {
+                    pane_id: window_pane.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let split_id = run_for_id(split, '%').unwrap();
+            for (index, pane) in [ids[2].as_str(), &window_pane, &split_id]
+                .into_iter()
+                .enumerate()
+            {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let pane_text = tmux()
+                        .args(["capture-pane", "-p", "-t", pane])
+                        .output()
+                        .unwrap();
+                    if !String::from_utf8_lossy(&pane_text.stdout).trim().is_empty() {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{shell} pane {pane} never showed a prompt"
+                    );
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                let marker = format!("launched-{index}");
+                let line = format!("muxflow-test-agent 'spaces $literal ; text' {marker}");
+                let sent = tmux()
+                    .args(["send-keys", "-t", pane, "-l", &line])
+                    .output()
+                    .unwrap();
+                assert!(sent.status.success(), "{sent:?}");
+                let sent = tmux()
+                    .args(["send-keys", "-t", pane, "Enter"])
+                    .output()
+                    .unwrap();
+                assert!(sent.status.success(), "{sent:?}");
+                let result = home.path().join(marker);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !result.exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                let result = std::fs::read_to_string(&result)
+                    .unwrap_or_else(|error| panic!("{shell} pane {pane}: {error}"));
+                let (actual_cwd, argument) = result.split_once('\n').unwrap();
+                assert_eq!(
+                    std::fs::canonicalize(actual_cwd).unwrap(),
+                    std::fs::canonicalize(&cwd).unwrap()
+                );
+                assert_eq!(argument, "spaces $literal ; text\n");
+            }
+        }
+        assert!(tested >= 2, "expected at least Bash and /bin/sh");
     }
 
     #[test]
@@ -363,7 +537,9 @@ mod tests {
                 "#{pane_current_path}",
                 "-t",
                 "%1",
-                APP_SHELL,
+                APP_SHELL[0],
+                APP_SHELL[1],
+                APP_SHELL[2],
             ]
         );
     }
@@ -520,7 +696,9 @@ mod tests {
                 "#{session_id} #{window_id} #{pane_id}",
                 "-s",
                 "checkout",
-                APP_SHELL,
+                APP_SHELL[0],
+                APP_SHELL[1],
+                APP_SHELL[2],
             ]
         );
     }
@@ -537,8 +715,14 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            args[args.len() - 3..],
-            ["-e", "CODEX_EXEC_SERVER_URL=", APP_SHELL]
+            args[args.len() - 5..],
+            [
+                "-e",
+                "CODEX_EXEC_SERVER_URL=",
+                APP_SHELL[0],
+                APP_SHELL[1],
+                APP_SHELL[2]
+            ]
         );
     }
 
@@ -613,7 +797,12 @@ mod tests {
     #[test]
     fn new_session_without_a_configured_directory_leaves_tmuxs_own_choice_alone() {
         let args = session_args(&v1::TmuxAction::default()).unwrap();
-        assert!(!args.iter().any(|argument| argument == "-c"), "{args:?}");
+        assert!(
+            !args[..args.len() - APP_SHELL.len()]
+                .iter()
+                .any(|argument| argument == "-c"),
+            "{args:?}"
+        );
     }
 
     /// `~` is the shape people type, and tmux does not expand it: without this
@@ -703,7 +892,9 @@ mod tests {
                 "$1",
                 "-n",
                 "new tab",
-                APP_SHELL,
+                APP_SHELL[0],
+                APP_SHELL[1],
+                APP_SHELL[2],
             ]
         );
     }

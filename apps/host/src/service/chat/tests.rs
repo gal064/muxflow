@@ -1630,6 +1630,104 @@ fn the_agent_mode_defaults_to_terminal_and_survives_a_restart() {
     assert_eq!(nowhere.agent_mode(), v1::ChatAgentMode::Terminal);
 }
 
+#[test]
+fn initializing_a_host_preserves_saved_choices_and_the_conversion_epoch() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    assert_eq!(
+        runtime
+            .configure_agent_mode(v1::ChatAgentMode::Chat, true)
+            .unwrap(),
+        v1::ChatAgentMode::Chat
+    );
+    let since = *runtime.chat_since.lock().unwrap();
+    assert!(since.is_some());
+    assert_eq!(
+        runtime
+            .configure_agent_mode(v1::ChatAgentMode::Terminal, true)
+            .unwrap(),
+        v1::ChatAgentMode::Chat
+    );
+    runtime.set_agent_mode(v1::ChatAgentMode::Chat).unwrap();
+    assert_eq!(*runtime.chat_since.lock().unwrap(), since);
+    runtime.set_agent_mode(v1::ChatAgentMode::Terminal).unwrap();
+    assert_eq!(
+        runtime
+            .configure_agent_mode(v1::ChatAgentMode::Chat, true)
+            .unwrap(),
+        v1::ChatAgentMode::Terminal
+    );
+    assert_eq!(
+        scripted_runtime(&directory).agent_mode(),
+        v1::ChatAgentMode::Terminal
+    );
+}
+
+#[test]
+fn reselecting_a_saved_mode_after_restart_does_not_reset_the_conversion_epoch() {
+    let directory = tempfile::tempdir().unwrap();
+    scripted_runtime(&directory)
+        .set_agent_mode(v1::ChatAgentMode::Chat)
+        .unwrap();
+    let restarted = scripted_runtime(&directory);
+    restarted.set_agent_mode(v1::ChatAgentMode::Chat).unwrap();
+    assert_eq!(*restarted.chat_since.lock().unwrap(), None);
+    assert_eq!(restarted.agent_mode(), v1::ChatAgentMode::Chat);
+}
+
+#[test]
+fn a_corrupt_or_unreadable_setting_is_never_initialized_as_a_new_host() {
+    let directory = tempfile::tempdir().unwrap();
+    for contents in ["{broken", "{}", r#"{"agentMode":"something"}"#] {
+        std::fs::write(directory.path().join("settings.json"), contents).unwrap();
+        let runtime = scripted_runtime(&directory);
+        assert_eq!(
+            runtime
+                .configure_agent_mode(v1::ChatAgentMode::Chat, true)
+                .unwrap_err()
+                .code,
+            "chat_mode_not_loaded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("settings.json")).unwrap(),
+            contents
+        );
+        assert_eq!(runtime.agent_mode(), v1::ChatAgentMode::Terminal);
+    }
+    std::fs::remove_file(directory.path().join("settings.json")).unwrap();
+    std::fs::create_dir(directory.path().join("settings.json")).unwrap();
+    assert_eq!(
+        scripted_runtime(&directory)
+            .configure_agent_mode(v1::ChatAgentMode::Chat, true)
+            .unwrap_err()
+            .code,
+        "chat_mode_not_loaded"
+    );
+}
+
+#[test]
+fn concurrent_desktops_agree_on_one_initial_host_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    std::thread::scope(|scope| {
+        let chat = scope.spawn(|| {
+            runtime
+                .configure_agent_mode(v1::ChatAgentMode::Chat, true)
+                .unwrap()
+        });
+        let terminal = scope.spawn(|| {
+            runtime
+                .configure_agent_mode(v1::ChatAgentMode::Terminal, true)
+                .unwrap()
+        });
+        assert_eq!(chat.join().unwrap(), terminal.join().unwrap());
+    });
+    assert_eq!(
+        runtime.agent_mode(),
+        scripted_runtime(&directory).agent_mode()
+    );
+}
+
 // --- over the wire, against the process-wide runtime ------------------------
 
 struct Client {

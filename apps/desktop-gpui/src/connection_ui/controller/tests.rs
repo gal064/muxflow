@@ -60,6 +60,10 @@ struct FakeState {
     online: bool,
     seeds: Vec<String>,
     prewarms: Vec<String>,
+    mode_requests: Vec<(String, ChatRequest)>,
+    hold_modes: bool,
+    mode_answers:
+        Vec<oneshot::Sender<Result<desktop_core::connection::chat::ChatResponse, String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -104,6 +108,33 @@ impl Fake {
 }
 
 impl TerminalBackend for Fake {
+    fn chat_request(
+        &self,
+        client: String,
+        request: ChatRequest,
+    ) -> BoxFuture<'static, Result<desktop_core::connection::chat::ChatResponse, String>> {
+        let mut state = self.state();
+        let mode = request.mode;
+        state.mode_requests.push((client, request));
+        if state.hold_modes {
+            let (sender, receiver) = oneshot::channel();
+            state.mode_answers.push(sender);
+            return async move {
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("mode request canceled".into()))
+            }
+            .boxed();
+        }
+        async move {
+            Ok(desktop_core::connection::chat::ChatResponse {
+                mode,
+                ..Default::default()
+            })
+        }
+        .boxed()
+    }
+
     fn spawn_engine(
         &self,
         outputs: std::sync::mpsc::Sender<terminal_engine::EngineOutput>,
@@ -1157,6 +1188,8 @@ fn starts_every_shown_host_attaching_a_terminal_only_on_the_active_one(cx: &mut 
         attached,
         [("local".to_owned(), true), ("remote-a".to_owned(), false)]
     );
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness.publish(cx, 1, vec![state_frame("connected")]);
     harness.read(cx, |state| {
         assert_eq!(state.active_profile_id(), "local");
         assert_eq!(
@@ -1225,6 +1258,8 @@ fn activates_a_peer_at_its_remembered_session_without_restarting_it(cx: &mut Tes
 #[gpui_kit::test]
 fn stops_a_hosts_bridge_when_it_stops_being_shown(cx: &mut TestAppContext) {
     let harness = two_shown_hosts(cx);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness.publish(cx, 1, vec![state_frame("connected")]);
     harness.update(cx, |state, cx| {
         state.save_profile_fields("remote-a", None, false, cx)
     });
@@ -2409,4 +2444,98 @@ fn settles_on_no_file_service_event() {
     assert!(settles(&BridgeEvent::GitService {
         payload: "{}".into()
     }));
+}
+
+#[gpui_kit::test]
+fn a_host_is_not_writable_until_its_agent_preference_is_initialized(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| fake.state().hold_modes = true);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness.read(cx, |controller| {
+        let link = controller.active_link().unwrap();
+        assert_ne!(link.host_state.phase, ConnectionPhase::Connected);
+        assert!(link.client_id.is_none());
+    });
+    assert!(cx.read_entity(&harness.controller, |controller, cx| {
+        controller
+            .terminal_link("remote-a")
+            .unwrap()
+            .read(cx)
+            .client_id()
+            .is_none()
+    }));
+    let request = harness.fake.state().mode_requests[0].1.clone();
+    assert!(request.initialize_if_unset);
+    assert_eq!(request.mode, i32::from(ChatAgentMode::Terminal));
+    harness
+        .fake
+        .state()
+        .mode_answers
+        .remove(0)
+        .send(Ok(desktop_core::connection::chat::ChatResponse {
+            mode: ChatAgentMode::Chat.into(),
+            ..Default::default()
+        }))
+        .unwrap();
+    cx.run_until_parked();
+    harness.read(cx, |controller| {
+        let link = controller.active_link().unwrap();
+        assert_eq!(link.host_state.phase, ConnectionPhase::Connected);
+        assert_eq!(link.client_id.as_deref(), Some("client-1"));
+    });
+    cx.update(|cx| assert_eq!(crate::chat::agent_mode("remote-a", cx), Some(true)));
+}
+
+#[gpui_kit::test]
+fn a_late_agent_preference_reply_cannot_reopen_a_disconnected_link(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| fake.state().hold_modes = true);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    let reply = harness.fake.state().mode_answers.remove(0);
+    harness.publish(cx, 0, vec![state_frame("disconnected")]);
+    reply
+        .send(Ok(desktop_core::connection::chat::ChatResponse {
+            mode: ChatAgentMode::Chat.into(),
+            ..Default::default()
+        }))
+        .unwrap();
+    cx.run_until_parked();
+    harness.read(cx, |controller| {
+        let link = controller.active_link().unwrap();
+        assert_eq!(link.host_state.phase, ConnectionPhase::Disconnected);
+        assert!(link.client_id.is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn an_unreadable_host_preference_stays_unwritable_and_reports_the_failure(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| fake.state().hold_modes = true);
+    let statuses = harness.statuses(cx);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness
+        .fake
+        .state()
+        .mode_answers
+        .remove(0)
+        .send(Err("saved settings are corrupt".into()))
+        .unwrap();
+    cx.run_until_parked();
+    harness.read(cx, |controller| {
+        assert!(controller.active_link().unwrap().client_id.is_none())
+    });
+    assert!(
+        statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("saved settings are corrupt"))
+    );
+    harness.publish(
+        cx,
+        0,
+        vec![state_frame("disconnected"), state_frame("connected")],
+    );
+    assert_eq!(
+        harness.fake.state().mode_requests.len(),
+        2,
+        "reconnecting retries without silently queuing a mode change"
+    );
 }
