@@ -64,6 +64,7 @@ wait "$build_host_pid"
 wait "$build_driver_pid"
 "$host_binary" version >"$runtime/host-version.json"
 tmux -V >"$runtime/local-tmux-version.txt"
+"$driver_target/debug/workspace-lifecycle" "$host_binary" >"$runtime/workspace-lifecycle.log" 2>&1
 docker info --format '{{.ServerVersion}}' >"$runtime/docker-version.txt"
 
 snapshot_tmux_config() {

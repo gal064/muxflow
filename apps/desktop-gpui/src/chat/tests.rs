@@ -1830,6 +1830,40 @@ fn applying_to_all_hosts_reports_offline_hosts_without_queuing_changes(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn applying_to_all_hosts_keeps_success_in_settings(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let writer = messages.clone();
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        cx.subscribe(&controller, move |_, event, _| {
+            if let ConnectionEvent::Status(message) = event {
+                writer.lock().unwrap().push(message.clone());
+            }
+        })
+        .detach();
+    });
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| {
+        super::apply_to_hosts(true, vec![("local".into(), "Local".into())], controller, cx)
+    });
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert_eq!(super::apply_result(cx), Some("Applied Chat to 1 hosts.")));
+    assert!(
+        !messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.starts_with("Applied "))
+    );
+}
+
+#[gpui_kit::test]
 fn choosing_chat_on_local_initializes_the_next_new_remote_as_chat(cx: &mut TestAppContext) {
     let mut shell = shell(cx);
     shell.host.state().chat_answers.push_back(Ok(ChatResponse {

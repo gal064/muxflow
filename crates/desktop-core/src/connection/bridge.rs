@@ -723,6 +723,13 @@ fn process_event(
                 .ok_or("topology snapshot event omitted snapshot")?;
             let server_identity = value.server_identity.clone();
             if server_identity != expected_server_identity {
+                if server_identity == "tmux:none"
+                    && value.sessions.is_empty()
+                    && value.windows.is_empty()
+                    && value.panes.is_empty()
+                {
+                    return Err(super::EMPTY_TMUX_SERVER_RECONNECT.into());
+                }
                 return Err(
                     "tmux server identity changed; authoritative reconnect required".into(),
                 );

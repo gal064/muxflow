@@ -69,6 +69,12 @@ const STALLED_LANE_UNANSWERED_REQUESTS: u32 = 3;
 const STALLED_LANE_SILENCE: Duration = Duration::from_secs(15);
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// An authoritative empty snapshot ends a tmux server lifecycle, not the
+/// network connection. The desktop still reconnects to clear identity-bound
+/// state, but should not describe this transition as an outage.
+pub const EMPTY_TMUX_SERVER_RECONNECT: &str =
+    "tmux server became empty; authoritative reconnect required";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum ConnectionSpec {

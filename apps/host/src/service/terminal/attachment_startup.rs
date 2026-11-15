@@ -114,27 +114,8 @@ impl TerminalAttachment {
         // Created here rather than handed in, for the same reason `flow` is:
         // it belongs to one control client and it dies with it.
         let capture_in_flight = Arc::new(Mutex::new(HashSet::new()));
-        {
-            let mut writer = stdin.lock().unwrap();
-            for pane_id in pane_ids {
-                if reports_terminal_colors {
-                    let colors = terminal_colors.lock().unwrap().clone();
-                    write_terminal_color_reports(&mut *writer, pane_id, &colors)?;
-                }
-                queue_capture(&mut *writer, pane_id)?;
-            }
-            writer.flush()?;
-        }
-        // After the flush, because a ledger entry for a capture that never
-        // left this process silences the seed that would replace it. Unlike
-        // the writers `queue_capture` describes, nothing can answer these
-        // captures before they are recorded: the reader starts below.
-        capture_in_flight
-            .lock()
-            .unwrap()
-            .extend(pane_ids.iter().cloned());
-
         let (stream_tx, stream_rx) = std_mpsc::channel();
+        let (attached_tx, attached_rx) = std_mpsc::sync_channel(1);
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
         let reader_panes = pane_ids.to_vec();
@@ -154,6 +135,7 @@ impl TerminalAttachment {
             std::thread::Builder::new().name(format!("host-tmux-control-{session_id}")),
             move || {
                 read_control_stream(ControlStreamReader {
+                    attached: attached_tx,
                     connection_epoch,
                     stdout,
                     writer: reader_writer,
@@ -173,6 +155,31 @@ impl TerminalAttachment {
                 reader_stopped.store(true, Ordering::Release);
             },
         )?;
+        // tmux can read stdin before it executes the initial attach-session.
+        // A refresh-client written in that gap fails with "no current client"
+        // and used to tear down the desktop's entire bridge. Its first
+        // session-changed notification proves attachment completed; neither
+        // startup captures nor callers' sizing writes may precede it.
+        attached_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .context("tmux control client did not finish attaching")?;
+        {
+            let mut writer = stdin.lock().unwrap();
+            // The reader is live now. Register before writing so a fast reply
+            // cannot leave a completed capture recorded as still in flight.
+            capture_in_flight
+                .lock()
+                .unwrap()
+                .extend(pane_ids.iter().cloned());
+            for pane_id in pane_ids {
+                if reports_terminal_colors {
+                    let colors = terminal_colors.lock().unwrap().clone();
+                    write_terminal_color_reports(&mut *writer, pane_id, &colors)?;
+                }
+                queue_capture(&mut *writer, pane_id)?;
+            }
+            writer.flush()?;
+        }
         let (child, workers) = startup.commit();
         Ok(Self {
             pane_ids: pane_ids.iter().cloned().collect(),

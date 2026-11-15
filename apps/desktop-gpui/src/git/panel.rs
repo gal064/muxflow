@@ -575,7 +575,7 @@ impl GitPanel {
                             this.follow = None;
                         }
                         this.accept(&key, &result, cx);
-                        if this.key.as_deref() != Some(&key) || model::needs_notice(&result) {
+                        if model::needs_notice(&result) {
                             this.message(model::result_message(&result, &subject), cx);
                         }
                     }
@@ -929,7 +929,9 @@ impl GitPanel {
         let applied = result.applied();
         if self.key.as_deref() != Some(key) {
             // The form that asked is no longer this repository's.
-            self.message(model::result_message(&result, "Commit created."), cx);
+            if model::needs_notice(&result) {
+                self.message(model::result_message(&result, "Commit created."), cx);
+            }
             return applied && work == Work::CommitAndPush;
         }
         match result.outcome {
@@ -971,8 +973,11 @@ impl GitPanel {
         };
         self.accept(key, &result, cx);
         if self.key.as_deref() != Some(key) {
-            let pushed = model::pushed_to(&result);
-            return self.message(model::result_message(&result, &pushed), cx);
+            if model::needs_notice(&result) {
+                let pushed = model::pushed_to(&result);
+                self.message(model::result_message(&result, &pushed), cx);
+            }
+            return;
         }
         match result.outcome {
             Outcome::Applied => {
