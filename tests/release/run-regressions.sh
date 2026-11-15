@@ -40,6 +40,7 @@ run_gate() {
 
 : > "$run_root/results.tsv"
 run_gate repo-privacy bash tests/release/check-repo-privacy.sh
+run_gate helper-artifact node --test release/helper-artifact.test.mjs
 bookworm_helper="$PHASE8_WORK_DIR/muxflow-host-bookworm"
 run_gate bookworm-helper release/linux/build-compatible-host.sh "$target_arch" "$bookworm_helper"
 export ADE_TEST_BOOKWORM_HELPER="$bookworm_helper"

@@ -61,6 +61,7 @@ fn send_capture(
 }
 
 pub(super) struct ControlStreamReader {
+    pub(super) attached: std_mpsc::SyncSender<()>,
     pub(super) connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     pub(super) stdout: ChildStdout,
     /// Writes the reader needs performed are handed to the input dispatch
@@ -97,6 +98,7 @@ pub(super) enum StreamControl {
 
 pub(super) fn read_control_stream(context: ControlStreamReader) {
     let ControlStreamReader {
+        attached,
         connection_epoch,
         stdout,
         writer,
@@ -113,6 +115,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         emission_order,
         topology_trigger,
     } = context;
+    let mut attached = Some(attached);
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
     let mut state = StreamState::new(&pane_ids, flow);
@@ -154,6 +157,15 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                             }
                         }
                         Ok(record) => {
+                            if matches!(&record, ControlRecord::Notification { name, .. } if name == "session-changed")
+                                && let Some(attached) = attached.take()
+                            {
+                                let _ = attached.send(());
+                                // This is the attachment acknowledgment, not
+                                // a later selection change. Its caller already
+                                // owns the initial topology snapshot.
+                                continue;
+                            }
                             if let Some(output) = pending_output.take() {
                                 state.handle(output, runtime(read_started));
                             }

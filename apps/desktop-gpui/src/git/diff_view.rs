@@ -614,7 +614,7 @@ impl GitDiffView {
             });
             // A tab closed meanwhile still says what happened.
             if let Ok(result) = result
-                && notice.unwrap_or(true)
+                && notice.unwrap_or_else(|_| model::needs_notice(&result))
             {
                 let message = model::result_message(&result, "Git change applied.");
                 cx.update(|cx| super::report(message, cx));
