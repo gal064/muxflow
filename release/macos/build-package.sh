@@ -50,6 +50,15 @@ if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
 fi
 export MUXFLOW_PERF_BUILD
 
+# Supplied artifacts must belong to these sources and build options. Check
+# before compiling the Mac binaries so stale inputs fail early.
+if [[ -n ${MUXFLOW_LINUX_HELPERS_DIR:-} ]]; then
+  for helper_arch in aarch64 x86_64; do
+    node release/helper-artifact.mjs verify \
+      "$MUXFLOW_LINUX_HELPERS_DIR/muxflow-host-linux-$helper_arch" "$helper_arch"
+  done
+fi
+
 # Two builds, not one: built together, the app's dependencies would unify
 # features into the helper's (gpui turns on serde_json's `preserve_order`), and
 # the shipped helper must stay the one `-p muxflow-host` builds everywhere else.
@@ -98,6 +107,8 @@ if [[ -n ${MUXFLOW_LINUX_HELPERS_DIR:-} ]]; then
   for helper_arch in aarch64 x86_64; do
     install -m 0755 "$MUXFLOW_LINUX_HELPERS_DIR/muxflow-host-linux-$helper_arch" \
       "$resources/muxflow-host-linux-$helper_arch"
+    install -m 0644 "$MUXFLOW_LINUX_HELPERS_DIR/muxflow-host-linux-$helper_arch.json" \
+      "$resources/muxflow-host-linux-$helper_arch.json"
   done
 elif [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} != 1 ]]; then
   build_linux_helper aarch64

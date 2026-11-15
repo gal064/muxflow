@@ -29,27 +29,7 @@ case "$output" in
 esac
 work_root=${ADE_WORK_ROOT:-"$repo_root/tmp/work"}
 mkdir -p "$work_root/cache/compatible-host" "$work_root/cache/cargo-home" "$(dirname "$output")"
-source_digest=$(
-  cd "$repo_root"
-  # An isolated source copy can live beneath the developer checkout's ignored
-  # tmp/work tree. Do not let Git walk upward and accidentally hash the parent
-  # checkout; only use its index when this source root owns `.git` itself.
-  if [[ -e "$repo_root/.git" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    # `--deduplicate` and the existence filter both matter: `--cached` lists
-    # what the *index* holds, which still names a file deleted in the worktree
-    # but not yet staged. Hashing that path aborts the build on a state a
-    # developer is legitimately in mid-change, and the digest is supposed to
-    # describe the tree actually being compiled.
-    git ls-files --cached --others --exclude-standard -z -- \
-      Cargo.lock Cargo.toml rust-toolchain.toml rustfmt.toml apps/host crates \
-      | while IFS= read -r -d '' path; do
-          [[ -f "$path" ]] && printf '%s\0' "$path"
-        done
-  else
-    find Cargo.lock Cargo.toml rust-toolchain.toml rustfmt.toml apps/host crates \
-      -type f -not -path '*/target/*' -not -path '*/tmp/*' -print0
-  fi | LC_ALL=C sort -z -u | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
-)
+source_digest=$(node "$repo_root/release/helper-artifact.mjs" digest)
 # MUXFLOW_PERF_BUILD=1 compiles the switch-timing instrumentation into the
 # helper. It is part of the cache identity, not just the command line: a
 # measured and an unmeasured helper are different artifacts from identical
@@ -76,8 +56,9 @@ else
   until mkdir "$lock_dir" 2>/dev/null; do sleep 1; done
   trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 fi
-if [[ -x "$cached_binary" ]]; then
+if [[ -x "$cached_binary" ]] && node "$repo_root/release/helper-artifact.mjs" verify "$cached_binary" "$arch"; then
   install -m 0755 "$cached_binary" "$output"
+  install -m 0644 "$cached_binary.json" "$output.json"
   printf '%s\n' "$output"
   exit 0
 fi
@@ -91,8 +72,7 @@ docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   cargo build --locked --release --bin muxflow-host \
     ${perf_features[@]+"${perf_features[@]}"} \
     --target-dir /artifact-build/target
-install -m 0755 "$target_dir/release/muxflow-host" "$cached_binary"
-install -m 0755 "$cached_binary" "$output"
+install -m 0755 "$target_dir/release/muxflow-host" "$output"
 
 # Debian 12's glibc 2.36 is the declared dynamically-linked compatibility
 # baseline. The runtime smoke below guards against accidentally packaging a
@@ -100,4 +80,13 @@ install -m 0755 "$cached_binary" "$output"
 docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   -v "$(dirname "$output"):/artifact:ro" debian:bookworm-slim \
   "/artifact/$(basename "$output")" version >/dev/null
+# Do not publish a cache entry until the runtime check passed. Never stamp a
+# helper with sources that changed while its build was in flight.
+[[ $(node "$repo_root/release/helper-artifact.mjs" digest) == "$source_digest" ]] || {
+  echo "helper sources changed during the build; retry" >&2
+  exit 65
+}
+node "$repo_root/release/helper-artifact.mjs" write "$output" "$arch" "$source_digest"
+install -m 0755 "$output" "$cached_binary"
+install -m 0644 "$output.json" "$cached_binary.json"
 printf '%s\n' "$output"
