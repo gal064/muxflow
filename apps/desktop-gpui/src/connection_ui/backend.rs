@@ -618,13 +618,16 @@ impl ConnectionBackend for NativeBackend {
     }
 }
 
-/// Runs on the backend's runtime, where its tokio-based work belongs.
+/// Runs on the backend's runtime, where its tokio-based work belongs. The work
+/// starts now, not when the caller first polls the answer: that poll waits for
+/// the UI thread, which can be a frame or two away, and the host's reply would
+/// wait with it.
 fn spawned<T: Send + 'static>(
     work: impl Future<Output = Result<T, String>> + Send + 'static,
 ) -> BoxFuture<'static, Result<T, String>> {
+    let task = platform::spawn(work);
     async move {
-        platform::spawn(work)
-            .await
+        task.await
             .map_err(|error| format!("connection task failed: {error}"))?
     }
     .boxed()
@@ -719,6 +722,29 @@ mod frame_tests {
     fn an_input_frame_ends_with_the_bytes() {
         let body = input_frame("c", "%1", b"ab");
         assert_eq!(body, [0, 1, b'c', 0, 2, b'%', b'1', b'a', b'b']);
+    }
+}
+
+#[cfg(test)]
+mod spawned_tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::spawned;
+
+    #[test]
+    fn a_request_starts_before_its_answer_is_awaited() {
+        let (started, observed) = mpsc::channel();
+        let answer = spawned(async move {
+            let _ = started.send(());
+            Ok(())
+        });
+        // Nothing has polled `answer` yet: the UI thread would only reach it a
+        // frame later, and the host's reply must not wait for that.
+        observed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the request starts without being polled");
+        futures::executor::block_on(answer).unwrap();
     }
 }
 
