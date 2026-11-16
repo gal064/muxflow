@@ -362,6 +362,8 @@ impl AgentRuntime {
                         .insert(host, TopologyAuthority { scope, windows });
                 }
             }
+            // The bridge dropped under the request; the reconnect asks again.
+            Err(error) if desktop_core::connection::lost_to_reconnect(&error) => {}
             Err(error) => self.status(
                 format!(
                     "Agent snapshot unavailable for {}: {error}",

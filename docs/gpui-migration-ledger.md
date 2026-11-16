@@ -529,7 +529,7 @@ font row covers them).
 | `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `features/terminal/clientSize.ts` | 112 | port | 3 | terminal/client_size.rs | done (T3.3) |
 | `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests in terminal/input/latency.rs; the dispose and per-pane cases drop, since each pane owns its probe | done (T3.4) |
-| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | terminal/input/latency.rs (EchoLagProbe), one per pane in PaneInput; a journalled lag reaches the link quality verdict as LinkEvent::EchoLag | done (T3.4) |
+| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | terminal/input/latency.rs (EchoLagProbe), one per pane in PaneInput; journal only (an echo waits on the program as much as the network, so it is no link-quality signal) | done (T3.4) |
 | `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; cell-width snapping cases in terminal/cell_metrics.rs | done (T3.3) |
 | `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | terminal/probes.rs (GridMismatchProbe) | done (T3.3) |

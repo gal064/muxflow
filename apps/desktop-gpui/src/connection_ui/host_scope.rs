@@ -1,6 +1,8 @@
 //! The identity an action or dialog is bound to. Port of
 //! `features/shell/hostScope.ts`.
 
+use desktop_core::connection::NO_TMUX_SERVER;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostScopeToken {
     pub host_profile_id: String,
@@ -16,11 +18,19 @@ pub fn same_host_scope(left: &HostScopeToken, right: &HostScopeToken) -> bool {
 
 /// Dialogs may stay open while a topology event advances the generation. A
 /// profile switch, reconnect, helper or server restart still invalidates them.
-pub fn same_host_connection(left: &HostScopeToken, right: &HostScopeToken) -> bool {
-    left.host_profile_id == right.host_profile_id
-        && left.connection_key == right.connection_key
-        && left.connection_epoch == right.connection_epoch
-        && left.server_identity == right.server_identity
+///
+/// The first tmux server on an empty host is adopted on the same connection
+/// (desktop-core's bridge), so anything begun against no server — the action
+/// that creates the first workspace, a dialog opened on the empty host — still
+/// belongs to the server it started. Only that direction: what was bound to a
+/// server does not survive it ending.
+pub fn same_host_connection(captured: &HostScopeToken, current: &HostScopeToken) -> bool {
+    captured.host_profile_id == current.host_profile_id
+        && captured.connection_key == current.connection_key
+        && captured.connection_epoch == current.connection_epoch
+        && (captured.server_identity == current.server_identity
+            || (captured.server_identity.as_deref() == Some(NO_TMUX_SERVER)
+                && current.server_identity.is_some()))
 }
 
 /// A first helper install begins before the bridge can report a server
@@ -88,6 +98,26 @@ mod tests {
             ..token()
         };
         assert!(same_host_connection(&token(), &newer));
+    }
+
+    #[test]
+    fn keeps_what_began_on_an_empty_host_when_its_first_server_starts() {
+        let empty = HostScopeToken {
+            server_identity: Some(NO_TMUX_SERVER.into()),
+            ..token()
+        };
+        assert!(same_host_connection(&empty, &token()));
+        assert!(!same_host_connection(&token(), &empty));
+        let reconnected = HostScopeToken {
+            connection_epoch: 2,
+            ..token()
+        };
+        assert!(!same_host_connection(&empty, &reconnected));
+        let unknown = HostScopeToken {
+            server_identity: None,
+            ..token()
+        };
+        assert!(!same_host_connection(&unknown, &token()));
     }
 
     #[test]
