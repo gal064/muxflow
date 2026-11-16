@@ -80,6 +80,11 @@ fn settles(event: &BridgeEvent) -> bool {
 const LOCAL_TEARDOWN_MARKER: &str = " (torn down locally:";
 
 pub fn user_facing_bridge_failure(detail: &str) -> &str {
+    // The remote shell's own words for a host the helper was never installed
+    // on; the Connection dialog offers the install.
+    if detail.contains("muxflow-host: No such file or directory") {
+        return "Muxflow is not set up on this host yet. Open Connection… to install it.";
+    }
     detail
         .find(LOCAL_TEARDOWN_MARKER)
         .map_or(detail, |marker| &detail[..marker])
@@ -91,13 +96,6 @@ static HANDSHAKE_FAILURE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)handshake|connection setup").expect("static pattern"));
 
 const MAX_FRAME_BATCH: usize = 256;
-
-/// The server identity a host reports while it has no tmux server.
-const NO_TMUX_SERVER: &str = "tmux:none";
-/// desktop-core's bridge error when the host's tmux server is not the one it
-/// attached to.
-const SERVER_IDENTITY_CHANGED: &str =
-    "tmux server identity changed; authoritative reconnect required";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
@@ -178,10 +176,13 @@ struct LinkRuntime {
     terminal_events: Option<Subscription>,
     /// The tmux server the engine's screens describe.
     server_identity: Option<String>,
-    /// The bridge is reconnecting only to attach to the tmux server the first
-    /// workspace started. Until it is back, or drops for real, that is no
-    /// outage to show.
-    reconnecting_empty_host: bool,
+    /// The bridge is reconnecting because of something the app itself did —
+    /// the last workspace closed, or a helper was just installed. Until it is
+    /// back, or drops for real, that is no outage to show.
+    quiet_reconnect: bool,
+    /// The failure already journaled for this outage. A supervisor retrying an
+    /// unchanged failure (a host waiting for its helper) says nothing new.
+    journaled_down: Option<String>,
 }
 
 pub struct ConnectionController {
@@ -467,12 +468,12 @@ impl ConnectionController {
         self.active_link().map(|link| &link.host_state)
     }
 
-    /// The active link is adopting its first tmux server or returning to an
-    /// empty host after the last workspace closed: neither is an outage.
-    pub fn reconnecting_empty_host(&self) -> bool {
+    /// The active link is reconnecting for a reason of the app's own (see the
+    /// runtime field): not an outage.
+    pub fn quiet_reconnect(&self) -> bool {
         self.runtimes
             .get(&self.active_profile_id())
-            .is_some_and(|runtime| runtime.reconnecting_empty_host)
+            .is_some_and(|runtime| runtime.quiet_reconnect)
     }
 
     pub fn active_host_label(&self) -> String {
@@ -915,9 +916,9 @@ impl ConnectionController {
         if !same_helper_install_connection(&scope, &self.active_scope()) {
             return;
         }
-        let (installed_word, failed_word) = match operation {
-            HelperOperation::Install => ("installed", "install"),
-            HelperOperation::Upgrade => ("upgraded", "upgrade"),
+        let failed_word = match operation {
+            HelperOperation::Install => "install",
+            HelperOperation::Upgrade => "upgrade",
         };
         match result {
             Ok(report) if report.ok => {
@@ -928,11 +929,15 @@ impl ConnectionController {
                         message: report.message,
                     },
                 );
+                // The reconnect onto the new helper is the install finishing,
+                // not an outage: nothing to show unless it fails.
+                if let Some(runtime) = self.runtimes.get_mut(&self.active_profile_id()) {
+                    runtime.quiet_reconnect = true;
+                }
+                // The handshake failure that led here is answered.
                 self.dispatch(HostLinksAction::Detail {
                     profile_id: self.active_profile_id(),
-                    detail: format!(
-                        "Remote helper {installed_word}; reconnecting for a fresh authoritative snapshot."
-                    ),
+                    detail: String::new(),
                 });
                 self.bump_active_epoch();
             }
@@ -1253,7 +1258,6 @@ impl ConnectionController {
             Some(LinkQualityChange::Degraded {
                 state,
                 losses,
-                lag_events,
                 late_requests,
             }) => {
                 self.incident(
@@ -1261,7 +1265,6 @@ impl ConnectionController {
                     json!({
                         "state": state.name(),
                         "losses": losses,
-                        "lagEvents": lag_events,
                         "lateRequests": late_requests,
                     }),
                 );
@@ -1488,17 +1491,6 @@ impl ConnectionController {
                 self.flow_stalled(profile_id, pane_id, *epoch, cx);
             }
             LinkEvent::Status(message) => self.announce(profile_id, message.clone(), cx),
-            // An echo the journal recorded as slow is one occasion of the host
-            // answering late, for a remote host the user is typing on.
-            LinkEvent::EchoLag { lag_ms } => {
-                if profile_id == self.active_profile_id() && self.link_quality_host().is_some() {
-                    let change = self
-                        .link_quality
-                        .note_echo_lag(self.backend.now_ms(), *lag_ms);
-                    self.apply_link_quality(change, cx);
-                    cx.notify();
-                }
-            }
             LinkEvent::ClipboardWrite(text) => self.application_copied(profile_id, text, cx),
         }
     }
@@ -1857,7 +1849,10 @@ impl ConnectionController {
             return;
         };
         let previous = runtime.server_identity.replace(identity.to_owned());
-        if previous.is_some_and(|previous| previous != identity) {
+        // The first server on an empty host replaces nothing the engine held.
+        if previous.is_some_and(|previous| {
+            previous != identity && previous != desktop_core::connection::NO_TMUX_SERVER
+        }) {
             self.terminal_command(profile_id, Command::ClearTerminalState, cx);
         }
     }
@@ -1870,26 +1865,31 @@ impl ConnectionController {
         error: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        self.incident(
-            "link.bridgeDown",
-            json!({ "hostProfileId": profile_id, "event": kind, "detail": detail }),
-        );
+        let runtime = self.runtimes.get_mut(profile_id);
+        let repeated = runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.journaled_down.as_deref() == Some(detail.as_str()));
+        if let Some(runtime) = runtime {
+            runtime.journaled_down = Some(detail.clone());
+        }
+        if !repeated {
+            self.incident(
+                "link.bridgeDown",
+                json!({ "hostProfileId": profile_id, "event": kind, "detail": detail }),
+            );
+        }
         let shown = user_facing_bridge_failure(&detail).to_owned();
-        // Creating the first workspace and closing the last one both change
-        // the tmux server identity. Reconnecting clears identity-bound state;
-        // these normal lifecycle transitions are not lost network links.
+        // Closing the last workspace ends the tmux server, and reconnecting
+        // clears what was bound to it: a lifecycle transition, not a lost
+        // network link. (The first workspace's server is adopted in place.)
         let connected = self
             .links
             .link(profile_id)
             .filter(|link| link.host_state.phase == ConnectionPhase::Connected);
-        let adopting = error == Some(desktop_core::connection::EMPTY_TMUX_SERVER_RECONNECT)
-            || (error == Some(SERVER_IDENTITY_CHANGED)
-                && connected.is_some_and(|link| {
-                    link.host_state.server_identity.as_deref() == Some(NO_TMUX_SERVER)
-                }));
+        let adopting = error == Some(desktop_core::connection::EMPTY_TMUX_SERVER_RECONNECT);
         let was_connected = connected.is_some() && !adopting;
         if let Some(runtime) = self.runtimes.get_mut(profile_id) {
-            runtime.reconnecting_empty_host = adopting;
+            runtime.quiet_reconnect = adopting;
         }
         let active = self.is_active(profile_id);
         // An error while the link is up is the link dropping under the app:
@@ -1964,7 +1964,8 @@ impl ConnectionController {
         self.observe_transitions(cx);
         if phase == ConnectionPhase::Connected {
             if let Some(runtime) = self.runtimes.get_mut(profile_id) {
-                runtime.reconnecting_empty_host = false;
+                runtime.quiet_reconnect = false;
+                runtime.journaled_down = None;
             }
             self.dispatch(HostLinksAction::Detail {
                 profile_id: profile_id.to_owned(),

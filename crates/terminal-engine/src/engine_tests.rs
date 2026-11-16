@@ -354,11 +354,19 @@ fn still_bounds_the_wait_when_neither_the_reveal_nor_the_seed_is_answered() {
         host.incidents("pane.degraded"),
         [json!({ "paneId": PANE, "reason": "paneAwaitingSeed", "attempt": 0 })]
     );
+    assert_eq!(
+        host.renderer_diagnostic(),
+        None,
+        "the first retry is routine recovery, not news"
+    );
+    host.advance(Duration::from_millis(4_001));
     assert!(
         host.renderer_diagnostic()
-            .is_some_and(|message| message.ends_with("; retrying…")),
-        "the banner says it is retrying"
+            .is_some_and(|message| message.contains("longer than usual")),
+        "a failed retry is worth saying"
     );
+    host.seed(500, "back");
+    assert_eq!(host.renderer_diagnostic(), None, "recovery clears it");
 }
 
 #[test]
@@ -1107,7 +1115,7 @@ fn reveals_a_pane_whose_only_content_ever_arrives_as_output() {
 }
 
 #[test]
-fn says_it_is_waiting_for_a_seed_and_shows_nothing_until_the_seed_arrives() {
+fn waits_for_a_seed_quietly_and_shows_nothing_until_it_arrives() {
     let mut host = Host::connected();
     host.mount();
     host.resource(|r| {
@@ -1117,16 +1125,16 @@ fn says_it_is_waiting_for_a_seed_and_shows_nothing_until_the_seed_arrives() {
     assert!(!host.revealed(), "the deliberate blank is not content");
     assert_eq!(host.screen(), "");
     assert_eq!(
-        host.renderer_diagnostic().as_deref(),
-        Some("Renderer state was released; waiting for a fresh terminal seed…")
+        host.renderer_diagnostic(),
+        None,
+        "routine recovery is silent"
+    );
+    assert_eq!(
+        host.incidents("pane.awaitingSeed"),
+        [json!({ "paneId": PANE, "reason": "Renderer state was released" })]
     );
     host.seed(500, "back");
     assert!(host.revealed());
-    assert_eq!(
-        host.renderer_diagnostic(),
-        None,
-        "the seed clears the banner"
-    );
 }
 
 /// The old `restoredViewport`: the reader comes back to the rows they left,

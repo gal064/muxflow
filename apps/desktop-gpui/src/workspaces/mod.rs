@@ -629,8 +629,10 @@ impl Workspaces {
             self.coordinator.invalidate();
             self.protected_app_tab = None;
             self.pending = None;
-            self.flight_scope = scope.cloned();
         }
+        // Even when the same connection, the scope tracks the live server: a
+        // flight begun on an empty host belongs to its first server only.
+        self.flight_scope = scope.cloned();
     }
 
     fn retire_pending(&mut self, cx: &App) {
