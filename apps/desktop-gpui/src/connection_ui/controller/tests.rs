@@ -968,7 +968,7 @@ fn pins_the_exact_shape_of_a_local_teardown_suffix() {
     assert_eq!(user_facing_bridge_failure("ssh closed"), "ssh closed");
     assert_eq!(
         user_facing_bridge_failure(
-            "host closed during handshake: bash: line 1: /home/qa/.local/bin/muxflow-host: No such file or directory (torn down locally: reader exited)"
+            "host closed during handshake: bash: line 1: $HOME/.local/bin/muxflow-host: No such file or directory (torn down locally: reader exited)"
         ),
         "Muxflow is not set up on this host yet. Open Connection… to install it."
     );
