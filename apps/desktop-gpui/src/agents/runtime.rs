@@ -341,6 +341,10 @@ impl AgentRuntime {
         answer: Result<Value, String>,
         cx: &mut Context<Self>,
     ) {
+        // The snapshot after a finished hook install says how the host is wired.
+        if self.setup.auto_installing.as_ref() == Some(&(scope.host_profile_id.clone(), true)) {
+            self.setup.auto_installing = None;
+        }
         let mapped = answer.and_then(|response| {
             let snapshot = response
                 .get("snapshot")
