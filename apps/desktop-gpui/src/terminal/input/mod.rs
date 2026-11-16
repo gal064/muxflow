@@ -133,10 +133,12 @@ impl Journal {
 }
 
 impl PaneInput {
-    /// A `%output` reached this pane's screen, in stream order. Returns the lag
-    /// of an echo the journal recorded as slow, for the link quality verdict.
-    pub fn note_output(&mut self, sequence: u64, generation: u64) -> Option<u64> {
-        let journal = self.journal.as_ref()?;
+    /// A `%output` reached this pane's screen, in stream order. A slow echo is
+    /// journaled; it is not a link verdict, since a busy program echoes late.
+    pub fn note_output(&mut self, sequence: u64, generation: u64) {
+        let Some(journal) = self.journal.as_ref() else {
+            return;
+        };
         let output = desktop_core::perf_log::sink::perf_log_enabled().then_some(EchoOutput {
             sequence,
             generation,
@@ -147,16 +149,17 @@ impl PaneInput {
             .note_output(&journal.pane_id, Instant::now(), output, || {
                 journal.counters()
             });
-        let lag = outcome.sample?;
+        let Some(lag) = outcome.sample else {
+            return;
+        };
         self.echo_timeout = None;
         journal.latency.sample(Segment::EndToEnd, lag);
         if let Some(echo) = outcome.echo {
             crate::perf::record("perf.echo", echo);
         }
-        let incident = outcome.incident?;
-        let lag_ms = incident.1["lagMs"].as_u64();
-        journal.record(incident);
-        lag_ms
+        if let Some(incident) = outcome.incident {
+            journal.record(incident);
+        }
     }
 
     fn expire_echo(&mut self) {

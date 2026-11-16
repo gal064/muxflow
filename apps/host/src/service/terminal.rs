@@ -1242,6 +1242,17 @@ impl TerminalClients {
             crate::diagnostics::record_seed_forced_reveal();
         }
         report_pane_degradations(&self.resources, sender, overflowed);
+        // A pane in a session that is not attached yet is the request arriving
+        // ahead of the attach (a new tab, a workspace switch): nothing failed.
+        // The seed is owed and goes out when the session attaches.
+        if !self
+            .clients
+            .values()
+            .any(|client| client.contains_pane(pane_id))
+        {
+            self.owe_seed(pane_id);
+            return Ok(());
+        }
         let requested = self.request_seed(pane_id);
         if requested.is_err() {
             self.owe_seed(pane_id);

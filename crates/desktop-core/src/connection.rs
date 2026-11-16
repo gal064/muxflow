@@ -73,6 +73,11 @@ const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const EMPTY_TMUX_SERVER_RECONNECT: &str =
     "tmux server became empty; authoritative reconnect required";
 
+/// The server identity a host reports while it has no tmux server. Nothing is
+/// bound to it, so the server that replaces it is adopted on the same
+/// connection instead of reconnecting.
+pub const NO_TMUX_SERVER: &str = "tmux:none";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum ConnectionSpec {

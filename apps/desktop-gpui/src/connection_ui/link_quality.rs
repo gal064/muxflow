@@ -1,5 +1,9 @@
 //! Whether the network is the thing that is wrong, said in those words. Port of
 //! `app/linkQuality.ts`: a pure tally over injected time.
+//!
+//! Only the link's own signals count: drops, and requests the host answered
+//! late. A keystroke's echo is not one — a shell still starting or an agent
+//! booting delays it on a perfect network.
 
 use std::collections::VecDeque;
 
@@ -21,9 +25,6 @@ impl LinkQualityState {
 pub const UNSTABLE_WINDOW_MS: u64 = 300_000;
 pub const UNSTABLE_LOSS_COUNT: usize = 2;
 pub const SLOW_WINDOW_MS: u64 = 60_000;
-pub const SLOW_LAG_COUNT: usize = 2;
-pub const SLOW_LAG_MIN_MS: u64 = 750;
-pub const SLOW_LAG_ALONE_MS: u64 = 1_500;
 pub const LINK_QUALITY_CLEAR_MS: u64 = 120_000;
 pub const LINK_QUALITY_POLL_MS: u64 = 10_000;
 pub const LINK_STATS_POLL_MS: u64 = 5_000;
@@ -33,7 +34,6 @@ pub enum LinkQualityChange {
     Degraded {
         state: LinkQualityState,
         losses: usize,
-        lag_events: usize,
         late_requests: usize,
     },
     Cleared {
@@ -65,11 +65,8 @@ fn prune(times: &mut VecDeque<u64>, at: u64, window_ms: u64) {
 #[derive(Debug, Default)]
 pub struct LinkQualityMonitor {
     losses: VecDeque<u64>,
-    lags: VecDeque<u64>,
     lates: VecDeque<u64>,
     state: Option<LinkQualityState>,
-    /// Set by a signal that means "slow" on its own; consumed by `evaluate`.
-    slow_alone: bool,
     episode_started_at: u64,
     last_trigger_at: Option<u64>,
 }
@@ -86,22 +83,8 @@ impl LinkQualityMonitor {
         self.evaluate(at)
     }
 
-    /// One echo-lag record; only lags of at least `SLOW_LAG_MIN_MS` count.
-    pub fn note_echo_lag(&mut self, at: u64, lag_ms: u64) -> Option<LinkQualityChange> {
-        if lag_ms < SLOW_LAG_MIN_MS {
-            return None;
-        }
-        if lag_ms >= SLOW_LAG_ALONE_MS {
-            self.slow_alone = true;
-        }
-        self.lags.push_back(at);
-        self.last_trigger_at = Some(at);
-        self.evaluate(at)
-    }
-
     /// A host answer the native side gave up waiting on: one is enough.
     pub fn note_late_request(&mut self, at: u64) -> Option<LinkQualityChange> {
-        self.slow_alone = true;
         self.lates.push_back(at);
         self.last_trigger_at = Some(at);
         self.evaluate(at)
@@ -118,7 +101,6 @@ impl LinkQualityMonitor {
         self.state = None;
         self.last_trigger_at = None;
         self.losses.clear();
-        self.lags.clear();
         self.lates.clear();
         Some(LinkQualityChange::Cleared { after_ms })
     }
@@ -130,16 +112,14 @@ impl LinkQualityMonitor {
 
     fn evaluate(&mut self, at: u64) -> Option<LinkQualityChange> {
         prune(&mut self.losses, at, UNSTABLE_WINDOW_MS);
-        prune(&mut self.lags, at, SLOW_WINDOW_MS);
         prune(&mut self.lates, at, SLOW_WINDOW_MS);
         let next = if self.losses.len() >= UNSTABLE_LOSS_COUNT {
             Some(LinkQualityState::Unstable)
-        } else if self.lags.len() >= SLOW_LAG_COUNT || self.slow_alone {
+        } else if !self.lates.is_empty() {
             Some(LinkQualityState::Slow)
         } else {
             None
         };
-        self.slow_alone = false;
         let next = next.filter(|value| Some(*value) != self.state)?;
         // An episode may climb from slow to unstable, never back down inside
         // the same episode: that would be two sentences for one bad network.
@@ -153,7 +133,6 @@ impl LinkQualityMonitor {
         Some(LinkQualityChange::Degraded {
             state: next,
             losses: self.losses.len(),
-            lag_events: self.lags.len(),
             late_requests: self.lates.len(),
         })
     }
@@ -166,13 +145,12 @@ mod tests {
     fn degraded(
         state: LinkQualityState,
         losses: usize,
-        lag_events: usize,
+        late_requests: usize,
     ) -> Option<LinkQualityChange> {
         Some(LinkQualityChange::Degraded {
             state,
             losses,
-            lag_events,
-            late_requests: 0,
+            late_requests,
         })
     }
 
@@ -197,28 +175,27 @@ mod tests {
     }
 
     #[test]
-    fn calls_two_late_echoes_inside_the_window_slow() {
+    fn calls_one_late_request_slow_once_inside_the_window() {
         let mut monitor = LinkQualityMonitor::default();
-        assert_eq!(monitor.note_echo_lag(0, 1_000), None);
         assert_eq!(
-            monitor.note_echo_lag(SLOW_WINDOW_MS, 1_000),
-            degraded(LinkQualityState::Slow, 0, 2)
+            monitor.note_late_request(0),
+            degraded(LinkQualityState::Slow, 0, 1)
         );
-        assert_eq!(monitor.note_echo_lag(SLOW_WINDOW_MS + 1_000, 1_000), None);
+        assert_eq!(monitor.note_late_request(1_000), None);
+        assert_eq!(monitor.state(), Some(LinkQualityState::Slow));
     }
 
     #[test]
     fn climbs_from_slow_to_unstable_and_never_back_down_inside_one_episode() {
         let mut monitor = LinkQualityMonitor::default();
-        monitor.note_echo_lag(0, 1_000);
         assert_eq!(
-            monitor.note_echo_lag(1_000, 1_000),
-            degraded(LinkQualityState::Slow, 0, 2)
+            monitor.note_late_request(1_000),
+            degraded(LinkQualityState::Slow, 0, 1)
         );
         monitor.note_link_lost(2_000);
         assert_eq!(
             monitor.note_link_lost(3_000),
-            degraded(LinkQualityState::Unstable, 2, 2)
+            degraded(LinkQualityState::Unstable, 2, 1)
         );
         assert_eq!(monitor.note_link_lost(4_000 + SLOW_WINDOW_MS), None);
         assert_eq!(monitor.state(), Some(LinkQualityState::Unstable));
@@ -262,40 +239,5 @@ mod tests {
             describe_link_quality(LinkQualityState::Slow, "build-01"),
             "Your connection to build-01 is slow; the host is answering, but late."
         );
-    }
-
-    #[test]
-    fn does_not_count_an_echo_late_by_less_than_a_networks_worth() {
-        let mut monitor = LinkQualityMonitor::default();
-        assert_eq!(monitor.note_echo_lag(0, SLOW_LAG_MIN_MS - 1), None);
-        assert_eq!(monitor.note_echo_lag(1_000, SLOW_LAG_MIN_MS - 1), None);
-        assert_eq!(monitor.state(), None);
-        assert_eq!(monitor.note_echo_lag(2_000, SLOW_LAG_MIN_MS), None);
-        assert_eq!(
-            monitor.note_echo_lag(3_000, SLOW_LAG_MIN_MS),
-            degraded(LinkQualityState::Slow, 0, 2)
-        );
-    }
-
-    #[test]
-    fn calls_the_link_slow_on_one_late_request_or_one_echo_late_by_a_networks_worth() {
-        let mut late = LinkQualityMonitor::default();
-        assert!(matches!(
-            late.note_late_request(0),
-            Some(LinkQualityChange::Degraded {
-                state: LinkQualityState::Slow,
-                ..
-            })
-        ));
-        let mut echo = LinkQualityMonitor::default();
-        assert!(matches!(
-            echo.note_echo_lag(0, SLOW_LAG_ALONE_MS),
-            Some(LinkQualityChange::Degraded {
-                state: LinkQualityState::Slow,
-                ..
-            })
-        ));
-        let mut mild = LinkQualityMonitor::default();
-        assert_eq!(mild.note_echo_lag(0, SLOW_LAG_ALONE_MS - 1), None);
     }
 }

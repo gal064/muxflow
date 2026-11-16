@@ -153,7 +153,7 @@ fn capture(pane_id: Option<&str>, cx: &App) -> Option<Captured> {
 fn same_connection(captured: &Captured, cx: &App) -> bool {
     live_link(cx).is_some_and(|(_, link)| {
         link.client_id.as_deref() == Some(captured.client_id.as_str())
-            && same_host_connection(&link.scope(), &captured.scope)
+            && same_host_connection(&captured.scope, &link.scope())
     })
 }
 
