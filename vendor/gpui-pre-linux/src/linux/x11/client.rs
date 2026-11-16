@@ -84,6 +84,53 @@ pub(crate) struct WindowRef {
     refresh_state: Option<RefreshState>,
     last_visibility: Visibility,
     is_mapped: bool,
+    pacing: FramePacing,
+}
+
+/// The shortest and longest a frame waits for queued foreground work.
+const MIN_FRAME_HOLD: Duration = Duration::from_millis(4);
+const MAX_FRAME_HOLD: Duration = Duration::from_millis(250);
+
+/// Lets foreground work that is already queued run before a window's next frame.
+///
+/// The refresh timer and Expose events would otherwise draw as soon as they fire,
+/// ahead of runnables that arrived during the previous frame. Where a frame takes
+/// hundreds of milliseconds (software rendering), every step of work that leads to
+/// the next frame then waits a whole frame. A frame is held only while runnables are
+/// queued, and for at most half the last frame's cost, so drawing is never starved.
+#[derive(Default)]
+struct FramePacing {
+    held_since: Option<Instant>,
+    /// The refresh timer's deadline when the current hold began, so a held frame
+    /// keeps the display's schedule rather than moving it by the hold.
+    held_deadline: Option<Instant>,
+    last_frame: Duration,
+    /// An Expose arrived while the frame was held; the refresh timer presents it.
+    presentation_owed: bool,
+}
+
+impl FramePacing {
+    fn hold(&mut self, work_queued: bool, now: Instant) -> bool {
+        if !work_queued {
+            self.held_since = None;
+            return false;
+        }
+        let held_since = *self.held_since.get_or_insert(now);
+        let limit = (self.last_frame / 2).clamp(MIN_FRAME_HOLD, MAX_FRAME_HOLD);
+        if now.duration_since(held_since) < limit {
+            return true;
+        }
+        self.held_since = None;
+        false
+    }
+
+    /// Records a refresh's cost. Refreshes that found nothing to draw are too cheap
+    /// to say what a frame costs, so they leave the last cost in place.
+    fn refreshed(&mut self, took: Duration) {
+        if took >= Duration::from_millis(1) {
+            self.last_frame = took;
+        }
+    }
 }
 
 impl WindowRef {
@@ -795,19 +842,34 @@ impl X11Client {
             }
 
             for x_window in windows_to_refresh {
-                let window = self
-                    .0
-                    .borrow()
-                    .windows
-                    .get(&x_window)
-                    .and_then(|window| window.is_mapped.then(|| window.window.clone()));
-                if let Some(window) = window {
-                    window.refresh(RequestFrameOptions {
-                        require_presentation: true,
-                        force_render: false,
-                        signal_at: None,
-                        signal_source: FrameRequestSource::NativeCallback,
-                    });
+                let window = {
+                    let mut state = self.0.borrow_mut();
+                    let work_queued = state.common.borrow().queued_runnables.any();
+                    let Some(window_ref) = state.windows.get_mut(&x_window) else {
+                        continue;
+                    };
+                    if !window_ref.is_mapped {
+                        continue;
+                    }
+                    let refreshing = matches!(
+                        window_ref.refresh_state,
+                        Some(RefreshState::PeriodicRefresh { .. })
+                    );
+                    if refreshing && window_ref.pacing.hold(work_queued, Instant::now()) {
+                        window_ref.pacing.presentation_owed = true;
+                        continue;
+                    }
+                    window_ref.window.clone()
+                };
+                let started = Instant::now();
+                window.refresh(RequestFrameOptions {
+                    require_presentation: true,
+                    force_render: false,
+                    signal_at: None,
+                    signal_source: FrameRequestSource::NativeCallback,
+                });
+                if let Some(window_ref) = self.0.borrow_mut().windows.get_mut(&x_window) {
+                    window_ref.pacing.refreshed(started.elapsed());
                 }
             }
         }
@@ -1747,6 +1809,7 @@ impl X11Client {
             refresh_state: None,
             last_visibility: Visibility::UNOBSCURED,
             is_mapped: false,
+            pacing: FramePacing::default(),
         };
 
         state.windows.insert(x_window, window_ref);
@@ -2062,15 +2125,33 @@ impl X11ClientState {
                     let xcb_connection = {
                         let mut state = client.0.borrow_mut();
                         let xcb_connection = state.xcb_connection.clone();
-                        if let Some(window) = state.windows.get_mut(&x_window) {
-                            let window = window.window.clone();
+                        let work_queued = state.common.borrow().queued_runnables.any();
+                        if let Some(window_ref) = state.windows.get_mut(&x_window) {
+                            let now = Instant::now();
+                            if window_ref.pacing.hold(work_queued, now) {
+                                window_ref.pacing.held_deadline.get_or_insert(instant);
+                                // Look again once the queued runnables have run.
+                                return calloop::timer::TimeoutAction::ToInstant(now);
+                            }
+                            if let Some(deadline) = window_ref.pacing.held_deadline.take() {
+                                instant = deadline;
+                            }
+                            let require_presentation =
+                                std::mem::take(&mut window_ref.pacing.presentation_owed);
+                            let window = window_ref.window.clone();
                             drop(state);
+                            let started = Instant::now();
                             window.refresh(RequestFrameOptions {
-                                require_presentation: false,
+                                require_presentation,
                                 force_render: false,
                                 signal_at: PlatformFrameSignal::capture(|| instant),
                                 signal_source: FrameRequestSource::LocalSchedule,
                             });
+                            if let Some(window_ref) =
+                                client.0.borrow_mut().windows.get_mut(&x_window)
+                            {
+                                window_ref.pacing.refreshed(started.elapsed());
+                            }
                         }
                         xcb_connection
                     };
@@ -3211,5 +3292,57 @@ mod tests {
 
         // Assert pressing space while on the Czech layout still types a space.
         assert_eq!(key_event_state.key_get_utf8(space), " ");
+    }
+}
+
+#[cfg(test)]
+mod frame_pacing_tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_frame_is_not_held_without_queued_work() {
+        let mut pacing = FramePacing::default();
+        pacing.refreshed(ms(600));
+        assert!(!pacing.hold(false, Instant::now()));
+    }
+
+    #[test]
+    fn a_frame_is_held_for_queued_work_up_to_half_the_last_frame() {
+        let mut pacing = FramePacing::default();
+        pacing.refreshed(ms(400));
+        let start = Instant::now();
+        assert!(pacing.hold(true, start));
+        assert!(pacing.hold(true, start + ms(199)));
+        assert!(!pacing.hold(true, start + ms(200)));
+        // The next frame gets a fresh allowance.
+        assert!(pacing.hold(true, start + ms(201)));
+    }
+
+    #[test]
+    fn the_hold_stays_within_its_bounds() {
+        let start = Instant::now();
+        let mut fast = FramePacing::default();
+        fast.refreshed(ms(2));
+        assert!(fast.hold(true, start));
+        assert!(!fast.hold(true, start + MIN_FRAME_HOLD));
+
+        let mut slow = FramePacing::default();
+        slow.refreshed(Duration::from_secs(5));
+        assert!(slow.hold(true, start));
+        assert!(!slow.hold(true, start + MAX_FRAME_HOLD));
+    }
+
+    #[test]
+    fn a_refresh_with_nothing_to_draw_keeps_the_last_frame_cost() {
+        let mut pacing = FramePacing::default();
+        pacing.refreshed(ms(400));
+        pacing.refreshed(Duration::from_micros(50));
+        let start = Instant::now();
+        assert!(pacing.hold(true, start));
+        assert!(pacing.hold(true, start + ms(199)));
     }
 }

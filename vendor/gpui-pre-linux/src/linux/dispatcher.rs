@@ -5,7 +5,15 @@ use calloop::{
 };
 use gpui_util::ResultExt;
 
-use std::{mem::MaybeUninit, thread, time::Duration};
+use std::{
+    mem::MaybeUninit,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use gpui::{
     PlatformDispatcher, Priority, PriorityQueueReceiver, PriorityQueueSender, RunnableVariant,
@@ -164,18 +172,44 @@ impl PlatformDispatcher for LinuxDispatcher {
     }
 }
 
+/// Counts runnables sent to the main thread that have not run yet, so the
+/// window refresh can let queued work run before an expensive frame.
+#[derive(Clone, Default)]
+pub(crate) struct QueuedRunnables(Arc<AtomicUsize>);
+
+impl QueuedRunnables {
+    pub(crate) fn any(&self) -> bool {
+        self.0.load(Ordering::Acquire) > 0
+    }
+
+    /// Called once a runnable taken from the main-thread queue has run.
+    pub(crate) fn finished(&self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub struct PriorityQueueCalloopSender<T> {
     sender: PriorityQueueSender<T>,
     ping: calloop::ping::Ping,
+    queued: QueuedRunnables,
 }
 
 impl<T> PriorityQueueCalloopSender<T> {
-    fn new(tx: PriorityQueueSender<T>, ping: calloop::ping::Ping) -> Self {
-        Self { sender: tx, ping }
+    fn new(tx: PriorityQueueSender<T>, ping: calloop::ping::Ping, queued: QueuedRunnables) -> Self {
+        Self {
+            sender: tx,
+            ping,
+            queued,
+        }
     }
 
     fn send(&self, priority: Priority, item: T) -> Result<(), gpui::queue::SendError<T>> {
+        // Count before sending, so the main thread never runs an uncounted item.
+        self.queued.0.fetch_add(1, Ordering::AcqRel);
         let res = self.sender.send(priority, item);
+        if res.is_err() {
+            self.queued.0.fetch_sub(1, Ordering::AcqRel);
+        }
         if res.is_ok() {
             self.ping.ping();
         }
@@ -193,6 +227,7 @@ pub struct PriorityQueueCalloopReceiver<T> {
     receiver: PriorityQueueReceiver<T>,
     source: calloop::ping::PingSource,
     ping: calloop::ping::Ping,
+    queued: QueuedRunnables,
 }
 
 impl<T> PriorityQueueCalloopReceiver<T> {
@@ -200,15 +235,23 @@ impl<T> PriorityQueueCalloopReceiver<T> {
         let (ping, source) = calloop::ping::make_ping().expect("Failed to create a Ping.");
 
         let (tx, rx) = PriorityQueueReceiver::new();
+        let queued = QueuedRunnables::default();
 
         (
-            PriorityQueueCalloopSender::new(tx, ping.clone()),
+            PriorityQueueCalloopSender::new(tx, ping.clone(), queued.clone()),
             Self {
                 receiver: rx,
                 source,
                 ping,
+                queued,
             },
         )
+    }
+
+    /// The count of items sent but not yet finished. The consumer calls
+    /// [`QueuedRunnables::finished`] after handling each item.
+    pub(crate) fn queued(&self) -> QueuedRunnables {
+        self.queued.clone()
     }
 }
 
@@ -312,6 +355,19 @@ impl<T> calloop::EventSource for PriorityQueueCalloopReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runnable_counts_as_queued_until_it_has_run() {
+        let (tx, rx) = PriorityQueueCalloopReceiver::<()>::new();
+        let queued = rx.queued();
+        assert!(!queued.any());
+
+        tx.send(Priority::Medium, ()).unwrap();
+        assert!(queued.any());
+
+        queued.finished();
+        assert!(!queued.any());
+    }
 
     #[test]
     fn calloop_works() {
