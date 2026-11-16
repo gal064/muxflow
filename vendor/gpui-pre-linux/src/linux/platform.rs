@@ -33,7 +33,7 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{
     Backend, DisplayConnection, HeadlessConnection, LinuxDispatcher, PriorityQueueCalloopReceiver,
-    select_backend,
+    QueuedRunnables, select_backend,
 };
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
@@ -113,6 +113,9 @@ pub(crate) struct LinuxCommon {
     /// X11 uses this to handle events that a runnable's requests read into xcb's queue, where
     /// they would not wake the event loop.
     pub(crate) after_runnable: Option<Rc<dyn Fn()>>,
+    /// Foreground runnables sent but not yet run. X11 lets them run before an
+    /// expensive frame, so work that is ready is not held up behind a redraw.
+    pub(crate) queued_runnables: QueuedRunnables,
 }
 
 impl LinuxCommon {
@@ -124,6 +127,7 @@ impl LinuxCommon {
         calloop::channel::Channel<SystemPowerEvent>,
     ) {
         let (main_sender, main_receiver) = PriorityQueueCalloopReceiver::new();
+        let queued_runnables = main_receiver.queued();
         let (power_sender, power_receiver) = calloop::channel::channel();
 
         #[cfg(any(feature = "wayland", feature = "x11"))]
@@ -156,6 +160,7 @@ impl LinuxCommon {
             #[cfg(any(feature = "wayland", feature = "x11"))]
             power_mode_listener: None,
             after_runnable: None,
+            queued_runnables,
         };
 
         (common, main_receiver, power_receiver)
@@ -200,6 +205,7 @@ impl LinuxCommon {
                             gpui::profiler::update_running_task(spawned, location);
                             runnable.run();
                             gpui::profiler::save_task_timing();
+                            common.borrow().queued_runnables.finished();
 
                             let after_runnable = common.borrow().after_runnable.clone();
                             if let Some(after_runnable) = after_runnable {
