@@ -2314,6 +2314,28 @@ mod multi_host {
         assert_eq!(shell.count("createSession"), 1);
     }
 
+    /// A host that is not connected can be picked, and the dialog offers to
+    /// connect it rather than a Save that cannot work.
+    #[gpui_kit::test]
+    fn a_disconnected_host_is_offered_a_connect_instead_of_a_save(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        shell.publish_to(1, vec![frame(6, "disconnected", &[])]);
+        shell.run("session.new");
+        shell.click("new-workspace-host");
+        shell.click_label("R Remote · disconnected");
+        assert!(shell.shows("Remote is not connected."));
+        // Looked at, not adopted as where new workspaces go.
+        remembered(&mut shell, "local");
+        let save = shell
+            .visual
+            .update(|window, _| window.find_by_label("Save").disabled());
+        assert_eq!(save, Some(true));
+        shell.click("new-workspace-connect");
+        assert!(!shell.dialog_open());
+        assert_eq!(active_host(&mut shell), "remote");
+        assert_eq!(shell.count("createSession"), 0);
+    }
+
     #[gpui_kit::test]
     fn a_host_picked_in_a_cancelled_dialog_is_remembered_but_not_activated(
         cx: &mut TestAppContext,
