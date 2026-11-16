@@ -1509,6 +1509,14 @@ impl Workspaces {
             .detach();
     }
 
+    /// Whether a workspace or tab is being created on `host`, before the host
+    /// has drawn it.
+    pub fn creating_on(&self, host: &str) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == host)
+    }
+
     fn new_pending(&mut self, host: &str, session_id: Option<String>, title: String) -> u64 {
         self.next_key += 1;
         self.pending = Some((

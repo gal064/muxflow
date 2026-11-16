@@ -2168,6 +2168,29 @@ mod surface {
 
     /// Enter answers the consent dialog with its primary button; it never
     /// closes it as a decline.
+    /// A strip that came due while the consent dialog was up does not show
+    /// through as the dialog closes into the reconnect.
+    #[gpui_kit::test]
+    fn no_strip_shows_through_a_finished_install(cx: &mut TestAppContext) {
+        let harness = confirming(cx, |_| {});
+        let mut visual = open(cx, &harness);
+        visual.executor().advance_clock(Duration::from_secs(10));
+        visual.run_until_parked();
+        harness
+            .controller
+            .update(&mut visual, |state, cx| state.confirm_helper_install(cx));
+        visual.run_until_parked();
+        visual
+            .executor()
+            .advance_clock(Duration::from_millis(2 * STRIP_APPEAR_DELAY_MS));
+        for _ in 0..2 {
+            visual.update(|window, _| window.refresh());
+            visual.run_until_parked();
+        }
+        let strip = visual.update(|window, _| window.try_find_by_label("Reconnect").is_some());
+        assert!(!strip, "the reconnect onto the new helper is not an outage");
+    }
+
     #[gpui_kit::test]
     fn enter_on_the_helper_consent_dialog_installs(cx: &mut TestAppContext) {
         let harness = confirming(cx, |fake| fake.state().hold_installs = true);
