@@ -5,6 +5,7 @@ use desktop_core::app_state::load_app_state;
 use gpui_kit::{
     App, AppContext, Context, Entity, Focusable, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Render, Role, SharedString, Styled, WeakEntity, Window,
+    base::TestSupportExt,
     component::{
         Disableable, WindowExt,
         button::{Button, ButtonVariants},
@@ -122,12 +123,30 @@ impl NewWorkspace {
         super::focus_terminal(&workspaces, window, cx);
     }
 
-    /// The pick is the preference, even if the dialog is then cancelled.
-    fn pick(&mut self, host: String, cx: &mut Context<Self>) {
-        if !self.hosts(cx).iter().any(|entry| entry.profile_id == host) {
+    /// A host that is not connected is connected from here: the dialog gives
+    /// way to whatever that asks, such as installing the helper.
+    fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspaces) = self.workspaces.upgrade() else {
             return;
+        };
+        window.close_dialog(cx);
+        let host = self.selected.clone();
+        workspaces.update(cx, |workspaces, cx| workspaces.connect_host(&host, cx));
+    }
+
+    /// The pick is the preference, even if the dialog is then cancelled; a
+    /// host that cannot take a workspace now is looked at, not remembered.
+    fn pick(&mut self, host: String, cx: &mut Context<Self>) {
+        let Some(entry) = self
+            .hosts(cx)
+            .into_iter()
+            .find(|entry| entry.profile_id == host)
+        else {
+            return;
+        };
+        if entry.can_mutate {
+            super::remember_new_workspace_host(&host, cx);
         }
-        super::remember_new_workspace_host(&host, cx);
         self.selected = host;
         cx.notify();
     }
@@ -247,7 +266,6 @@ impl Render for NewWorkspace {
                                 .ok();
                         })
                         .checked(host.profile_id == current)
-                        .disabled(!host.can_mutate)
                         .into()
                     })
                     .collect();
@@ -274,6 +292,53 @@ impl Render for NewWorkspace {
                 ),
             )
             .child(v_flex().mt(ui(12.)).gap(ui(8.)).child("Host").child(picker))
+            // A host that is not connected cannot take a workspace; say so and
+            // offer the way back, rather than a Save that does nothing.
+            .when_some(
+                selected
+                    .as_ref()
+                    .filter(|host| host.phase != ConnectionPhase::Connected),
+                |this, host| {
+                    this.child(
+                        h_flex()
+                            .mt(ui(8.))
+                            .gap(ui(8.))
+                            .items_center()
+                            .child({
+                                let note = match host.phase {
+                                    ConnectionPhase::Connecting => {
+                                        format!("{} is connecting…", host.label)
+                                    }
+                                    ConnectionPhase::Resyncing => {
+                                        format!("{} is syncing…", host.label)
+                                    }
+                                    _ => format!("{} is not connected.", host.label),
+                                };
+                                div()
+                                    .id("new-workspace-host-state")
+                                    .test_support()
+                                    .role(Role::Status)
+                                    .aria_label(note.clone())
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(ui(metrics::TYPE_SECONDARY))
+                                    .text_color(palette.chrome_dim)
+                                    .child(note)
+                            })
+                            // A syncing link is up and recovering; a fresh
+                            // connection would only interrupt it.
+                            .when(host.phase != ConnectionPhase::Resyncing, |this| {
+                                this.child(
+                                    Button::new("new-workspace-connect")
+                                        .label("Connect")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.connect(window, cx)
+                                        })),
+                                )
+                            }),
+                    )
+                },
+            )
             .child(
                 h_flex()
                     .mt(ui(20.))

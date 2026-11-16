@@ -814,6 +814,15 @@ impl Workspaces {
         self.controller_changed(cx);
     }
 
+    /// Connects a host that is not connected, from where its absence shows.
+    pub fn connect_host(&mut self, host: &str, cx: &mut Context<Self>) {
+        let Some(controller) = self.controller.clone() else {
+            return;
+        };
+        controller.update(cx, |controller, cx| controller.connect_host(host, cx));
+        self.controller_changed(cx);
+    }
+
     pub fn select_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let seq = self.begin_intent(true);
         let view = self.view(cx);
