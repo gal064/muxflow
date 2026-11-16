@@ -1103,7 +1103,13 @@ impl RenderOnce for AgentsList {
                 let runtime = agents.runtime.read(cx);
                 let focus = &runtime.inputs.focus;
                 (
-                    hook_wiring_notice(&host_hook_wiring(runtime.adapters(&focus.host_profile_id))),
+                    if runtime.hook_setup_underway(&focus.host_profile_id) {
+                        None
+                    } else {
+                        hook_wiring_notice(&host_hook_wiring(
+                            runtime.adapters(&focus.host_profile_id),
+                        ))
+                    },
                     crate::settings::get(cx).agent_state_glyphs,
                     selected_agent_id_for_pane(
                         &rows,

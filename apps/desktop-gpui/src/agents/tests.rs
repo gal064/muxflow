@@ -571,6 +571,12 @@ fn the_helper_install_answers_for_agent_status_without_asking_twice(cx: &mut Tes
             .operations()
             .contains(&"hookInstall".to_owned())
     );
+    // Quiet only while it runs: the snapshot after it decides the notice.
+    assert!(
+        !harness
+            .runtime
+            .read_with(cx, |runtime, _| runtime.hook_setup_underway("local"))
+    );
 }
 
 #[gpui_kit::test]
