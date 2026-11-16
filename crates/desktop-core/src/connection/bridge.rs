@@ -336,6 +336,26 @@ pub(super) fn handshake_and_snapshot(
     reader: &mut impl Read,
     connection_epoch: u64,
 ) -> Result<(v1::ServerHello, InitialHostState), String> {
+    handshake_stage(stdin, reader, connection_epoch).map_err(name_handshake_failure)
+}
+
+/// Every failure of the handshake names the stage. The desktop asks the helper
+/// probe only after a handshake failure, and an incompatible helper fails here
+/// in ways that would not say so: a reset, a frame that is not a ServerHello, a
+/// different protocol major.
+fn name_handshake_failure(error: String) -> String {
+    if error.contains("handshake") {
+        error
+    } else {
+        format!("handshake failed: {error}")
+    }
+}
+
+fn handshake_stage(
+    stdin: &mut impl Write,
+    reader: &mut impl Read,
+    connection_epoch: u64,
+) -> Result<(v1::ServerHello, InitialHostState), String> {
     write_frame_sync(
         stdin,
         &envelope(
