@@ -2,6 +2,9 @@
 
 use crate::event::{PaneEvent, PaneResource, PaneResourceState};
 
+/// How every pane without a retained screen starts: routine, not an incident.
+pub const NO_LOCAL_STATE: &str = "No recoverable renderer state was available";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaneRevealState {
     pub ready: bool,
@@ -174,7 +177,7 @@ pub fn reduce_pane_reveal(
         return (
             NOTHING_HELD,
             PaneRevealEffect::AwaitSeed {
-                reason: "No recoverable renderer state was available".into(),
+                reason: NO_LOCAL_STATE.into(),
                 request_seed: true,
                 unusable_state: None,
             },
