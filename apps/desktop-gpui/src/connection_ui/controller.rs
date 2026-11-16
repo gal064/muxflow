@@ -731,6 +731,16 @@ impl ConnectionController {
         self.settle(cx);
     }
 
+    /// Puts a shown host that is not connected on screen and connects it
+    /// afresh, so whatever stops it is answered now: a host without the helper
+    /// asks to install it, as it does when it is the one on screen.
+    pub fn connect_host(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        self.activate_host(profile_id, cx);
+        if self.active_profile_id() == profile_id {
+            self.reconnect(cx);
+        }
+    }
+
     /// Makes another shown host the one on screen. The pointer moves; the
     /// bridges do not.
     pub fn activate_host(&mut self, profile_id: &str, cx: &mut Context<Self>) {
