@@ -928,7 +928,7 @@ fn confirming(cx: &mut TestAppContext, prepare: impl FnOnce(&Fake)) -> Harness {
 }
 
 #[gpui_kit::test]
-fn a_consented_install_reconnects_for_a_fresh_snapshot(cx: &mut TestAppContext) {
+fn a_consented_install_reconnects_quietly(cx: &mut TestAppContext) {
     let harness = confirming(cx, |_| {});
     harness.update(cx, |state, cx| state.confirm_helper_install(cx));
     assert_eq!(harness.fake.state().installs.len(), 1);
@@ -937,9 +937,10 @@ fn a_consented_install_reconnects_for_a_fresh_snapshot(cx: &mut TestAppContext) 
     assert_eq!(harness.fake.state().stopped, ["client-1"]);
     assert_eq!(harness.fake.bridge_count(), 2);
     harness.read(cx, |state| {
-        assert_eq!(
-            state.active_link().unwrap().detail,
-            "Remote helper installed; reconnecting for a fresh authoritative snapshot."
+        assert_eq!(state.active_link().unwrap().detail, "");
+        assert!(
+            state.quiet_reconnect(),
+            "finishing the install is no outage"
         );
     });
 }
@@ -996,6 +997,12 @@ fn pins_the_exact_shape_of_a_local_teardown_suffix() {
         "ssh closed"
     );
     assert_eq!(user_facing_bridge_failure("ssh closed"), "ssh closed");
+    assert_eq!(
+        user_facing_bridge_failure(
+            "host closed during handshake: bash: line 1: /home/qa/.local/bin/muxflow-host: No such file or directory (torn down locally: reader exited)"
+        ),
+        "Muxflow is not set up on this host yet. Open Connection… to install it."
+    );
 }
 
 #[gpui_kit::test]
@@ -1105,9 +1112,10 @@ fn strips_the_local_teardown_suffix_from_what_the_user_reads(cx: &mut TestAppCon
 const VERDICT: &str =
     "Your connection to qa-host is unstable; Muxflow keeps losing the link and reconnecting.";
 
+/// The bridge adopts the first server on the same connection: the link stays
+/// up and the next snapshot simply names the new server.
 #[gpui_kit::test]
 fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
-    const CHANGED: &str = "tmux server identity changed; authoritative reconnect required";
     let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
     let statuses = harness.statuses(cx);
     harness.publish(
@@ -1115,15 +1123,16 @@ fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
         0,
         vec![state_frame("connected"), world("tmux:none", 1, &[])],
     );
-    harness.publish(cx, 0, vec![error_frame(CHANGED)]);
-    harness.publish(
-        cx,
-        0,
-        vec![
-            state_frame("connected"),
-            world("srv-qa", 2, &[("$0", "home")]),
-        ],
-    );
+    harness.publish(cx, 0, vec![world("srv-qa", 2, &[("$0", "home")])]);
+    let (phase, identity) = harness.controller.read_with(cx, |state, _| {
+        let link = state.active_link().unwrap();
+        (
+            link.host_state.phase,
+            link.host_state.server_identity.clone(),
+        )
+    });
+    assert_eq!(phase, ConnectionPhase::Connected);
+    assert_eq!(identity.as_deref(), Some("srv-qa"));
     // One real loss after it: not yet a link that keeps dropping.
     harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
     assert_eq!(count(&statuses, VERDICT), 0);
@@ -1151,7 +1160,7 @@ fn closing_the_last_workspace_is_no_lost_link(cx: &mut TestAppContext) {
     assert!(
         harness
             .controller
-            .read_with(cx, |state, _| state.reconnecting_empty_host())
+            .read_with(cx, |state, _| state.quiet_reconnect())
     );
     harness.publish(
         cx,
@@ -1161,7 +1170,7 @@ fn closing_the_last_workspace_is_no_lost_link(cx: &mut TestAppContext) {
     assert!(
         !harness
             .controller
-            .read_with(cx, |state, _| state.reconnecting_empty_host())
+            .read_with(cx, |state, _| state.quiet_reconnect())
     );
     harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
     assert_eq!(count(&statuses, VERDICT), 0);
@@ -2012,7 +2021,10 @@ mod surface {
     use super::*;
     use crate::{
         app::{self, Core},
-        connection_ui::{ConnectionUi, surface::STRIP_APPEAR_DELAY_MS},
+        connection_ui::{
+            ConnectionUi,
+            surface::{FIRST_CONNECT_STRIP_DELAY_MS, STRIP_APPEAR_DELAY_MS},
+        },
     };
 
     fn open(cx: &mut TestAppContext, harness: &Harness) -> VisualTestContext {
@@ -2058,6 +2070,8 @@ mod surface {
     fn the_strip_waits_then_names_its_status_and_actions(cx: &mut TestAppContext) {
         let harness = two_shown_hosts(cx);
         let mut visual = open(cx, &harness);
+        harness.publish_visual(&mut visual, 0, state_frame("connected"));
+        harness.publish_visual(&mut visual, 0, world("srv-qa", 1, &[("$0", "home")]));
         harness.fake.publish(0, state_frame("disconnected"));
         visual.run_until_parked();
         let before = visual.update(|window, _| window.try_find_by_label("Reconnect").is_none());
@@ -2076,12 +2090,27 @@ mod surface {
         assert!(gone, "recovery is not delayed");
     }
 
-    /// The first workspace starts the host's first tmux server, and the bridge
-    /// reconnects to attach to it: no outage to show, while a real drop after
-    /// it still shows one.
+    /// Launching is not an outage: until a snapshot names a server, the strip
+    /// waits the first-connect grace, and a launch that outlasts it still shows.
+    #[gpui_kit::test]
+    fn a_launch_waits_the_first_connect_grace_before_the_strip(cx: &mut TestAppContext) {
+        let harness = two_shown_hosts(cx);
+        let mut visual = open(cx, &harness);
+        let strip_after = |visual: &mut VisualTestContext, ms: u64| {
+            visual.executor().advance_clock(Duration::from_millis(ms));
+            visual.run_until_parked();
+            visual.update(|window, _| window.try_find_by_label("Reconnect").is_some())
+        };
+        harness.publish_visual(&mut visual, 0, state_frame("disconnected"));
+        assert!(!strip_after(&mut visual, 2 * STRIP_APPEAR_DELAY_MS));
+        assert!(strip_after(&mut visual, FIRST_CONNECT_STRIP_DELAY_MS));
+    }
+
+    /// The first workspace starts the host's first tmux server, which the
+    /// bridge adopts on the same connection: no outage to show, while a real
+    /// drop after it still shows one.
     #[gpui_kit::test]
     fn the_first_tmux_server_starting_shows_no_strip(cx: &mut TestAppContext) {
-        const CHANGED: &str = "tmux server identity changed; authoritative reconnect required";
         let harness = two_shown_hosts(cx);
         let mut visual = open(cx, &harness);
         let strip = |visual: &mut VisualTestContext| {
@@ -2093,19 +2122,6 @@ mod surface {
         };
         harness.publish_visual(&mut visual, 0, state_frame("connected"));
         harness.publish_visual(&mut visual, 0, world("tmux:none", 1, &[]));
-        for frame in [
-            error_frame(CHANGED),
-            state_frame("disconnected"),
-            state_frame("reconnecting"),
-        ] {
-            harness.publish_visual(&mut visual, 0, frame);
-            assert!(!strip(&mut visual), "no strip while it attaches");
-        }
-        let detail = harness.controller.read_with(&visual, |state, _| {
-            state.active_link().unwrap().detail.clone()
-        });
-        assert!(!detail.contains("identity"), "{detail}");
-        harness.publish_visual(&mut visual, 0, state_frame("connected"));
         harness.publish_visual(&mut visual, 0, world("srv-qa", 2, &[("$0", "home")]));
         assert!(!strip(&mut visual));
 
@@ -2148,6 +2164,26 @@ mod surface {
             strip(&mut visual),
             "a genuine failure on an empty host still shows"
         );
+    }
+
+    /// Enter answers the consent dialog with its primary button; it never
+    /// closes it as a decline.
+    #[gpui_kit::test]
+    fn enter_on_the_helper_consent_dialog_installs(cx: &mut TestAppContext) {
+        let harness = confirming(cx, |fake| fake.state().hold_installs = true);
+        let mut visual = open(cx, &harness);
+        visual.run_until_parked();
+        assert_eq!(
+            role_of(&mut visual, "Install and connect"),
+            Some(Role::Button)
+        );
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+        assert!(matches!(
+            harness.helper(&mut visual),
+            HelperUpgradeState::Upgrading { .. }
+        ));
+        assert_eq!(role_of(&mut visual, "Working…"), Some(Role::Button));
     }
 
     #[gpui_kit::test]
@@ -2234,6 +2270,12 @@ mod surface {
             harness.helper(&mut visual),
             HelperUpgradeState::Ready { .. }
         ));
+        // It leaves with its content, not as an empty card.
+        visual.executor().advance_clock(Duration::from_secs(1));
+        for _ in 0..2 {
+            visual.update(|window, _| window.refresh());
+            visual.run_until_parked();
+        }
         let helper_gone =
             visual.update(|window, _| window.try_find_by_label("Install and connect").is_none());
         assert!(helper_gone);
@@ -2577,6 +2619,33 @@ fn a_late_agent_preference_reply_cannot_reopen_a_disconnected_link(cx: &mut Test
         assert_eq!(link.host_state.phase, ConnectionPhase::Disconnected);
         assert!(link.client_id.is_none());
     });
+}
+
+/// A drop under the mode request is the reconnect's to answer, not a failure
+/// to report: the reconnect asks again.
+#[gpui_kit::test]
+fn a_preference_request_lost_to_a_reconnect_says_nothing(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| fake.state().hold_modes = true);
+    let statuses = harness.statuses(cx);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness
+        .fake
+        .state()
+        .mode_answers
+        .remove(0)
+        .send(Err(desktop_core::connection::TRANSPORT_DISCONNECTED.into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(statuses.lock().unwrap().is_empty(), "{statuses:?}");
+    harness.read(cx, |controller| {
+        assert!(controller.active_link().unwrap().detail.is_empty())
+    });
+    harness.publish(
+        cx,
+        0,
+        vec![state_frame("disconnected"), state_frame("connected")],
+    );
+    assert_eq!(harness.fake.state().mode_requests.len(), 2);
 }
 
 #[gpui_kit::test]

@@ -1,7 +1,7 @@
 //! The connection dialog and the confirmations it raises. Copy and field
 //! behavior from `features/shell/SettingsDialog.tsx` and `app/AppDialogLayer.tsx`.
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use desktop_core::connection::{ConnectionSpec, helper::HelperRollback, profiles::HostProfile};
 use gpui_kit::{
@@ -151,11 +151,20 @@ pub fn open_helper_dialog(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // The dialog is still drawn while it fades out, after the install has
+    // left `Upgrading`: it keeps its last content rather than going blank.
+    let shown: Rc<RefCell<Option<(bool, RemoteHelperProbe)>>> = Rc::default();
     window.open_dialog(cx, move |dialog, window, cx| {
-        let (busy, probe) = match controller.read(cx).helper() {
-            HelperUpgradeState::Confirming { probe, .. } => (false, probe.clone()),
-            HelperUpgradeState::Upgrading { probe, .. } => (true, probe.clone()),
-            _ => return dialog,
+        let current = match controller.read(cx).helper() {
+            HelperUpgradeState::Confirming { probe, .. } => Some((false, probe.clone())),
+            HelperUpgradeState::Upgrading { probe, .. } => Some((true, probe.clone())),
+            _ => None,
+        };
+        if current.is_some() {
+            *shown.borrow_mut() = current;
+        }
+        let Some((busy, probe)) = shown.borrow().clone() else {
+            return dialog;
         };
         let confirm_label = match (busy, probe.installed) {
             (true, _) => "Working…",
@@ -164,6 +173,7 @@ pub fn open_helper_dialog(
         };
         let cancel = controller.clone();
         let confirm = controller.clone();
+        let entered = controller.clone();
         let escaped = controller.clone();
         let closed_by_kit = closed_by_kit.clone();
         dialog::card(dialog, &theme::palette(cx))
@@ -173,6 +183,13 @@ pub fn open_helper_dialog(
             .close_button(false)
             .keyboard(!busy)
             .overlay_closable(false)
+            // Enter is the primary button: install, and stay open as progress.
+            .on_ok(move |_, _, cx| {
+                if !busy {
+                    entered.update(cx, |state, cx| state.confirm_helper_install(cx));
+                }
+                false
+            })
             .on_close(move |_, _, cx| {
                 closed_by_kit(cx);
                 escaped.update(cx, |state, cx| state.cancel_helper_install(cx));

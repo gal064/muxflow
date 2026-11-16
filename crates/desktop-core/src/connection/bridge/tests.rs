@@ -70,7 +70,7 @@ fn only_a_truly_empty_snapshot_is_an_empty_server_transition() {
                 }),
             ),
             0,
-            "server-a",
+            &mut "server-a".to_owned(),
             &channel,
             &client,
         )
@@ -226,7 +226,13 @@ impl StreamHarness {
             TerminalEventChannel::new(Uuid::new_v4(), channel, Arc::clone(&client.delivery_window));
         let run_client = Arc::clone(&client);
         let run = thread::spawn(move || {
-            read_protocol_stream(host_read, from_sequence, "server-a", &channel, &run_client)
+            read_protocol_stream(
+                host_read,
+                from_sequence,
+                &mut "server-a".to_owned(),
+                &channel,
+                &run_client,
+            )
         });
         Self {
             host: Some(host_write),
@@ -547,4 +553,58 @@ fn handshake_refuses_a_different_contract_or_epoch_without_reading_a_snapshot() 
             .unwrap();
         assert!(error.contains(expected), "{error}");
     }
+}
+
+#[test]
+fn the_first_server_on_an_empty_host_is_adopted_without_reconnecting() {
+    let client = Arc::new(TerminalClient::new());
+    *client.server_identity.lock().unwrap() = super::super::NO_TMUX_SERVER.into();
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&delivered);
+    let channel = TerminalEventChannel::new(
+        Uuid::new_v4(),
+        crate::platform::test_sink(move |body| {
+            sink.lock().unwrap().push(body);
+            Ok(())
+        }),
+        Arc::clone(&client.delivery_window),
+    );
+    let mut identity = super::super::NO_TMUX_SERVER.to_owned();
+    let started = |sequence| {
+        envelope(
+            0,
+            sequence,
+            Payload::Event(v1::HostEvent {
+                kind: v1::EventKind::TopologySnapshot.into(),
+                snapshot: Some(v1::Snapshot {
+                    server_identity: "server-a".into(),
+                    sessions: vec![v1::Session::default()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+    };
+    let (next, _) = process_event(started(1), 0, &mut identity, &channel, &client).unwrap();
+    assert_eq!(next, 1);
+    assert_eq!(identity, "server-a");
+    assert_eq!(*client.server_identity.lock().unwrap(), "server-a");
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    // Only the empty host is adopted: a second server still reconnects.
+    let replaced = envelope(
+        0,
+        2,
+        Payload::Event(v1::HostEvent {
+            kind: v1::EventKind::TopologySnapshot.into(),
+            snapshot: Some(v1::Snapshot {
+                server_identity: "server-b".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        process_event(replaced, 1, &mut identity, &channel, &client).unwrap_err(),
+        "tmux server identity changed; authoritative reconnect required"
+    );
 }

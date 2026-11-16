@@ -3,10 +3,11 @@
 //!
 //! Matched as substrings because the native side returns these as plain
 //! strings. Each is a literal copy of a sentence in `desktop-core`'s
-//! `connection.rs`, or its structured code.
+//! `connection` module, or its structured code.
 
-pub const TRANSIENT_REVEAL_ERRORS: [&str; 3] = [
+pub const TRANSIENT_REVEAL_ERRORS: [&str; 4] = [
     "host bridge is disconnected",
+    "host transport disconnected",
     "terminal client is no longer attached",
     "connection_unavailable",
 ];

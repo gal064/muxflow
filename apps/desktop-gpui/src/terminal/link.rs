@@ -52,10 +52,6 @@ pub enum LinkEvent {
         epoch: Option<u64>,
     },
     Status(String),
-    /// A keystroke echoed slowly enough to be journalled.
-    EchoLag {
-        lag_ms: u64,
-    },
     /// A program in a pane wrote the clipboard with OSC 52. Whether it may is
     /// the controller's call, which knows the host on screen.
     ClipboardWrite(String),
@@ -277,11 +273,10 @@ impl TerminalLink {
                 sequence,
                 generation,
             } => {
-                let echo_lag = self.pane(&pane_id).and_then(|pane| {
-                    pane.update(cx, |pane, _| pane.input.note_output(sequence, generation))
-                });
-                if let Some(lag_ms) = echo_lag {
-                    cx.emit(LinkEvent::EchoLag { lag_ms });
+                // Journal only: an echo waits on the program as much as on
+                // the network, so it is no verdict on the link.
+                if let Some(pane) = self.pane(&pane_id) {
+                    pane.update(cx, |pane, _| pane.input.note_output(sequence, generation));
                 }
             }
             EngineOutput::RendererDiagnostic { pane_id, message } => {

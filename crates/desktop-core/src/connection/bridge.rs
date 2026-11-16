@@ -96,10 +96,7 @@ pub(super) fn supervise_bridge(
         if let Some(writer) = client.writer.lock().unwrap().take() {
             writer.close();
         }
-        client
-            .fail_pending(
-                "host transport disconnected; commit outcome is unknown and the request will not replay",
-            );
+        client.fail_pending(super::TRANSPORT_DISCONNECTED);
         if let Some(mut child) = client.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -220,6 +217,7 @@ fn run_bridge_once(
         .terminal_epoch
         .store(terminal_epoch, Ordering::Release);
     *client.server_identity.lock().unwrap() = hello.server_identity.clone();
+    let mut server_identity = hello.server_identity.clone();
     send_event(
         channel,
         TerminalEvent::GenerationEpoch {
@@ -260,7 +258,7 @@ fn run_bridge_once(
         }
         for frame in initial.buffered_events {
             let (next, scoped_seed) =
-                process_event(frame, sequence, &hello.server_identity, channel, client)?;
+                process_event(frame, sequence, &mut server_identity, channel, client)?;
             sequence = next;
             if let Some(pane_id) = scoped_seed {
                 write_scoped_seed_request(&mut stdin, client, pane_id)?;
@@ -288,7 +286,7 @@ fn run_bridge_once(
         let buffered = read_until_response(&mut reader, attach_id)?;
         for frame in buffered {
             let (next, scoped_seed) =
-                process_event(frame, sequence, &hello.server_identity, channel, client)?;
+                process_event(frame, sequence, &mut server_identity, channel, client)?;
             sequence = next;
             if let Some(pane_id) = scoped_seed {
                 write_scoped_seed_request(&mut stdin, client, pane_id)?;
@@ -327,7 +325,7 @@ fn run_bridge_once(
     read_protocol_stream(
         CountingReader::new(reader, &client.link_counters),
         sequence,
-        &hello.server_identity,
+        &mut server_identity,
         channel,
         client,
     )
@@ -389,10 +387,16 @@ pub(super) fn handshake_and_snapshot(
     let snapshot = response
         .snapshot
         .ok_or("subscribe response omitted snapshot")?;
+    let mut hello = hello;
     if snapshot.server_identity != hello.server_identity {
-        return Err(
-            "tmux server changed during handshake; reconnecting for a coherent snapshot".into(),
-        );
+        // A server that started between the hello and the snapshot replaced
+        // nothing, so the snapshot's server is this connection's.
+        if hello.server_identity != super::NO_TMUX_SERVER {
+            return Err(
+                "tmux server changed during handshake; reconnecting for a coherent snapshot".into(),
+            );
+        }
+        hello.server_identity = snapshot.server_identity.clone();
     }
     let generation = snapshot.generation;
     let agent_snapshot = snapshot.agents.clone();
@@ -458,7 +462,7 @@ fn read_until_response_with_value(
 fn read_protocol_stream(
     mut reader: impl Read,
     mut sequence: u64,
-    server_identity: &str,
+    server_identity: &mut String,
     channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
 ) -> Result<(), String> {
@@ -487,7 +491,9 @@ fn read_protocol_stream(
                 }
                 let protocol_snapshot = response.snapshot.ok_or("resync omitted snapshot")?;
                 let snapshot_identity = protocol_snapshot.server_identity.clone();
-                if snapshot_identity != server_identity {
+                if snapshot_identity != *server_identity
+                    && !adopt_started_server(client, server_identity, &snapshot_identity)
+                {
                     return Err("tmux server changed during resync".into());
                 }
                 let generation = protocol_snapshot.generation;
@@ -679,10 +685,27 @@ pub(super) fn terminal_scope(
     (session_id, mounted)
 }
 
+/// Adopts the first tmux server on a connection that started with none, which
+/// is what creating the first workspace does. A host with no server has no
+/// panes, sessions or generations, so nothing the desktop holds is bound to the
+/// identity being replaced, and reconnecting would only fail every request in
+/// flight. Any other change of server still reconnects: its pane ids may
+/// collide with the ones already on screen.
+fn adopt_started_server(client: &TerminalClient, current: &mut String, started: &str) -> bool {
+    if current != super::NO_TMUX_SERVER || started == super::NO_TMUX_SERVER {
+        return false;
+    }
+    super::files::invalidate_bulk_scope(client.bulk_scope, "the host's tmux server started");
+    super::files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
+    *client.server_identity.lock().unwrap() = started.to_owned();
+    *current = started.to_owned();
+    true
+}
+
 fn process_event(
     frame: v1::Envelope,
     last_sequence: u64,
-    expected_server_identity: &str,
+    expected_server_identity: &mut String,
     channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
 ) -> Result<(u64, Option<String>), String> {
@@ -722,8 +745,10 @@ fn process_event(
                 .snapshot
                 .ok_or("topology snapshot event omitted snapshot")?;
             let server_identity = value.server_identity.clone();
-            if server_identity != expected_server_identity {
-                if server_identity == "tmux:none"
+            if server_identity != *expected_server_identity
+                && !adopt_started_server(client, expected_server_identity, &server_identity)
+            {
+                if server_identity == super::NO_TMUX_SERVER
                     && value.sessions.is_empty()
                     && value.windows.is_empty()
                     && value.panes.is_empty()
