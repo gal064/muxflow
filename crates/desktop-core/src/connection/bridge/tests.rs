@@ -555,6 +555,72 @@ fn handshake_refuses_a_different_contract_or_epoch_without_reading_a_snapshot() 
     }
 }
 
+/// The desktop checks the helper only after a failure that names the
+/// handshake, and an older helper on a different protocol major breaks the
+/// handshake in any of these ways.
+#[test]
+fn every_handshake_failure_names_the_handshake() {
+    struct Reset;
+    impl Read for Reset {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+    }
+    let frames = |envelopes: &[v1::Envelope]| {
+        Cursor::new(
+            envelopes
+                .iter()
+                .flat_map(|envelope| tmux_agent_protocol::encode_frame(envelope).unwrap())
+                .collect::<Vec<u8>>(),
+        )
+    };
+    let hello = |major: u32| {
+        let mut hello = envelope(
+            1,
+            0,
+            Payload::ServerHello(v1::ServerHello {
+                connection_epoch: 9,
+                ..Default::default()
+            }),
+        );
+        hello.protocol_major = major;
+        hello
+    };
+    let refused = envelope(
+        2,
+        0,
+        Payload::Response(v1::Response {
+            ok: false,
+            error_code: "UNAVAILABLE".into(),
+            display_message: "refused".into(),
+            ..Default::default()
+        }),
+    );
+    let mut failures = vec![
+        handshake_and_snapshot(&mut Vec::new(), &mut Reset, 9),
+        handshake_and_snapshot(&mut Vec::new(), &mut Cursor::new(Vec::new()), 9),
+        handshake_and_snapshot(
+            &mut Vec::new(),
+            &mut frames(std::slice::from_ref(&refused)),
+            9,
+        ),
+        handshake_and_snapshot(
+            &mut Vec::new(),
+            &mut frames(&[hello(tmux_agent_protocol::PROTOCOL_MAJOR - 1)]),
+            9,
+        ),
+        handshake_and_snapshot(
+            &mut Vec::new(),
+            &mut frames(&[hello(tmux_agent_protocol::PROTOCOL_MAJOR), refused]),
+            9,
+        ),
+    ];
+    for result in failures.drain(..) {
+        let error = result.err().unwrap();
+        assert!(error.contains("handshake"), "{error}");
+    }
+}
+
 #[test]
 fn the_first_server_on_an_empty_host_is_adopted_without_reconnecting() {
     let client = Arc::new(TerminalClient::new());
