@@ -1234,6 +1234,10 @@ impl Render for TerminalSurface {
         // Only a connected host that has none: while the app is still loading,
         // or a new workspace's panes are mounting, an empty frame is not news.
         let empty = self.panes.is_empty()
+            && self.target.as_ref().is_some_and(|target| {
+                !crate::workspaces::current(cx)
+                    .is_some_and(|workspaces| workspaces.read(cx).creating_on(&target.profile_id))
+            })
             && self
                 .controller
                 .read(cx)
