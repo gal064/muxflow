@@ -69,7 +69,7 @@ export const stateColors = {
 } as const;
 
 // ── Light theme (desktop) ───────────────────────────────────────────────
-// Modelled on T3 Code's light theme: neutral zinc greys rather than One Light's
+// Neutral zinc greys rather than One Light's
 // blue-tinted ones, the work area a shade whiter than the chrome around it,
 // and white selected rows set off by a border.
 export const lightColors = {
@@ -105,7 +105,7 @@ export const lightColors = {
   shadow: "#18181b40",
 } as const satisfies Record<keyof typeof colors, string>;
 
-// VS Code's light terminal colours, which T3 Code uses too, with every text
+// VS Code's light terminal colours, with every text
 // colour at 4.5:1 or better on the background. VS Code leaves yellow and cyan
 // near 3:1, and shell prompts are commonly drawn in cyan, so both are darkened
 // here, as are the bright green, yellow and white CLIs print emphasis in;
