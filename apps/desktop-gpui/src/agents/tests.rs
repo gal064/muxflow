@@ -804,6 +804,39 @@ fn settings_offers_this_runtimes_agent_setup(cx: &mut TestAppContext) {
     assert!(question_open(&harness, cx));
 }
 
+/// Hooks a consented helper install is about to set up are not missing: no
+/// "set up hooks" line while the install waits for the lane, or runs.
+#[gpui_kit::test]
+fn a_consented_helper_install_keeps_the_hooks_notice_quiet(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx, setup_host("notWired"));
+    let underway = |cx: &mut TestAppContext| {
+        harness
+            .runtime
+            .read_with(cx, |runtime, _| runtime.hook_setup_underway("local"))
+    };
+    harness.runtime.update(cx, |runtime, _| {
+        runtime.setup.auto_setup = Some("local".into());
+        runtime.setup.allowed = false;
+    });
+    harness.sync(cx, inputs(vec![scope(4, 1)]));
+    assert!(
+        underway(cx),
+        "due while the helper dialog still owns the lane"
+    );
+    assert!(!question_open(&harness, cx));
+    harness
+        .runtime
+        .update(cx, |runtime, _| runtime.setup.allowed = true);
+    harness.sync(cx, inputs(vec![scope(4, 1)]));
+    assert!(
+        harness
+            .host
+            .operations()
+            .contains(&"hookInstall".to_owned())
+    );
+    assert!(!underway(cx), "the snapshot after the install decides");
+}
+
 #[gpui_kit::test]
 fn pauses_the_question_while_another_host_question_owns_the_lane(cx: &mut TestAppContext) {
     let harness = Harness::new(cx, setup_host("notWired"));
