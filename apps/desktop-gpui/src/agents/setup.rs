@@ -107,10 +107,17 @@ impl AgentRuntime {
     /// Whether the hooks on `host` are being set up by themselves right now: no
     /// moment to tell the user they are missing.
     pub fn hook_setup_underway(&self, host: &str) -> bool {
-        self.setup
+        let installing = self
+            .setup
             .auto_installing
             .as_ref()
-            .is_some_and(|(installing, _)| installing == host)
+            .is_some_and(|(installing, _)| installing == host);
+        // Consented with the helper and about to start once the host is free.
+        let due = self.setup.auto_setup.as_deref() == Some(host)
+            && !host_hook_wiring(self.adapters(host))
+                .setup_targets
+                .is_empty();
+        installing || due
     }
 
     /// Whether Settings and the sidebar line should offer to set this host up.
@@ -226,7 +233,12 @@ impl AgentRuntime {
                             );
                         });
                     }
-                    _ => self.offer_setup(cx),
+                    (true, None) => {
+                        // It cannot run by itself after all: asking is the answer.
+                        self.setup.auto_setup = None;
+                        self.offer_setup(cx)
+                    }
+                    (false, _) => self.offer_setup(cx),
                 }
             }
         }
