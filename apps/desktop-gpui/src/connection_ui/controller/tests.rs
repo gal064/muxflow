@@ -636,6 +636,28 @@ fn asks_the_host_once_and_opens_the_install(cx: &mut TestAppContext) {
     assert_eq!(harness.fake.state().probes.len(), 1);
 }
 
+/// A helper on an older protocol major never lets the connection come up, so
+/// only the failed handshake can lead to its upgrade.
+#[gpui_kit::test]
+fn offers_the_upgrade_when_an_older_helper_breaks_the_handshake(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, false))));
+    harness.publish(
+        cx,
+        0,
+        vec![error_frame(
+            "handshake failed: host did not return ServerHello: Error: Connection reset by peer (os error 104)",
+        )],
+    );
+    assert_eq!(harness.fake.state().probes.len(), 1);
+    assert!(matches!(
+        harness.helper(cx),
+        HelperUpgradeState::Confirming {
+            operation: HelperOperation::Upgrade,
+            ..
+        }
+    ));
+}
+
 #[gpui_kit::test]
 fn checks_a_successful_connection_once_and_prompts_for_a_digest_mismatch(cx: &mut TestAppContext) {
     let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, false))));
