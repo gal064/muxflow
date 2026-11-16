@@ -1366,6 +1366,29 @@ fn keeps_a_peers_failures_and_helper_questions_off_the_screen(cx: &mut TestAppCo
     assert_eq!(harness.helper(cx), HelperUpgradeState::Idle);
 }
 
+/// The peer's missing helper stays its own until the user goes to it; then
+/// connecting it asks to install, as the host on screen would.
+#[gpui_kit::test]
+fn connecting_a_peer_without_its_helper_offers_the_install(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    harness.publish(cx, 1, vec![error_frame(HANDSHAKE_FAILURE)]);
+    assert!(harness.fake.state().probes.is_empty());
+    queue_answer(&harness.fake, Ok(probe_of(false, false)));
+    let epoch = harness.read(cx, |state| state.link("remote-a").unwrap().connection_epoch);
+    harness.update(cx, |state, cx| state.connect_host("remote-a", cx));
+    harness.read(cx, |state| {
+        assert_eq!(state.active_profile_id(), "remote-a");
+        assert!(state.link("remote-a").unwrap().connection_epoch > epoch);
+    });
+    let fresh = harness.fake.bridge_count() - 1;
+    harness.publish(cx, fresh, vec![error_frame(HANDSHAKE_FAILURE)]);
+    assert_eq!(harness.fake.state().probes.len(), 1);
+    assert!(matches!(
+        harness.helper(cx),
+        HelperUpgradeState::Confirming { .. }
+    ));
+}
+
 #[gpui_kit::test]
 fn restarts_only_the_stalled_peers_bridge_and_only_once(cx: &mut TestAppContext) {
     let harness = two_shown_hosts(cx);
