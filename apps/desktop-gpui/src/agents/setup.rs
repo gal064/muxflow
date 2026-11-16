@@ -282,10 +282,11 @@ impl AgentRuntime {
                     cx,
                 ),
                 Ok(_) => {}
-                Err(error) => this.status_line(
-                    format!("Recommended tmux window naming was not applied: {error}"),
-                    cx,
-                ),
+                // Nothing the user can act on: window names are a nicety, and
+                // the next connection to this server asks again.
+                Err(error) => {
+                    eprintln!("muxflow: recommended tmux window naming was not applied: {error}");
+                }
             })
             .ok();
         })

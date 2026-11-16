@@ -38,12 +38,15 @@ use super::{
 
 /// Sub-400ms blips are self-healing repairs whose strip would only be a flash.
 pub const STRIP_APPEAR_DELAY_MS: u64 = 400;
+/// A first connect is the app starting: a few seconds of it is normal, and
+/// only a connect that takes longer than that is worth a strip.
+pub const FIRST_CONNECT_STRIP_DELAY_MS: u64 = 3_000;
 
 fn strip_title(phase: ConnectionPhase) -> &'static str {
     match phase {
         ConnectionPhase::Connecting => "Connecting to tmux…",
         ConnectionPhase::Reconnecting => "Reconnecting to tmux…",
-        ConnectionPhase::Resyncing => "Reconciling authoritative state…",
+        ConnectionPhase::Resyncing => "Syncing with the host…",
         ConnectionPhase::Disconnected | ConnectionPhase::Connected => "Disconnected from tmux",
     }
 }
@@ -96,13 +99,21 @@ impl ConnectionSurface {
         let Some(controller) = self.controller.clone() else {
             return;
         };
-        let (degraded, helper_modal, discard_modal) = {
+        let (first_connect, degraded, helper_modal, discard_modal) = {
             let state = controller.read(cx);
             (
+                // Starting up: no snapshot has named a server yet. A failed
+                // handshake is first a question for the helper probe (a host
+                // without the helper is setup, not an outage), and a quiet
+                // reconnect is a lifecycle step. Each usually settles inside
+                // the first-connect grace; one that does not still shows.
+                state.active_host_state().is_some_and(|host| {
+                    host.phase == ConnectionPhase::Connecting || host.server_identity.is_none()
+                }) || matches!(state.helper(), HelperUpgradeState::Probing { .. })
+                    || state.quiet_reconnect(),
                 state
                     .active_host_state()
-                    .is_some_and(|host| host.phase != ConnectionPhase::Connected)
-                    && !state.reconnecting_empty_host(),
+                    .is_some_and(|host| host.phase != ConnectionPhase::Connected),
                 matches!(
                     state.helper(),
                     HelperUpgradeState::Confirming { .. } | HelperUpgradeState::Upgrading { .. }
@@ -114,9 +125,14 @@ impl ConnectionSurface {
             self.strip_ready = false;
             self.strip_timer = None;
         } else if !self.strip_ready && self.strip_timer.is_none() {
+            let delay = if first_connect {
+                FIRST_CONNECT_STRIP_DELAY_MS
+            } else {
+                STRIP_APPEAR_DELAY_MS
+            };
             self.strip_timer = Some(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
-                    .timer(Duration::from_millis(STRIP_APPEAR_DELAY_MS))
+                    .timer(Duration::from_millis(delay))
                     .await;
                 let _ = this.update_in(cx, |this, _, cx| {
                     this.strip_ready = true;
@@ -169,9 +185,10 @@ impl ConnectionSurface {
         let detail: SharedString = if !link.detail.is_empty() {
             link.detail.clone().into()
         } else if link.host_state.snapshot.sessions.is_empty() {
-            "Workspace data appears after a complete authoritative snapshot.".into()
+            SharedString::default()
         } else {
-            "The last known workspace stays visible; writes are frozen and are not queued.".into()
+            "Your workspaces stay on screen; typing and changes pause until the host is back."
+                .into()
         };
         let title = strip_title(phase);
         let palette = theme::palette(cx);

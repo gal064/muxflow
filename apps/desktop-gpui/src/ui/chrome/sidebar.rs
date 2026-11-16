@@ -607,7 +607,7 @@ fn host_row(workspaces: &Entity<Workspaces>, cx: &App) -> AnyElement {
     );
     let tooltip: SharedString = match latency {
         Some(ms) => format!(
-            "{} · {} · {phase} · last measured round-trip {ms} ms",
+            "{} · {} · {phase} · workspace and tab actions take about {ms} ms",
             active.label, active.transport
         ),
         None => format!("{} · {} · {phase}", active.label, active.transport),

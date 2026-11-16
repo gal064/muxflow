@@ -30,6 +30,10 @@ use crate::watchdog::{PaneDegradedReason, PaneDegradedWatchdog};
 const REVEAL_VOID_TIMEOUT: Duration = Duration::from_millis(4_000);
 const REVEAL_VOID_MAX_ATTEMPTS: u32 = 3;
 const PANE_HANDOFF_TIMEOUT: Duration = Duration::from_millis(2_000);
+/// The watchdog retry whose firing means one retry already failed: about six
+/// seconds without a screen. Everything before it is routine recovery.
+const STUCK_BANNER_ATTEMPT: u32 = 1;
+const STUCK_BANNER: &str = "This terminal is taking longer than usual to load. Still retrying…";
 
 #[derive(Debug)]
 pub enum EngineOutput {
@@ -226,6 +230,8 @@ pub(crate) struct Pane {
     void_watch: Option<(Instant, u32)>,
     seed_diagnostic_for_next_seed: bool,
     stream_grid: Option<GridSize>,
+    /// The one banner a pane shows: recovery has failed long enough to say so.
+    stuck_banner: bool,
 }
 
 impl Pane {
@@ -250,6 +256,7 @@ impl Pane {
             void_watch: None,
             seed_diagnostic_for_next_seed: false,
             stream_grid: None,
+            stuck_banner: false,
         }
     }
 
@@ -312,11 +319,11 @@ impl Pane {
                 kind: "pane.degraded",
                 detail: json!({ "paneId": self.id, "reason": reason.name(), "attempt": retry.attempt }),
             });
-            if retry.attempt == 0 {
-                self.renderer_diagnostic(
-                    Some(format!("{}; retrying…", reason.description())),
-                    shared,
-                );
+            // Recovery is routine and usually done before the first retry, so
+            // the pane says nothing until a retry has already failed.
+            if retry.attempt == STUCK_BANNER_ATTEMPT {
+                self.stuck_banner = true;
+                self.renderer_diagnostic(Some(STUCK_BANNER.to_owned()), shared);
             }
             shared.hub.retry_pane_seed(&self.id, &mut shared.hub_out);
             shared.request_seed(
@@ -759,6 +766,16 @@ impl Pane {
         }
     }
 
+    /// Every path back to a working pane ends the watchdog episode, and with it
+    /// the banner — not only a seed: a verified resume, or output after a
+    /// re-reveal, recovers a pane just as well.
+    fn healthy(&mut self, shared: &mut Shared) {
+        self.watchdog.note_healthy();
+        if std::mem::take(&mut self.stuck_banner) {
+            self.renderer_diagnostic(None, shared);
+        }
+    }
+
     fn renderer_diagnostic(&self, message: Option<String>, shared: &mut Shared) {
         shared.out.push(EngineOutput::RendererDiagnostic {
             pane_id: self.id.clone(),
@@ -909,7 +926,7 @@ impl Pane {
         match effect {
             PaneRevealEffect::Seed(data) => self.apply_seed(&data, generation, event_epoch, shared),
             PaneRevealEffect::Output(data) => {
-                self.watchdog.note_healthy();
+                self.healthy(shared);
                 if self.skip_output_for_historical_screen(shared) {
                     return;
                 }
@@ -952,11 +969,14 @@ impl Pane {
                 self.watchdog
                     .note(PaneDegradedReason::PaneAwaitingSeed, now);
                 self.blank();
-                if !reason.is_empty() {
-                    self.renderer_diagnostic(
-                        Some(format!("{reason}; waiting for a fresh terminal seed…")),
-                        shared,
-                    );
+                // Waiting for a screen is how every pane starts and how one
+                // recovers: the journal keeps the reason, and the watchdog
+                // speaks only if the seed never comes.
+                if !reason.is_empty() && reason != crate::reveal::NO_LOCAL_STATE {
+                    shared.out.push(EngineOutput::Incident {
+                        kind: "pane.awaitingSeed",
+                        detail: json!({ "paneId": self.id, "reason": reason }),
+                    });
                 }
                 if request_seed {
                     shared.request_seed(&self.id, &reason);
@@ -1009,6 +1029,9 @@ impl Pane {
         self.held = None;
         self.deferred.reset();
         self.screen_on_display = None;
+        // A blank pane holds no screen of any epoch: a re-reveal must not claim
+        // one, or a bare `Visible` would mark it ready with nothing drawn.
+        self.renderer_epoch = None;
         self.pager.note_screen_gone();
     }
 
@@ -1024,14 +1047,13 @@ impl Pane {
         self.deferred.reset();
         self.pager.note_screen_seeded();
         self.screen_on_display = None;
-        self.watchdog.note_healthy();
+        self.healthy(shared);
         self.writer.seed(data);
         self.applied_generation = generation;
         self.publish_initial_paint(generation, event_epoch, shared);
         // Only from a seed: a restored or resumed screen already carries
         // whatever history it had.
         self.ask_for_page(HistoryPageTrigger::Prefetch, shared);
-        self.renderer_diagnostic(None, shared);
         if self.seed_diagnostic_for_next_seed {
             self.seed_diagnostic_for_next_seed = false;
         } else {
@@ -1065,10 +1087,10 @@ impl Pane {
                 "Pane {} is not showing the screen the host resumed it from",
                 self.id
             );
-            self.renderer_diagnostic(
-                Some(format!("{reason}; waiting for a fresh terminal seed…")),
-                shared,
-            );
+            shared.out.push(EngineOutput::Incident {
+                kind: "pane.awaitingSeed",
+                detail: json!({ "paneId": self.id, "reason": reason }),
+            });
             shared.request_seed(&self.id, &reason);
             return;
         }
@@ -1077,8 +1099,7 @@ impl Pane {
             // The kept screen is still the exact view being read. The tail is
             // covered by the one seed requested when the user returns live.
             self.deferred.reset();
-            self.watchdog.note_healthy();
-            self.renderer_diagnostic(None, shared);
+            self.healthy(shared);
             return;
         }
         self.write_output(raw_tail, tail_through_generation);
@@ -1087,8 +1108,7 @@ impl Pane {
             self.screen_on_display = None;
         }
         self.flush_deferred_output(Some(tail_through_generation), shared);
-        self.watchdog.note_healthy();
-        self.renderer_diagnostic(None, shared);
+        self.healthy(shared);
     }
 
     fn receive_history(&mut self, data: &[u8], history_size: Option<u32>, shared: &mut Shared) {

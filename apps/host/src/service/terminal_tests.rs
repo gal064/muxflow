@@ -2315,3 +2315,24 @@ fn screen_seed_restores_the_mouse_mode_the_app_asked_for() {
         assert!(!contains(&none.bytes, mode));
     }
 }
+
+/// A seed request often overtakes the attach of its pane's session (a new tab,
+/// a workspace switch). That is not a failure: the seed is owed and sent once
+/// the session attaches.
+#[test]
+fn a_seed_request_ahead_of_its_sessions_attach_is_owed_not_refused() {
+    let output_credit = Arc::new(OutputCredit::new());
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
+    clients
+        .resources
+        .lock()
+        .unwrap()
+        .require_seed("%1", "a pane in a session not attached yet");
+    let (events, _receiver) = mpsc::channel(8);
+    clients
+        .request_seed_for_render("%1", &events, &AtomicBool::new(false))
+        .unwrap();
+    assert!(clients.owed_seeds.contains("%1"));
+    clients.stop();
+}

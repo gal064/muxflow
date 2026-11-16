@@ -56,7 +56,7 @@ pub async fn agent_request(
     let requested_epoch = parse_u64("connectionEpoch", &command.connection_epoch)?;
     let current_epoch = client.terminal_epoch.load(Ordering::Acquire);
     if requested_epoch == 0 || requested_epoch != current_epoch {
-        return Err("agent request belongs to a replaced connection epoch".into());
+        return Err(super::REPLACED_EPOCH.into());
     }
     let host_profile_id = client.host_profile_id.lock().unwrap().clone();
     let adapter_id = command.adapter_id;

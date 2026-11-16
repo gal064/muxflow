@@ -18,7 +18,9 @@ use tmux_control::{Pane, TmuxSnapshot, Window as TmuxWindow};
 
 use crate::{
     chat::{self, ChatPane},
-    connection_ui::{controller::ConnectionController, host_links::HostLink},
+    connection_ui::{
+        connection_reducer::ConnectionPhase, controller::ConnectionController, host_links::HostLink,
+    },
     fonts,
     theme::{self, metrics::ui},
 };
@@ -1228,9 +1230,17 @@ impl Render for TerminalSurface {
             .top_0()
             .size_full()
         };
-        // As in Tauri, whenever nothing is drawn: with no workspace at all it is
-        // the first thing a new install shows.
-        let empty = self.panes.is_empty();
+        // With no workspace at all it is the first thing a new install shows.
+        // Only a connected host that has none: while the app is still loading,
+        // or a new workspace's panes are mounting, an empty frame is not news.
+        let empty = self.panes.is_empty()
+            && self
+                .controller
+                .read(cx)
+                .active_host_state()
+                .is_some_and(|host| {
+                    host.phase == ConnectionPhase::Connected && host.snapshot.sessions.is_empty()
+                });
         div()
             .id("terminal-surface")
             .role(Role::Group)

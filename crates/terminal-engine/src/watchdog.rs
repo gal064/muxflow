@@ -29,18 +29,6 @@ impl PaneDegradedReason {
             Self::SeedRequested => "seedRequested",
         }
     }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::RevealFailed => "This pane is waiting for the host to show it",
-            Self::DeferredOverflow => "Output outran this pane's recovery buffer",
-            Self::RendererReseed => "The terminal renderer refused this pane's content",
-            Self::HubConflictReseed => "A conflicting terminal handoff was rejected",
-            Self::HubAwaitingSeed => "This pane's output is held back until a seed arrives",
-            Self::PaneAwaitingSeed => "This pane is waiting for a fresh terminal seed",
-            Self::SeedRequested => "This pane is still waiting for the terminal seed it asked for",
-        }
-    }
 }
 
 pub const PANE_WATCHDOG_BASE_DELAY: Duration = Duration::from_millis(2_000);
