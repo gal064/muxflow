@@ -10,7 +10,7 @@
 //! The server keeps the conversation: what a chat opens on is what
 //! `thread/resume` returns, and a turn goes on while nobody is connected.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Value, json};
 use tmux_agent_protocol::v1::{
@@ -287,6 +287,11 @@ pub(super) struct Codex {
     turns: Vec<(String, String)>,
     /// Tools still running and text still streaming, by item id.
     open: BTreeMap<String, v1::ChatItem>,
+    /// The open commands unified exec started (`unifiedExecStartup`, the
+    /// source of every command the model runs). One still running when its
+    /// turn ends was put in the background (seen on 0.169.0): it runs on, and
+    /// its own late `item/completed` ends it.
+    execs: BTreeSet<String>,
     /// Full or Auto was chosen in the chat, and the next turn must say so.
     permission_chosen: bool,
     /// The user chose a speed in this chat. Until then the thread keeps the
@@ -499,6 +504,12 @@ fn agent_states(source: &Value) -> Vec<(&str, &str)> {
     seen
 }
 
+/// A command of the model's, which unified exec started: one that may be put
+/// in the background.
+fn is_exec(source: &Value) -> bool {
+    string(source, "type") == "commandExecution" && string(source, "source") == "unifiedExecStartup"
+}
+
 /// Remembers the subagent a spawn's `row` stands for, under its thread.
 fn remember_agent(agents: &mut BTreeMap<String, v1::ChatItem>, source: &Value, row: &v1::ChatItem) {
     let thread = source["receiverThreadIds"][0].as_str().unwrap_or_default();
@@ -703,6 +714,9 @@ impl Codex {
         self.turn = None;
         self.agents.clear();
         self.state.compacting = false;
+        // The thread as read has every step of an ended turn ended.
+        self.execs.clear();
+        self.state.background.clear();
         let turns = thread["turns"].as_array().map_or(&[][..], Vec::as_slice);
         for turn in turns {
             let running = string(turn, "status") == "inProgress";
@@ -740,6 +754,9 @@ impl Codex {
                 }
                 if item.streaming || items::is_running(&item) {
                     self.open.insert(item.id.clone(), item.clone());
+                    if is_exec(source) {
+                        self.execs.insert(item.id.clone());
+                    }
                 }
                 timeline.push(item);
             }
@@ -826,7 +843,8 @@ impl Codex {
             Some(((name, _, path), rest)) => (vec![item(name, path)], rest, vec![name.as_str()]),
             None => (Vec::new(), text, Vec::new()),
         };
-        if !text.is_empty() {
+        // Blank space alone, as beside an image with no words, is no text.
+        if !text.trim().is_empty() {
             input.push(json!({"type": "text", "text": text}));
         }
         for (at, _) in text.match_indices('$') {
@@ -958,9 +976,23 @@ impl Codex {
             }
         }
         self.track(&item);
+        let (id, running) = (item.id.clone(), items::is_running(&item));
         out.publish(Change::Item(item));
         if string(source, "type") == "contextCompaction" {
             self.publish_state(out);
+        }
+        if is_exec(source) {
+            if running {
+                self.execs.insert(id);
+            } else {
+                // Its end, also after the turn it started in.
+                self.execs.remove(&id);
+                let listed = self.state.background.len();
+                self.state.background.retain(|task| task.id != id);
+                if self.state.background.len() != listed {
+                    self.publish_state(out);
+                }
+            }
         }
     }
 
@@ -1007,10 +1039,32 @@ impl Codex {
         self.starting = false;
         self.pending.clear();
         self.state.compacting = false;
-        for mut item in std::mem::take(&mut self.open).into_values() {
+        for (id, mut item) in std::mem::take(&mut self.open) {
+            // A command still running was put in the background: listed
+            // until its own end. Codex has no stop for one.
+            if self.execs.contains(&id) {
+                if !self.state.background.iter().any(|task| task.id == id) {
+                    self.state.background.push(v1::ChatBackgroundTask {
+                        id: id.clone(),
+                        kind: v1::ChatTaskKind::Command.into(),
+                        description: item
+                            .tool
+                            .as_ref()
+                            .map_or_else(String::new, |tool| tool.detail.clone()),
+                        started_at_unix_millis: match item.at_unix_millis {
+                            0 => super::now_unix_millis(),
+                            at => at,
+                        },
+                        stoppable: false,
+                    });
+                }
+                self.open.insert(id, item);
+                continue;
+            }
             items::stop(&mut item);
             out.publish(Change::Item(item));
         }
+        self.execs.retain(|id| self.open.contains_key(id));
         // Whether a subagent outlives the turn that spawned it is not known
         // (not seen live): its row ends with the turn, as every step does.
         self.agents.values_mut().for_each(items::stop);
@@ -1402,6 +1456,15 @@ impl Dialect for Codex {
         // A request the agent waited on is not known to have been answered:
         // losing the link is no word that the agent stopped waiting.
         self.reported_blocked = false;
+        // Whether a command put in the background still runs is not known
+        // over a new link: its end may have been said to nobody.
+        self.execs.clear();
+        for task in std::mem::take(&mut self.state.background) {
+            if let Some(mut item) = self.open.remove(&task.id) {
+                items::stop(&mut item);
+                out.publish(Change::Item(item));
+            }
+        }
         self.state.connection = Connection::Connecting.into();
         self.publish_state(out);
         let version = env!("CARGO_PKG_VERSION");
@@ -1532,8 +1595,8 @@ impl Dialect for Codex {
                 self.publish_state(out);
                 Ok(())
             }
-            // It lists no background tasks: whether a Codex task outlives
-            // its turn, and how one would be stopped, is not known yet.
+            // The commands it lists in the background have no stop here: the
+            // server's is an experimental API this chat does not take.
             SessionCommand::StopTask { .. } => Err(super::cannot_stop()),
         }
     }
@@ -1602,6 +1665,9 @@ impl Dialect for Codex {
         self.rewind = None;
         self.agents.clear();
         self.state.compacting = false;
+        // What it ran in the background went with it.
+        self.execs.clear();
+        self.state.background.clear();
         for mut item in std::mem::take(&mut self.open).into_values() {
             items::stop(&mut item);
             out.publish(Change::Item(item));

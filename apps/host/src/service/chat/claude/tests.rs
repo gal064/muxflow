@@ -1110,6 +1110,17 @@ async fn a_small_image_goes_as_an_image_and_anything_else_as_its_path() {
         .command(SessionCommand::Send {
             text: String::new(),
             item_id: "m-image".into(),
+            attachments: vec![shot.clone()],
+        })
+        .unwrap();
+    let content = &replay.written.last().unwrap()["message"]["content"];
+    assert_eq!(content.as_array().unwrap().len(), 1);
+    assert_eq!(content[0]["type"], "image");
+    // So is one with blank space for its text: the agent takes no blank text.
+    replay
+        .command(SessionCommand::Send {
+            text: " \n\t".into(),
+            item_id: "m-image-blank".into(),
             attachments: vec![shot],
         })
         .unwrap();
@@ -1132,13 +1143,13 @@ async fn a_small_image_goes_as_an_image_and_anything_else_as_its_path() {
 
 #[test]
 fn a_recorded_message_gives_back_its_inline_images_and_named_files() {
-    let staged = attach::staging_directory().unwrap();
-    let path = staged.join("notes.md");
+    let staged = tempfile::tempdir().unwrap();
+    let path = staged.path().join("notes.md");
     let entry = json!({"type": "user", "message": {"role": "user", "content": [
         {"type": "text", "text": format!("Read these.\n\n{}", path.display())},
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
     ]}});
-    let Said::User(text, attachments) = said(&entry) else {
+    let Said::User(text, attachments) = said_in(&entry, Some(staged.path())) else {
         panic!("a message of the user's");
     };
     assert_eq!(text, "Read these.");
@@ -1242,7 +1253,7 @@ fn a_replys_fork_starts_a_copy_cut_after_that_reply() {
         name: "Fix tests".into(),
         ..Default::default()
     };
-    let fork = |next: Option<&str>| fork_launch(home.path(), SESSION, next, base.clone());
+    let fork = |next: Option<&str>| fork_launch(home.path(), SESSION, None, next, base.clone());
     // Through the reply to the second message: where the third began.
     let through_second = fork(Some(M3)).unwrap();
     assert_eq!(
@@ -1264,7 +1275,7 @@ fn a_replys_fork_starts_a_copy_cut_after_that_reply() {
     assert_eq!(fork(Some(M1)).unwrap_err().code, "chat_fork_unavailable");
     let empty = tempfile::tempdir().unwrap();
     assert_eq!(
-        fork_launch(empty.path(), SESSION, None, base.clone())
+        fork_launch(empty.path(), SESSION, None, None, base.clone())
             .unwrap_err()
             .message,
         "This chat has no conversation to fork yet."
@@ -1307,6 +1318,79 @@ fn a_fork_with_nothing_said_in_it_shows_its_source_up_to_the_cut() {
         replay.jobs.as_slice(),
         [Job::History { copied: None, .. }]
     ));
+}
+
+/// Before its first turn a copy has no record: an edit, a rewind or a fork
+/// of what it shows is cut from its source's record, as a new copy.
+#[test]
+fn a_fork_with_nothing_said_in_it_is_rewound_and_forked_from_its_source() {
+    let home = home();
+    let copy = "c0b10000-0000-4000-8000-000000000002";
+    let copied = || Some((SESSION.to_owned(), SECOND_REPLY.to_owned()));
+    let copy_launch = Launch {
+        resume: Resume::Session {
+            id: SESSION.into(),
+            fork: true,
+        },
+        resume_at: SECOND_REPLY.into(),
+        name: "Fix tests (fork)".into(),
+        ..Default::default()
+    };
+    let before_m2 = history::parent_of(home.path(), SESSION, M2)
+        .unwrap()
+        .unwrap();
+    let from_source = |resume_at: &str| Launch {
+        resume: Resume::Session {
+            id: SESSION.into(),
+            fork: true,
+        },
+        resume_at: resume_at.into(),
+        ..copy_launch.clone()
+    };
+
+    // A fork of an earlier reply, and of the newest: the copy's cut.
+    let fork =
+        |next: Option<&str>| fork_launch(home.path(), copy, copied(), next, copy_launch.clone());
+    assert_eq!(fork(Some(M2)).unwrap(), from_source(&before_m2));
+    assert_eq!(fork(None).unwrap(), from_source(SECOND_REPLY));
+
+    // A rewind (and an edit, which is one) of its second message.
+    let rewind = |uuid: &str| {
+        let mut launch = copy_launch.clone();
+        rewind_launch(home.path(), copy, uuid, &mut launch).map(|dropped| (launch, dropped))
+    };
+    assert_eq!(
+        rewind(M2).unwrap(),
+        (from_source(&before_m2), String::new())
+    );
+    // Of its first: a new conversation.
+    let (fresh, dropped) = rewind(M1).unwrap();
+    assert_eq!(
+        (fresh.resume, fresh.resume_at, dropped),
+        (Resume::Fresh, String::new(), String::new())
+    );
+    // A message sent in it and not yet recorded is in no record.
+    assert_eq!(
+        rewind(M5).unwrap_err(),
+        "That message is not in the session's record yet."
+    );
+
+    // Once something is said in it the copy has its record, and goes on in it.
+    let project = home.path().join("projects/-work");
+    std::fs::write(project.join(format!("{copy}.jsonl")), SESSION_FILE).unwrap();
+    let (resumed, dropped) = rewind(M2).unwrap();
+    assert_eq!(
+        (resumed.resume, resumed.resume_at, dropped),
+        (
+            Resume::Session {
+                id: copy.into(),
+                fork: false
+            },
+            before_m2.clone(),
+            M2.to_owned()
+        )
+    );
+    assert_eq!(fork(None).unwrap().resume_at, NEWEST);
 }
 
 #[tokio::test]
@@ -1358,7 +1442,12 @@ fn a_long_session_opens_on_its_newest_part_and_says_there_is_more() {
         parent = Value::String(uuid);
     }
     std::fs::write(project.join(format!("{SESSION}.jsonl")), text).unwrap();
+    // Longer than the first window: read again from further back, whole.
     let history = history::load(home.path(), SESSION, "");
+    assert!(history.complete);
+    assert_eq!(history.items.len(), count);
+    // Longer than the most that is read: its newest part, and more said.
+    let history = history::load_within(home.path(), SESSION, "", history::TAIL_BYTES);
     assert!(!history.complete);
     assert!(history.items.len() < count && history.items.len() > 100);
     assert!(
@@ -1369,6 +1458,58 @@ fn a_long_session_opens_on_its_newest_part_and_says_there_is_more() {
             .text
             .starts_with("message 199 ")
     );
+}
+
+/// Messages carrying as many inline images as one may: each fits on one of
+/// the agent's lines and inside the first window of its record, and a
+/// conversation of several, longer than that window, is still read whole.
+#[test]
+fn messages_with_the_most_inline_images_fit_a_line_and_are_read_back_whole() {
+    let budget = attach::MAX_INLINE_TOTAL_BYTES;
+    let images: Vec<Attached> = [5 * 1024 * 1024, budget - 5 * 1024 * 1024]
+        .into_iter()
+        .map(|len| Attached {
+            inline: Some("A".repeat(len)),
+            ..attached("/staged/shot.png", "image/png", None)
+        })
+        .collect();
+    let text = "Why does it overlap? ".repeat(1000);
+    let content = content(&text, &images);
+    let line = json!({"type": "user", "message": {"role": "user", "content": content},
+                      "uuid": M1, "parent_tool_use_id": null})
+    .to_string();
+    assert!(line.len() < super::super::session::MAX_MESSAGE_BYTES);
+    assert!((line.len() as u64) < history::TAIL_BYTES);
+
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("projects/-work");
+    std::fs::create_dir_all(&project).unwrap();
+    let id = |index: u32| format!("d0000000-0000-4000-8000-{index:012}");
+    let mut record = String::new();
+    let mut parent = Value::Null;
+    let turns = 3;
+    for turn in 0..turns {
+        let asked = json!({"parentUuid": parent, "type": "user", "uuid": id(2 * turn),
+            "message": {"role": "user", "content": content}});
+        let reply = json!({"parentUuid": id(2 * turn), "type": "assistant",
+            "uuid": id(2 * turn + 1), "message": {"id": format!("msg_{turn}"),
+            "role": "assistant", "content": [{"type": "text", "text": "Fixed."}]}});
+        record.push_str(&format!("{asked}\n{reply}\n"));
+        parent = Value::String(id(2 * turn + 1));
+    }
+    assert!(record.len() as u64 > history::TAIL_BYTES);
+    std::fs::write(project.join(format!("{SESSION}.jsonl")), record).unwrap();
+
+    let read = history::load(home.path(), SESSION, "");
+    assert!(read.complete);
+    assert_eq!(read.items.len(), 2 * turns as usize);
+    let first = &read.items[0];
+    assert_eq!(first.id, id(0));
+    assert_eq!(first.attachments.len(), 2);
+    // A copy cut at the first reply finds it as far back as it lies.
+    let through = history::load_through(home.path(), SESSION, &id(1));
+    assert!(through.complete);
+    assert_eq!(through.items.len(), 2);
 }
 
 #[test]
@@ -1661,6 +1802,45 @@ async fn compacting_is_said_while_it_lasts_and_leaves_a_notice_with_the_size_bef
         .agent(&json!({"type": "system", "subtype": "status", "status": "compacting"}).to_string());
     replay.end("");
     assert!(replay.client.state.background.is_empty());
+    assert!(!replay.client.state.compacting);
+}
+
+#[tokio::test]
+async fn only_the_conversations_own_status_says_whether_it_compacts() {
+    let mut replay = ready();
+    let status = |fields: Value| {
+        let mut line = json!({"type": "system", "subtype": "status"});
+        line.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        line.to_string()
+    };
+    replay.agent(&status(json!({"status": "compacting"})));
+    assert!(replay.client.state.compacting);
+    // A status line that does not name the status leaves it as it is.
+    replay.agent(&status(json!({"permissionMode": "bypassPermissions"})));
+    assert!(replay.client.state.compacting);
+    // A subagent's lines are about its own conversation.
+    replay.agent(&status(
+        json!({"status": null, "parent_tool_use_id": "toolu_9"}),
+    ));
+    assert!(replay.client.state.compacting);
+    let boundary = json!({"type": "system", "subtype": "compact_boundary",
+                          "parent_tool_use_id": "toolu_9", "compact_metadata": {}});
+    replay.agent(&boundary.to_string());
+    assert!(replay.client.state.compacting);
+    replay.agent(&status(json!({"status": null})));
+    assert!(!replay.client.state.compacting);
+    replay.agent(&status(
+        json!({"status": "compacting", "parent_tool_use_id": "toolu_9"}),
+    ));
+    assert!(!replay.client.state.compacting);
+
+    // A link lost while it compacts does not leave it compacting.
+    replay.agent(&status(json!({"status": "compacting"})));
+    assert!(replay.client.state.compacting);
+    replay.disconnect();
+    replay.connect(&tag(SESSION, ""));
     assert!(!replay.client.state.compacting);
 }
 

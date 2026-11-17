@@ -22,9 +22,11 @@ use tmux_agent_protocol::v1::{self, ChatItemKind as Kind};
 use super::{Reader, Said, said};
 use crate::service::chat::items::{self, string};
 
-/// How much of the end of a session's file is read. A conversation longer
-/// than this opens on its newest part.
-const TAIL_BYTES: u64 = 8 * 1024 * 1024;
+/// How much of the end of a session's file is read first. A conversation
+/// whose chain runs off it is read again from twice as far back, up to
+/// [`MAX_TAIL_BYTES`]; one longer than that opens on its newest part.
+pub(in crate::service::chat) const TAIL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_TAIL_BYTES: u64 = 64 * 1024 * 1024;
 /// The most entries one conversation is followed back through.
 const MAX_CHAIN: usize = 20_000;
 
@@ -61,20 +63,67 @@ fn session_file(configuration: &Path, session: &str) -> Result<Option<PathBuf>, 
         .find(|file| file.is_file()))
 }
 
+/// The session has a file of its own. A copy has none until something is
+/// said in it.
+pub(in crate::service::chat) fn has_record(configuration: &Path, session: &str) -> bool {
+    matches!(session_file(configuration, session), Ok(Some(_)))
+}
+
 struct Entry {
     parent: Option<String>,
     value: Value,
 }
 
-/// The entries of the end of the file by their id, and the id of the newest.
-fn read_entries(file: &Path) -> Option<(BTreeMap<String, Entry>, Option<String>)> {
+type Entries = BTreeMap<String, Entry>;
+
+/// The entries of the end of the file, read far enough back to hold the
+/// chain from `leaf`, or from the newest entry when there is none: the
+/// window grows while the chain runs off its start, up to `max_window`.
+/// Answers the entries and the leaf, which is `None` when the file holds no
+/// entry.
+fn read_back(
+    file: &Path,
+    leaf: Option<&str>,
+    max_window: u64,
+) -> Option<(Entries, Option<String>)> {
+    let mut window = TAIL_BYTES;
+    loop {
+        let (entries, newest, whole) = read_entries(file, window)?;
+        let leaf = leaf.map(str::to_owned).or(newest);
+        let short = !whole
+            && window < max_window
+            && leaf.as_ref().is_none_or(|leaf| runs_off(&entries, leaf));
+        if !short {
+            return Some((entries, leaf));
+        }
+        window *= 2;
+    }
+}
+
+/// The chain from `leaf` ends at an entry whose parent was not read: it
+/// started before what was read of the file.
+fn runs_off(entries: &Entries, leaf: &str) -> bool {
+    if !entries.contains_key(leaf) {
+        return true;
+    }
+    let (ids, _) = chain(entries, leaf);
+    ids.len() < MAX_CHAIN
+        && ids
+            .last()
+            .and_then(|id| entries[id].parent.as_ref())
+            .is_some_and(|parent| !entries.contains_key(parent))
+}
+
+/// The entries of the last `window` bytes of the file by their id, the id of
+/// the newest, and whether that was the whole file.
+fn read_entries(file: &Path, window: u64) -> Option<(Entries, Option<String>, bool)> {
     let mut file = std::fs::File::open(file).ok()?;
     let length = file.metadata().ok()?.len();
-    let cut = length > TAIL_BYTES;
+    let cut = length > window;
     if cut {
-        file.seek(SeekFrom::Start(length - TAIL_BYTES)).ok()?;
+        file.seek(SeekFrom::Start(length - window)).ok()?;
     }
-    let mut reader = std::io::BufReader::new(file.take(TAIL_BYTES));
+    let mut reader = std::io::BufReader::new(file.take(window));
     let mut line = Vec::new();
     if cut {
         // What is left of the line the cut fell in.
@@ -104,7 +153,7 @@ fn read_entries(file: &Path) -> Option<(BTreeMap<String, Entry>, Option<String>)
             },
         );
     }
-    Some((entries, newest))
+    Some((entries, newest, !cut))
 }
 
 /// The ids from `leaf` back to the root, newest first, and whether the root
@@ -140,6 +189,16 @@ pub(in crate::service::chat) fn load(
     session: &str,
     rewound: &str,
 ) -> History {
+    load_within(configuration, session, rewound, MAX_TAIL_BYTES)
+}
+
+/// [`load`], reading no more than `max_window` of the end of the file.
+pub(super) fn load_within(
+    configuration: &Path,
+    session: &str,
+    rewound: &str,
+    max_window: u64,
+) -> History {
     let file = match session_file(configuration, session) {
         Ok(Some(file)) => file,
         // A session that has said nothing yet has no file.
@@ -151,7 +210,7 @@ pub(in crate::service::chat) fn load(
         }
         Err(()) => return History::unavailable(),
     };
-    let Some((entries, Some(newest))) = read_entries(&file) else {
+    let Some((entries, Some(newest))) = read_back(&file, None, max_window) else {
         return History::unavailable();
     };
     read_chain(&entries, &newest, rewound)
@@ -167,7 +226,7 @@ pub(in crate::service::chat) fn load_through(
     let Ok(Some(file)) = session_file(configuration, session) else {
         return History::unavailable();
     };
-    match read_entries(&file) {
+    match read_back(&file, Some(through), MAX_TAIL_BYTES) {
         Some((entries, _)) if entries.contains_key(through) => read_chain(&entries, through, ""),
         _ => History::unavailable(),
     }
@@ -180,7 +239,8 @@ pub(in crate::service::chat) fn last_message(
     session: &str,
 ) -> Option<String> {
     let file = session_file(configuration, session).ok()??;
-    let (entries, newest) = read_entries(&file)?;
+    // Only the newest message is wanted: the first window has it.
+    let (entries, newest, _) = read_entries(&file, TAIL_BYTES)?;
     let (ids, _) = chain(&entries, &newest?);
     ids.into_iter()
         .find(|id| matches!(string(&entries[id].value, "type"), "assistant" | "user"))

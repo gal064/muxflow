@@ -1389,6 +1389,13 @@ async fn a_chat_is_titled_by_its_name_or_else_by_its_first_message() {
     // A conversation read from the agent's record is titled as it is read.
     let read = vec![item("h1", User, "Earlier"), item("h2", Assistant, "Yes")];
     assert_eq!(sink.reset(read, true).as_deref(), Some("Earlier"));
+    // A first message of files alone names nothing: the first with text does.
+    let read = vec![
+        item("f1", User, " \n"),
+        item("f2", Assistant, "Looked"),
+        item("f3", User, "What is in them?"),
+    ];
+    assert_eq!(sink.reset(read, true).as_deref(), Some("What is in them?"));
 }
 
 #[tokio::test]

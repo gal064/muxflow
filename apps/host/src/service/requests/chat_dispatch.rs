@@ -4,7 +4,7 @@
 //! `service::chat`; this maps a `ChatRequest` to a `ChatRuntime` call and its
 //! outcome to a `Response`.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tmux_agent_protocol::v1;
 
@@ -30,7 +30,7 @@ pub(super) async fn handle(
     request: v1::Request,
     control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
     connection_id: u64,
-    topology_baseline: &Mutex<Option<(tmux_control::TmuxSnapshot, String)>>,
+    topology_baseline: &Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
 ) {
     let outcome = match request.chat {
         None => Err(invalid("A chat operation needs a chat payload.")),
@@ -51,7 +51,29 @@ pub(super) async fn handle(
                         ))
                     }),
             };
-            attached.and_then(|attached| dispatch(chat, attached, connection_id, topology_baseline))
+            let forks = [v1::ChatAction::Fork, v1::ChatAction::SideFork]
+                .iter()
+                .any(|action| chat.action == i32::from(*action));
+            match attached {
+                // A fork reads the agent's record, runs tmux and reads the
+                // agent's process: off the runtime's workers, as an agent
+                // operation is, so a stalled disk parks only the blocking pool.
+                Ok(attached) if forks => {
+                    let baseline = Arc::clone(topology_baseline);
+                    tokio::task::spawn_blocking(move || {
+                        dispatch(chat, attached, connection_id, &baseline)
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ChatError::new(
+                            "chat_fork_unavailable",
+                            "The fork could not be opened.",
+                        ))
+                    })
+                }
+                Ok(attached) => dispatch(chat, attached, connection_id, topology_baseline),
+                Err(error) => Err(error),
+            }
         }
     };
     let response = match outcome {
@@ -411,6 +433,55 @@ mod tests {
         };
         assert!(outcome(send).is_ok());
         assert_eq!(outcome(fork("m1")).unwrap_err(), "chat_turn_busy");
+        assert!(seen.lock().unwrap().is_some(), "nothing was opened");
+    }
+
+    /// A fork is answered from the blocking pool, as any other request is
+    /// answered: through the connection's ordered lane.
+    #[tokio::test]
+    async fn a_fork_is_answered_from_off_the_runtime() {
+        const SERVER: &str = "dispatch-test-fork-lane-server";
+        const PANE: &str = "%9121";
+        let (sender, _queue) = tokio::sync::mpsc::channel(4096);
+        let connection = register_control_event_sink(sender);
+        let seen = Arc::new(Mutex::new(baseline(SERVER, &[PANE])));
+        assert!(
+            dispatch(
+                request(Action::Open, SERVER, PANE),
+                Vec::new(),
+                connection.id,
+                &seen
+            )
+            .is_ok()
+        );
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(4);
+        for action in [Action::Fork, Action::SideFork] {
+            let chat = v1::ChatRequest {
+                item_id: "no-such-item".into(),
+                ..request(action, SERVER, PANE)
+            };
+            let request = v1::Request {
+                chat: Some(chat),
+                ..Default::default()
+            };
+            handle(7, request, &control_tx, connection.id, &seen).await;
+            let Some(SequencerControl::Response {
+                request_id,
+                response,
+                ..
+            }) = control_rx.recv().await
+            else {
+                panic!("no response");
+            };
+            assert_eq!(request_id, 7);
+            assert!(!response.ok);
+            // The reply is not in the chat; a side question needs its text.
+            let expected = match action {
+                Action::Fork => "chat_item_not_found",
+                _ => "chat_invalid_request",
+            };
+            assert_eq!(response.error_code, expected);
+        }
         assert!(seen.lock().unwrap().is_some(), "nothing was opened");
     }
 }

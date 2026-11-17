@@ -779,7 +779,11 @@ impl Pane {
             return None;
         } else {
             let user = i32::from(v1::ChatItemKind::User);
-            let first = self.items.iter().find(|item| item.kind == user)?;
+            // A message of files alone names nothing.
+            let first = self
+                .items
+                .iter()
+                .find(|item| item.kind == user && !item.text.trim().is_empty())?;
             title_line(&first.text, MAX_TITLE_CHARS)?
         };
         if title == self.title {

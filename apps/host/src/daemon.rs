@@ -540,7 +540,8 @@ const STALE_TEMPORARY_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Removes the temporaries of state writes that never reached their rename:
 /// `.hook-fallback-<uuid>.tmp` from a hook client killed by its agent's hook
-/// timeout mid-write, and `.agents-<uuid>.tmp` from a daemon killed mid-persist.
+/// timeout mid-write, and `.agents-<uuid>.tmp` and `.sessions-<uuid>.tmp` from a
+/// daemon killed mid-persist of the agent state or the session history.
 /// Nothing else removes them, and one stalled afternoon left 138.
 fn remove_stale_temporaries(state: &Path, now: std::time::SystemTime) {
     let Ok(entries) = fs::read_dir(state) else {
@@ -549,7 +550,9 @@ fn remove_stale_temporaries(state: &Path, now: std::time::SystemTime) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !(name.starts_with(".hook-fallback-") || name.starts_with(".agents-"))
+        if ![".hook-fallback-", ".agents-", ".sessions-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
             || !name.ends_with(".tmp")
         {
             continue;
@@ -586,6 +589,8 @@ mod tests {
             "hook-fallback-codex-7-00000000000000000000.pb",
             "agents.json",
             ".sessions-0b1c.tmp",
+            "sessions.json",
+            ".diagnostics-0b1c.tmp",
         ];
         for name in names {
             fs::write(state.path().join(name), b"x").unwrap();
@@ -604,10 +609,11 @@ mod tests {
         assert_eq!(
             left,
             [
+                ".diagnostics-0b1c.tmp",
                 ".hook-fallback-mailbox.lock",
-                ".sessions-0b1c.tmp",
                 "agents.json",
                 "hook-fallback-codex-7-00000000000000000000.pb",
+                "sessions.json",
             ]
         );
     }

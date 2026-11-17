@@ -46,7 +46,7 @@ const START_WAIT: Duration = Duration::from_secs(45);
 const RECONNECT_WAIT: Duration = Duration::from_secs(4);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest line read from an agent. A longer one is skipped.
-const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// The longest WebSocket message read from an agent: one may carry a whole
 /// conversation. A longer one ends the connection.
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;

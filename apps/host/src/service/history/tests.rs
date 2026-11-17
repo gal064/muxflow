@@ -362,3 +362,50 @@ fn a_placeholder_running_at_the_first_look_is_over() {
     restarted.observe(vec![seen("s1", "Fix tests", 6)]);
     assert!(!restarted.lookup("claude-code", "s1").unwrap().woke);
 }
+
+/// The store whose writes wait while [`WRITE_GATE`] is held, and whether one
+/// has started to.
+static STALLED: Mutex<Option<PathBuf>> = Mutex::new(None);
+static WRITE_GATE: Mutex<()> = Mutex::new(());
+static STALLED_WRITE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A write of the store a test stalls, as a stalled disk would.
+pub(super) fn stall_if_asked(path: &Path) {
+    let stalled = STALLED.lock().unwrap_or_else(PoisonError::into_inner);
+    if stalled.as_deref() == Some(path) {
+        drop(stalled);
+        STALLED_WRITE.store(true, std::sync::atomic::Ordering::Release);
+        drop(WRITE_GATE.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+}
+
+/// The agents service feeds the store under its own lock: a write stalled on
+/// the disk must not hold up that feed.
+#[test]
+fn a_stalled_write_of_the_store_holds_up_no_observation() {
+    let (_directory, history) = store();
+    history.observe(vec![seen("s1", "Fix", 10)]);
+    std::thread::scope(|scope| {
+        let gate = WRITE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        *STALLED.lock().unwrap() = Some(history.path.clone());
+        let writing = scope.spawn(|| history.maintain(1));
+        while !STALLED_WRITE.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        let (observed, seen_now) = std::sync::mpsc::channel();
+        let history = &history;
+        scope.spawn(move || {
+            history.observe(vec![seen("s1", "Fix tests", 20)]);
+            let _ = observed.send(());
+        });
+        let fed = seen_now.recv_timeout(std::time::Duration::from_secs(10));
+        drop(gate);
+        *STALLED.lock().unwrap() = None;
+        assert!(fed.is_ok(), "an observation waited for the write");
+        writing.join().unwrap();
+    });
+    // What changed while the write ran is written by the next one.
+    assert_eq!(titles(&History::load(history.path.clone())), ["Fix"]);
+    history.maintain(2);
+    assert_eq!(titles(&History::load(history.path.clone())), ["Fix tests"]);
+}

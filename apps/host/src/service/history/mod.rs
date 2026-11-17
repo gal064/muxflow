@@ -120,6 +120,11 @@ struct Inner {
 pub(crate) struct History {
     path: PathBuf,
     inner: Mutex<Inner>,
+    /// Held across a write of the store, which is made outside `inner`: the
+    /// agents service feeds `inner` under its own lock, and a write may wait
+    /// on a stalled disk. Taken before `inner`, so the snapshot a writer takes
+    /// is never older than one already written.
+    writer: Mutex<()>,
 }
 
 /// Why a history action was refused, as the wire's error code and message.
@@ -181,11 +186,16 @@ impl History {
         Self {
             path,
             inner: Mutex::new(inner),
+            writer: Mutex::new(()),
         }
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn writer(&self) -> MutexGuard<'_, ()> {
+        self.writer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Marks the pane a side fork (`/btw`, `/side`) opened in: the session
@@ -419,30 +429,42 @@ impl History {
         native_session_id: &str,
         edit: impl FnOnce(&mut Entry),
     ) -> Result<v1::HistoryEvent, Refusal> {
-        let mut inner = self.inner();
+        let _writing = self.writer();
         let key = key(adapter_id, native_session_id);
-        let entry = inner
-            .entries
-            .get_mut(&key)
-            .ok_or_else(|| refusal("history_unknown_session", "This session is not in History."))?;
-        let before = entry.clone();
-        edit(entry);
-        if *entry == before {
-            return Ok(v1::HistoryEvent {
-                generation: inner.generation,
-                woke: Vec::new(),
-            });
-        }
-        if let Err(error) = write(&self.path, &inner.entries) {
-            inner.entries.insert(key, before);
+        let (entries, before, edited, unwritten) = {
+            let mut inner = self.inner();
+            let entry = inner.entries.get_mut(&key).ok_or_else(|| {
+                refusal("history_unknown_session", "This session is not in History.")
+            })?;
+            let before = entry.clone();
+            edit(entry);
+            if *entry == before {
+                return Ok(v1::HistoryEvent {
+                    generation: inner.generation,
+                    woke: Vec::new(),
+                });
+            }
+            let edited = entry.clone();
+            let unwritten = take_unwritten(&mut inner);
+            (inner.entries.clone(), before, edited, unwritten)
+        };
+        // Written outside `inner`, which the agents service waits on.
+        let written = write(&self.path, &entries);
+        let mut inner = self.inner();
+        if let Err(error) = written {
+            restore_unwritten(&mut inner, unwritten);
+            match inner.entries.get_mut(&key) {
+                Some(entry) if *entry == edited => *entry = before,
+                // Changed again meanwhile: written as it is now, next time.
+                Some(_) => inner.dirty = true,
+                None => {}
+            }
             return Err(refusal(
                 "history_not_saved",
                 format!("History could not be saved: {error:#}"),
             ));
         }
         inner.generation += 1;
-        inner.dirty = false;
-        inner.activity = false;
         inner.written_at = now_millis();
         Ok(v1::HistoryEvent {
             generation: inner.generation,
@@ -454,6 +476,23 @@ impl History {
     /// write. Answers the event to publish when a snooze ended or a woke
     /// session ran again.
     pub(crate) fn maintain(&self, now: i64) -> Option<v1::HistoryEvent> {
+        let _writing = self.writer();
+        let (event, unwritten) = self.maintain_in_memory(now);
+        // Written outside `inner`, which the agents service waits on.
+        if let Some((entries, unwritten)) = unwritten {
+            match write(&self.path, &entries) {
+                Ok(()) => self.inner().written_at = now,
+                // Tried again on the next tick; the snoozes it ended stay
+                // ended in memory, so nobody is told twice.
+                Err(_) => restore_unwritten(&mut self.inner(), unwritten),
+            }
+        }
+        event
+    }
+
+    /// What [`History::maintain`] does under `inner`: answers its event and,
+    /// when the store is due a write, what to write.
+    fn maintain_in_memory(&self, now: i64) -> (Option<v1::HistoryEvent>, Option<ToWrite>) {
         let mut inner = self.inner();
         let inner = &mut *inner;
         let mut woke_keys = Vec::new();
@@ -476,18 +515,11 @@ impl History {
             inner.dirty = true;
         }
         let activity_due = inner.activity && now - inner.written_at >= ACTIVITY_WRITE_MILLIS;
-        if inner.dirty || activity_due {
-            // A failed write is tried again on the next tick; the snoozes it
-            // ended stay ended in memory, so nobody is told twice.
-            if write(&self.path, &inner.entries).is_ok() {
-                inner.dirty = false;
-                inner.activity = false;
-                inner.written_at = now;
-            }
-        }
+        let unwritten =
+            (inner.dirty || activity_due).then(|| (inner.entries.clone(), take_unwritten(inner)));
         let announce = std::mem::take(&mut inner.announce);
         if woke_keys.is_empty() && !announce {
-            return None;
+            return (None, unwritten);
         }
         let woke = woke_keys
             .iter()
@@ -496,11 +528,32 @@ impl History {
                 Some(wire_entry(entry, inner.running.get(key)))
             })
             .collect();
-        Some(v1::HistoryEvent {
+        let event = v1::HistoryEvent {
             generation: inner.generation,
             woke,
-        })
+        };
+        (Some(event), unwritten)
     }
+}
+
+/// What was unwritten when a snapshot of the store was taken to be written:
+/// `dirty` and `activity`, cleared then, so a change made while the write
+/// runs marks the store again.
+type Unwritten = (bool, bool);
+/// A snapshot of the store, taken to be written, and what it leaves written.
+type ToWrite = (BTreeMap<Key, Entry>, Unwritten);
+
+fn take_unwritten(inner: &mut Inner) -> Unwritten {
+    (
+        std::mem::take(&mut inner.dirty),
+        std::mem::take(&mut inner.activity),
+    )
+}
+
+/// After a failed write, the store is as unwritten as it was.
+fn restore_unwritten(inner: &mut Inner, (dirty, activity): Unwritten) {
+    inner.dirty |= dirty;
+    inner.activity |= activity;
 }
 
 /// A tab's title as the desktop labels its agent: the pane's own title, else
@@ -601,6 +654,8 @@ fn trim(inner: &mut Inner) {
 }
 
 fn write(path: &Path, entries: &BTreeMap<Key, Entry>) -> anyhow::Result<()> {
+    #[cfg(test)]
+    tests::stall_if_asked(path);
     let parent = path.parent().context("history store has no parent")?;
     crate::paths::prepare_runtime_dir(parent)?;
     let file = StoredFile {
