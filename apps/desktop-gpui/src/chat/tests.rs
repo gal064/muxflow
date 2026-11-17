@@ -668,9 +668,17 @@ fn frame(kind: u8, label: &str, payload: &[u8]) -> Vec<u8> {
 }
 
 fn topology(generation: u64, panes: Vec<Pane>) -> Vec<u8> {
+    topology_of(
+        generation,
+        vec![window("@1", "$1", 0, "agent", true)],
+        panes,
+    )
+}
+
+fn topology_of(generation: u64, windows: Vec<tmux_control::Window>, panes: Vec<Pane>) -> Vec<u8> {
     let snapshot = TmuxSnapshot {
         sessions: vec![session("$1", "main", 0)],
-        windows: vec![window("@1", "$1", 0, "agent", true)],
+        windows,
         panes,
     };
     let body = json!({
@@ -768,6 +776,28 @@ impl Shell {
 
     fn press(&mut self, key: &str) {
         self.visual.update(|window, cx| window.press(key, cx));
+        self.settle();
+    }
+
+    /// Puts tmux window `id` on screen, as the tab strip does.
+    fn show_window(&mut self, id: &str) {
+        let controller = self.controller.clone();
+        let id = id.to_owned();
+        self.visual.update(|_, cx| {
+            controller.update(cx, |controller, cx| {
+                controller.set_active_window("local", Some(id), cx);
+            });
+        });
+        self.settle();
+    }
+
+    /// Chooses an entry of the menu on show.
+    fn choose(&mut self, label: &str) {
+        let at = self
+            .visual
+            .update(|window, _| window.find_by_label(label).bounds().center());
+        self.visual
+            .simulate_click(at, gpui_kit::Modifiers::default());
         self.settle();
     }
 }
@@ -1031,6 +1061,11 @@ fn escape_stops_the_agent_while_it_works(cx: &mut TestAppContext) {
     shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
     shell.press("escape");
     assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    // Once while it stops.
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    shell.chat(event(13, ChatChange::State(state(ChatTurnState::Working))));
     // From a control elsewhere in the chat too: the earlier message's Edit.
     shell.press("shift-tab");
     shell.press("escape");
@@ -2241,4 +2276,342 @@ fn replies_from_different_hosts_do_not_reverse_the_latest_explicit_preference(
             "the newer Terminal choice wins over the older delayed Chat reply"
         );
     });
+}
+
+// Kept chats: a chat that leaves the screen stays open, and comes back as it
+// was left.
+
+/// [`panes`], and a second window holding a shell; `@1` the active one.
+fn two_windows(generation: u64) -> Vec<u8> {
+    two_windows_on(generation, "@1")
+}
+
+/// [`two_windows`], with `active` the window tmux says is active.
+fn two_windows_on(generation: u64, active: &str) -> Vec<u8> {
+    let mut panes = panes();
+    panes.push(Pane {
+        active: true,
+        ..pane("%3", "@2", "$1", (0, 0, 100, 24))
+    });
+    let windows = vec![
+        window("@1", "$1", 0, "agent", active == "@1"),
+        window("@2", "$1", 1, "shell", active == "@2"),
+    ];
+    topology_of(generation, windows, panes)
+}
+
+#[test]
+fn the_kept_set_lets_the_least_recently_shown_go_and_never_one_on_screen() {
+    let key = |pane: u32| ("local".to_owned(), "tmux".to_owned(), format!("%{pane}"));
+    let mut kept = super::KeptChats::<u32>::default();
+    for pane in 1..=9 {
+        kept.insert(key(pane), pane);
+    }
+    assert_eq!(kept.show(&key(1)), Some(1), "now the most recent");
+    kept.trim(|_| false);
+    assert_eq!(kept.show(&key(2)), None);
+    assert_eq!(kept.show(&key(1)), Some(1));
+    // More on screen than the cap: none of them goes.
+    for pane in 10..=12 {
+        kept.insert(key(pane), pane);
+    }
+    kept.trim(|_| true);
+    assert_eq!(kept.show(&key(3)), Some(3));
+    kept.trim(|key| key.2 != "%4");
+    assert_eq!(kept.show(&key(4)), None);
+    assert_eq!(kept.show(&key(3)), Some(3));
+}
+
+/// The window of [`two_windows`] with the chat on screen, the chat opened.
+fn kept(cx: &mut TestAppContext) -> Shell {
+    let mut shell = shell(cx);
+    shell.publish(vec![two_windows(2)]);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Find out why."),
+            item("a1", ChatItemKind::Assistant, "The detector joins rows."),
+        ],
+        "",
+    ));
+    shell
+}
+
+#[gpui_kit::test]
+fn a_chat_come_back_to_is_as_it_was_left_and_not_opened_again(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.input("Half a thought");
+    shell.show_window("@2");
+    assert!(!shell.named("Chat"));
+    // It is still open at the host, and what happens meanwhile applies.
+    shell.chat(event(
+        11,
+        ChatChange::Item(item("a2", ChatItemKind::Assistant, "Done while away.")),
+    ));
+    shell.show_window("@1");
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+    assert!(!shell.shows("chat-updating"), "nothing to wait for");
+    assert!(shell.shows("chat-item-u1"));
+    assert!(shell.shows("chat-item-a2"));
+    // The draft, with the keyboard back in it.
+    shell.input(", and more.");
+    shell.press("enter");
+    assert_eq!(
+        shell.host.last(ChatAction::Send).text,
+        "Half a thought, and more."
+    );
+}
+
+#[gpui_kit::test]
+fn a_chat_come_back_to_keeps_its_place(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.publish(vec![two_windows(2)]);
+    let items = (0..40)
+        .map(|number| {
+            item(
+                &format!("a{number}"),
+                ChatItemKind::Assistant,
+                &format!("Earlier answer {number}."),
+            )
+        })
+        .collect();
+    shell.chat(snapshot(10, items, ""));
+    shell.visual.update(|window, cx| {
+        let delta = ScrollDelta::Lines(point(0., 6.));
+        window.scroll("chat-item-a39", delta, cx);
+    });
+    shell.settle();
+    let top = |shell: &mut Shell| {
+        shell
+            .visual
+            .update(|window, _| window.find("chat-item-a30").bounds().top())
+    };
+    let before = top(&mut shell);
+    shell.show_window("@2");
+    shell.show_window("@1");
+    assert_eq!(top(&mut shell), before);
+    assert_eq!(shell.host.count(ChatAction::Open), 1);
+}
+
+#[gpui_kit::test]
+fn the_ninth_chat_lets_the_least_recently_shown_go(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let chat = |number: u32| Pane {
+        active: true,
+        chat_adapter_id: "claude".into(),
+        ..pane(
+            &format!("%{number}"),
+            &format!("@{number}"),
+            "$1",
+            (0, 0, 100, 24),
+        )
+    };
+    let windows = (1..=9)
+        .map(|number| window(&format!("@{number}"), "$1", number, "agent", number == 1))
+        .collect();
+    shell.publish(vec![topology_of(2, windows, (1..=9).map(chat).collect())]);
+    for number in 2..=8 {
+        shell.show_window(&format!("@{number}"));
+    }
+    assert_eq!(shell.host.count(ChatAction::Open), 8);
+    assert_eq!(shell.host.count(ChatAction::Close), 0, "eight are kept");
+    shell.show_window("@9");
+    assert_eq!(shell.host.count(ChatAction::Close), 1);
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, "%1");
+    // Coming back to the second costs nothing; to the first, an `OPEN`.
+    shell.show_window("@2");
+    assert_eq!(shell.host.count(ChatAction::Open), 9);
+    shell.show_window("@1");
+    assert_eq!(shell.host.count(ChatAction::Open), 10);
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, "%3");
+}
+
+#[gpui_kit::test]
+fn a_kept_chat_whose_pane_went_is_let_go(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.show_window("@2");
+    // tmux still has it, in another window: kept.
+    shell.publish(vec![two_windows(3)]);
+    assert_eq!(shell.host.count(ChatAction::Close), 0);
+    shell.publish(vec![topology_of(
+        4,
+        vec![
+            window("@1", "$1", 0, "agent", false),
+            window("@2", "$1", 1, "shell", true),
+        ],
+        vec![
+            pane("%2", "@1", "$1", (0, 0, 100, 24)),
+            Pane {
+                active: true,
+                ..pane("%3", "@2", "$1", (0, 0, 100, 24))
+            },
+        ],
+    )]);
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, PANE);
+}
+
+#[gpui_kit::test]
+fn a_kept_chat_reports_no_activity_and_keeps_no_keyboard(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::terminal::integration::agents::PaneActivity;
+
+    let mut shell = kept(cx);
+    shell.visual.update(|window, _| window.activate_window());
+    shell.settle();
+    let noted = Rc::new(RefCell::new(Vec::<String>::new()));
+    shell.visual.update(|_, cx| {
+        let noted = noted.clone();
+        cx.set_global(PaneActivity(Rc::new(move |_, pane, _| {
+            noted.borrow_mut().push(pane.to_owned())
+        })));
+    });
+    shell.input("Still");
+    assert!(noted.borrow().iter().any(|pane| pane == PANE));
+    shell.show_window("@2");
+    noted.borrow_mut().clear();
+    shell.input("ls");
+    shell.press("shift-tab");
+    shell.press("enter");
+    assert!(
+        !noted.borrow().iter().any(|pane| pane == PANE),
+        "{:?}",
+        noted.borrow()
+    );
+    // What was typed went to the shell, not into the kept chat's draft.
+    shell.show_window("@1");
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "Still");
+}
+
+#[gpui_kit::test]
+fn a_kept_chat_is_opened_again_after_a_lost_link_once_shown(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.show_window("@2");
+    // tmux follows: a resync puts its active window on screen.
+    shell.publish(vec![two_windows_on(3, "@2")]);
+    shell.publish(vec![frame(6, "resyncing", &[]), frame(6, "connected", &[])]);
+    assert!(!shell.named("Chat"));
+    assert_eq!(
+        shell.host.count(ChatAction::Open),
+        1,
+        "nothing asked off screen"
+    );
+    shell.show_window("@1");
+    assert_eq!(shell.host.count(ChatAction::Open), 2);
+    // What was held shows at once, said to be on its way again.
+    assert!(shell.shows("chat-item-u1"));
+    assert_eq!(shell.label("chat-updating"), "Updating…");
+    shell.chat(snapshot(
+        20,
+        vec![item("u1", ChatItemKind::User, "Find out why.")],
+        "",
+    ));
+    assert!(!shell.shows("chat-updating"));
+    assert!(!shell.shows("chat-item-a1"));
+}
+
+#[gpui_kit::test]
+fn closing_the_window_closes_its_kept_chats(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.show_window("@2");
+    assert_eq!(shell.host.count(ChatAction::Close), 0);
+    shell.visual.update(|window, _| window.remove_window());
+    shell.visual.run_until_parked();
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, PANE);
+}
+
+// The optimistic overlay: a choice and a Stop show at once.
+
+#[gpui_kit::test]
+fn a_pill_shows_a_choice_at_once_and_snaps_back_when_refused(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell
+        .host
+        .refuse_next("chat_agent_gone: The model was not changed: the agent is not running.");
+    shell.host.hold_next();
+    shell.click("chat-model");
+    shell.choose("Fable 5.2");
+    assert_eq!(
+        shell
+            .host
+            .last(ChatAction::SetOptions)
+            .options
+            .unwrap()
+            .model,
+        "fable"
+    );
+    assert!(shell.named("Model: Fable 5.2"), "before the host answers");
+    shell.host.release();
+    shell.settle();
+    assert!(shell.named("Model: Opus 5.5"));
+    assert_eq!(
+        shell.label("chat-notice"),
+        "The model was not changed: the agent is not running."
+    );
+
+    // Taken, and the state shows it.
+    shell.click("chat-model");
+    shell.choose("Fable 5.2");
+    let mut fable = state(ChatTurnState::Idle);
+    fable.options.as_mut().unwrap().model = "fable".into();
+    shell.chat(event(11, ChatChange::State(fable)));
+    assert!(shell.named("Model: Fable 5.2"));
+    // Taken, but the agent settled on something else: the host's word wins
+    // after a moment.
+    shell.click("chat-model");
+    shell.choose("Opus 5.5");
+    assert!(shell.named("Model: Opus 5.5"));
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(3));
+    shell.settle();
+    assert!(shell.named("Model: Fable 5.2"));
+}
+
+#[gpui_kit::test]
+fn stop_shows_at_once_until_the_turn_ends(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(!shell.shows("chat-stopping"));
+    shell.host.hold_next();
+    shell.click("chat-send");
+    assert_eq!(shell.label("chat-stopping"), "Stopping…");
+    // Off while it stops: a second press sends nothing.
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    shell.host.release();
+    shell.settle();
+    assert!(shell.shows("chat-stopping"), "answered, still working");
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-stopping"));
+    assert!(shell.named("Send"));
+}
+
+#[gpui_kit::test]
+fn a_refused_or_unanswered_stop_is_stop_again(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell
+        .host
+        .refuse_next("chat_agent_gone: The agent has exited.");
+    shell.click("chat-send");
+    assert!(!shell.shows("chat-stopping"));
+    assert_eq!(shell.label("chat-notice"), "The agent has exited.");
+    assert!(shell.named("Stop"));
+
+    // An answer that never comes leaves it pending for ten seconds only.
+    shell.host.hold_next();
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+    assert!(shell.shows("chat-stopping"));
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(10));
+    shell.settle();
+    assert!(!shell.shows("chat-stopping"));
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 3);
 }

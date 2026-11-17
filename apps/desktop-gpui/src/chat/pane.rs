@@ -4,8 +4,12 @@
 //! The pane follows its host's link. It opens the chat when the link is live,
 //! and again after a resync, a reconnect, a lost change, or a refusal that
 //! says to; `chat.proto` has the rules. Whatever the host has not confirmed
-//! yet (a message being sent, a page being loaded) is kept beside the model,
-//! never in it.
+//! yet (a message being sent, a page being loaded, a pill's choice, a Stop)
+//! is kept beside the model, never in it.
+//!
+//! Its window keeps a pane open while it is off screen (see
+//! [`super::KeptChats`]): its events still apply, and an `OPEN` it needs then
+//! waits until it is shown again.
 
 use std::{
     cell::Cell,
@@ -18,7 +22,7 @@ use std::{
 use desktop_core::connection::chat::{
     ChatAction, ChatAnswer, ChatCapabilities, ChatCommand, ChatConnection, ChatEvent, ChatItem,
     ChatItemKind, ChatModel, ChatOptions, ChatPendingRequest, ChatRequest, ChatRequestKind,
-    ChatResponse, ChatTurnState,
+    ChatResponse, ChatSpeed, ChatTurnState,
 };
 use futures::future::BoxFuture;
 use gpui_kit::{
@@ -56,6 +60,13 @@ const OPEN_RETRIES: u32 = 20;
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(5);
 /// Inline code paths asked about for one chat before the answers are dropped.
 const MAX_PROBES: usize = 512;
+/// How long a choice the host took is shown when its state says otherwise:
+/// the agent settled on something else, as fast mode does on an account
+/// without it. Then the pill shows what the host says.
+const WANTED_WAIT: Duration = Duration::from_secs(3);
+/// How long Stop stays pending without the turn ending, so an answer lost
+/// on the way cannot leave it off for good.
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// The host's refusal as `"<error_code>: <display message>"`: its code.
 pub(super) fn error_code(error: &str) -> &str {
@@ -128,6 +139,92 @@ pub(super) enum Row {
     Request,
 }
 
+/// Choices sent to the host and not yet in its state, one per pill, drawn
+/// over the state's options until it shows them. Each remembers the request
+/// it went with, so that request's refusal takes back only its own choice
+/// and not one made after it.
+#[derive(Default)]
+pub(super) struct Wanted {
+    model: Option<(u64, String)>,
+    effort: Option<(u64, String)>,
+    permission: Option<(u64, i32)>,
+    speed: Option<(u64, i32)>,
+}
+
+impl Wanted {
+    /// What request `choice` asks for. Empty and unspecified fields ask
+    /// for nothing.
+    fn want(&mut self, choice: u64, options: &ChatOptions) {
+        if !options.model.is_empty() {
+            self.model = Some((choice, options.model.clone()));
+        }
+        if !options.effort.is_empty() {
+            self.effort = Some((choice, options.effort.clone()));
+        }
+        if options.permission != 0 {
+            self.permission = Some((choice, options.permission));
+        }
+        if options.speed != 0 {
+            self.speed = Some((choice, options.speed));
+        }
+    }
+
+    /// Takes back what request `choice` asked for. True if anything was.
+    fn forget(&mut self, choice: u64) -> bool {
+        let model = self.model.take_if(|(by, _)| *by == choice).is_some();
+        let effort = self.effort.take_if(|(by, _)| *by == choice).is_some();
+        let permission = self.permission.take_if(|(by, _)| *by == choice).is_some();
+        let speed = self.speed.take_if(|(by, _)| *by == choice).is_some();
+        model || effort || permission || speed
+    }
+
+    /// Drops every choice the host's state already shows.
+    fn settle(&mut self, confirmed: &ChatOptions) {
+        let fast = |speed: i32| speed == i32::from(ChatSpeed::Fast);
+        self.model.take_if(|(_, model)| *model == confirmed.model);
+        self.effort
+            .take_if(|(_, effort)| *effort == confirmed.effort);
+        self.permission
+            .take_if(|(_, permission)| *permission == confirmed.permission);
+        // Unspecified is standard: the toggle draws them alike.
+        self.speed
+            .take_if(|(_, speed)| fast(*speed) == fast(confirmed.speed));
+    }
+
+    /// `confirmed` with the choices on their way laid over it.
+    fn over(&self, mut options: ChatOptions) -> ChatOptions {
+        if let Some((_, model)) = &self.model {
+            options.model = model.clone();
+        }
+        if let Some((_, effort)) = &self.effort {
+            options.effort = effort.clone();
+        }
+        if let Some((_, permission)) = self.permission {
+            options.permission = permission;
+        }
+        if let Some((_, speed)) = self.speed {
+            options.speed = speed;
+        }
+        options
+    }
+
+    pub fn model(&self) -> bool {
+        self.model.is_some()
+    }
+
+    pub fn effort(&self) -> bool {
+        self.effort.is_some()
+    }
+
+    pub fn permission(&self) -> bool {
+        self.permission.is_some()
+    }
+
+    pub fn speed(&self) -> bool {
+        self.speed.is_some()
+    }
+}
+
 /// How many panes hold each chat open, so a pane that is replaced in place
 /// does not close the chat its replacement has just opened.
 #[derive(Default)]
@@ -161,6 +258,20 @@ pub struct ChatPane {
     snapshot_by: Option<Instant>,
     pub(super) open_error: Option<SharedString>,
     retry: Option<Task<()>>,
+    /// On screen. A pane its window keeps off screen sends nothing on its
+    /// own and reports no activity.
+    on_screen: bool,
+    /// The chat is to be opened again once it is shown.
+    open_due: bool,
+    /// What is shown is held from before and the host is sending it again.
+    pub(super) updating: bool,
+    /// The pills' choices the host has not shown yet.
+    pub(super) wanted: Wanted,
+    /// Counts `SET_OPTIONS`, so each answer finds its own choice.
+    choices: u64,
+    /// Stop was pressed and the turn has not ended yet.
+    pub(super) stopping: bool,
+    stop_wait: Option<Task<()>>,
     pub(super) list: Entity<MessageScrollerState>,
     /// The item and trailing rows the list was last told of.
     rows: (usize, usize),
@@ -238,7 +349,7 @@ impl ChatPane {
             // own work, so one an action takes counts too.
             cx.observe_keystrokes(|this, event, window, cx| {
                 if !event.keystroke.is_modifier_key() && this.focus.contains_focused(window, cx) {
-                    note_activity(&this.profile_id, &this.pane_id, cx);
+                    this.seen(cx);
                 }
             }),
             cx.observe(&controller, |this, _, cx| this.follow_link(cx)),
@@ -289,6 +400,14 @@ impl ChatPane {
             snapshot_by: None,
             open_error: None,
             retry: None,
+            // Made to be mounted.
+            on_screen: true,
+            open_due: false,
+            updating: false,
+            wanted: Wanted::default(),
+            choices: 0,
+            stopping: false,
+            stop_wait: None,
             list,
             rows: (0, 0),
             composer,
@@ -323,6 +442,36 @@ impl ChatPane {
 
     pub fn server_identity(&self) -> &str {
         &self.server_identity
+    }
+
+    /// Which chat this is, as its window keeps it.
+    pub fn key(&self) -> super::ChatKey {
+        (
+            self.profile_id.clone(),
+            self.server_identity.clone(),
+            self.pane_id.to_string(),
+        )
+    }
+
+    /// Put on screen or taken off it by its window, which keeps it open
+    /// meanwhile. Off screen its events still apply, so it is current when
+    /// it comes back; only a new snapshot waits for that.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.on_screen == shown {
+            return;
+        }
+        self.on_screen = shown;
+        if shown && self.open_due {
+            self.open(cx);
+        }
+        cx.notify();
+    }
+
+    /// Says the agent's call has been seen, from a pane on screen only.
+    fn seen(&self, cx: &mut App) {
+        if self.on_screen {
+            note_activity(&self.profile_id, &self.pane_id, cx);
+        }
     }
 
     /// What typing goes to: the composer.
@@ -405,7 +554,12 @@ impl ChatPane {
             return;
         }
         self.live = live;
-        if self.live.is_some() {
+        // The answer to a Stop sent over the old connection is not coming.
+        self.stopped(cx);
+        if self.live.is_none() {
+            // Nothing is on its way while the link is down.
+            self.updating = false;
+        } else {
             // Whatever was asked over the old connection has no answer coming.
             self.forget_probes(cx);
             self.open(cx);
@@ -457,6 +611,17 @@ impl ChatPane {
         if self.live.is_none() {
             return;
         }
+        if !self.on_screen {
+            // Asked for once shown: what is held shows at once meanwhile, and
+            // a reconnect does not ask for every kept chat's snapshot at once
+            // over a slow link.
+            self.open_due = true;
+            self.retry = None;
+            return;
+        }
+        self.open_due = false;
+        // What is held stays on show, said to be on its way again.
+        self.updating = self.chat.is_held();
         self.open_attempt += 1;
         self.opened_at_restore = self.controller.read(cx).link_restores(&self.profile_id);
         let attempt = self.open_attempt;
@@ -498,6 +663,7 @@ impl ChatPane {
                 Err(error) => {
                     this.open_retries = 0;
                     this.snapshot_by = None;
+                    this.updating = false;
                     this.open_error = Some(error_message(&error).to_owned().into());
                 }
             }
@@ -610,6 +776,7 @@ impl ChatPane {
                 self.opening = false;
                 self.snapshot_by = None;
                 self.open_error = None;
+                self.updating = false;
                 self.shown.clear();
                 self.loading_older = false;
                 self.older_failed = false;
@@ -622,6 +789,12 @@ impl ChatPane {
         }
         if let Some(item) = changed_item.and_then(|index| self.chat.items.get(index)) {
             self.shown.remove(&item.id);
+        }
+        if matches!(outcome, Outcome::Reset | Outcome::State) {
+            self.wanted.settle(&self.confirmed_options());
+            if self.turn() != ChatTurnState::Working {
+                self.stopped(cx);
+            }
         }
         self.rows = match outcome {
             Outcome::Updated(_) | Outcome::State => (old_items, old_trail),
@@ -739,13 +912,20 @@ impl ChatPane {
         ChatConnection::try_from(self.chat.state.connection).unwrap_or_default()
     }
 
-    pub(super) fn options(&self) -> ChatOptions {
+    /// The options as the host's state says them.
+    fn confirmed_options(&self) -> ChatOptions {
         self.chat.state.options.clone().unwrap_or_default()
+    }
+
+    /// The options as the pills draw them: the host's, under the choices
+    /// still on their way.
+    pub(super) fn options(&self) -> ChatOptions {
+        self.wanted.over(self.confirmed_options())
     }
 
     /// The selected model, when the catalog lists it.
     pub(super) fn model(&self) -> Option<&ChatModel> {
-        let id = self.chat.state.options.as_ref()?.model.as_str();
+        let id = self.options().model;
         self.chat.catalog.models.iter().find(|model| model.id == id)
     }
 
@@ -794,7 +974,7 @@ impl ChatPane {
             InputEvent::Change => {
                 // Typed, pasted or composed: the field sends no event for
                 // the text set here.
-                note_activity(&self.profile_id, &self.pane_id, cx);
+                self.seen(cx);
                 self.slash_active = 0;
                 let text = self.composer.read(cx).value();
                 if self.slash_dismissed.as_deref() != Some(text.as_ref()) {
@@ -917,7 +1097,7 @@ impl ChatPane {
         if text.is_empty() {
             return;
         }
-        note_activity(&self.profile_id, &self.pane_id, cx);
+        self.seen(cx);
         self.notice = None;
         // A side question goes to a fork, so the turn here need not be idle.
         let side = slash::side_question(&self.chat.catalog, &text).map(str::to_owned);
@@ -1056,17 +1236,38 @@ impl ChatPane {
         cx.defer(move |cx| open_when_present(pending, cx));
     }
 
+    /// Asks the agent to stop. Stop shows it at once and is off until the
+    /// turn ends, so a press the host has not answered yet is not sent twice.
     pub(super) fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if self.stopping {
+            return;
+        }
         let stop = ChatRequest {
             action: ChatAction::Interrupt.into(),
             ..Default::default()
         };
         self.notice = None;
+        self.stopping = true;
+        let wait = cx.background_executor().timer(STOP_WAIT);
+        self.stop_wait = Some(cx.spawn(async move |this, cx| {
+            wait.await;
+            this.update(cx, |this, cx| this.stopped(cx)).ok();
+        }));
         self.send(stop, cx, |this, result, cx| {
             if let Err(error) = result {
+                this.stopped(cx);
                 this.refused(&error, cx);
             }
         });
+        cx.notify();
+    }
+
+    /// Stop is Stop again: the turn ended, the host refused, or no answer came.
+    fn stopped(&mut self, cx: &mut Context<Self>) {
+        self.stop_wait = None;
+        if std::mem::take(&mut self.stopping) {
+            cx.notify();
+        }
     }
 
     /// Answers the request a card showed. A card pressed as another request
@@ -1078,7 +1279,7 @@ impl ChatPane {
         if !shown || self.answering.is_some() {
             return;
         }
-        note_activity(&self.profile_id, &self.pane_id, cx);
+        self.seen(cx);
         self.answering = Some(request_id.to_owned());
         self.notice = None;
         let request = ChatRequest {
@@ -1104,19 +1305,42 @@ impl ChatPane {
     }
 
     /// Changes what the pills select. Empty and unspecified fields keep
-    /// their value.
+    /// their value. The pill shows the choice at once, until the host's
+    /// state shows it or the host turns it down.
     pub(super) fn set_options(&mut self, options: ChatOptions, cx: &mut Context<Self>) {
+        self.choices += 1;
+        let choice = self.choices;
+        self.wanted.want(choice, &options);
+        // Asked for what is already so: nothing to wait for.
+        self.wanted.settle(&self.confirmed_options());
         let request = ChatRequest {
             action: ChatAction::SetOptions.into(),
             options: Some(options),
             ..Default::default()
         };
         self.notice = None;
-        self.send(request, cx, |this, result, cx| {
-            if let Err(error) = result {
+        self.send(request, cx, move |this, result, cx| match result {
+            Err(error) => {
+                this.wanted.forget(choice);
                 this.refused(&error, cx);
             }
+            // The state that shows the choice is usually here first. If the
+            // agent settled on something else, the pill follows the host.
+            Ok(_) => {
+                let wait = cx.background_executor().timer(WANTED_WAIT);
+                cx.spawn(async move |this, cx| {
+                    wait.await;
+                    this.update(cx, |this, cx| {
+                        if this.wanted.forget(choice) {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         });
+        cx.notify();
     }
 
     /// Puts an earlier message back in the composer; sending it rewinds.
