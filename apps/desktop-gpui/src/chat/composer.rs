@@ -101,6 +101,39 @@ impl ChatPane {
         })
     }
 
+    /// Whether Send is Stop: the agent works, and the host can be told.
+    fn stoppable(&self) -> bool {
+        self.turn() == ChatTurnState::Working && self.is_live()
+    }
+
+    /// Closes the command list, or else cancels the edit. False when
+    /// neither was open.
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.slash_dismiss(cx) {
+            return true;
+        }
+        if self.editing.is_some() {
+            self.cancel_edit(window, cx);
+            return true;
+        }
+        false
+    }
+
+    /// Escape anywhere in the chat that nothing inside it took: closes the
+    /// command list, else cancels the edit, else stops the agent while it
+    /// works, as Stop does. Otherwise it goes on to the app.
+    pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composing(window, cx) || self.dismiss(window, cx) {
+            return;
+        }
+        if self.stoppable() {
+            self.interrupt(cx);
+            cx.notify();
+            return;
+        }
+        cx.propagate();
+    }
+
     /// What the empty field says: what typing there would do now.
     fn placeholder_now(&self) -> &'static str {
         if self.editing.is_some() {
@@ -402,7 +435,7 @@ impl ChatPane {
 
     /// `.send`, or `.send.stop` while the agent works.
     fn send_button(&self, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
-        let stop = self.turn() == ChatTurnState::Working && self.is_live();
+        let stop = self.stoppable();
         let off = !stop && self.send_refusal().is_some();
         let ring = p.chrome_ink_strong;
         let (label, glyph, ground) = if stop {
@@ -686,13 +719,13 @@ impl ChatPane {
                 }
             }))
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                // During an IME composition Escape ends the composition, and
+                // nothing else: not the list, the edit, or the agent's turn.
                 if this.composing(window, cx) {
-                    return;
-                }
-                if this.slash_dismiss(cx) {
+                    this.composer
+                        .update(cx, |composer, cx| composer.unmark_text(window, cx));
                     cx.stop_propagation();
-                } else if this.editing.is_some() {
-                    this.cancel_edit(window, cx);
+                } else if this.dismiss(window, cx) {
                     cx.stop_propagation();
                 }
             }))

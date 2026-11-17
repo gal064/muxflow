@@ -34,7 +34,7 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 use desktop_core::connection::chat::{
     ChatAction, ChatAgentMode, ChatRequest, ChatResponse, ChatUsage,
 };
-use gpui_kit::{AnyElement, App, Entity, Global, Pixels, Window};
+use gpui_kit::{AnyElement, App, Entity, Global, KeyBinding, Pixels, Window, actions};
 use tmux_control::Pane;
 
 use crate::{
@@ -47,6 +47,12 @@ use crate::{
 };
 
 pub use pane::ChatPane;
+
+// Escape with the keyboard anywhere in a chat: see `ChatPane::escape`.
+actions!(chat, [Escape]);
+
+/// Focus anywhere in a chat pane.
+pub const CONTEXT: &str = "Chat";
 
 /// Whether `pane` is drawn as a chat.
 pub fn is_chat(pane: &Pane) -> bool {
@@ -388,6 +394,9 @@ fn publish(controller: &Entity<ConnectionController>, cx: &mut App) {
 /// Called once from [`crate::features::init`].
 pub fn init(cx: &mut App) {
     cx.set_global(AgentModes::default());
+    // Below whatever is open inside the chat: a field, a menu or a popover
+    // takes Escape first, and the chat has it only when they leave it.
+    cx.bind_keys([KeyBinding::new("escape", Escape, Some(CONTEXT))]);
     details::init(cx);
     settings::set_agent_mode_change(Rc::new(|chat, _, cx| set_agent_mode(chat, cx)), cx);
 }
