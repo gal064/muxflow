@@ -90,6 +90,7 @@ fn command(scope: &GitScope, operation: &str) -> GitCommand {
         commit_message: String::new(),
         watch_id: String::new(),
         branch: String::new(),
+        summary_base: String::new(),
     }
 }
 

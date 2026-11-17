@@ -159,6 +159,109 @@ fn field_numbers_and_wire_types_do_not_move() {
     );
 }
 
+#[test]
+fn chat_attachments_tasks_subagents_fork_and_summary_base_do_not_move() {
+    // Each message is encoded, compared byte for byte, and decoded back.
+    fn pinned<M: Message + Default + PartialEq + std::fmt::Debug>(message: M, bytes: &[u8]) {
+        assert_eq!(message.encode_to_vec(), bytes);
+        assert_eq!(M::decode(bytes).unwrap(), message);
+    }
+    assert_eq!(v1::ChatAction::Fork as i32, 11);
+    assert_eq!(v1::ChatAction::StopTask as i32, 12);
+    assert_eq!(v1::ChatTaskKind::Other as i32, 3);
+    assert_eq!(v1::GitSummaryBase::Head as i32, 1);
+    // ChatState.background 11 and compacting 12.
+    pinned(
+        v1::ChatState {
+            background: vec![v1::ChatBackgroundTask {
+                id: "t".into(),
+                kind: v1::ChatTaskKind::Command.into(),
+                description: "d".into(),
+                started_at_unix_millis: 5,
+                stoppable: true,
+            }],
+            compacting: true,
+            ..Default::default()
+        },
+        &[
+            0x5a, 12, 0x0a, 1, b't', 0x10, 1, 0x1a, 1, b'd', 0x20, 5, 0x28, 1, 0x60, 1,
+        ],
+    );
+    // ChatTool's subagent figures, 11 to 15.
+    pinned(
+        v1::ChatTool {
+            kind: v1::ChatToolKind::Subagent.into(),
+            agent_type: "E".into(),
+            activity: "a".into(),
+            tool_uses: 3,
+            tokens: 300,
+            background: true,
+            ..Default::default()
+        },
+        &[
+            0x08, 7, 0x5a, 1, b'E', 0x62, 1, b'a', 0x68, 3, 0x70, 0xac, 0x02, 0x78, 1,
+        ],
+    );
+    // SEND's attachments 13; a USER item's attachments 8.
+    pinned(
+        v1::ChatRequest {
+            action: v1::ChatAction::Send.into(),
+            attachments: vec![v1::ChatAttachment {
+                path: "/p".into(),
+                name: "n".into(),
+                media_type: "i/p".into(),
+                size_bytes: 7,
+            }],
+            ..Default::default()
+        },
+        &[
+            0x08, 3, 0x6a, 14, 0x0a, 2, b'/', b'p', 0x12, 1, b'n', 0x1a, 3, b'i', b'/', b'p', 0x20,
+            7,
+        ],
+    );
+    pinned(
+        v1::ChatItem {
+            attachments: vec![v1::ChatAttachment::default()],
+            ..Default::default()
+        },
+        &[0x42, 0],
+    );
+    // FORK takes item_id 8 and answers forked_pane_id 3.
+    pinned(
+        v1::ChatRequest {
+            action: v1::ChatAction::Fork.into(),
+            item_id: "i".into(),
+            ..Default::default()
+        },
+        &[0x08, 11, 0x42, 1, b'i'],
+    );
+    pinned(
+        v1::ChatResponse {
+            forked_pane_id: "%9".into(),
+            ..Default::default()
+        },
+        &[0x1a, 2, b'%', b'9'],
+    );
+    // STOP_TASK takes task_id 14.
+    pinned(
+        v1::ChatRequest {
+            action: v1::ChatAction::StopTask.into(),
+            task_id: "t".into(),
+            ..Default::default()
+        },
+        &[0x08, 12, 0x72, 1, b't'],
+    );
+    // GitRequest.summary_base 19; the default branch is the zero value.
+    pinned(
+        v1::GitRequest {
+            summary_base: v1::GitSummaryBase::Head.into(),
+            ..Default::default()
+        },
+        &[0x98, 1, 1],
+    );
+    pinned(v1::GitRequest::default(), &[]);
+}
+
 #[tokio::test]
 async fn frame_readers_distinguish_disconnect_truncation_corruption_and_oversize() {
     use tmux_agent_protocol::{FrameAccumulator, FrameError, MAX_FRAME_BYTES, read_frame};

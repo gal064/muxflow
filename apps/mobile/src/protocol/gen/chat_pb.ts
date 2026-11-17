@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file chat.proto.
  */
 export const file_chat: GenFile = /*@__PURE__*/
-  fileDesc("CgpjaGF0LnByb3RvEhZ0bXV4X2FnZW50LnByb3RvY29sLnYxIp4BCgtDaGF0T3B0aW9ucxINCgVtb2RlbBgBIAEoCRIOCgZlZmZvcnQYAiABKAkSPgoKcGVybWlzc2lvbhgDIAEoDjIqLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdFBlcm1pc3Npb25Nb2RlEjAKBXNwZWVkGAQgASgOMiEudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0U3BlZWQijQIKCENoYXRUb29sEjIKBGtpbmQYASABKA4yJC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRUb29sS2luZBINCgV0aXRsZRgCIAEoCRIOCgZkZXRhaWwYAyABKAkSNgoGc3RhdHVzGAQgASgOMiYudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0VG9vbFN0YXR1cxIWCg5yZXN1bHRfc3VtbWFyeRgFIAEoCRIMCgRwYXRoGAYgASgJEg0KBWFkZGVkGAcgASgNEg8KB3JlbW92ZWQYCCABKA0SFgoOb3V0cHV0X3ByZXZpZXcYCSABKAkSGAoQb3V0cHV0X3RydW5jYXRlZBgKIAEoCCLHAQoIQ2hhdEl0ZW0SCgoCaWQYASABKAkSMgoEa2luZBgCIAEoDjIkLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1LaW5kEgwKBHRleHQYAyABKAkSEQoJc3RyZWFtaW5nGAQgASgIEi4KBHRvb2wYBSABKAsyIC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRUb29sEhYKDmF0X3VuaXhfbWlsbGlzGAYgASgDEhIKCnJld2luZGFibGUYByABKAgiPAoKQ2hhdE9wdGlvbhIKCgJpZBgBIAEoCRINCgVsYWJlbBgCIAEoCRITCgtkZXNjcmlwdGlvbhgDIAEoCSKaAQoMQ2hhdFF1ZXN0aW9uEgoKAmlkGAEgASgJEg4KBmhlYWRlchgCIAEoCRIOCgZwcm9tcHQYAyABKAkSMwoHb3B0aW9ucxgEIAMoCzIiLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE9wdGlvbhIUCgxtdWx0aV9zZWxlY3QYBSABKAgSEwoLYWxsb3dfb3RoZXIYBiABKAgitwEKEkNoYXRQZW5kaW5nUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEjUKBGtpbmQYAiABKA4yJy50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRSZXF1ZXN0S2luZBINCgV0aXRsZRgDIAEoCRIOCgZkZXRhaWwYBCABKAkSNwoJcXVlc3Rpb25zGAUgAygLMiQudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0UXVlc3Rpb24iUQoSQ2hhdFF1ZXN0aW9uQW5zd2VyEhMKC3F1ZXN0aW9uX2lkGAEgASgJEhIKCm9wdGlvbl9pZHMYAiADKAkSEgoKb3RoZXJfdGV4dBgDIAEoCSJpCgpDaGF0QW5zd2VyEg0KBWFsbG93GAEgASgIEjsKB2Fuc3dlcnMYAiADKAsyKi50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRRdWVzdGlvbkFuc3dlchIPCgdza2lwcGVkGAMgASgIIn4KC0NoYXRDb21tYW5kEgwKBG5hbWUYASABKAkSEwoLZGVzY3JpcHRpb24YAiABKAkSFQoNYXJndW1lbnRfaGludBgDIAEoCRI1CgRraW5kGAQgASgOMicudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q29tbWFuZEtpbmQiTgoJQ2hhdE1vZGVsEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEg8KB2VmZm9ydHMYAyADKAkSFQoNc3VwcG9ydHNfZmFzdBgEIAEoCCKcAQoQQ2hhdENhcGFiaWxpdGllcxIOCgZyZXdpbmQYASABKAgSFQoNc2VuZF9taWRfdHVybhgCIAEoCBINCgVtb2RlbBgDIAEoCBIOCgZlZmZvcnQYBCABKAgSDQoFc3BlZWQYBSABKAgSEgoKcGVybWlzc2lvbhgGIAEoCBIMCgRmb3JrGAcgASgIEhEKCXF1ZXN0aW9ucxgIIAEoCCK3AQoLQ2hhdENhdGFsb2cSPgoMY2FwYWJpbGl0aWVzGAEgASgLMigudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q2FwYWJpbGl0aWVzEjEKBm1vZGVscxgCIAMoCzIhLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE1vZGVsEjUKCGNvbW1hbmRzGAMgAygLMiMudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q29tbWFuZCI3CglDaGF0VXNhZ2USEwoLdXNlZF90b2tlbnMYASABKAQSFQoNd2luZG93X3Rva2VucxgCIAEoBCKMAwoJQ2hhdFN0YXRlEg8KB3BhbmVfaWQYASABKAkSEgoKYWRhcHRlcl9pZBgCIAEoCRIZChFuYXRpdmVfc2Vzc2lvbl9pZBgDIAEoCRIzCgR0dXJuGAQgASgOMiUudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0VHVyblN0YXRlEjoKCmNvbm5lY3Rpb24YBSABKA4yJi50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRDb25uZWN0aW9uEg8KB2ZhaWx1cmUYBiABKAkSNAoHb3B0aW9ucxgHIAEoCzIjLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE9wdGlvbnMSMAoFdXNhZ2UYCCABKAsyIS50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRVc2FnZRI7CgdwZW5kaW5nGAkgASgLMioudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0UGVuZGluZ1JlcXVlc3QSGAoQaGlzdG9yeV9jb21wbGV0ZRgKIAEoCCLPAQoMQ2hhdFNuYXBzaG90EhAKCHJldmlzaW9uGAEgASgEEjAKBXN0YXRlGAIgASgLMiEudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0U3RhdGUSNAoHY2F0YWxvZxgDIAEoCzIjLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdENhdGFsb2cSLwoFaXRlbXMYBCADKAsyIC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRJdGVtEhQKDG9sZGVyX2N1cnNvchgFIAEoCSKUAwoLQ2hhdFJlcXVlc3QSMgoGYWN0aW9uGAEgASgOMiIudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0QWN0aW9uEg8KB3BhbmVfaWQYAiABKAkSIAoYZXhwZWN0ZWRfc2VydmVyX2lkZW50aXR5GAMgASgJEgwKBHRleHQYBCABKAkSGQoRY2xpZW50X21lc3NhZ2VfaWQYBSABKAkSEgoKcmVxdWVzdF9pZBgGIAEoCRIyCgZhbnN3ZXIYByABKAsyIi50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRBbnN3ZXISDwoHaXRlbV9pZBgIIAEoCRIUCgxvbGRlcl9jdXJzb3IYCSABKAkSNAoHb3B0aW9ucxgKIAEoCzIjLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE9wdGlvbnMSMwoEbW9kZRgLIAEoDjIlLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEFnZW50TW9kZRIbChNpbml0aWFsaXplX2lmX3Vuc2V0GAwgASgIIrQBCgxDaGF0UmVzcG9uc2USLwoFb2xkZXIYASADKAsyIC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRJdGVtEhQKDG9sZGVyX2N1cnNvchgCIAEoCRIWCg5mb3JrZWRfcGFuZV9pZBgDIAEoCRIzCgRtb2RlGAQgASgOMiUudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0QWdlbnRNb2RlEhAKCHJldmlzaW9uGAUgASgEIjUKDUNoYXRJdGVtRGVsdGESDwoHaXRlbV9pZBgBIAEoCRITCgt0ZXh0X2FwcGVuZBgCIAEoCSIlCgxDaGF0VHJ1bmNhdGUSFQoNYWZ0ZXJfaXRlbV9pZBgBIAEoCSK3AwoJQ2hhdEV2ZW50Eg8KB3BhbmVfaWQYASABKAkSEAoIcmV2aXNpb24YAiABKAQSMAoEaXRlbRgDIAEoCzIgLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1IABI2CgVkZWx0YRgEIAEoCzIlLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1EZWx0YUgAEjIKBXN0YXRlGAUgASgLMiEudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0U3RhdGVIABI2CgdjYXRhbG9nGAYgASgLMiMudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q2F0YWxvZ0gAEjgKCHRydW5jYXRlGAcgASgLMiQudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0VHJ1bmNhdGVIABI4CghzbmFwc2hvdBgIIAEoCzIkLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdFNuYXBzaG90SAASMwoHdXBkYXRlZBgJIAEoCzIgLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1IAEIICgZjaGFuZ2UqaAoNQ2hhdEFnZW50TW9kZRIfChtDSEFUX0FHRU5UX01PREVfVU5TUEVDSUZJRUQQABIcChhDSEFUX0FHRU5UX01PREVfVEVSTUlOQUwQARIYChRDSEFUX0FHRU5UX01PREVfQ0hBVBACKqUCCgpDaGF0QWN0aW9uEhsKF0NIQVRfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFAoQQ0hBVF9BQ1RJT05fT1BFThABEhUKEUNIQVRfQUNUSU9OX0NMT1NFEAISFAoQQ0hBVF9BQ1RJT05fU0VORBADEhkKFUNIQVRfQUNUSU9OX0lOVEVSUlVQVBAEEhYKEkNIQVRfQUNUSU9OX0FOU1dFUhAFEhYKEkNIQVRfQUNUSU9OX1JFV0lORBAGEhsKF0NIQVRfQUNUSU9OX1NFVF9PUFRJT05TEAcSGgoWQ0hBVF9BQ1RJT05fTE9BRF9PTERFUhAIEhkKFUNIQVRfQUNUSU9OX1NJREVfRk9SSxAJEhgKFENIQVRfQUNUSU9OX1NFVF9NT0RFEAoqeAoSQ2hhdFBlcm1pc3Npb25Nb2RlEiQKIENIQVRfUEVSTUlTU0lPTl9NT0RFX1VOU1BFQ0lGSUVEEAASHQoZQ0hBVF9QRVJNSVNTSU9OX01PREVfQVVUTxABEh0KGUNIQVRfUEVSTUlTU0lPTl9NT0RFX0ZVTEwQAipVCglDaGF0U3BlZWQSGgoWQ0hBVF9TUEVFRF9VTlNQRUNJRklFRBAAEhcKE0NIQVRfU1BFRURfU1RBTkRBUkQQARITCg9DSEFUX1NQRUVEX0ZBU1QQAiqEAQoNQ2hhdFR1cm5TdGF0ZRIfChtDSEFUX1RVUk5fU1RBVEVfVU5TUEVDSUZJRUQQABIYChRDSEFUX1RVUk5fU1RBVEVfSURMRRABEhsKF0NIQVRfVFVSTl9TVEFURV9XT1JLSU5HEAISGwoXQ0hBVF9UVVJOX1NUQVRFX1dBSVRJTkcQAyqjAQoOQ2hhdENvbm5lY3Rpb24SHwobQ0hBVF9DT05ORUNUSU9OX1VOU1BFQ0lGSUVEEAASHgoaQ0hBVF9DT05ORUNUSU9OX0NPTk5FQ1RJTkcQARIZChVDSEFUX0NPTk5FQ1RJT05fUkVBRFkQAhIZChVDSEFUX0NPTk5FQ1RJT05fRU5ERUQQAxIaChZDSEFUX0NPTk5FQ1RJT05fRkFJTEVEEAQqtwEKDENoYXRJdGVtS2luZBIeChpDSEFUX0lURU1fS0lORF9VTlNQRUNJRklFRBAAEhcKE0NIQVRfSVRFTV9LSU5EX1VTRVIQARIcChhDSEFUX0lURU1fS0lORF9BU1NJU1RBTlQQAhIcChhDSEFUX0lURU1fS0lORF9SRUFTT05JTkcQAxIXChNDSEFUX0lURU1fS0lORF9UT09MEAQSGQoVQ0hBVF9JVEVNX0tJTkRfTk9USUNFEAUq/gEKDENoYXRUb29sS2luZBIeChpDSEFUX1RPT0xfS0lORF9VTlNQRUNJRklFRBAAEhoKFkNIQVRfVE9PTF9LSU5EX0NPTU1BTkQQARIXChNDSEFUX1RPT0xfS0lORF9SRUFEEAISFwoTQ0hBVF9UT09MX0tJTkRfRURJVBADEhkKFUNIQVRfVE9PTF9LSU5EX1NFQVJDSBAEEhYKEkNIQVRfVE9PTF9LSU5EX1dFQhAFEhYKEkNIQVRfVE9PTF9LSU5EX01DUBAGEhsKF0NIQVRfVE9PTF9LSU5EX1NVQkFHRU5UEAcSGAoUQ0hBVF9UT09MX0tJTkRfT1RIRVIQCCqGAQoOQ2hhdFRvb2xTdGF0dXMSIAocQ0hBVF9UT09MX1NUQVRVU19VTlNQRUNJRklFRBAAEhwKGENIQVRfVE9PTF9TVEFUVVNfUlVOTklORxABEhcKE0NIQVRfVE9PTF9TVEFUVVNfT0sQAhIbChdDSEFUX1RPT0xfU1RBVFVTX0ZBSUxFRBADKnYKD0NoYXRSZXF1ZXN0S2luZBIhCh1DSEFUX1JFUVVFU1RfS0lORF9VTlNQRUNJRklFRBAAEiAKHENIQVRfUkVRVUVTVF9LSU5EX1BFUk1JU1NJT04QARIeChpDSEFUX1JFUVVFU1RfS0lORF9RVUVTVElPThACKo8BCg9DaGF0Q29tbWFuZEtpbmQSIQodQ0hBVF9DT01NQU5EX0tJTkRfVU5TUEVDSUZJRUQQABIdChlDSEFUX0NPTU1BTkRfS0lORF9DT01NQU5EEAESGwoXQ0hBVF9DT01NQU5EX0tJTkRfU0tJTEwQAhIdChlDSEFUX0NPTU1BTkRfS0lORF9NVVhGTE9XEANiBnByb3RvMw");
+  fileDesc("CgpjaGF0LnByb3RvEhZ0bXV4X2FnZW50LnByb3RvY29sLnYxIp4BCgtDaGF0T3B0aW9ucxINCgVtb2RlbBgBIAEoCRIOCgZlZmZvcnQYAiABKAkSPgoKcGVybWlzc2lvbhgDIAEoDjIqLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdFBlcm1pc3Npb25Nb2RlEjAKBXNwZWVkGAQgASgOMiEudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0U3BlZWQi6gIKCENoYXRUb29sEjIKBGtpbmQYASABKA4yJC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRUb29sS2luZBINCgV0aXRsZRgCIAEoCRIOCgZkZXRhaWwYAyABKAkSNgoGc3RhdHVzGAQgASgOMiYudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0VG9vbFN0YXR1cxIWCg5yZXN1bHRfc3VtbWFyeRgFIAEoCRIMCgRwYXRoGAYgASgJEg0KBWFkZGVkGAcgASgNEg8KB3JlbW92ZWQYCCABKA0SFgoOb3V0cHV0X3ByZXZpZXcYCSABKAkSGAoQb3V0cHV0X3RydW5jYXRlZBgKIAEoCBISCgphZ2VudF90eXBlGAsgASgJEhAKCGFjdGl2aXR5GAwgASgJEhEKCXRvb2xfdXNlcxgNIAEoDRIOCgZ0b2tlbnMYDiABKAQSEgoKYmFja2dyb3VuZBgPIAEoCCJUCg5DaGF0QXR0YWNobWVudBIMCgRwYXRoGAEgASgJEgwKBG5hbWUYAiABKAkSEgoKbWVkaWFfdHlwZRgDIAEoCRISCgpzaXplX2J5dGVzGAQgASgEIpwBChJDaGF0QmFja2dyb3VuZFRhc2sSCgoCaWQYASABKAkSMgoEa2luZBgCIAEoDjIkLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdFRhc2tLaW5kEhMKC2Rlc2NyaXB0aW9uGAMgASgJEh4KFnN0YXJ0ZWRfYXRfdW5peF9taWxsaXMYBCABKAMSEQoJc3RvcHBhYmxlGAUgASgIIoQCCghDaGF0SXRlbRIKCgJpZBgBIAEoCRIyCgRraW5kGAIgASgOMiQudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0SXRlbUtpbmQSDAoEdGV4dBgDIAEoCRIRCglzdHJlYW1pbmcYBCABKAgSLgoEdG9vbBgFIAEoCzIgLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdFRvb2wSFgoOYXRfdW5peF9taWxsaXMYBiABKAMSEgoKcmV3aW5kYWJsZRgHIAEoCBI7CgthdHRhY2htZW50cxgIIAMoCzImLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEF0dGFjaG1lbnQiPAoKQ2hhdE9wdGlvbhIKCgJpZBgBIAEoCRINCgVsYWJlbBgCIAEoCRITCgtkZXNjcmlwdGlvbhgDIAEoCSKaAQoMQ2hhdFF1ZXN0aW9uEgoKAmlkGAEgASgJEg4KBmhlYWRlchgCIAEoCRIOCgZwcm9tcHQYAyABKAkSMwoHb3B0aW9ucxgEIAMoCzIiLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE9wdGlvbhIUCgxtdWx0aV9zZWxlY3QYBSABKAgSEwoLYWxsb3dfb3RoZXIYBiABKAgitwEKEkNoYXRQZW5kaW5nUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEjUKBGtpbmQYAiABKA4yJy50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRSZXF1ZXN0S2luZBINCgV0aXRsZRgDIAEoCRIOCgZkZXRhaWwYBCABKAkSNwoJcXVlc3Rpb25zGAUgAygLMiQudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0UXVlc3Rpb24iUQoSQ2hhdFF1ZXN0aW9uQW5zd2VyEhMKC3F1ZXN0aW9uX2lkGAEgASgJEhIKCm9wdGlvbl9pZHMYAiADKAkSEgoKb3RoZXJfdGV4dBgDIAEoCSJpCgpDaGF0QW5zd2VyEg0KBWFsbG93GAEgASgIEjsKB2Fuc3dlcnMYAiADKAsyKi50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRRdWVzdGlvbkFuc3dlchIPCgdza2lwcGVkGAMgASgIIn4KC0NoYXRDb21tYW5kEgwKBG5hbWUYASABKAkSEwoLZGVzY3JpcHRpb24YAiABKAkSFQoNYXJndW1lbnRfaGludBgDIAEoCRI1CgRraW5kGAQgASgOMicudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q29tbWFuZEtpbmQiTgoJQ2hhdE1vZGVsEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEg8KB2VmZm9ydHMYAyADKAkSFQoNc3VwcG9ydHNfZmFzdBgEIAEoCCKcAQoQQ2hhdENhcGFiaWxpdGllcxIOCgZyZXdpbmQYASABKAgSFQoNc2VuZF9taWRfdHVybhgCIAEoCBINCgVtb2RlbBgDIAEoCBIOCgZlZmZvcnQYBCABKAgSDQoFc3BlZWQYBSABKAgSEgoKcGVybWlzc2lvbhgGIAEoCBIMCgRmb3JrGAcgASgIEhEKCXF1ZXN0aW9ucxgIIAEoCCK3AQoLQ2hhdENhdGFsb2cSPgoMY2FwYWJpbGl0aWVzGAEgASgLMigudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q2FwYWJpbGl0aWVzEjEKBm1vZGVscxgCIAMoCzIhLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE1vZGVsEjUKCGNvbW1hbmRzGAMgAygLMiMudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q29tbWFuZCI3CglDaGF0VXNhZ2USEwoLdXNlZF90b2tlbnMYASABKAQSFQoNd2luZG93X3Rva2VucxgCIAEoBCLgAwoJQ2hhdFN0YXRlEg8KB3BhbmVfaWQYASABKAkSEgoKYWRhcHRlcl9pZBgCIAEoCRIZChFuYXRpdmVfc2Vzc2lvbl9pZBgDIAEoCRIzCgR0dXJuGAQgASgOMiUudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0VHVyblN0YXRlEjoKCmNvbm5lY3Rpb24YBSABKA4yJi50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRDb25uZWN0aW9uEg8KB2ZhaWx1cmUYBiABKAkSNAoHb3B0aW9ucxgHIAEoCzIjLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE9wdGlvbnMSMAoFdXNhZ2UYCCABKAsyIS50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRVc2FnZRI7CgdwZW5kaW5nGAkgASgLMioudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0UGVuZGluZ1JlcXVlc3QSGAoQaGlzdG9yeV9jb21wbGV0ZRgKIAEoCBI+CgpiYWNrZ3JvdW5kGAsgAygLMioudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0QmFja2dyb3VuZFRhc2sSEgoKY29tcGFjdGluZxgMIAEoCCLPAQoMQ2hhdFNuYXBzaG90EhAKCHJldmlzaW9uGAEgASgEEjAKBXN0YXRlGAIgASgLMiEudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0U3RhdGUSNAoHY2F0YWxvZxgDIAEoCzIjLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdENhdGFsb2cSLwoFaXRlbXMYBCADKAsyIC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRJdGVtEhQKDG9sZGVyX2N1cnNvchgFIAEoCSLiAwoLQ2hhdFJlcXVlc3QSMgoGYWN0aW9uGAEgASgOMiIudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0QWN0aW9uEg8KB3BhbmVfaWQYAiABKAkSIAoYZXhwZWN0ZWRfc2VydmVyX2lkZW50aXR5GAMgASgJEgwKBHRleHQYBCABKAkSGQoRY2xpZW50X21lc3NhZ2VfaWQYBSABKAkSEgoKcmVxdWVzdF9pZBgGIAEoCRIyCgZhbnN3ZXIYByABKAsyIi50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRBbnN3ZXISDwoHaXRlbV9pZBgIIAEoCRIUCgxvbGRlcl9jdXJzb3IYCSABKAkSNAoHb3B0aW9ucxgKIAEoCzIjLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdE9wdGlvbnMSMwoEbW9kZRgLIAEoDjIlLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEFnZW50TW9kZRIbChNpbml0aWFsaXplX2lmX3Vuc2V0GAwgASgIEjsKC2F0dGFjaG1lbnRzGA0gAygLMiYudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0QXR0YWNobWVudBIPCgd0YXNrX2lkGA4gASgJIrQBCgxDaGF0UmVzcG9uc2USLwoFb2xkZXIYASADKAsyIC50bXV4X2FnZW50LnByb3RvY29sLnYxLkNoYXRJdGVtEhQKDG9sZGVyX2N1cnNvchgCIAEoCRIWCg5mb3JrZWRfcGFuZV9pZBgDIAEoCRIzCgRtb2RlGAQgASgOMiUudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0QWdlbnRNb2RlEhAKCHJldmlzaW9uGAUgASgEIjUKDUNoYXRJdGVtRGVsdGESDwoHaXRlbV9pZBgBIAEoCRITCgt0ZXh0X2FwcGVuZBgCIAEoCSIlCgxDaGF0VHJ1bmNhdGUSFQoNYWZ0ZXJfaXRlbV9pZBgBIAEoCSK3AwoJQ2hhdEV2ZW50Eg8KB3BhbmVfaWQYASABKAkSEAoIcmV2aXNpb24YAiABKAQSMAoEaXRlbRgDIAEoCzIgLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1IABI2CgVkZWx0YRgEIAEoCzIlLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1EZWx0YUgAEjIKBXN0YXRlGAUgASgLMiEudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0U3RhdGVIABI2CgdjYXRhbG9nGAYgASgLMiMudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0Q2F0YWxvZ0gAEjgKCHRydW5jYXRlGAcgASgLMiQudG11eF9hZ2VudC5wcm90b2NvbC52MS5DaGF0VHJ1bmNhdGVIABI4CghzbmFwc2hvdBgIIAEoCzIkLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdFNuYXBzaG90SAASMwoHdXBkYXRlZBgJIAEoCzIgLnRtdXhfYWdlbnQucHJvdG9jb2wudjEuQ2hhdEl0ZW1IAEIICgZjaGFuZ2UqaAoNQ2hhdEFnZW50TW9kZRIfChtDSEFUX0FHRU5UX01PREVfVU5TUEVDSUZJRUQQABIcChhDSEFUX0FHRU5UX01PREVfVEVSTUlOQUwQARIYChRDSEFUX0FHRU5UX01PREVfQ0hBVBACKtYCCgpDaGF0QWN0aW9uEhsKF0NIQVRfQUNUSU9OX1VOU1BFQ0lGSUVEEAASFAoQQ0hBVF9BQ1RJT05fT1BFThABEhUKEUNIQVRfQUNUSU9OX0NMT1NFEAISFAoQQ0hBVF9BQ1RJT05fU0VORBADEhkKFUNIQVRfQUNUSU9OX0lOVEVSUlVQVBAEEhYKEkNIQVRfQUNUSU9OX0FOU1dFUhAFEhYKEkNIQVRfQUNUSU9OX1JFV0lORBAGEhsKF0NIQVRfQUNUSU9OX1NFVF9PUFRJT05TEAcSGgoWQ0hBVF9BQ1RJT05fTE9BRF9PTERFUhAIEhkKFUNIQVRfQUNUSU9OX1NJREVfRk9SSxAJEhgKFENIQVRfQUNUSU9OX1NFVF9NT0RFEAoSFAoQQ0hBVF9BQ1RJT05fRk9SSxALEhkKFUNIQVRfQUNUSU9OX1NUT1BfVEFTSxAMKngKEkNoYXRQZXJtaXNzaW9uTW9kZRIkCiBDSEFUX1BFUk1JU1NJT05fTU9ERV9VTlNQRUNJRklFRBAAEh0KGUNIQVRfUEVSTUlTU0lPTl9NT0RFX0FVVE8QARIdChlDSEFUX1BFUk1JU1NJT05fTU9ERV9GVUxMEAIqVQoJQ2hhdFNwZWVkEhoKFkNIQVRfU1BFRURfVU5TUEVDSUZJRUQQABIXChNDSEFUX1NQRUVEX1NUQU5EQVJEEAESEwoPQ0hBVF9TUEVFRF9GQVNUEAIqhAEKDUNoYXRUdXJuU3RhdGUSHwobQ0hBVF9UVVJOX1NUQVRFX1VOU1BFQ0lGSUVEEAASGAoUQ0hBVF9UVVJOX1NUQVRFX0lETEUQARIbChdDSEFUX1RVUk5fU1RBVEVfV09SS0lORxACEhsKF0NIQVRfVFVSTl9TVEFURV9XQUlUSU5HEAMqowEKDkNoYXRDb25uZWN0aW9uEh8KG0NIQVRfQ09OTkVDVElPTl9VTlNQRUNJRklFRBAAEh4KGkNIQVRfQ09OTkVDVElPTl9DT05ORUNUSU5HEAESGQoVQ0hBVF9DT05ORUNUSU9OX1JFQURZEAISGQoVQ0hBVF9DT05ORUNUSU9OX0VOREVEEAMSGgoWQ0hBVF9DT05ORUNUSU9OX0ZBSUxFRBAEKrcBCgxDaGF0SXRlbUtpbmQSHgoaQ0hBVF9JVEVNX0tJTkRfVU5TUEVDSUZJRUQQABIXChNDSEFUX0lURU1fS0lORF9VU0VSEAESHAoYQ0hBVF9JVEVNX0tJTkRfQVNTSVNUQU5UEAISHAoYQ0hBVF9JVEVNX0tJTkRfUkVBU09OSU5HEAMSFwoTQ0hBVF9JVEVNX0tJTkRfVE9PTBAEEhkKFUNIQVRfSVRFTV9LSU5EX05PVElDRRAFKv4BCgxDaGF0VG9vbEtpbmQSHgoaQ0hBVF9UT09MX0tJTkRfVU5TUEVDSUZJRUQQABIaChZDSEFUX1RPT0xfS0lORF9DT01NQU5EEAESFwoTQ0hBVF9UT09MX0tJTkRfUkVBRBACEhcKE0NIQVRfVE9PTF9LSU5EX0VESVQQAxIZChVDSEFUX1RPT0xfS0lORF9TRUFSQ0gQBBIWChJDSEFUX1RPT0xfS0lORF9XRUIQBRIWChJDSEFUX1RPT0xfS0lORF9NQ1AQBhIbChdDSEFUX1RPT0xfS0lORF9TVUJBR0VOVBAHEhgKFENIQVRfVE9PTF9LSU5EX09USEVSEAgqhgEKDkNoYXRUb29sU3RhdHVzEiAKHENIQVRfVE9PTF9TVEFUVVNfVU5TUEVDSUZJRUQQABIcChhDSEFUX1RPT0xfU1RBVFVTX1JVTk5JTkcQARIXChNDSEFUX1RPT0xfU1RBVFVTX09LEAISGwoXQ0hBVF9UT09MX1NUQVRVU19GQUlMRUQQAyp2Cg9DaGF0UmVxdWVzdEtpbmQSIQodQ0hBVF9SRVFVRVNUX0tJTkRfVU5TUEVDSUZJRUQQABIgChxDSEFUX1JFUVVFU1RfS0lORF9QRVJNSVNTSU9OEAESHgoaQ0hBVF9SRVFVRVNUX0tJTkRfUVVFU1RJT04QAiqPAQoPQ2hhdENvbW1hbmRLaW5kEiEKHUNIQVRfQ09NTUFORF9LSU5EX1VOU1BFQ0lGSUVEEAASHQoZQ0hBVF9DT01NQU5EX0tJTkRfQ09NTUFORBABEhsKF0NIQVRfQ09NTUFORF9LSU5EX1NLSUxMEAISHQoZQ0hBVF9DT01NQU5EX0tJTkRfTVVYRkxPVxADKoEBCgxDaGF0VGFza0tpbmQSHgoaQ0hBVF9UQVNLX0tJTkRfVU5TUEVDSUZJRUQQABIaChZDSEFUX1RBU0tfS0lORF9DT01NQU5EEAESGwoXQ0hBVF9UQVNLX0tJTkRfU1VCQUdFTlQQAhIYChRDSEFUX1RBU0tfS0lORF9PVEhFUhADYgZwcm90bzM");
 
 /**
  * What the composer's pills select. In `ChatRequest.options` an empty string
@@ -120,6 +120,39 @@ export type ChatTool = Message<"tmux_agent.protocol.v1.ChatTool"> & {
    * @generated from field: bool output_truncated = 10;
    */
   outputTruncated: boolean;
+
+  /**
+   * SUBAGENT: the kind of agent, as the provider names it: "Explore".
+   *
+   * @generated from field: string agent_type = 11;
+   */
+  agentType: string;
+
+  /**
+   * SUBAGENT: what it is doing now: "Running ls -la".
+   *
+   * @generated from field: string activity = 12;
+   */
+  activity: string;
+
+  /**
+   * SUBAGENT: the tool calls it has made and the tokens it has used.
+   *
+   * @generated from field: uint32 tool_uses = 13;
+   */
+  toolUses: number;
+
+  /**
+   * @generated from field: uint64 tokens = 14;
+   */
+  tokens: bigint;
+
+  /**
+   * SUBAGENT: it runs in the background, apart from the turn.
+   *
+   * @generated from field: bool background = 15;
+   */
+  background: boolean;
 };
 
 /**
@@ -128,6 +161,89 @@ export type ChatTool = Message<"tmux_agent.protocol.v1.ChatTool"> & {
  */
 export const ChatToolSchema: GenMessage<ChatTool> = /*@__PURE__*/
   messageDesc(file_chat, 1);
+
+/**
+ * A file sent with a user message, already on the host.
+ *
+ * @generated from message tmux_agent.protocol.v1.ChatAttachment
+ */
+export type ChatAttachment = Message<"tmux_agent.protocol.v1.ChatAttachment"> & {
+  /**
+   * Absolute, on the host.
+   *
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * The name to show.
+   *
+   * @generated from field: string name = 2;
+   */
+  name: string;
+
+  /**
+   * Such as "image/png". Empty when not known.
+   *
+   * @generated from field: string media_type = 3;
+   */
+  mediaType: string;
+
+  /**
+   * @generated from field: uint64 size_bytes = 4;
+   */
+  sizeBytes: bigint;
+};
+
+/**
+ * Describes the message tmux_agent.protocol.v1.ChatAttachment.
+ * Use `create(ChatAttachmentSchema)` to create a new message.
+ */
+export const ChatAttachmentSchema: GenMessage<ChatAttachment> = /*@__PURE__*/
+  messageDesc(file_chat, 2);
+
+/**
+ * Work the agent runs outside the turn, such as a background command.
+ *
+ * @generated from message tmux_agent.protocol.v1.ChatBackgroundTask
+ */
+export type ChatBackgroundTask = Message<"tmux_agent.protocol.v1.ChatBackgroundTask"> & {
+  /**
+   * The provider's id for the task: STOP_TASK takes it.
+   *
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: tmux_agent.protocol.v1.ChatTaskKind kind = 2;
+   */
+  kind: ChatTaskKind;
+
+  /**
+   * @generated from field: string description = 3;
+   */
+  description: string;
+
+  /**
+   * @generated from field: int64 started_at_unix_millis = 4;
+   */
+  startedAtUnixMillis: bigint;
+
+  /**
+   * STOP_TASK accepts this task.
+   *
+   * @generated from field: bool stoppable = 5;
+   */
+  stoppable: boolean;
+};
+
+/**
+ * Describes the message tmux_agent.protocol.v1.ChatBackgroundTask.
+ * Use `create(ChatBackgroundTaskSchema)` to create a new message.
+ */
+export const ChatBackgroundTaskSchema: GenMessage<ChatBackgroundTask> = /*@__PURE__*/
+  messageDesc(file_chat, 3);
 
 /**
  * One entry of the timeline. An item is sent whole when it appears and again
@@ -180,6 +296,13 @@ export type ChatItem = Message<"tmux_agent.protocol.v1.ChatItem"> & {
    * @generated from field: bool rewindable = 7;
    */
   rewindable: boolean;
+
+  /**
+   * USER only: the files sent with the message.
+   *
+   * @generated from field: repeated tmux_agent.protocol.v1.ChatAttachment attachments = 8;
+   */
+  attachments: ChatAttachment[];
 };
 
 /**
@@ -187,7 +310,7 @@ export type ChatItem = Message<"tmux_agent.protocol.v1.ChatItem"> & {
  * Use `create(ChatItemSchema)` to create a new message.
  */
 export const ChatItemSchema: GenMessage<ChatItem> = /*@__PURE__*/
-  messageDesc(file_chat, 2);
+  messageDesc(file_chat, 4);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatOption
@@ -214,7 +337,7 @@ export type ChatOption = Message<"tmux_agent.protocol.v1.ChatOption"> & {
  * Use `create(ChatOptionSchema)` to create a new message.
  */
 export const ChatOptionSchema: GenMessage<ChatOption> = /*@__PURE__*/
-  messageDesc(file_chat, 3);
+  messageDesc(file_chat, 5);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatQuestion
@@ -262,7 +385,7 @@ export type ChatQuestion = Message<"tmux_agent.protocol.v1.ChatQuestion"> & {
  * Use `create(ChatQuestionSchema)` to create a new message.
  */
 export const ChatQuestionSchema: GenMessage<ChatQuestion> = /*@__PURE__*/
-  messageDesc(file_chat, 4);
+  messageDesc(file_chat, 6);
 
 /**
  * What the agent is waiting on. At most one per chat.
@@ -305,7 +428,7 @@ export type ChatPendingRequest = Message<"tmux_agent.protocol.v1.ChatPendingRequ
  * Use `create(ChatPendingRequestSchema)` to create a new message.
  */
 export const ChatPendingRequestSchema: GenMessage<ChatPendingRequest> = /*@__PURE__*/
-  messageDesc(file_chat, 5);
+  messageDesc(file_chat, 7);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatQuestionAnswer
@@ -334,7 +457,7 @@ export type ChatQuestionAnswer = Message<"tmux_agent.protocol.v1.ChatQuestionAns
  * Use `create(ChatQuestionAnswerSchema)` to create a new message.
  */
 export const ChatQuestionAnswerSchema: GenMessage<ChatQuestionAnswer> = /*@__PURE__*/
-  messageDesc(file_chat, 6);
+  messageDesc(file_chat, 8);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatAnswer
@@ -367,7 +490,7 @@ export type ChatAnswer = Message<"tmux_agent.protocol.v1.ChatAnswer"> & {
  * Use `create(ChatAnswerSchema)` to create a new message.
  */
 export const ChatAnswerSchema: GenMessage<ChatAnswer> = /*@__PURE__*/
-  messageDesc(file_chat, 7);
+  messageDesc(file_chat, 9);
 
 /**
  * One entry of the composer's slash list.
@@ -403,7 +526,7 @@ export type ChatCommand = Message<"tmux_agent.protocol.v1.ChatCommand"> & {
  * Use `create(ChatCommandSchema)` to create a new message.
  */
 export const ChatCommandSchema: GenMessage<ChatCommand> = /*@__PURE__*/
-  messageDesc(file_chat, 8);
+  messageDesc(file_chat, 10);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatModel
@@ -437,7 +560,7 @@ export type ChatModel = Message<"tmux_agent.protocol.v1.ChatModel"> & {
  * Use `create(ChatModelSchema)` to create a new message.
  */
 export const ChatModelSchema: GenMessage<ChatModel> = /*@__PURE__*/
-  messageDesc(file_chat, 9);
+  messageDesc(file_chat, 11);
 
 /**
  * What this chat's provider can do. A client hides the controls for the rest.
@@ -493,7 +616,7 @@ export type ChatCapabilities = Message<"tmux_agent.protocol.v1.ChatCapabilities"
  * Use `create(ChatCapabilitiesSchema)` to create a new message.
  */
 export const ChatCapabilitiesSchema: GenMessage<ChatCapabilities> = /*@__PURE__*/
-  messageDesc(file_chat, 10);
+  messageDesc(file_chat, 12);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatCatalog
@@ -520,7 +643,7 @@ export type ChatCatalog = Message<"tmux_agent.protocol.v1.ChatCatalog"> & {
  * Use `create(ChatCatalogSchema)` to create a new message.
  */
 export const ChatCatalogSchema: GenMessage<ChatCatalog> = /*@__PURE__*/
-  messageDesc(file_chat, 11);
+  messageDesc(file_chat, 13);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatUsage
@@ -544,7 +667,7 @@ export type ChatUsage = Message<"tmux_agent.protocol.v1.ChatUsage"> & {
  * Use `create(ChatUsageSchema)` to create a new message.
  */
 export const ChatUsageSchema: GenMessage<ChatUsage> = /*@__PURE__*/
-  messageDesc(file_chat, 12);
+  messageDesc(file_chat, 14);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatState
@@ -606,6 +729,20 @@ export type ChatState = Message<"tmux_agent.protocol.v1.ChatState"> & {
    * @generated from field: bool history_complete = 10;
    */
   historyComplete: boolean;
+
+  /**
+   * What the agent runs outside the turn, whatever `turn` says.
+   *
+   * @generated from field: repeated tmux_agent.protocol.v1.ChatBackgroundTask background = 11;
+   */
+  background: ChatBackgroundTask[];
+
+  /**
+   * The agent is compacting the conversation's context.
+   *
+   * @generated from field: bool compacting = 12;
+   */
+  compacting: boolean;
 };
 
 /**
@@ -613,7 +750,7 @@ export type ChatState = Message<"tmux_agent.protocol.v1.ChatState"> & {
  * Use `create(ChatStateSchema)` to create a new message.
  */
 export const ChatStateSchema: GenMessage<ChatState> = /*@__PURE__*/
-  messageDesc(file_chat, 13);
+  messageDesc(file_chat, 15);
 
 /**
  * Everything a client needs to draw a chat it has just opened. It replaces
@@ -660,7 +797,7 @@ export type ChatSnapshot = Message<"tmux_agent.protocol.v1.ChatSnapshot"> & {
  * Use `create(ChatSnapshotSchema)` to create a new message.
  */
 export const ChatSnapshotSchema: GenMessage<ChatSnapshot> = /*@__PURE__*/
-  messageDesc(file_chat, 14);
+  messageDesc(file_chat, 16);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatRequest
@@ -716,7 +853,8 @@ export type ChatRequest = Message<"tmux_agent.protocol.v1.ChatRequest"> & {
   answer?: ChatAnswer | undefined;
 
   /**
-   * REWIND: a `rewindable` USER item.
+   * REWIND: a `rewindable` USER item. FORK: any item of the turn to fork
+   * through.
    *
    * @generated from field: string item_id = 8;
    */
@@ -750,6 +888,20 @@ export type ChatRequest = Message<"tmux_agent.protocol.v1.ChatRequest"> & {
    * @generated from field: bool initialize_if_unset = 12;
    */
   initializeIfUnset: boolean;
+
+  /**
+   * SEND: files on the host to send with `text`.
+   *
+   * @generated from field: repeated tmux_agent.protocol.v1.ChatAttachment attachments = 13;
+   */
+  attachments: ChatAttachment[];
+
+  /**
+   * STOP_TASK: a `ChatBackgroundTask.id`.
+   *
+   * @generated from field: string task_id = 14;
+   */
+  taskId: string;
 };
 
 /**
@@ -757,7 +909,7 @@ export type ChatRequest = Message<"tmux_agent.protocol.v1.ChatRequest"> & {
  * Use `create(ChatRequestSchema)` to create a new message.
  */
 export const ChatRequestSchema: GenMessage<ChatRequest> = /*@__PURE__*/
-  messageDesc(file_chat, 15);
+  messageDesc(file_chat, 17);
 
 /**
  * @generated from message tmux_agent.protocol.v1.ChatResponse
@@ -778,7 +930,7 @@ export type ChatResponse = Message<"tmux_agent.protocol.v1.ChatResponse"> & {
   olderCursor: string;
 
   /**
-   * SIDE_FORK: the pane the fork opened in.
+   * SIDE_FORK and FORK: the pane the fork opened in.
    *
    * @generated from field: string forked_pane_id = 3;
    */
@@ -810,7 +962,7 @@ export type ChatResponse = Message<"tmux_agent.protocol.v1.ChatResponse"> & {
  * Use `create(ChatResponseSchema)` to create a new message.
  */
 export const ChatResponseSchema: GenMessage<ChatResponse> = /*@__PURE__*/
-  messageDesc(file_chat, 16);
+  messageDesc(file_chat, 18);
 
 /**
  * Text appended to a `streaming` item.
@@ -834,7 +986,7 @@ export type ChatItemDelta = Message<"tmux_agent.protocol.v1.ChatItemDelta"> & {
  * Use `create(ChatItemDeltaSchema)` to create a new message.
  */
 export const ChatItemDeltaSchema: GenMessage<ChatItemDelta> = /*@__PURE__*/
-  messageDesc(file_chat, 17);
+  messageDesc(file_chat, 19);
 
 /**
  * A rewind: drop every item after `after_item_id`. Empty drops them all,
@@ -856,7 +1008,7 @@ export type ChatTruncate = Message<"tmux_agent.protocol.v1.ChatTruncate"> & {
  * Use `create(ChatTruncateSchema)` to create a new message.
  */
 export const ChatTruncateSchema: GenMessage<ChatTruncate> = /*@__PURE__*/
-  messageDesc(file_chat, 18);
+  messageDesc(file_chat, 20);
 
 /**
  * One change to one chat, sent only to the connections that opened it.
@@ -946,7 +1098,7 @@ export type ChatEvent = Message<"tmux_agent.protocol.v1.ChatEvent"> & {
  * Use `create(ChatEventSchema)` to create a new message.
  */
 export const ChatEventSchema: GenMessage<ChatEvent> = /*@__PURE__*/
-  messageDesc(file_chat, 19);
+  messageDesc(file_chat, 21);
 
 /**
  * Whether an agent started in a terminal becomes a chat. One value per host.
@@ -1005,7 +1157,7 @@ export enum ChatAction {
   CLOSE = 2,
 
   /**
-   * Sends `text` as a user message.
+   * Sends `text`, with any `attachments`, as a user message.
    *
    * @generated from enum value: CHAT_ACTION_SEND = 3;
    */
@@ -1059,6 +1211,21 @@ export enum ChatAction {
    * @generated from enum value: CHAT_ACTION_SET_MODE = 10;
    */
   SET_MODE = 10,
+
+  /**
+   * Forks the conversation into a new chat through the end of the turn that
+   * holds `item_id`.
+   *
+   * @generated from enum value: CHAT_ACTION_FORK = 11;
+   */
+  FORK = 11,
+
+  /**
+   * Stops the background task `task_id`, one of `ChatState.background`.
+   *
+   * @generated from enum value: CHAT_ACTION_STOP_TASK = 12;
+   */
+  STOP_TASK = 12,
 }
 
 /**
@@ -1396,4 +1563,37 @@ export enum ChatCommandKind {
  */
 export const ChatCommandKindSchema: GenEnum<ChatCommandKind> = /*@__PURE__*/
   enumDesc(file_chat, 10);
+
+/**
+ * @generated from enum tmux_agent.protocol.v1.ChatTaskKind
+ */
+export enum ChatTaskKind {
+  /**
+   * @generated from enum value: CHAT_TASK_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * A shell command.
+   *
+   * @generated from enum value: CHAT_TASK_KIND_COMMAND = 1;
+   */
+  COMMAND = 1,
+
+  /**
+   * @generated from enum value: CHAT_TASK_KIND_SUBAGENT = 2;
+   */
+  SUBAGENT = 2,
+
+  /**
+   * @generated from enum value: CHAT_TASK_KIND_OTHER = 3;
+   */
+  OTHER = 3,
+}
+
+/**
+ * Describes the enum tmux_agent.protocol.v1.ChatTaskKind.
+ */
+export const ChatTaskKindSchema: GenEnum<ChatTaskKind> = /*@__PURE__*/
+  enumDesc(file_chat, 11);
 

@@ -55,6 +55,10 @@ fn dispatch(
     let action = Action::try_from(request.action).unwrap_or_default();
     match action {
         Action::Unspecified => return Err(invalid("Unknown chat action.")),
+        // Not handled yet: package E of chat-polish-plan.md adds FORK.
+        Action::Fork => return Err(invalid("Unknown chat action.")),
+        // Not handled yet: package G of chat-polish-plan.md adds STOP_TASK.
+        Action::StopTask => return Err(invalid("Unknown chat action.")),
         Action::SetMode => {
             let mode = v1::ChatAgentMode::try_from(request.mode).unwrap_or_default();
             let mode = if request.initialize_if_unset {
@@ -173,7 +177,7 @@ fn dispatch(
                 ..Default::default()
             })
         }
-        Action::Unspecified | Action::SetMode | Action::Close => {
+        Action::Unspecified | Action::SetMode | Action::Close | Action::Fork | Action::StopTask => {
             unreachable!("answered above")
         }
     }
