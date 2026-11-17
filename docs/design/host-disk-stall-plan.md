@@ -224,47 +224,54 @@ hold the disk busy with `stress-ng --hdd 4 --hdd-bytes 4G` (or `fio` with
 
 ## 7. State
 
-Implemented on 16 Nov, uncommitted, under `apps/host/` only:
+Implemented and committed on `gpui/chat`, under `apps/host/` only:
 
-- **H1.** `agent_dispatch::handle` and `history_dispatch::handle` run on the
-  blocking pool. Test:
+- **H1** (`6e39d5dc`). `agent_dispatch::handle` and `history_dispatch::handle`
+  run on the blocking pool. Test:
   `service::tests::hook_ingests_stuck_on_the_disk_leave_runtime_workers_free`
   (two workers, three stuck ingests, a fourth connection answered inside a
   second); it fails with the change reverted.
-- **H2.** `bridge.rs`: a silent daemon is probed again for 10 s
+- **H2** (`6e39d5dc`). `bridge.rs`: a silent daemon is probed again for 10 s
   (`SILENT_DAEMON_BOUND`) before it is retired; a different build is retired
   at once, as before; `bridge.log` gets a `daemonRetired` line with
-  `different-build` or `silent`. Three new bridge tests, two adjusted.
-- **H4, first half.** Temp files older than an hour are removed once a
-  minute.
+  `different-build` or `silent`.
+- **H3** (`778d1e9d`). The `sync_all` calls are gone from `store::persist`
+  and `persist_latest_fallback`; both still write a temp file and rename it.
+- **H4.** Temp files older than an hour are removed once a minute
+  (`.hook-fallback-*.tmp`, `.agents-*.tmp`, `.sessions-*.tmp`).
+- **R1** (`778d1e9d`). The daemon accepts first; the mailbox is drained on
+  the blocking pool, and plugins start after the drain.
+- **History store.** `History::maintain` and `change` no longer hold the
+  history lock across the synced write of `sessions.json`: they snapshot
+  under it and write outside, serialised by a writer lock. The agents
+  service feeds history under its own `state` lock, so that write used to
+  be the one fsync an ingest could still wait on.
+- **Daemon exit.** A daemon that was asked to stop leaves the process when
+  `daemon::run` returns, instead of waiting for blocking-pool ingests that
+  would write `agents.json` under the daemon that replaced it.
+- **Fork.** A chat's fork (session-file scan, tmux, `/proc`) runs on the
+  blocking pool as well.
 
-Found while doing it, and still open:
+Still open:
 
 | # | What | Why it matters |
 | --- | --- | --- |
-| R1 | `daemon::run` still drains the mailbox before its first `accept` (H4, second half) | A daemon started under load is silent for as long as the drain takes, and is now retired after 10 s instead of 2 s. H3 makes the drain cheap; moving it behind `accept` makes it harmless. Do one of them. |
-| R2 | §4 H1 was wrong about `snapshot.rs`: `discover_authoritative` is on the blocking pool, but `snapshot_from_identity` → `reconcile_topology` is not. It takes `state` and can persist. It runs inline at `service.rs:1157`, `requests.rs:151`, `tmux_action_dispatch.rs:256` and `:349`, and in the topology actor; the terminal-input path (`dispatcher.rs:399`, `:415`) holds `state` too | Each can park one runtime worker behind an ingest's fsync. Bounded by the number of subscribed desktops and phones, so it cannot starve the runtime the way hooks did, but a desktop's typing can wait on a hook's fsync. H3 removes it; otherwise these move to the blocking pool one by one, with care for ordering. |
-| R3 | The handshake runs `server_identity()`, a tmux subprocess, on a worker (`service.rs:390`) | "A hello never waits on the disk" is true only while starting tmux is fast. Not measured under a stalled disk. |
-| R4 | Every waiting hook now holds a blocking-pool thread (512 at most) | A queue as long as the incident's would make git, files and topology work wait behind hooks. H3 ends the queue; without it, an async semaphore before `spawn_blocking`. |
-
-All four point the same way: H3 is the real fix, and H1 and H2 are what keep
-the daemon alive and reachable until it lands.
+| R2 | `snapshot_from_identity` → `reconcile_topology` takes the agent `state` lock on a runtime worker (`service.rs`, `requests.rs`, `tmux_action_dispatch.rs`, the topology actor; the terminal-input path holds `state` too) | With H3 and the history change, nothing under `state` syncs to disk any more, so a worker waits on a write and a rename, not on an fsync. A stalled disk can still make a plain write slow. Bounded by the number of subscribed clients. |
+| R3 | The handshake runs `server_identity()`, a tmux subprocess, on a worker | "A hello never waits on the disk" is true only while starting tmux is fast. Not measured under a stalled disk. |
+| R4 | Every waiting hook holds a blocking-pool thread (512 at most) | Without fsyncs the queue should not form. Not measured; if it does, an async semaphore before `spawn_blocking`. |
 
 One behaviour change to know: the ordered lane's 10 s bound now fires for
 agent operations. A desktop whose agent request waits longer is
-disconnected and reconnects, where before it hung.
+disconnected and reconnects, where before it hung. The work is not
+cancelled, so a retry can run it twice; ingests are idempotent by event id.
 
 ## 8. Next, in order
 
-Nothing here has started.
-
-1. **H3**, once the owner agrees: check that nothing in `StoredState` must
-   survive a reboot, then drop the `sync_all` calls in `store::persist` and
-   `persist_latest_fallback`. This settles R1, R2 and R4.
-2. **R1** if H3 is refused: drain the mailbox after `accept`, on the
-   blocking pool.
-3. **R3**: measure a handshake under a stalled disk (§6); move
-   `server_identity()` off the worker only if it shows.
-4. **§5**: `debug = "line-tables-only"` and one integration test target,
+1. **§6** on a real host under a heavy build: the daemon answers a hello
+   throughout, no `daemonRetired … silent` line, hook ingests stay short.
+   This is the only proof that R2 and R4 are settled; nothing here has been
+   measured under a stalled disk since the incident.
+2. **R3**: measure a handshake in the same run; move `server_identity()`
+   off the worker only if it shows.
+3. **§5**: `debug = "line-tables-only"` and one integration test target,
    as its own change.
-5. **§6** on a real host, then release.

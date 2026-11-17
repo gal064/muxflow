@@ -14,20 +14,20 @@ Line numbers are as of `07cd7e5d` and drift; function names are the anchor.
 
 | # | Problem | Root cause | Fix | Layers | Wire | Size | State |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Paste image / drop file does nothing | Chat has no paste or drop handler; the upload glue is typed on `TerminalPane`; a chat message is text only on the wire and in both providers | Attachments: generalise the upload batch, chips in the composer, `attachments` on SEND and on USER items, providers hand images over as images | desktop, wire, host | additive | L | mock S6, then build |
-| 2 | Folder path is absolute | Details card prints `Pane.current_path` as it is | `~`-relative, or repo name + path inside the active repository | desktop | none | S | mock S1 |
-| 3 | Text symbols as icons | Card rows, pills and Send draw Unicode glyphs; only the Kit's 101 default icons are embedded | Embed the needed Lucide icons with `icon_assets!` and use them | desktop | none | S | mock S1–S4, D1–D2 |
-| 4 | "Changes vs main" ambiguous, no uncommitted-only | One summary exists: working tree against the merge base with the default branch | Second summary against `HEAD`; two rows | desktop, wire, host | additive | M | mock S1, D3 |
-| 5 | Pill says "Default (recommended)" | Host passes Claude Code's `displayName` through | Host labels the default entry with the model it resolves to | host | none | S | mock S2, D4 |
-| 6 | Every tool call its own row | Timeline rows are 1:1 with items | Client-side grouping of tool/thinking runs | desktop | none | M | mock S4, D7, D13 |
-| 7 | Nothing shows while the agent works | By design: the first mock drew no working mark; thinking is shown only when the model streams thinking text; a subagent's activity is dropped by the host | Status line while a turn works; thinking as a step; subagent step count | desktop, host | none | M | mock S5, D8, D11 |
-| 8 | Weak message buttons, no fork | Edit is a text button left of the bubble; copy only in the context menu; no wire action forks at a message | Icon rows under messages; `CHAT_ACTION_FORK` | desktop, wire, host | additive | S + L | mock S3, D5–D6, D12 |
-| 9 | Esc does not stop the agent | The composer's Escape handler ends after "close list / cancel edit" | Third arm: interrupt while WORKING; also outside the composer | desktop | none | S | **done** (§2) |
-| 10 | Colours not compared with T3 Code | Not done | Compared (§3.10): four kinds of small text are under 4.5:1; three options | desktop | none | S | mock S8, D14 |
-| 11 | Typing does not clear the notification | Chat calls `note_activity` only on send and answer | Call it on any key or press in the pane | desktop | none | S | **done** (§2) |
-| 12 | Slow on a 1 s link | (a) the chat pane is destroyed, closed at the host and reloaded on every tab switch; (b) options and Stop draw only host-confirmed state; (c) local branch lacked origin's two latency fixes | (a) keep panes alive; (b) optimistic overlay; (c) synced | desktop | none (one optional) | M | (c) **done**; rest §3.12, mock S7 |
-| 14 | No sign of background tasks, of what a subagent does, or of compacting (added 16 Nov) | The host reads none of it: Claude Code's `task_*`, `background_tasks_changed` and `status: compacting` lines fall through `system`'s `_ => {}`; Codex's compaction item is drawn as "compacted" the moment it starts | Host keeps a task list and a compacting flag in `ChatState`, and live figures on a subagent's row; the desktop draws a chip by the composer, subagent rows under the status line, and "Compacting context" | desktop, wire, host | additive | M | §3.14, mock S9, D15–D18 |
-| 13 | Cmd+C in the chat copies nothing (Mac) | The app's shortcut interceptor runs `terminal.copy` before the focused text sees the chord | Selectable chat text keeps its own chords | desktop | none | S | **done** (§2) |
+| 1 | Paste image / drop file does nothing | Chat has no paste or drop handler; the upload glue is typed on `TerminalPane`; a chat message is text only on the wire and in both providers | Attachments: generalise the upload batch, chips in the composer, `attachments` on SEND and on USER items, providers hand images over as images | desktop, wire, host | additive | L | built, `470c97b3` |
+| 2 | Folder path is absolute | Details card prints `Pane.current_path` as it is | `~`-relative, or repo name + path inside the active repository | desktop | none | S | built, `70740c88` |
+| 3 | Text symbols as icons | Card rows, pills and Send draw Unicode glyphs; only the Kit's 101 default icons are embedded | Embed the needed Lucide icons with `icon_assets!` and use them | desktop | none | S | built, `70740c88` |
+| 4 | "Changes vs main" ambiguous, no uncommitted-only | One summary exists: working tree against the merge base with the default branch | Second summary against `HEAD`; two rows | desktop, wire, host | additive | M | built, `70740c88` |
+| 5 | Pill says "Default (recommended)" | Host passes Claude Code's `displayName` through | Host labels the default entry with the model it resolves to | host | none | S | built, `70740c88` |
+| 6 | Every tool call its own row | Timeline rows are 1:1 with items | Client-side grouping of tool/thinking runs | desktop | none | M | built, `11664539` |
+| 7 | Nothing shows while the agent works | By design: the first mock drew no working mark; thinking is shown only when the model streams thinking text; a subagent's activity is dropped by the host | Status line while a turn works; thinking as a step; subagent step count | desktop, host | none | M | built, `11664539` |
+| 8 | Weak message buttons, no fork | Edit is a text button left of the bubble; copy only in the context menu; no wire action forks at a message | Icon rows under messages; `CHAT_ACTION_FORK` | desktop, wire, host | additive | S + L | built, `11664539` (buttons), `8fe44838` (fork) |
+| 9 | Esc does not stop the agent | The composer's Escape handler ends after "close list / cancel edit" | Third arm: interrupt while WORKING; also outside the composer | desktop | none | S | built, `7675bee6` |
+| 10 | Colours not compared with T3 Code | Not done | Compared (§3.10): four kinds of small text are under 4.5:1; three options | desktop | none | S | built, `5ff96360` (C1) |
+| 11 | Typing does not clear the notification | Chat calls `note_activity` only on send and answer | Call it on any key or press in the pane | desktop | none | S | built, `7675bee6` |
+| 12 | Slow on a 1 s link | (a) the chat pane is destroyed, closed at the host and reloaded on every tab switch; (b) options and Stop draw only host-confirmed state; (c) local branch lacked origin's two latency fixes | (a) keep panes alive; (b) optimistic overlay; (c) synced | desktop | none | M | built, `7c9532d2`; the two optional items not built |
+| 14 | No sign of background tasks, of what a subagent does, or of compacting (added 16 Nov) | The host reads none of it: Claude Code's `task_*`, `background_tasks_changed` and `status: compacting` lines fall through `system`'s `_ => {}`; Codex's compaction item is drawn as "compacted" the moment it starts | Host keeps a task list and a compacting flag in `ChatState`, and live figures on a subagent's row; the desktop draws a chip by the composer, subagent rows under the status line, and "Compacting context" | desktop, wire, host | additive | M | built, `f595ad2b` |
+| 13 | Cmd+C in the chat copies nothing (Mac) | The app's shortcut interceptor runs `terminal.copy` before the focused text sees the chord | Selectable chat text keeps its own chords | desktop | none | S | built, `e27bd5aa` |
 
 Sizes: S under a day for one agent, M one to two days, L more.
 
@@ -134,9 +134,10 @@ Fix. The pane reports it for any key while the keyboard is inside it
 pane. The hook drops repeats, as it does for a terminal. Test:
 `typing_or_pressing_in_a_chat_says_its_agent_has_been_seen`.
 
-All three are uncommitted in the working tree. `cargo test -p muxflow-gpui
---lib -- chat:: commands::` (127 passed) and `--test commands` (50 passed)
-on the tree with all three; the other integration tests were not run.
+Committed as `e27bd5aa` (13) and `7675bee6` (9, 11). `cargo test -p
+muxflow-gpui --lib -- chat:: commands::` (127 passed) and `--test commands`
+(50 passed) on the tree with all three; the other integration tests were
+not run.
 
 ## 3. The rest, one by one
 
@@ -167,8 +168,10 @@ nothing":
 - *Desktop, taking files.* Split `upload::Batch` from its target: a small
   `UploadTarget` (scope now, set busy, deliver the verified host paths) with
   two implementations. The terminal's delivers by pasting, exactly as today.
-  The chat's adds attachments to the composer. On a local host there is no
-  upload: the path is the attachment (the batch already has that branch).
+  The chat's adds attachments to the composer. As built, a local host
+  stages the file too: it is copied into the host's upload folder, because
+  the host admits only files that lie there (below). The agent is given the
+  copy's path, not the original's.
 - *Desktop, the three ways in.* On the chat's root: `on_drop` for
   `ExternalPaths` and `InternalPathDrag`, with a pane-wide drop hint like the
   terminal's. On the composer's wrapper: `capture_action` of the Kit's
@@ -183,19 +186,27 @@ nothing":
   attachments back with its text.
 - *Wire* (§4): `ChatRequest.attachments` on SEND, `ChatItem.attachments` on
   USER items.
-- *Host.* `admit` checks each path is a regular file the host user can read,
-  at most ten, each within the existing limits. Then per provider:
-  - Claude: an image (png, jpeg, gif, webp) small enough for the API (5 MB
-    encoded) goes as an `image` content block, base64, beside the text block.
+- *Host.* `attach::admit` takes only regular files of the host's user that
+  lie directly in the upload folder (`~/.cache/muxflow/uploads`, opened
+  with `O_NOFOLLOW`), at most ten. An image is told by its first bytes, not
+  its name. Then per provider:
+  - Claude: an image (png, jpeg, gif, webp) small enough for the API (5 MiB
+    encoded) goes as an `image` content block, base64, beside the text
+    block, up to 6 MiB encoded in one message, so that a message always
+    fits the host's 16 MiB line bound and the history reader's first
+    window.
     **Verified** on Claude Code 2.1.326: a `user` line whose `content` is
     `[text, image]` is answered about the image. Anything else, and an image
     too large, goes as its path on a line of its own under the text; the
     agent reads it with its own tools.
   - Codex: an image goes as `{type: "localImage", path}`, any other file as
-    `{type: "mention", name, path}`; both are in the installed server's
-    schema (`UserInput`, 0.169.0). **To verify** against the server.
+    its path under the text, as for Claude. **Verified** live on 0.169.0
+    (§5); a `mention` item is accepted but the server does not read the
+    file in, so it is not used.
   - History: Claude's session file holds the image inline, so a reloaded
-    message shows an unnamed "Image" chip; file paths come back as text.
+    message shows an unnamed "Image" chip with no path; staged paths under
+    the text come back as chips. The reader's window grows (8 MiB, doubling
+    to 64 MiB) when a conversation's chain runs off its start.
 - *Cleanup.* The staging directory already forgets completed uploads after
   seven days. A chip whose file is gone opens nothing and says so.
 
@@ -487,11 +498,12 @@ message ChatTool {
   SUBAGENT row's `agent_type` and `background`.
 - `task_progress`: set `activity`, `tool_uses`, `tokens` on that row and
   republish it, joined with the existing 50 ms window.
-- `task_notification`: final figures; `result_summary` from `status`
-  ("done", "failed", "stopped"). The row's own `tool_result` still closes it
+- `task_notification`: final figures on the row, then the task is
+  forgotten. The row's own `tool_result` closes it and gives its outcome,
   as today.
-- `status`: `compacting = (status == "compacting")`; also cleared by
-  `compact_boundary` and by `result`.
+- `status`: `compacting = (status == "compacting")`, only for a line that
+  has the key and is the conversation's own (not a subagent's); also
+  cleared by `compact_boundary`, by `result` and on a reconnect.
 - The summary `user` line after a boundary makes no USER item; the fixture
   of the recorded compaction covers it.
 - `CHAT_ACTION_STOP_TASK`: the control request
@@ -663,7 +675,7 @@ One commit, before the packages that use them. `PROTOCOL_MAJOR` stays 5.
 
 | Change | Used by | Previous phone, new host | New phone, previous host |
 | --- | --- | --- | --- |
-| `chat.proto`: `message ChatAttachment { path, name, media_type, size_bytes }`; `ChatRequest.attachments` (SEND); `ChatItem.attachments` (USER) | 3.1 | Never sends them; ignores the item field and shows the text | The phone is not changed to send them |
+| `chat.proto`: `message ChatAttachment { path, name, media_type, size_bytes }`; `ChatRequest.attachments` (SEND); `ChatItem.attachments` (USER) | 3.1 | Never sends them; ignores the item field and shows the text. A message of attachments alone is an empty bubble, and editing a message from the phone resends its text without its attachments. Neither breaks the phone: no bump | The phone is not changed to send them |
 | `chat.proto`: `CHAT_ACTION_FORK = 11`, taking `item_id`, answering `forked_pane_id` | 3.8 | Never sends it | Not sent by the phone |
 | `envelope.proto`: `GitRequest.summary_base` (enum, zero = default branch) | 3.4 | The phone does not ask for summaries | Same |
 | `chat.proto`: `ChatBackgroundTask`, `ChatTaskKind`; `ChatState.background = 11`, `ChatState.compacting = 12`; `ChatTool` fields 11–15 (`agent_type`, `activity`, `tool_uses`, `tokens`, `background`); `CHAT_ACTION_STOP_TASK = 12` with `task_id` | 3.14 | Ignores the fields and never sends the action; draws the chat as it does today | Reads empty values from a host that does not set them: no chip, no figures. Not sent by the phone |
@@ -680,12 +692,13 @@ the desktop's REWIND-then-SEND; the phone's REWIND stays on the wire).
 | Claude Code headless takes an `image` content block in a `user` line | Verified, 2.1.326, one live turn |
 | Claude Code print mode forks cut at a message (`--fork-session` with `--resume-session-at`) | Verified, 2.1.326; source session untouched |
 | Claude Code's `initialize` names the default's real model (`resolvedModel`, `description`) | Verified, 2.1.326 |
-| Codex `turn/start` input takes `localImage` and `mention` | In the 0.169.0 schema; **to verify** live |
-| Codex `thread/fork` takes `lastTurnId` | In the 0.169.0 schema; **to verify** live |
+| Codex `turn/start` input takes `localImage` and `mention` | Verified, 0.169.0, live (17 Nov): the model sees a `localImage` without a tool call; the echoed user item carries it back unchanged. A `mention` is accepted but the server does not read the file in; the host sends paths in the text instead |
+| Codex `thread/fork` takes `lastTurnId` | Verified, 0.169.0, live (17 Nov): the fork holds the turns up to that one and keeps the source's turn and item ids; `lastTurnId` is the server's turn id (a client message id is refused, "turn not found"); without it the whole thread is copied |
 | Claude Code headless sends `background_tasks_changed`, `task_started`, `task_progress`, `task_updated`, `task_notification`, `thinking_tokens` | Verified, 2.1.326, one live turn with a background command and a subagent |
 | Claude Code sends `system/status { status: "compacting" }`, then `status: null` and `compact_boundary` with `pre_tokens` and `post_tokens` | Verified, 2.1.326, one live `/compact` |
 | Claude Code stops a background task on the control request `stop_task { task_id }` | Verified, 2.1.326, live |
-| Codex `contextCompaction` item, `collabAgentToolCall` with `agentsStates`, `commandExecution.source = unifiedExecStartup` | In the 0.169.0 schema; **to verify** live, above all whether a background terminal outlives its turn |
+| Codex `commandExecution.source = unifiedExecStartup` | Verified, 0.169.0, live (17 Nov): a background command outlives its turn; the turn completes with no `item/completed` for it, and one arrives late, with the old turn's id, when the process ends. `thread/read` leaves a running one out. Listing and stopping (`thread/backgroundTerminals/*`) need the `experimentalApi` capability, which the host does not send: no stop on Codex |
+| Codex `contextCompaction` item, `collabAgentToolCall` with `agentsStates` | In the 0.169.0 schema; not run live |
 | Claude Code downsizes an oversized inline image | Not known; avoided by the 5 MB rule |
 
 ## 6. Work packages
@@ -741,24 +754,28 @@ Given through the mock's answer form. Sections S1 to S9: all fine as drawn.
 
 All are the recommended option, so the mock as drawn is the specification. C2 and C3 of §3.10 are not built.
 
-## 8. Order of work
+## 8. State (17 Nov)
 
-Planning is closed. Nothing below has started; the owner starts it.
+All eight packages are built and committed on `gpui/chat`, in the order W,
+A, B, C, G, D, E, F (the hashes are in §0). The two optional items of §3.12
+and C2/C3 of §3.10 are not built.
 
-One build runs on this machine at a time (§1), and the packages share one
-working tree, so they run one after another, each reviewed before the next:
+Reviewed once by four independent readers (host code, desktop code,
+invariants, a render of the real pane against the mock); what they found
+and was accepted is fixed in the commits after `5ff96360`.
 
-1. **W** — every wire addition of §4, in one commit.
-2. **A** — card and names (3.2, 3.3, 3.5, 3.4).
-3. **B** — keep-alive and the optimistic overlay (3.12).
-4. **C** — timeline: groups, status line, message buttons (3.6, 3.7, 3.8).
-5. **G** — background tasks, subagents, compacting (3.14).
-6. **D** — attachments (3.1).
-7. **E** — fork from a reply (3.8).
-8. **F** — colours C1 (3.10); the two optional items of 3.12 only if asked.
+Known and left as they are:
 
-Each package ends with its own commit if the owner allows commits; the tree
-already holds the fixes of §2 and the host fixes of
-host-disk-stall-plan.md, uncommitted. Codex facts still marked **to verify**
-in §5 are checked live by the package that needs them (D, E, G), before it
-builds on them.
+- **Codex.** A background command is listed while it runs, with no stop
+  button: listing and stopping need Codex's experimental API. One that is
+  running when a chat is reopened is not shown (`thread/read` leaves it
+  out). Compaction and subagent items are built from the schema and were
+  not run live.
+- **Claude, background subagent.** Its row gets no figures after its
+  `tool_result`; it stays listed in the chip. The chip is empty after a host
+  restart until the agent next reports its list.
+- **Light theme.** Dim ink is 4.62:1 on the pane, but 4.39:1 on raised
+  surfaces and 3.77–3.95:1 on washes. Open with the owner: darken light
+  `chromeDim` everywhere, or add an ink for dim text on raised surfaces.
+- **Mac.** Cmd+C in the chat (problem 13) is covered by tests, not checked
+  on a Mac.
