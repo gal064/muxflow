@@ -82,10 +82,22 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     )?;
     fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o600))?;
 
-    if service::agents::ingest_fallbacks().is_err() {
-        diagnostics.record(SafeErrorClass::HookFallbackIngestionFailed);
-        write_safe_log(SafeErrorClass::HookFallbackIngestionFailed);
-    }
+    // Replay what hooks left in the mailbox while no daemon ran, off the
+    // runtime, so the socket answers from the start: a daemon started under a
+    // busy disk used to be silent for the whole drain, and a bridge retires a
+    // silent daemon. The order still holds. A live hook drains the mailbox
+    // under the same lock before it is applied, so it waits for this drain
+    // instead of overtaking it, and the timer below does the same before
+    // maintenance.
+    let startup_drain = tokio::task::spawn_blocking({
+        let diagnostics = diagnostics.clone();
+        move || {
+            if service::agents::ingest_fallbacks().is_err() {
+                diagnostics.record(SafeErrorClass::HookFallbackIngestionFailed);
+                write_safe_log(SafeErrorClass::HookFallbackIngestionFailed);
+            }
+        }
+    });
 
     // The chats that were running when the last daemon stopped go on from
     // where they are, with nobody connected to ask for them.
@@ -123,7 +135,13 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     });
     // Optional features with daemon-lifetime work of their own, such as
     // automations; like the hook timer, they run with no client connected.
-    let plugin_tasks = service::plugins::start();
+    // They start once the mailbox is drained: an automation that closes an
+    // idle agent's tab must not judge it by state the mailbox is about to
+    // change.
+    let plugins = tokio::spawn(async move {
+        let _ = startup_drain.await;
+        service::plugins::start()
+    });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
     loop {
@@ -151,8 +169,11 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         }
     }
     hook_retry.abort();
-    for task in plugin_tasks {
-        task.abort();
+    plugins.abort();
+    if let Ok(plugin_tasks) = plugins.await {
+        for task in plugin_tasks {
+            task.abort();
+        }
     }
     drop(listener);
     // A hot voice sidecar holds ~1 GB; kill it here rather than let

@@ -1417,6 +1417,14 @@ async fn send_request_and_wait(
 /// describes where the agent ended up.
 const MAX_FALLBACK_PER_PANE: usize = 32;
 
+/// Written through a fresh temporary file and a rename, so the daemon sees a
+/// whole event or none, whether this hook or the daemon dies first.
+///
+/// Not synced, on purpose. The mailbox only has to outlive the daemon, and the
+/// page cache does. Power loss or a kernel crash also ends the tmux server,
+/// and with it every pane these events describe. This runs inside the agent's
+/// hook, and two fsyncs on a busy disk held the agent's tool call for seconds
+/// (docs/design/host-disk-stall-plan.md).
 fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     let _mailbox = crate::hook_mailbox::HookMailboxLock::acquire(runtime)?;
     let pane = event.pane_id.trim_start_matches('%');
@@ -1440,9 +1448,7 @@ fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow
             .mode(0o600)
             .open(&temporary)?;
         file.write_all(&event.encode_to_vec())?;
-        file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(runtime)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {

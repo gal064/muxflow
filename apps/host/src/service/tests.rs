@@ -730,7 +730,7 @@ async fn a_different_contract_is_closed_before_pipelined_requests_are_dispatched
 }
 
 /// Agent work is synchronous and, on a stalled disk, waits for tens of seconds
-/// on locks and fsyncs. Run on the runtime's workers, a few waiting hooks parked
+/// on locks and the disk. Run on the runtime's workers, a few waiting hooks parked
 /// all of them and the daemon stopped answering handshakes. Here two workers
 /// and three hooks stuck behind the stand-in for that wait must still leave a
 /// fourth connection its hello and an answer.

@@ -29,7 +29,7 @@ pub(super) const PLACEMENT_FORMAT: &str = "#{session_id}:#{window_id}:#{pane_id}
 /// Stands in, in tests, for agent work stuck on the disk: a request whose agent
 /// ID is [`TEST_AGENT_WORK`] never reaches the process-wide agent runtime, its
 /// state folder or tmux. A hook ingest waits for [`TEST_AGENT_WORK_GATE`] where
-/// a real one would wait for its locks and fsyncs; anything else answers at
+/// a real one would wait for its locks and the disk; anything else answers at
 /// once.
 #[cfg(test)]
 pub(in crate::service) const TEST_AGENT_WORK: &str = "test-agent-work";
@@ -50,7 +50,7 @@ pub(super) async fn handle(
     cancellation: Arc<AtomicBool>,
 ) {
     // Every agent operation is synchronous: it takes the agent runtime's
-    // mutexes, runs tmux, and persists the state with two fsyncs while holding
+    // mutexes, runs tmux, and writes the state file while holding
     // them. On a runtime worker a stalled disk parks the worker, and enough
     // waiting hooks park all of them, so the daemon stops accepting and
     // answering handshakes. On the blocking pool only that pool's threads wait,
