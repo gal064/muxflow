@@ -1442,12 +1442,9 @@ fn a_long_session_opens_on_its_newest_part_and_says_there_is_more() {
         parent = Value::String(uuid);
     }
     std::fs::write(project.join(format!("{SESSION}.jsonl")), text).unwrap();
-    // Longer than the first window: read again from further back, whole.
+    // Longer than the first window, which holds plenty of it: its newest
+    // part, and more said. It is not read again from further back.
     let history = history::load(home.path(), SESSION, "");
-    assert!(history.complete);
-    assert_eq!(history.items.len(), count);
-    // Longer than the most that is read: its newest part, and more said.
-    let history = history::load_within(home.path(), SESSION, "", history::TAIL_BYTES);
     assert!(!history.complete);
     assert!(history.items.len() < count && history.items.len() > 100);
     assert!(

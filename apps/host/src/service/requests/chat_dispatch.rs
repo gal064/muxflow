@@ -51,14 +51,19 @@ pub(super) async fn handle(
                         ))
                     }),
             };
-            let forks = [v1::ChatAction::Fork, v1::ChatAction::SideFork]
-                .iter()
-                .any(|action| chat.action == i32::from(*action));
+            let blocks = [
+                v1::ChatAction::Fork,
+                v1::ChatAction::SideFork,
+                v1::ChatAction::SetMode,
+            ]
+            .iter()
+            .any(|action| chat.action == i32::from(*action));
             match attached {
                 // A fork reads the agent's record, runs tmux and reads the
-                // agent's process: off the runtime's workers, as an agent
-                // operation is, so a stalled disk parks only the blocking pool.
-                Ok(attached) if forks => {
+                // agent's process, and a change of mode is synced to disk:
+                // off the runtime's workers, as an agent operation is, so a
+                // stalled disk parks only the blocking pool.
+                Ok(attached) if blocks => {
                     let baseline = Arc::clone(topology_baseline);
                     tokio::task::spawn_blocking(move || {
                         dispatch(chat, attached, connection_id, &baseline)
@@ -66,8 +71,8 @@ pub(super) async fn handle(
                     .await
                     .unwrap_or_else(|_| {
                         Err(ChatError::new(
-                            "chat_fork_unavailable",
-                            "The fork could not be opened.",
+                            "chat_request_failed",
+                            "The request could not be run.",
                         ))
                     })
                 }
@@ -436,10 +441,10 @@ mod tests {
         assert!(seen.lock().unwrap().is_some(), "nothing was opened");
     }
 
-    /// A fork is answered from the blocking pool, as any other request is
-    /// answered: through the connection's ordered lane.
+    /// A fork, which is run on the blocking pool, is answered as any other
+    /// request is: through the connection's ordered lane.
     #[tokio::test]
-    async fn a_fork_is_answered_from_off_the_runtime() {
+    async fn a_fork_is_answered_on_the_ordered_lane() {
         const SERVER: &str = "dispatch-test-fork-lane-server";
         const PANE: &str = "%9121";
         let (sender, _queue) = tokio::sync::mpsc::channel(4096);

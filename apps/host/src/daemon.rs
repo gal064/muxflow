@@ -175,6 +175,11 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
             task.abort();
         }
     }
+    // The paths go before the listener does. A bridge starts the next daemon
+    // as soon as a connect here fails, and that daemon binds the same paths:
+    // removed after the flush below, on a slow disk, they would be its.
+    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_file(&metadata_path);
     drop(listener);
     // A hot voice sidecar holds ~1 GB; kill it here rather than let
     // `kill_on_drop` race the runtime's teardown.
@@ -182,8 +187,6 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     // Flush coalesced operational counters before cooperative shutdown. This
     // is ordered against the background writer and never runs on hot paths.
     let _ = diagnostics.flush();
-    let _ = fs::remove_file(&socket_path);
-    let _ = fs::remove_file(&metadata_path);
     Ok(())
 }
 

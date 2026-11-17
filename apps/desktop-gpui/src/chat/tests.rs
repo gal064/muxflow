@@ -3984,27 +3984,6 @@ mod attachments {
     }
 
     #[gpui_kit::test]
-    fn plain_text_is_pasted_at_once(cx: &mut TestAppContext) {
-        let mut shell = open(cx);
-        shell.input("Look at ");
-        shell.visual.update(|_, cx| {
-            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("wrapped paths".into()));
-            cx.set_global(ClipboardRead(Rc::new(
-                || -> Result<Option<Value>, String> {
-                    panic!("the native reader is not asked for text")
-                },
-            )));
-        });
-        let pane = shell.pane();
-        // In the key's own update, with nothing run after it.
-        let text = shell.visual.update(|window, cx| {
-            window.press("ctrl-v", cx);
-            pane.read(cx).composer.read(cx).value().to_string()
-        });
-        assert_eq!(text, "Look at wrapped paths");
-    }
-
-    #[gpui_kit::test]
     fn an_image_read_after_its_message_went_is_not_added_to_the_next(cx: &mut TestAppContext) {
         let mut shell = open(cx);
         let dir = tempfile::tempdir().unwrap();

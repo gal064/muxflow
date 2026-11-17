@@ -29,6 +29,10 @@ pub(in crate::service::chat) const TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TAIL_BYTES: u64 = 64 * 1024 * 1024;
 /// The most entries one conversation is followed back through.
 const MAX_CHAIN: usize = 20_000;
+/// A window that holds this much of the conversation is not read again from
+/// further back: it opens on its newest part. Fewer is a window a few large
+/// messages filled, images mostly.
+const ENOUGH_CHAIN: usize = 64;
 
 pub(in crate::service::chat) struct History {
     /// Oldest first.
@@ -63,10 +67,10 @@ fn session_file(configuration: &Path, session: &str) -> Result<Option<PathBuf>, 
         .find(|file| file.is_file()))
 }
 
-/// The session has a file of its own. A copy has none until something is
-/// said in it.
+/// The session's own file holds a message. A copy's holds none until
+/// something is said in it, though the agent may have named it there already.
 pub(in crate::service::chat) fn has_record(configuration: &Path, session: &str) -> bool {
-    matches!(session_file(configuration, session), Ok(Some(_)))
+    last_message(configuration, session).is_some()
 }
 
 struct Entry {
@@ -107,7 +111,7 @@ fn runs_off(entries: &Entries, leaf: &str) -> bool {
         return true;
     }
     let (ids, _) = chain(entries, leaf);
-    ids.len() < MAX_CHAIN
+    ids.len() < ENOUGH_CHAIN
         && ids
             .last()
             .and_then(|id| entries[id].parent.as_ref())
