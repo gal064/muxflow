@@ -206,7 +206,8 @@ nothing":
   - History: Claude's session file holds the image inline, so a reloaded
     message shows an unnamed "Image" chip with no path; staged paths under
     the text come back as chips. The reader's window grows (8 MiB, doubling
-    to 64 MiB) when a conversation's chain runs off its start.
+    to 64 MiB) only when it holds little of the conversation, as after a
+    few messages with images, or not the reply a fork is cut at.
 - *Cleanup.* The staging directory already forgets completed uploads after
   seven days. A chip whose file is gone opens nothing and says so.
 

@@ -10,12 +10,7 @@
 //! Each file is its own batch, so one that fails is retried or removed alone.
 //! Progress is the upload's record in [`Uploads`], read by its transfer.
 
-use std::{
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
 use desktop_core::connection::{
     ConnectionSpec, chat::ChatAttachment, files::native_clipboard::read_native_terminal_clipboard,
@@ -23,9 +18,9 @@ use desktop_core::connection::{
 use desktop_core::platform;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FontWeight,
-    InteractiveElement, IntoElement, ObjectFit, ParentElement, Role, SharedString,
-    StatefulInteractiveElement, Styled, StyledImage as _, Window,
+    AnyElement, App, Context, ExternalPaths, FontWeight, InteractiveElement, IntoElement,
+    ObjectFit, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
+    StyledImage as _, Window,
     component::{h_flex, tooltip::Tooltip, v_flex},
     div, img,
     prelude::FluentBuilder,
@@ -154,25 +149,6 @@ pub(super) fn size_label(bytes: u64) -> String {
         let tenths = (u128::from(bytes) * 10 + u128::from(MB) / 2) / u128::from(MB);
         format!("{}.{} MB", tenths / 10, tenths % 10)
     }
-}
-
-/// What the clipboard holds as GPUI reads it, when it is text alone: no
-/// image or file with it, and not the URIs or paths a file manager puts
-/// there for files it copied, which the native reader tells apart.
-fn plain_text(item: Option<ClipboardItem>) -> Option<String> {
-    let mut text = String::new();
-    for entry in item?.entries() {
-        match entry {
-            ClipboardEntry::String(string) => text.push_str(string.text()),
-            _ => return None,
-        }
-    }
-    let names_files = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .all(|line| line.starts_with("file://") || Path::new(line).is_absolute());
-    (!names_files).then_some(text)
 }
 
 /// What a test reads in place of the native clipboard, as
@@ -560,12 +536,8 @@ impl ChatPane {
     /// image become attachments, and text is inserted as the field would.
     pub(super) fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.seen(cx);
-        // Text alone goes in at once, as the field puts it. Only files and an
-        // image need the native reader, which may wait on the app that owns
-        // the clipboard.
-        if let Some(text) = plain_text(cx.read_from_clipboard()) {
-            return self.insert_text(&text, window, cx);
-        }
+        // Everything is read natively, as the terminal reads it: what GPUI
+        // reads says text for a clipboard that holds an image beside it.
         #[cfg(test)]
         let known = cx.try_global::<ClipboardRead>().map(|read| (read.0)());
         #[cfg(not(test))]
@@ -1050,20 +1022,5 @@ mod tests {
         assert_eq!(size_label(880_640), "860 KB");
         assert_eq!(size_label(2_202_009), "2.1 MB");
         assert_eq!(size_label(12), "12 B");
-    }
-
-    #[test]
-    fn only_text_that_names_no_files_is_pasted_without_the_native_reader() {
-        let text = |text: &str| plain_text(Some(ClipboardItem::new_string(text.to_owned())));
-        assert_eq!(text("wrapped paths").as_deref(), Some("wrapped paths"));
-        assert_eq!(
-            text("see /work/repo/src/view.rs").as_deref(),
-            Some("see /work/repo/src/view.rs")
-        );
-        // What a file manager copies, and nothing at all, go to the reader.
-        assert_eq!(text("file:///home/u/card.png"), None);
-        assert_eq!(text("/home/u/card.png\n/home/u/log.txt\n"), None);
-        assert_eq!(text(""), None);
-        assert_eq!(plain_text(None), None);
     }
 }

@@ -246,17 +246,20 @@ Implemented and committed on `gpui/chat`, under `apps/host/` only:
   under it and write outside, serialised by a writer lock. The agents
   service feeds history under its own `state` lock, so that write used to
   be the one fsync an ingest could still wait on.
-- **Daemon exit.** A daemon that was asked to stop leaves the process when
-  `daemon::run` returns, instead of waiting for blocking-pool ingests that
-  would write `agents.json` under the daemon that replaced it.
-- **Fork.** A chat's fork (session-file scan, tmux, `/proc`) runs on the
-  blocking pool as well.
+- **Daemon exit.** A daemon that was asked to stop removes its socket and
+  `daemon.json` before it closes its listener, so it never removes its
+  replacement's, and leaves the process when `daemon::run` returns instead
+  of waiting for blocking-pool ingests. An ingest already running during
+  the voice shutdown and the diagnostics flush can still write
+  `agents.json` once under the replacement.
+- **Fork and mode.** A chat's fork (session-file scan, tmux, `/proc`) and a
+  change of mode run on the blocking pool as well.
 
 Still open:
 
 | # | What | Why it matters |
 | --- | --- | --- |
-| R2 | `snapshot_from_identity` → `reconcile_topology` takes the agent `state` lock on a runtime worker (`service.rs`, `requests.rs`, `tmux_action_dispatch.rs`, the topology actor; the terminal-input path holds `state` too) | With H3 and the history change, nothing under `state` syncs to disk any more, so a worker waits on a write and a rename, not on an fsync. A stalled disk can still make a plain write slow. Bounded by the number of subscribed clients. |
+| R2 | `snapshot_from_identity` → `reconcile_topology` takes the agent `state` lock on a runtime worker (`service.rs`, `requests.rs`, `tmux_action_dispatch.rs`, the topology actor; the terminal-input path holds `state` too) | With H3 and the history change, an ingest syncs nothing under `state`, so a worker waits on a write and a rename, not on an fsync. One synced write is left that `state` can wait behind: a switch between Terminal and Chat mode saves its sidecar under the mode lock, which a snapshot takes under `state`. It runs on the blocking pool and happens only when someone switches. A stalled disk can still make a plain write slow. Bounded by the number of subscribed clients. |
 | R3 | The handshake runs `server_identity()`, a tmux subprocess, on a worker | "A hello never waits on the disk" is true only while starting tmux is fast. Not measured under a stalled disk. |
 | R4 | Every waiting hook holds a blocking-pool thread (512 at most) | Without fsyncs the queue should not form. Not measured; if it does, an async semaphore before `spawn_blocking`. |
 

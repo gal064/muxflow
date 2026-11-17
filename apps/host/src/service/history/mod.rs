@@ -431,7 +431,7 @@ impl History {
     ) -> Result<v1::HistoryEvent, Refusal> {
         let _writing = self.writer();
         let key = key(adapter_id, native_session_id);
-        let (entries, before, edited, unwritten) = {
+        let (entries, before, unwritten) = {
             let mut inner = self.inner();
             let entry = inner.entries.get_mut(&key).ok_or_else(|| {
                 refusal("history_unknown_session", "This session is not in History.")
@@ -444,20 +444,19 @@ impl History {
                     woke: Vec::new(),
                 });
             }
-            let edited = entry.clone();
             let unwritten = take_unwritten(&mut inner);
-            (inner.entries.clone(), before, edited, unwritten)
+            (inner.entries.clone(), before, unwritten)
         };
         // Written outside `inner`, which the agents service waits on.
         let written = write(&self.path, &entries);
         let mut inner = self.inner();
         if let Err(error) = written {
             restore_unwritten(&mut inner, unwritten);
-            match inner.entries.get_mut(&key) {
-                Some(entry) if *entry == edited => *entry = before,
-                // Changed again meanwhile: written as it is now, next time.
-                Some(_) => inner.dirty = true,
-                None => {}
+            // Only the snooze is changed here, so only it is put back: what
+            // the agents service fed the entry meanwhile stays.
+            if let Some(entry) = inner.entries.get_mut(&key) {
+                entry.snoozed_until = before.snoozed_until;
+                entry.woke = before.woke;
             }
             return Err(refusal(
                 "history_not_saved",
