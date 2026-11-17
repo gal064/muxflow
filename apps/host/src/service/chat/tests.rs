@@ -534,6 +534,111 @@ async fn rewind_drops_the_message_and_what_followed_and_only_user_messages_rewin
     assert!(connection.open(&runtime, "%2").items.is_empty());
 }
 
+/// A FORK as the dispatcher hands it over, with the pane it opens as
+/// `opened` and no other: the launch the fork would have started from.
+fn fork(
+    runtime: &ChatRuntime,
+    pane_id: &str,
+    item_id: &str,
+    opened: &str,
+) -> Result<provider::Launch, ChatError> {
+    let mut launch = None;
+    let forked = runtime.fork(
+        &pane(pane_id),
+        scripted::ADAPTER_ID,
+        item_id,
+        "Fix tests",
+        |source, provider, given| {
+            assert_eq!(
+                (source, provider.adapter_id()),
+                (pane_id, scripted::ADAPTER_ID)
+            );
+            launch = Some(given.clone());
+            Ok(opened.to_owned())
+        },
+    )?;
+    assert_eq!(forked, opened);
+    Ok(launch.unwrap())
+}
+
+#[tokio::test]
+async fn a_reply_forks_through_the_end_of_its_turn_into_a_pane_history_lists() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+    let cut = |item_id: &str| fork(&runtime, "%1", item_id, "%9431").map(|launch| launch.resume_at);
+
+    // The newest reply: through the last item, the notice after its text.
+    let launch = fork(&runtime, "%1", "history-reply", "%9431").unwrap();
+    assert_eq!(
+        launch.resume,
+        provider::Resume::Session {
+            id: scripted::ADAPTER_ID.into(),
+            fork: true,
+        }
+    );
+    assert_eq!(launch.resume_at, "history-notice");
+    assert_eq!(launch.name, "Fix tests (fork)");
+    // An earlier one: through the last item before the next message.
+    assert_eq!(cut("history-a005").unwrap(), "history-a005");
+    assert_eq!(cut("history-q005").unwrap(), "history-a005");
+    assert_eq!(cut("missing").unwrap_err().code, "chat_item_not_found");
+
+    // While a turn runs, its reply is refused and every earlier one forks.
+    send(&runtime, "%1", "go", "m1").unwrap();
+    connection.until(turn_is(v1::ChatTurnState::Waiting)).await;
+    let refused = cut("turn-1-reply").unwrap_err();
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (
+            "chat_turn_busy",
+            "That reply is still being written. Fork it once it has finished."
+        )
+    );
+    assert_eq!(cut("history-reply").unwrap(), "history-notice");
+
+    // The fork's pane is not a side question's: what runs there is listed.
+    let history = crate::service::history::History::global();
+    history.observe(vec![crate::service::history::Seen {
+        adapter_id: "claude-code".into(),
+        native_session_id: "reply-fork-9431".into(),
+        pane_id: "%9431".into(),
+        ..Default::default()
+    }]);
+    assert!(
+        history
+            .list()
+            .entries
+            .iter()
+            .any(|entry| entry.native_session_id == "reply-fork-9431")
+    );
+}
+
+#[tokio::test]
+async fn a_chat_whose_agent_cannot_fork_refuses_and_opens_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let (runtime, _connection, sink) = quiet_runtime(&directory);
+    sink.publish(Change::Item(item("u1", v1::ChatItemKind::User, "Hi")));
+    sink.publish(Change::Item(item(
+        "a1",
+        v1::ChatItemKind::Assistant,
+        "Hello.",
+    )));
+    let refused = runtime
+        .fork(&pane("%1"), "quiet", "a1", "Fix tests", |_, _, _| {
+            panic!("nothing is opened")
+        })
+        .unwrap_err();
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (
+            "chat_fork_unavailable",
+            "This agent cannot fork from a reply."
+        )
+    );
+}
+
 #[tokio::test]
 async fn options_merge_into_the_current_ones_and_stay_valid_for_the_model() {
     let directory = tempfile::tempdir().unwrap();

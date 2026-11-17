@@ -514,12 +514,20 @@ impl ChatPane {
             let mut buttons = vec![self.copy_button(index, false, &group, palette, cx)];
             if self.capabilities().fork {
                 let id = id.clone();
+                // On its way: stays on, in the accent colour, and still, until
+                // the host answers.
+                let forking = self.forking(&id);
+                let ink = if forking {
+                    palette.accent
+                } else {
+                    palette.chrome_faint
+                };
                 buttons.push(message_button(
                     format!("chat-fork-{id}"),
                     "Fork from here",
                     IconName::GitFork,
-                    palette.chrome_faint.into(),
-                    Some(group.clone()),
+                    ink.into(),
+                    (!forking).then(|| group.clone()),
                     palette,
                     cx.listener(move |this, _, _, cx| this.fork_reply(&id, cx)),
                 ));

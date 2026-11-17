@@ -10,7 +10,7 @@ use tmux_agent_protocol::v1;
 
 use super::super::SequencerControl;
 use super::super::chat::{
-    Attached, ChatError, ChatRuntime, PaneKey, SessionCommand, admit_attachments,
+    Attached, ChatError, ChatRuntime, PaneKey, SessionCommand, admit_attachments, open_fork,
 };
 use super::super::snapshot::tmux_command;
 use super::super::terminal::validate_tmux_id;
@@ -76,8 +76,6 @@ fn dispatch(
     let action = Action::try_from(request.action).unwrap_or_default();
     match action {
         Action::Unspecified => return Err(invalid("Unknown chat action.")),
-        // Not handled yet: package E of chat-polish-plan.md adds FORK.
-        Action::Fork => return Err(invalid("Unknown chat action.")),
         Action::SetMode => {
             let mode = v1::ChatAgentMode::try_from(request.mode).unwrap_or_default();
             let mode = if request.initialize_if_unset {
@@ -201,9 +199,17 @@ fn dispatch(
                 ..Default::default()
             })
         }
-        Action::Unspecified | Action::SetMode | Action::Close | Action::Fork => {
-            unreachable!("answered above")
+        // A reply's fork: the chat starts it itself, beside its source.
+        Action::Fork => {
+            let forked_pane_id =
+                runtime.fork(&key, &adapter_id, &request.item_id, &title, open_fork)?;
+            *topology_baseline.lock().unwrap() = None;
+            Ok(v1::ChatResponse {
+                forked_pane_id,
+                ..Default::default()
+            })
         }
+        Action::Unspecified | Action::SetMode | Action::Close => unreachable!("answered above"),
     }
 }
 
@@ -374,5 +380,37 @@ mod tests {
         );
         *seen.lock().unwrap() = baseline(NEW, &[PANE]);
         assert_eq!(outcome(send(NEW, PANE)), Ok(()));
+    }
+
+    /// The refusals come before anything is opened: no pane is made here.
+    #[tokio::test]
+    async fn a_fork_of_a_reply_names_the_reply_and_is_refused_mid_turn() {
+        const SERVER: &str = "dispatch-test-fork-server";
+        const PANE: &str = "%9111";
+        let (sender, _queue) = tokio::sync::mpsc::channel(4096);
+        let connection = register_control_event_sink(sender);
+        let seen = Mutex::new(baseline(SERVER, &[PANE]));
+        let outcome = |request: v1::ChatRequest| {
+            dispatch(request, Vec::new(), connection.id, &seen).map_err(|error| error.code)
+        };
+        let fork = |item_id: &str| v1::ChatRequest {
+            item_id: item_id.into(),
+            ..request(Action::Fork, SERVER, PANE)
+        };
+        assert!(outcome(request(Action::Open, SERVER, PANE)).is_ok());
+        assert_eq!(
+            outcome(fork("no-such-item")).unwrap_err(),
+            "chat_item_not_found"
+        );
+        assert_eq!(outcome(fork("")).unwrap_err(), "chat_item_not_found");
+        // The scripted chat starts a turn, whose reply is not over.
+        let send = v1::ChatRequest {
+            text: "go".into(),
+            client_message_id: "m1".into(),
+            ..request(Action::Send, SERVER, PANE)
+        };
+        assert!(outcome(send).is_ok());
+        assert_eq!(outcome(fork("m1")).unwrap_err(), "chat_turn_busy");
+        assert!(seen.lock().unwrap().is_some(), "nothing was opened");
     }
 }

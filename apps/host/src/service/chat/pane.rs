@@ -254,6 +254,69 @@ fn respawn_arguments(pane_id: &str, cwd: &str, shell_line: &str) -> anyhow::Resu
     Ok(arguments)
 }
 
+/// Opens a pane beside `source` that runs `shell_line` in `cwd`, with
+/// `options` set on it and titled `title` in the same step, and answers it.
+pub(super) fn split(
+    source: &str,
+    cwd: &str,
+    shell_line: &str,
+    options: &[(&str, &str)],
+    title: &str,
+) -> anyhow::Result<String> {
+    for (_, value) in options {
+        if !value.is_empty() {
+            checked(value)?;
+        }
+    }
+    let output = tmux_command()?
+        .args(split_arguments(source, cwd, shell_line, options, title)?)
+        .output()
+        .context("run tmux")?;
+    let opened = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let is_pane = opened
+        .strip_prefix('%')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+    if !output.status.success() || !is_pane {
+        bail!(
+            "tmux refused: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(opened)
+}
+
+fn split_arguments(
+    source: &str,
+    cwd: &str,
+    shell_line: &str,
+    options: &[(&str, &str)],
+    title: &str,
+) -> anyhow::Result<Vec<String>> {
+    // Beside its source, as S3 draws it, and as a side question's fork opens.
+    let mut arguments: Vec<String> = ["split-window", "-h", "-P", "-F", "#{pane_id}", "-t", source]
+        .map(str::to_owned)
+        .into();
+    if !cwd.is_empty() {
+        arguments.extend(["-c".to_owned(), escaped_format_literal(checked(cwd)?)]);
+    }
+    arguments.extend(["/bin/sh", "-c", shell_line].map(str::to_owned));
+    // With no target, each of these is for the pane the split made, which is
+    // the active one from then on.
+    for (name, value) in options.iter().filter(|(_, value)| !value.is_empty()) {
+        arguments.extend([";", "set-option", "-p", name, value].map(str::to_owned));
+    }
+    if !title.is_empty() {
+        let [.., title] = title_arguments("", title);
+        arguments.extend([
+            ";".to_owned(),
+            "select-pane".to_owned(),
+            "-T".to_owned(),
+            title,
+        ]);
+    }
+    Ok(arguments)
+}
+
 /// Where the chat sockets and the environment files of this host live.
 pub(super) fn directory() -> PathBuf {
     crate::paths::runtime_dir().join("chat")
@@ -386,6 +449,51 @@ mod tests {
         assert!(respawn_arguments("%1", "/work/a;", "line").is_err());
         // No folder: tmux keeps the pane's.
         assert_eq!(respawn_arguments("%1", "", "line").unwrap().len(), 7);
+    }
+
+    #[test]
+    fn a_fork_opens_beside_its_source_tagged_as_a_chat_and_never_as_a_side() {
+        let arguments = split_arguments(
+            "%4",
+            "/work/#x",
+            "line",
+            &[(ADAPTER, "claude-code"), (SESSION, "s1"), (REWOUND_TO, "")],
+            "Fix tests (fork);",
+        )
+        .unwrap();
+        assert_eq!(
+            arguments,
+            [
+                "split-window",
+                "-h",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%4",
+                "-c",
+                "/work/##x",
+                "/bin/sh",
+                "-c",
+                "line",
+                ";",
+                "set-option",
+                "-p",
+                ADAPTER,
+                "claude-code",
+                ";",
+                "set-option",
+                "-p",
+                SESSION,
+                "s1",
+                ";",
+                "select-pane",
+                "-T",
+                "Fix tests (fork)\\;",
+            ]
+        );
+        // Listed in History: nothing marks it as a side question's.
+        assert!(!arguments.iter().any(|argument| argument == SIDE));
     }
 
     #[test]

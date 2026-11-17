@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use super::super::{
     pane::Tag,
+    provider::{ForkAt, ForkPlan, Launch},
     session::{Action, Dialect, Out},
 };
 use super::*;
@@ -70,6 +71,12 @@ impl<D: Dialect> ChatSession for PlayedSession<D> {
         let mut stage = self.0.lock().unwrap();
         let Stage { dialect, out } = stage.as_mut().unwrap();
         dialect.command(command, out)
+    }
+
+    fn fork(&mut self, at: &ForkAt) -> Result<ForkPlan, ChatError> {
+        let mut stage = self.0.lock().unwrap();
+        let Stage { dialect, out } = stage.as_mut().unwrap();
+        dialect.fork(at, out)
     }
 }
 
@@ -499,6 +506,27 @@ impl<D: Dialect + Wire> Replay<D> {
         let result = self.runtime.command(&pane(PANE), ADAPTER, command);
         self.step(|_, _| ());
         result
+    }
+
+    /// A FORK of the reply `item_id` is part of, as a client asks for it,
+    /// with its pane opened as `%77` and no other: the launch it would have
+    /// been started from.
+    pub(in crate::service::chat) fn fork(&mut self, item_id: &str) -> Result<Launch, ChatError> {
+        let mut opened = None;
+        let forked = self.runtime.fork(
+            &pane(PANE),
+            ADAPTER,
+            item_id,
+            "Fix tests",
+            |source, _, launch| {
+                assert_eq!(source, PANE);
+                opened = Some(launch.clone());
+                Ok("%77".to_owned())
+            },
+        );
+        self.step(|_, _| ());
+        assert_eq!(forked?, "%77");
+        Ok(opened.expect("the fork was opened"))
     }
 
     pub(in crate::service::chat) fn send(&mut self, id: &str, text: &str) {

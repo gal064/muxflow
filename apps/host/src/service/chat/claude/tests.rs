@@ -1191,6 +1191,156 @@ fn a_rewound_session_ends_where_it_was_rewound_to_until_a_message_follows() {
     assert_eq!(ids, [M1, "msg_01:0", M2, "toolu_01", "msg_03:0", M5]);
 }
 
+// --- a fork from a reply ----------------------------------------------------
+
+/// The entry of the reply to the second message: the last before the third.
+const SECOND_REPLY: &str = "00000000-0000-4000-8000-000000000033";
+/// The newest message of the recording: the note that the fourth's reply
+/// was stopped.
+const NEWEST: &str = "00000000-0000-4000-8000-000000000162";
+
+#[test]
+fn a_replys_fork_starts_a_copy_cut_after_that_reply() {
+    let command = |launch: Launch| {
+        ClaudeProvider
+            .pane_command(
+                &Launch {
+                    program: strings(&["claude"]),
+                    ..launch
+                },
+                Path::new("/run/a.sock"),
+            )
+            .unwrap()
+    };
+    let copy = command(Launch {
+        resume: Resume::Session {
+            id: SESSION.into(),
+            fork: true,
+        },
+        resume_at: SECOND_REPLY.into(),
+        ..Default::default()
+    });
+    let from = copy.argv.iter().position(|word| word == "auto").unwrap();
+    assert_eq!(
+        copy.argv[from + 1..].to_vec(),
+        [
+            "--resume",
+            SESSION,
+            "--fork-session",
+            "--session-id",
+            copy.session.as_str(),
+            "--resume-session-at",
+            SECOND_REPLY
+        ]
+    );
+    // A session of its own, known before the agent says it.
+    assert!(is_session_id(&copy.session) && copy.session != SESSION);
+
+    let home = home();
+    let base = Launch {
+        model: "opus".into(),
+        name: "Fix tests".into(),
+        ..Default::default()
+    };
+    let fork = |next: Option<&str>| fork_launch(home.path(), SESSION, next, base.clone());
+    // Through the reply to the second message: where the third began.
+    let through_second = fork(Some(M3)).unwrap();
+    assert_eq!(
+        through_second,
+        Launch {
+            resume: Resume::Session {
+                id: SESSION.into(),
+                fork: true,
+            },
+            resume_at: SECOND_REPLY.into(),
+            ..base.clone()
+        }
+    );
+    // The newest reply: through the newest message.
+    assert_eq!(fork(None).unwrap().resume_at, NEWEST);
+    // A next message the agent has not recorded: it may still be replying.
+    assert_eq!(fork(Some(M5)).unwrap_err().code, "chat_turn_busy");
+    // Nothing comes before the first message.
+    assert_eq!(fork(Some(M1)).unwrap_err().code, "chat_fork_unavailable");
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(
+        fork_launch(empty.path(), SESSION, None, base.clone())
+            .unwrap_err()
+            .message,
+        "This chat has no conversation to fork yet."
+    );
+}
+
+#[test]
+fn a_fork_with_nothing_said_in_it_shows_its_source_up_to_the_cut() {
+    let home = home();
+    let through = history::load_through(home.path(), SESSION, SECOND_REPLY);
+    let ids: Vec<&str> = through.items.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, [M1, "msg_01:0", M2, "toolu_01", "msg_03:0"]);
+    assert!(through.complete);
+    assert!(!history::load_through(home.path(), SESSION, "missing").complete);
+
+    // The copy's chat reads its own record, and its source's while it has
+    // none.
+    let copy = "c0b10000-0000-4000-8000-000000000001";
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&Tag {
+        launch: Launch {
+            resume: Resume::Session {
+                id: SESSION.into(),
+                fork: true,
+            },
+            resume_at: SECOND_REPLY.into(),
+            ..Default::default()
+        },
+        ..tag(copy, "")
+    });
+    assert!(matches!(
+        replay.jobs.as_slice(),
+        [Job::History { session, copied: Some((source, cut)), .. }]
+            if session == copy && source == SESSION && cut == SECOND_REPLY
+    ));
+    // A plain resume copies nothing.
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    assert!(matches!(
+        replay.jobs.as_slice(),
+        [Job::History { copied: None, .. }]
+    ));
+}
+
+#[tokio::test]
+async fn a_reply_is_not_forked_while_its_turn_can_still_add_to_it() {
+    let home = home();
+    let mut replay = ready();
+    replay.done(read_history(home.path(), ""));
+    // A message the agent has put behind the turn that runs: the reply
+    // before it is still that turn's.
+    replay.send(M5, "and then?");
+    replay.send("m6", "one more thing");
+    let queued = json!({"type": "command_lifecycle", "state": "queued",
+                        "command_uuid": message_uuid("m6")});
+    replay.agent(&queued.to_string());
+    let refused = replay.fork(M5).unwrap_err();
+    assert_eq!(refused.code, "chat_turn_busy");
+    assert_eq!(
+        refused.message,
+        "That reply is still being written. Fork it once it has finished."
+    );
+    // The reply a turn is adding to is refused by the runtime.
+    assert_eq!(replay.fork("m6").unwrap_err().code, "chat_turn_busy");
+    assert_eq!(replay.fork("gone").unwrap_err().code, "chat_item_not_found");
+
+    // A chat that has not said which session it is has nothing to fork.
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag("", ""));
+    replay.done(read_history(home.path(), ""));
+    assert_eq!(
+        replay.fork("msg_01:0").unwrap_err().message,
+        "This chat has no conversation to fork yet."
+    );
+}
+
 #[test]
 fn a_long_session_opens_on_its_newest_part_and_says_there_is_more() {
     let home = tempfile::tempdir().unwrap();

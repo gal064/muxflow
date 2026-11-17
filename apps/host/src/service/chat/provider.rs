@@ -140,6 +140,48 @@ pub(crate) trait ChatSession: Send {
     /// Runs on the lane of the connection that sent it: hand slow work to the
     /// session's own thread and return.
     fn command(&mut self, command: SessionCommand) -> Result<(), ChatError>;
+
+    /// Where a copy of the conversation through the end of the turn `at`
+    /// names starts from, for the fork of a reply (D6). Answers the work that
+    /// settles it, which may read files: the runtime runs it off every lock.
+    /// The runtime has already checked that the timeline holds the reply,
+    /// and that a turn still running is not the reply's last.
+    fn fork(&mut self, _at: &ForkAt) -> Result<ForkPlan, ChatError> {
+        Err(cannot_fork())
+    }
+}
+
+/// The turn a reply's fork is cut after, as the pane's timeline has it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ForkAt {
+    /// The user's messages from the reply back to the conversation's start,
+    /// newest first: the one that opened the reply's turn is among them.
+    pub(crate) before: Vec<String>,
+    /// The user's message after the reply, which starts the next turn.
+    /// Empty when the reply is the newest.
+    pub(crate) next: String,
+    /// The last item of the reply.
+    pub(crate) through: String,
+}
+
+/// Settles a fork's launch, off every lock. The launch is the provider's
+/// own: the runtime gives it its name and starts it.
+pub(crate) type ForkPlan = Box<dyn FnOnce() -> Result<Launch, ChatError> + Send>;
+
+/// A FORK of a reply for a provider that cannot start a copy at a turn.
+pub(crate) fn cannot_fork() -> ChatError {
+    ChatError::new(
+        "chat_fork_unavailable",
+        "This agent cannot fork from a reply.",
+    )
+}
+
+/// A FORK of a reply the agent has not finished.
+pub(crate) fn still_writing() -> ChatError {
+    ChatError::new(
+        "chat_turn_busy",
+        "That reply is still being written. Fork it once it has finished.",
+    )
 }
 
 /// The chat actions a provider carries out, one at a time per pane. The

@@ -654,6 +654,73 @@ async fn a_thread_is_opened_the_way_its_agent_was_started() {
     }
 }
 
+/// The first turn of the recording.
+const FIRST_TURN: &str = "0c0de000-0000-7000-8000-000000000002";
+
+#[tokio::test]
+async fn a_replys_fork_is_the_thread_through_that_turn() {
+    // The copy's chat asks for the thread through the reply's turn.
+    let mut replay = replay();
+    let mut lines = STREAM.lines();
+    replay.connect(&tag(
+        "",
+        Launch {
+            resume: Resume::Session {
+                id: "other".into(),
+                fork: true,
+            },
+            resume_at: "t1".into(),
+            ..Default::default()
+        },
+    ));
+    replay.play(&mut lines, "@skills/list");
+    assert_eq!(
+        replay.last_asked("thread/fork")["params"],
+        json!({"threadId": "other", "lastTurnId": "t1", "approvalPolicy": "on-request",
+               "approvalsReviewer": "auto_review", "sandbox": "workspace-write"})
+    );
+
+    // The source: a reply whose turn is over forks through that turn, set
+    // as the chat is now and named after its source.
+    let (mut replay, mut lines) = opened(Launch::default());
+    replay.send("m1", "Reply with exactly: ok");
+    replay.play(&mut lines, "turn/completed");
+    let launch = replay.fork("msg_04").unwrap();
+    assert_eq!(
+        (
+            launch.resume,
+            launch.resume_at.as_str(),
+            launch.name.as_str()
+        ),
+        (
+            Resume::Session {
+                id: THREAD.into(),
+                fork: true,
+            },
+            FIRST_TURN,
+            "Fix tests (fork)"
+        )
+    );
+    assert_eq!(launch.model, "gpt-5.6-luna");
+    // While the next turn runs, that reply still forks; the next does not.
+    let ask = "Ask me, with the request_user_input tool, whether I prefer red or blue, \
+               then reply with just the color.";
+    replay.send("m2", ask);
+    replay.play(&mut lines, "item/tool/requestUserInput");
+    assert_eq!(replay.fork("msg_04").unwrap().resume_at, FIRST_TURN);
+    assert_eq!(replay.fork("m2").unwrap_err().code, "chat_turn_busy");
+
+    // A message sent into a running turn joins it: the reply before it is
+    // still that turn's, which the server takes no fork of.
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "start");
+    let started = json!({"method": "turn/started", "params": {
+        "threadId": THREAD, "turn": {"id": "t1", "status": "inProgress"}}});
+    replay.agent(&started.to_string());
+    replay.send("m2", "and also");
+    assert_eq!(replay.fork("m1").unwrap_err().code, "chat_turn_busy");
+}
+
 #[tokio::test]
 async fn a_thread_that_cannot_be_opened_says_why() {
     let mut replay = replay();

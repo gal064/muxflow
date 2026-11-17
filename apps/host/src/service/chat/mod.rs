@@ -26,6 +26,7 @@ use tmux_agent_protocol::v1;
 
 use super::events::{Delivery, send_control_event_to, send_required_control_event_to};
 use super::snapshot::{load_sidecar, save_sidecar};
+use super::{agents::adapters::fork_name, topology::agent_title_suffix};
 
 mod attach;
 mod claude;
@@ -42,7 +43,7 @@ mod tests;
 mod websocket;
 
 pub(crate) use attach::{Attached, admit as admit_attachments};
-pub(crate) use convert::{agent_hooked, agents_detected};
+pub(crate) use convert::{agent_hooked, agents_detected, open_fork};
 pub(crate) use pane::{ADAPTER as CHAT_OPTION, SIDE as SIDE_OPTION};
 use provider::{Change, ChatProvider, ChatSession, ChatSink};
 pub(crate) use provider::{ChatError, SessionCommand};
@@ -462,6 +463,59 @@ impl ChatRuntime {
             // here.
             return running.command(command);
         }
+    }
+
+    /// Forks the pane's conversation through the end of the reply `item_id`
+    /// is part of (D6), as a chat in a new pane `open` starts beside it.
+    /// Answers that pane. `title` is the source's, which the fork is named
+    /// after. The source is left as it is, and goes on.
+    ///
+    /// Unlike a side question's fork, this one is a conversation of its own
+    /// and is listed in History (D12): its pane is not marked as a side's.
+    pub(crate) fn fork(
+        &self,
+        key: &PaneKey,
+        adapter_id: &str,
+        item_id: &str,
+        title: &str,
+        open: impl FnOnce(&str, &dyn ChatProvider, &provider::Launch) -> anyhow::Result<String>,
+    ) -> Result<String, ChatError> {
+        let plan = loop {
+            let session = self
+                .with_pane(key, adapter_id, |pane| Ok(pane.session.clone()))?
+                .ok_or_else(|| {
+                    ChatError::new("chat_not_ready", "The chat is still connecting. Try again.")
+                })?;
+            // Checked and asked under the session's lock, as a command is:
+            // nothing the agent says can come between the two.
+            let mut running = session.lock().unwrap_or_else(PoisonError::into_inner);
+            let at = match self.panes().0.get_mut(key) {
+                Some(pane)
+                    if pane
+                        .session
+                        .as_ref()
+                        .is_some_and(|its| Arc::ptr_eq(its, &session)) =>
+                {
+                    pane.fork_at(item_id)?
+                }
+                _ => continue,
+            };
+            break running.fork(&at)?;
+        };
+        // Off every lock: the plan may read the agent's record.
+        let mut launch = plan()?;
+        let provider = self.provider(adapter_id).ok_or_else(unavailable)?;
+        let source = match agent_title_suffix(title).unwrap_or(title) {
+            "" => launch.name.clone(),
+            title => title.to_owned(),
+        };
+        launch.name = fork_name(&source);
+        // It starts where its source's agent works, whatever folder that
+        // agent was first told to work in.
+        launch.cwd.clear();
+        launch.prompt.clear();
+        open(&key.pane_id, provider.as_ref(), &launch)
+            .map_err(|_| ChatError::new("chat_fork_unavailable", "The fork could not be opened."))
     }
 
     /// The page of items before `cursor`, oldest first, with the cursor for
@@ -1005,6 +1059,47 @@ impl Pane {
             }
         }
         Ok(())
+    }
+
+    /// Where a fork of the reply `item_id` is part of is cut: after the last
+    /// item before the user's next message, or after the newest item when
+    /// there is none and the turn is over.
+    fn fork_at(&self, item_id: &str) -> Result<provider::ForkAt, ChatError> {
+        if !self.catalog.capabilities.unwrap_or_default().fork {
+            return Err(provider::cannot_fork());
+        }
+        let index = self
+            .items
+            .iter()
+            .position(|item| !item_id.is_empty() && item.id == item_id)
+            .ok_or_else(|| {
+                ChatError::new(
+                    "chat_item_not_found",
+                    "That reply is no longer in this chat.",
+                )
+            })?;
+        let user = |item: &&v1::ChatItem| item.kind == i32::from(v1::ChatItemKind::User);
+        let after = &self.items[index + 1..];
+        let next = after.iter().position(|item| user(&item));
+        // The newest reply is the one a turn that runs is adding to.
+        if next.is_none() && self.state.turn != i32::from(v1::ChatTurnState::Idle) {
+            return Err(provider::still_writing());
+        }
+        let through = match next {
+            Some(0) => &self.items[index],
+            Some(next) => &after[next - 1],
+            None => self.items.last().unwrap_or(&self.items[index]),
+        };
+        Ok(provider::ForkAt {
+            before: self.items[..=index]
+                .iter()
+                .rev()
+                .filter(user)
+                .map(|item| item.id.clone())
+                .collect(),
+            next: next.map(|next| after[next].id.clone()).unwrap_or_default(),
+            through: through.id.clone(),
+        })
     }
 
     /// The options a SET_OPTIONS asks the provider for. An empty string or an
