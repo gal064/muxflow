@@ -16,6 +16,7 @@
 //! [`agent_mode`] is whether a host turns the agents started in its terminals
 //! into chats, and [`set_agent_mode`] changes it.
 
+mod attach;
 mod cards;
 mod composer;
 mod details;
@@ -48,6 +49,7 @@ use crate::{
     settings::{self, AgentMode},
 };
 
+pub use attach::CHAT_UPLOAD_PREFIX;
 pub use pane::ChatPane;
 
 // Escape with the keyboard anywhere in a chat: see `ChatPane::escape`.

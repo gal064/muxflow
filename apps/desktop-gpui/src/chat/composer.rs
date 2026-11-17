@@ -18,7 +18,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{Enter, Escape, IndentInline, MoveDown, MoveUp, OutdentInline, Textarea},
+        input::{Enter, Escape, IndentInline, MoveDown, MoveUp, OutdentInline, Paste, Textarea},
         menu::DropdownMenu,
         popover::Popover,
         tooltip::Tooltip,
@@ -544,14 +544,16 @@ impl ChatPane {
     }
 
     /// `.send`, or `.send.stop` while the agent works: `.send.stop.off` once
-    /// pressed, until the turn ends.
+    /// pressed, until the turn ends. Send is off while a file uploads, saying
+    /// so, and while one has failed (S6).
     fn send_button(&self, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let stop = self.stoppable();
         let off = if stop {
             self.stopping
         } else {
-            self.send_refusal().is_some()
+            self.send_refusal().is_some() || self.attachments_refusal().is_some()
         };
+        let uploading = !stop && self.uploading_any();
         let ring = p.chrome_ink_strong;
         let (label, ground) = if stop {
             ("Stop", p.danger)
@@ -582,6 +584,9 @@ impl ChatPane {
             .items_center()
             .justify_center()
             .child(mark)
+            .when(uploading, |button| {
+                button.tooltip(|window, cx| Tooltip::new("Uploading…").build(window, cx))
+            })
             .map(|button| {
                 if off {
                     button.opacity(0.42)
@@ -920,6 +925,14 @@ impl ChatPane {
                     cx.stop_propagation();
                 }
             }))
+            // Copied files and an image become attachments; text is
+            // inserted as the field would have.
+            .capture_action(cx.listener(|this, _: &Paste, window, cx| {
+                if !this.composing(window, cx) {
+                    cx.stop_propagation();
+                    this.paste(window, cx);
+                }
+            }))
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 // During an IME composition Escape ends the composition, and
                 // nothing else: not the list, the edit, or the agent's turn.
@@ -972,6 +985,7 @@ impl ChatPane {
                     })
                     .children(banner)
                     .children(notice)
+                    .children(self.composer_chips(p, cx))
                     .child(field)
                     .child(bar)
                     // Last, so it is drawn over the edge it sits on.

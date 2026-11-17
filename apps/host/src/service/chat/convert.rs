@@ -469,6 +469,7 @@ fn convert(candidate: &Candidate) {
             SessionCommand::Send {
                 text: prompt,
                 item_id: String::new(),
+                attachments: Vec::new(),
             },
         );
     }

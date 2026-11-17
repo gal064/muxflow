@@ -1011,6 +1011,7 @@ async fn a_turn_that_fails_says_why_and_another_threads_events_are_not_this_chat
         .command(SessionCommand::Send {
             text: "anyone?".into(),
             item_id: "late".into(),
+            attachments: Vec::new(),
         })
         .unwrap_err();
     assert_eq!(refused.code, "chat_unavailable");
@@ -1132,4 +1133,55 @@ async fn a_subagent_is_its_spawns_row_and_the_calls_after_it_say_how_it_is() {
         })
         .unwrap_err();
     assert_eq!(refused.code, "chat_task_not_found");
+}
+
+// --- attachments ------------------------------------------------------------
+//
+// Composed from the 0.169.0 schema's `UserInput`: not tried live.
+
+#[tokio::test]
+async fn an_image_goes_as_a_local_image_and_a_file_as_its_path_under_the_text() {
+    let (mut replay, _lines) = opened(Launch::default());
+    let staged = "/home/u/.cache/muxflow/uploads";
+    let file = |name: &str, media_type: &str| Attached {
+        path: format!("{staged}/{name}"),
+        name: name.into(),
+        media_type: media_type.into(),
+        size: 3,
+        inline: None,
+    };
+    replay
+        .command(SessionCommand::Send {
+            text: "What broke?".into(),
+            item_id: "m-files".into(),
+            attachments: vec![file("shot.png", "image/png"), file("crash.log", "")],
+        })
+        .unwrap();
+    let written = replay.written.last().unwrap();
+    assert_eq!(written["method"], "turn/start");
+    assert_eq!(
+        written["params"]["input"],
+        json!([
+            {"type": "text", "text": format!("What broke?\n\n{staged}/crash.log")},
+            {"type": "localImage", "path": format!("{staged}/shot.png")},
+        ])
+    );
+    let item = replay.client.item("m-files").unwrap();
+    assert_eq!(item.text, "What broke?");
+    assert_eq!(item.attachments.len(), 2);
+
+    // The thread's record of it reads back as it was sent.
+    let staging = attach::staging_directory().unwrap();
+    let recorded = json!({"type": "userMessage", "id": "u1", "clientId": "m-files", "content": [
+        {"type": "text", "text": format!("What broke?\n\n{}", staging.join("crash.log").display())},
+        {"type": "localImage", "path": staging.join("shot.png")},
+    ]});
+    let read = thread_item(&recorded, true).unwrap();
+    assert_eq!(read.text, "What broke?");
+    let names: Vec<(&str, &str)> = read
+        .attachments
+        .iter()
+        .map(|a| (a.name.as_str(), a.media_type.as_str()))
+        .collect();
+    assert_eq!(names, [("crash.log", ""), ("shot.png", "image/png")]);
 }

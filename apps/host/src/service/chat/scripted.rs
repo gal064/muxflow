@@ -325,8 +325,11 @@ impl Script {
             SessionCommand::Send {
                 text: message,
                 item_id,
+                attachments,
             } => {
-                self.publish_item(text(item_id, Kind::User, &message));
+                let mut item = text(item_id, Kind::User, &message);
+                item.attachments = attachments.iter().map(super::Attached::wire).collect();
+                self.publish_item(item);
                 // A message sent mid-turn joins the turn that is running.
                 if self.state.turn == i32::from(Turn::Idle) {
                     self.turns += 1;

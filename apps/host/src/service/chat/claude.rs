@@ -25,6 +25,7 @@ use tmux_agent_protocol::v1::{
 };
 
 use super::{
+    attach::{self, Attached},
     convert::{self, Arguments, Takes},
     items::{self, string},
     pane::{self, Tag},
@@ -563,16 +564,46 @@ fn is_silent_thinking(item: &v1::ChatItem) -> bool {
 /// What a `user` entry's text is to the timeline.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Said {
-    /// A message of the user's.
-    User(String),
+    /// A message of the user's, and the files sent with it.
+    User(String, Vec<v1::ChatAttachment>),
     Interrupted,
     /// Something the agent wrote to itself in the user's name.
     Nothing,
 }
 
-/// The text of a `user` entry that is not tool results.
+/// A user message as the agent takes it: the text alone, or with files a
+/// text block and an image block each, verified on Claude Code 2.1.326. An
+/// image too large to go inline, and any other file, is named by its path
+/// under the text (D9).
+fn content(text: &str, attachments: &[Attached]) -> Value {
+    if attachments.is_empty() {
+        return Value::String(text.to_owned());
+    }
+    let named = attachments
+        .iter()
+        .filter(|attached| attached.inline.is_none())
+        .map(|attached| attached.path.as_str());
+    let text = attach::with_paths(text, named);
+    let mut blocks = Vec::new();
+    if !text.is_empty() {
+        blocks.push(json!({"type": "text", "text": text}));
+    }
+    for attached in attachments {
+        if let Some(data) = &attached.inline {
+            blocks.push(json!({"type": "image", "source": {
+                "type": "base64", "media_type": attached.media_type, "data": data,
+            }}));
+        }
+    }
+    Value::Array(blocks)
+}
+
+/// The text of a `user` entry that is not tool results, and the files it was
+/// sent with: an image the record holds inline, which has kept no name, and
+/// the staged paths named under the text.
 pub(super) fn said(entry: &Value) -> Said {
     let content = &entry["message"]["content"];
+    let mut attachments = Vec::new();
     let text = match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => {
@@ -587,10 +618,23 @@ pub(super) fn said(entry: &Value) -> Said {
                 .filter(|block| string(block, "type") == "text")
                 .map(|block| string(block, "text"))
                 .collect();
+            for block in blocks
+                .iter()
+                .filter(|block| string(block, "type") == "image")
+            {
+                let source = &block["source"];
+                attachments.push(attach::inline_image(
+                    string(source, "media_type"),
+                    string(source, "data").len(),
+                ));
+            }
             texts.join("\n")
         }
         _ => return Said::Nothing,
     };
+    let (text, named) = attach::split_paths(&text);
+    // The record's order: what was named under the text, then the images.
+    let attachments: Vec<v1::ChatAttachment> = named.into_iter().chain(attachments).collect();
     let hidden = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"];
     if hidden
         .iter()
@@ -608,7 +652,7 @@ pub(super) fn said(entry: &Value) -> Said {
     // A slash command is recorded as markup naming it.
     if let Some(name) = between(text, "<command-name>", "</command-name>") {
         let arguments = between(text, "<command-args>", "</command-args>").unwrap_or_default();
-        return Said::User(format!("{name} {arguments}").trim().to_owned());
+        return Said::User(format!("{name} {arguments}").trim().to_owned(), attachments);
     }
     // Anything else in markup is the agent's own: a command's output, a
     // reminder, a task's notice.
@@ -620,10 +664,10 @@ pub(super) fn said(entry: &Value) -> Said {
                     .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
         })
     });
-    if markup || text.is_empty() {
+    if markup || (text.is_empty() && attachments.is_empty()) {
         Said::Nothing
     } else {
-        Said::User(text.to_owned())
+        Said::User(text.to_owned(), attachments)
     }
 }
 
@@ -1204,11 +1248,19 @@ impl Claude {
         let uuid = string(message, "uuid");
         let at = items::unix_millis(string(message, "timestamp"));
         match said(message) {
-            Said::User(text) if message["isReplay"].as_bool() == Some(true) => {
+            Said::User(text, read) if message["isReplay"].as_bool() == Some(true) => {
                 let sent = self.sent.iter().find(|(sent, _)| sent == uuid);
                 let id = sent.map_or(uuid, |(_, id)| id.as_str()).to_owned();
+                // A message sent from here keeps the files as they were sent:
+                // the agent's copy of an image has no name or path.
+                let sent_with = self
+                    .unconfirmed
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.attachments.clone());
                 self.unconfirmed.retain(|item| item.id != id);
                 let mut item = items::text(id, Kind::User, text);
+                item.attachments = sent_with.unwrap_or(read);
                 item.rewindable = true;
                 item.at_unix_millis = at;
                 out.publish(Change::Item(item));
@@ -1896,7 +1948,11 @@ impl Dialect for Claude {
         let not_ready =
             || ChatError::new("chat_not_ready", "The chat is still connecting. Try again.");
         match command {
-            SessionCommand::Send { text, item_id } => {
+            SessionCommand::Send {
+                text,
+                item_id,
+                attachments,
+            } => {
                 let waits = !self.ready || self.rewind.is_some();
                 if waits && self.held.len() >= MAX_HELD {
                     return Err(not_ready());
@@ -1921,12 +1977,13 @@ impl Dialect for Claude {
                 let uuid = message_uuid(&item_id);
                 let message = json!({
                     "type": "user",
-                    "message": {"role": "user", "content": text},
+                    "message": {"role": "user", "content": content(&text, &attachments)},
                     "uuid": uuid,
                     "parent_tool_use_id": null,
                 })
                 .to_string();
                 let mut item = items::text(item_id.clone(), Kind::User, text);
+                item.attachments = attachments.iter().map(Attached::wire).collect();
                 item.rewindable = true;
                 item.at_unix_millis = super::now_unix_millis();
                 if self.unconfirmed.len() >= MAX_SENT {

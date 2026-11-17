@@ -19,6 +19,7 @@ use tmux_agent_protocol::v1::{
 };
 
 use super::{
+    attach::{self, Attached},
     convert::{Arguments, Takes},
     items::{self, string},
     pane::{self, Tag},
@@ -237,6 +238,7 @@ struct Rewind {
 struct Held {
     text: String,
     item_id: String,
+    attachments: Vec<Attached>,
 }
 
 impl Held {
@@ -244,6 +246,7 @@ impl Held {
     /// which is what makes it one that can be gone back to.
     fn item(&self, opens: bool) -> v1::ChatItem {
         let mut item = items::text(self.item_id.clone(), Kind::User, self.text.clone());
+        item.attachments = self.attachments.iter().map(Attached::wire).collect();
         item.at_unix_millis = super::now_unix_millis();
         item.rewindable = opens;
         item
@@ -312,6 +315,10 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
             // A skill is shown as it was typed: its name, then what follows.
             // One named with `$` is in the text already.
             let skill = string(part, "type") == "skill";
+            // A file sent with the message is not its text.
+            if matches!(string(part, "type"), "localImage" | "image" | "mention") {
+                continue;
+            }
             let piece = match part.as_str() {
                 Some(piece) => piece.to_owned(),
                 None if skill && !text.is_empty() => continue,
@@ -345,7 +352,27 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
         "userMessage" => {
             let client = field("clientId");
             let id = if client.is_empty() { id } else { client };
-            items::text(id, Kind::User, texts("content"))
+            let (text, mut attachments) = attach::split_paths(&texts("content"));
+            let parts = source["content"].as_array().map_or(&[][..], Vec::as_slice);
+            for part in parts {
+                match string(part, "type") {
+                    "localImage" => {
+                        let path = string(part, "path");
+                        let name = path.rsplit('/').next().unwrap_or(path);
+                        attachments.push(v1::ChatAttachment {
+                            path: path.to_owned(),
+                            name: name.to_owned(),
+                            media_type: attach::image_type_of_name(name).to_owned(),
+                            size_bytes: 0,
+                        });
+                    }
+                    "image" => attachments.push(attach::inline_image("", 0)),
+                    _ => {}
+                }
+            }
+            let mut item = items::text(id, Kind::User, text);
+            item.attachments = attachments;
+            item
         }
         "agentMessage" | "plan" => {
             // One that has said nothing yet is shown when it does.
@@ -813,8 +840,29 @@ impl Codex {
         Value::Array(input)
     }
 
+    /// The message with its files: an image as a `localImage` the server
+    /// reads itself, any other file named by its path under the text (D9).
+    /// Both shapes are the 0.169.0 schema's `UserInput`; not yet tried
+    /// against a live server.
+    fn input_with(&self, text: &str, attachments: &[Attached]) -> Value {
+        let named = attachments
+            .iter()
+            .filter(|attached| !attached.is_image())
+            .map(|attached| attached.path.as_str());
+        let mut input = self.input(&attach::with_paths(text, named));
+        if let Value::Array(items) = &mut input {
+            items.extend(
+                attachments
+                    .iter()
+                    .filter(|attached| attached.is_image())
+                    .map(|attached| json!({"type": "localImage", "path": attached.path})),
+            );
+        }
+        input
+    }
+
     fn send(&mut self, held: Held, out: &mut Output) {
-        let input = self.input(&held.text);
+        let input = self.input_with(&held.text, &held.attachments);
         if let Some(turn) = self.turn.clone() {
             let params = json!({
                 "threadId": self.thread, "expectedTurnId": turn, "input": input,
@@ -1379,13 +1427,21 @@ impl Dialect for Codex {
         let not_ready =
             || ChatError::new("chat_not_ready", "The chat is still connecting. Try again.");
         match command {
-            SessionCommand::Send { text, item_id } => {
+            SessionCommand::Send {
+                text,
+                item_id,
+                attachments,
+            } => {
                 // A turn that was asked for and has no id yet cannot be joined.
                 let waits = !self.ready || self.rewind.is_some() || self.starting;
                 if waits && self.held.len() >= MAX_HELD {
                     return Err(not_ready());
                 }
-                let held = Held { text, item_id };
+                let held = Held {
+                    text,
+                    item_id,
+                    attachments,
+                };
                 // A message that joins a running turn cannot be gone back to
                 // on its own.
                 let opens = self.turn.is_none() && !self.starting && self.held.is_empty();

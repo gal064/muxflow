@@ -123,6 +123,7 @@ fn send(runtime: &ChatRuntime, pane_id: &str, text: &str, item_id: &str) -> Resu
         SessionCommand::Send {
             text: text.into(),
             item_id: item_id.into(),
+            attachments: Vec::new(),
         },
     )
 }
@@ -912,6 +913,7 @@ async fn messages_are_checked_before_the_provider_sees_them() {
         let command = SessionCommand::Send {
             text: text.into(),
             item_id: item_id.into(),
+            attachments: Vec::new(),
         };
         runtime
             .command(&pane("%1"), "quiet", command)
@@ -1095,6 +1097,7 @@ fn a_pane_takes_one_command_at_a_time_from_its_check_to_its_effect() {
         let command = SessionCommand::Send {
             text: text.into(),
             item_id: String::new(),
+            attachments: Vec::new(),
         };
         runtime
             .command(&pane("%1"), "gate", command)
