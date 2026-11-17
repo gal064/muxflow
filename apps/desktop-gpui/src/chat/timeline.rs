@@ -222,7 +222,7 @@ pub(super) fn summary<'a>(
 ) -> Summary {
     let mut summary = Summary::default();
     let (mut thoughts, mut thinking, mut timed) = (0, Duration::ZERO, true);
-    // Read, ran, searched, fetched, called, delegated, other; edits apart.
+    // Read, ran, searched, fetched, called, subagents, other; edits apart.
     let mut by_kind = [0usize; 7];
     let mut pathless_edits = 0;
     for item in steps {
@@ -266,14 +266,19 @@ pub(super) fn summary<'a>(
         (1, false) => parts.push("thought".to_owned()),
         (count, false) => parts.push(format!("thought {count} times")),
     }
-    for (count, verb) in
-        by_kind[..6]
-            .iter()
-            .zip(["read", "ran", "searched", "fetched", "called", "delegated"])
+    for (count, verb) in by_kind[..5]
+        .iter()
+        .zip(["read", "ran", "searched", "fetched", "called"])
     {
         if *count > 0 {
             parts.push(format!("{verb} {count}"));
         }
+    }
+    // A subagent is counted as a noun: "1 subagent", "2 subagents" (S9).
+    match by_kind[5] {
+        0 => {}
+        1 => parts.push("1 subagent".to_owned()),
+        count => parts.push(format!("{count} subagents")),
     }
     match (summary.files.len(), pathless_edits) {
         (0, 0) => {}
@@ -760,8 +765,24 @@ mod tests {
         ];
         assert_eq!(
             summary(&rest, |_| None).counts,
-            "fetched 1 · called 1 · delegated 1 · 1 other"
+            "fetched 1 · called 1 · 1 subagent · 1 other"
         );
+        // S9: "read 2 · searched 1 · 1 subagent", and the plural.
+        let delegated = [
+            read("r1"),
+            read("r2"),
+            tool("s", ChatToolKind::Search, "upload"),
+            tool("g", ChatToolKind::Subagent, "Explore the git module"),
+        ];
+        assert_eq!(
+            summary(&delegated, |_| None).counts,
+            "read 2 · searched 1 · 1 subagent"
+        );
+        let two = [
+            tool("g1", ChatToolKind::Subagent, "Explore"),
+            tool("g2", ChatToolKind::Subagent, "Audit"),
+        ];
+        assert_eq!(summary(&two, |_| None).counts, "2 subagents");
     }
 
     #[test]

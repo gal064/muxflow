@@ -967,31 +967,38 @@ impl ChatPane {
             // `.comp.hasbg`: room above for the chip.
             .when(has_chip, |area| area.pt(ui(6.)))
             .child(
+                // The chip beside the composer, not in it: GPUI draws a
+                // box's border after its children, and would draw the
+                // composer's top edge through the chip's label.
                 div()
-                    .id("chat-composer")
-                    .test_support()
-                    .role(Role::Group)
-                    .aria_label("Composer")
                     .relative()
-                    .border_1()
-                    .border_color(p.chrome_border)
-                    .rounded(ui(11.))
-                    .bg(p.chrome_bg)
-                    // `box-shadow: 0 1px 0 var(--hair)`.
-                    .shadow(vec![gpui_kit::BoxShadow::new(
-                        px(0.),
-                        px(1.),
-                        p.chrome_hairline.into(),
-                    )])
-                    .when(open, |composer| {
-                        composer.child(self.slash_list(sigil, &suggestions, p, cx))
-                    })
-                    .children(banner)
-                    .children(notice)
-                    .children(self.composer_chips(p, cx))
-                    .child(field)
-                    .child(bar)
-                    // Last, so it is drawn over the edge it sits on.
+                    .child(
+                        div()
+                            .id("chat-composer")
+                            .test_support()
+                            .role(Role::Group)
+                            .aria_label("Composer")
+                            .relative()
+                            .border_1()
+                            .border_color(p.chrome_border)
+                            .rounded(ui(11.))
+                            .bg(p.chrome_bg)
+                            // `box-shadow: 0 1px 0 var(--hair)`.
+                            .shadow(vec![gpui_kit::BoxShadow::new(
+                                px(0.),
+                                px(1.),
+                                p.chrome_hairline.into(),
+                            )])
+                            .when(open, |composer| {
+                                composer.child(self.slash_list(sigil, &suggestions, p, cx))
+                            })
+                            .children(banner)
+                            .children(notice)
+                            .children(self.composer_chips(p, cx))
+                            .child(field)
+                            .child(bar),
+                    )
+                    // After the composer, so it is drawn over the edge it sits on.
                     .children(chip),
             )
             .into_any_element()

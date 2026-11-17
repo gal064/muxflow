@@ -154,7 +154,26 @@ mod tests {
     #[test]
     fn the_app_s_assets_carry_the_extra_icons_beside_the_kit_s() {
         let extras = ExtraIcons.list("icons/").unwrap();
-        assert_eq!(extras.len(), 13);
+        let listed_above = [
+            IconName::Server,
+            IconName::GitBranch,
+            IconName::GitCommitHorizontal,
+            IconName::FileDiff,
+            IconName::GitFork,
+            IconName::Pencil,
+            IconName::FilePenLine,
+            IconName::Wrench,
+            IconName::Brain,
+            IconName::Paperclip,
+            IconName::X,
+            IconName::Image,
+            IconName::Layers,
+            IconName::Shrink,
+        ];
+        assert_eq!(extras.len(), listed_above.len());
+        for name in listed_above {
+            assert!(extras.contains(&name.path()), "{} is embedded", name.path());
+        }
         for path in &extras {
             // The Kit's source refuses a path it does not embed.
             assert!(

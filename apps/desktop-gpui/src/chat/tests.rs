@@ -2022,6 +2022,14 @@ fn a_narrow_chat_shows_its_details_only_from_the_details_button(cx: &mut TestApp
     let mut shell = open(cx);
     assert!(shell.shows("chat-details-toggle"));
     assert!(!shell.shows("chat-details-card"));
+    // The conversation starts under the button, so it hides no first row.
+    let (toggle, first) = shell.visual.update(|window, _| {
+        (
+            window.find("chat-details-toggle").bounds(),
+            window.find("chat-item-u1").bounds(),
+        )
+    });
+    assert!(first.top() >= toggle.bottom(), "{first:?} under {toggle:?}");
     shell.click("chat-details-toggle");
     assert!(shell.named("Session details"));
     assert_eq!(shell.label("chat-details-folder"), "Folder: /work/repo");
@@ -2708,9 +2716,12 @@ fn stop_shows_at_once_until_the_turn_ends(cx: &mut TestAppContext) {
     let mut shell = open(cx);
     shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
     assert_eq!(shell.label("chat-working"), "Working…");
+    assert!(shell.shows("chat-working-time"));
     shell.host.hold_next();
     shell.click("chat-send");
     assert_eq!(shell.label("chat-working"), "Stopping…");
+    // "Stopping…" alone, with no seconds after it (S7).
+    assert!(!shell.shows("chat-working-time"));
     // Off while it stops: a second press sends nothing.
     shell.click("chat-send");
     assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
@@ -2977,6 +2988,41 @@ fn the_working_line_ticks_once_a_second_and_only_while_on_screen(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn a_chat_under_an_app_tab_is_off_screen_until_the_tab_goes(cx: &mut TestAppContext) {
+    use crate::terminal::surface::TerminalSurface;
+
+    let surfaces: std::rc::Rc<std::cell::RefCell<Vec<gpui_kit::WeakEntity<TerminalSurface>>>> =
+        std::rc::Rc::default();
+    let made = surfaces.clone();
+    cx.update(|cx| {
+        cx.observe_new(move |_: &mut TerminalSurface, _, cx| {
+            made.borrow_mut().push(cx.weak_entity());
+        })
+        .detach();
+    });
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(ticking(&mut shell));
+    let surface = surfaces
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|surface| surface.upgrade())
+        .expect("the window's terminal surface");
+    let pane = shell.pane();
+    // As the chrome says when an app tab covers the terminal, and when it
+    // goes: the chat's timer follows.
+    let cover = |shell: &mut Shell, covered: bool| {
+        shell.visual.update(|_, cx| {
+            surface.update(cx, |surface, cx| surface.set_terminal_visible(!covered, cx));
+            pane.read(cx).is_ticking()
+        })
+    };
+    assert!(!cover(&mut shell, true), "nobody sees it under the tab");
+    assert!(cover(&mut shell, false), "on screen again");
+}
+
+#[gpui_kit::test]
 fn thinking_is_said_while_it_streams_and_is_a_thought_row_once_it_ends(cx: &mut TestAppContext) {
     let mut shell = shell(cx);
     shell.chat(snapshot_in(
@@ -3166,6 +3212,47 @@ fn fork_from_here_sends_the_reply_waits_for_the_host_and_shows_the_fork(cx: &mut
 }
 
 #[gpui_kit::test]
+fn a_fork_answered_after_the_user_moved_on_does_not_pull_them_back(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    follow_panes(&mut shell);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        forked_pane_id: "%4".into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.hover("chat-item-a1");
+    shell.click("chat-fork-a1");
+    assert!(forking(&mut shell, "a1"));
+
+    // Off to the other window while the host forks.
+    shell.show_window("@2");
+    let mut panes = panes();
+    panes.push(Pane {
+        active: true,
+        ..pane("%3", "@2", "$1", (0, 0, 100, 24))
+    });
+    panes.push(Pane {
+        chat_adapter_id: "claude".into(),
+        ..pane("%4", "@1", "$1", (0, 25, 100, 10))
+    });
+    let windows = vec![
+        window("@1", "$1", 0, "agent", false),
+        window("@2", "$1", 1, "shell", true),
+    ];
+    shell.publish(vec![topology_of(3, windows, panes)]);
+    shell.host.release();
+    shell.settle();
+    assert!(!forking(&mut shell, "a1"), "the button is itself again");
+    let focused = shell
+        .host
+        .state()
+        .actions
+        .iter()
+        .any(|action| action["kind"] == "focusPane" && action["pane_id"] == "%4");
+    assert!(!focused, "{:?}", shell.host.state().actions);
+}
+
+#[gpui_kit::test]
 fn a_fork_the_host_refuses_says_why_and_its_button_comes_back(cx: &mut TestAppContext) {
     let mut shell = replies(cx);
     shell
@@ -3223,6 +3310,20 @@ fn the_chip_comes_and_goes_with_the_list_and_stays_while_the_chat_is_idle(cx: &m
         ChatChange::State(with_tasks(ChatTurnState::Working, vec![server()])),
     ));
     assert!(shell.named("1 background task"));
+    // On the composer's top edge, beside the composer and not in it: the
+    // composer's border is drawn after its children, through the chip (S9).
+    let (chip, composer) = shell
+        .visual
+        .update(|window, _| (window.find("chat-tasks"), window.find("chat-composer")));
+    assert!(
+        !chip
+            .path()
+            .contains(&gpui_kit::ElementId::from("chat-composer")),
+        "{:?}",
+        chip.path()
+    );
+    let edge = composer.bounds().top();
+    assert!(chip.bounds().top() < edge && edge < chip.bounds().bottom());
     // The turn ends; the command still runs.
     shell.chat(event(
         12,
@@ -3620,6 +3721,37 @@ mod attachments {
     }
 
     #[gpui_kit::test]
+    fn files_dragged_over_the_chat_show_the_drop_hint_until_they_leave(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let hint = |shell: &mut Shell| {
+            shell
+                .visual
+                .update(|window, _| window.find("chat-drop-hint").visible())
+        };
+        assert!(!hint(&mut shell), "nothing is dragged");
+        let at = shell
+            .visual
+            .update(|window, _| window.find(format!("chat-{PANE}")).bounds().center());
+        shell
+            .visual
+            .simulate_mouse_move(at, None, Default::default());
+        let paths = ExternalPaths(files(&dir, &["card.png"]).into_iter().collect());
+        shell.visual.simulate_event(FileDropEvent::Entered {
+            position: at,
+            paths,
+        });
+        shell
+            .visual
+            .simulate_event(FileDropEvent::Pending { position: at });
+        shell.settle();
+        assert!(hint(&mut shell), "drawn while files are over the chat");
+        shell.visual.simulate_event(FileDropEvent::Exited);
+        shell.settle();
+        assert!(!hint(&mut shell), "gone with them");
+    }
+
+    #[gpui_kit::test]
     fn a_failed_upload_keeps_send_off_until_it_is_retried_or_removed(cx: &mut TestAppContext) {
         let mut shell = open(cx);
         shell.host.state().upload_outcome = UploadOutcome::Fail;
@@ -3759,5 +3891,208 @@ mod attachments {
         assert_eq!(sent.text, "Why does it overlap? Below 940px.");
         assert_eq!(sent.attachments[0].path, format!("{STAGED}/card.png"));
         assert!(shell.host.state().uploads.is_empty(), "already on the host");
+    }
+
+    /// The chat's upload records left in the shared list.
+    fn chat_records(shell: &mut Shell) -> usize {
+        shell.visual.update(|_, cx| {
+            cx.try_global::<crate::terminal::integration::upload::Uploads>()
+                .map_or(0, |uploads| {
+                    uploads
+                        .0
+                        .records
+                        .iter()
+                        .filter(|record| {
+                            record.pane_id.starts_with(crate::chat::CHAT_UPLOAD_PREFIX)
+                        })
+                        .count()
+                })
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_message_whose_answer_was_lost_takes_its_files_with_it_when_it_arrives(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["card.png"]));
+        shell.input("Look.");
+        shell.host.refuse_next("The connection was lost.");
+        shell.press("enter");
+        let lost = shell.host.last(ChatAction::Send);
+        assert_eq!(lost.attachments.len(), 1);
+        // Back in the composer, to be sent again.
+        assert_eq!(shell.composer_text(), "Look.");
+        assert!(shell.shows("chat-attachment-1"));
+
+        // The host had it: its text and its file both leave the composer.
+        let mut arrived = item(&lost.client_message_id, ChatItemKind::User, "Look.");
+        arrived.attachments = lost.attachments.clone();
+        shell.chat(event(11, ChatChange::Item(arrived)));
+        assert_eq!(shell.composer_text(), "");
+        assert!(!shell.shows("chat-attachment-1"));
+        shell.input("Next.");
+        shell.press("enter");
+        let next = shell.host.last(ChatAction::Send);
+        assert_eq!((next.text.as_str(), next.attachments.len()), ("Next.", 0));
+    }
+
+    #[gpui_kit::test]
+    fn a_message_whose_answer_comes_after_its_item_is_not_given_back(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["card.png"]));
+        shell.input("Look.");
+        shell.host.refuse_next("The connection was lost.");
+        shell.host.hold_next();
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        let mut arrived = item(&sent.client_message_id, ChatItemKind::User, "Look.");
+        arrived.attachments = sent.attachments.clone();
+        shell.chat(event(11, ChatChange::Item(arrived)));
+        shell.host.release();
+        shell.settle();
+        assert_eq!(shell.composer_text(), "");
+        assert!(!shell.shows("chat-attachment-1"));
+        assert!(!shell.shows("chat-notice"));
+    }
+
+    #[gpui_kit::test]
+    fn files_alone_sent_again_with_other_files_are_another_message(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["card.png"]));
+        shell.host.refuse_next("The connection was lost.");
+        shell.press("enter");
+        let lost = shell.host.last(ChatAction::Send);
+        assert!(shell.shows("chat-attachment-1"));
+        // The same files again: the same message, under its id.
+        shell.host.refuse_next("The connection was lost.");
+        shell.press("enter");
+        let again = shell.host.last(ChatAction::Send);
+        assert_eq!(again.client_message_id, lost.client_message_id);
+        // Another file in its place, with the same (empty) text: a new one,
+        // which the host does not drop as a duplicate.
+        shell.hover("chat-attachment-1");
+        shell.click("chat-attachment-x-1");
+        shell.drop_files(&files(&dir, &["log.txt"]));
+        shell.press("enter");
+        let other = shell.host.last(ChatAction::Send);
+        assert_eq!(other.attachments[0].name, "log.txt");
+        assert_ne!(other.client_message_id, lost.client_message_id);
+    }
+
+    #[gpui_kit::test]
+    fn plain_text_is_pasted_at_once(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.input("Look at ");
+        shell.visual.update(|_, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("wrapped paths".into()));
+            cx.set_global(ClipboardRead(Rc::new(
+                || -> Result<Option<Value>, String> {
+                    panic!("the native reader is not asked for text")
+                },
+            )));
+        });
+        let pane = shell.pane();
+        // In the key's own update, with nothing run after it.
+        let text = shell.visual.update(|window, cx| {
+            window.press("ctrl-v", cx);
+            pane.read(cx).composer.read(cx).value().to_string()
+        });
+        assert_eq!(text, "Look at wrapped paths");
+    }
+
+    #[gpui_kit::test]
+    fn an_image_read_after_its_message_went_is_not_added_to_the_next(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let staged = files(&dir, &[SCREENSHOT]).remove(0);
+        shell.clipboard(json!({"kind": "image", "staged": {
+            "path": staged, "name": SCREENSHOT, "sizeBytes": "12",
+        }}));
+        shell.input("The card covers the composer.");
+        // Enter sends while the clipboard is still read.
+        shell.visual.update(|window, cx| {
+            window.press("ctrl-v", cx);
+            window.press("enter", cx);
+        });
+        shell.uploads_settle();
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "The card covers the composer.");
+        assert!(sent.attachments.is_empty());
+        assert!(!shell.shows("chat-attachment-1"), "nor in the next one");
+        assert!(shell.uploaded().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn a_file_removed_before_its_upload_has_an_id_is_stopped_once_it_has(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.host.state().upload_outcome = UploadOutcome::Hold;
+        let dir = tempfile::tempdir().unwrap();
+        let path = files(&dir, &["muxflow-gpui.log"]).remove(0);
+        let pane = shell.pane();
+        shell.visual.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.attach_paths(vec![path.to_string_lossy().into_owned()], window, cx);
+                assert_eq!(
+                    pane.attachments[0].upload,
+                    crate::chat::attach::Upload::Uploading(None)
+                );
+                pane.remove_attachment(1, cx);
+            });
+        });
+        shell.uploads_settle();
+        assert_eq!(shell.host.state().cancelled_uploads, ["t0"]);
+        assert!(shell.uploaded().is_empty(), "the batch went no further");
+        assert_eq!(chat_records(&mut shell), 0);
+    }
+
+    #[gpui_kit::test]
+    fn editing_an_earlier_message_stops_the_uploads_it_replaces(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.host.state().upload_outcome = UploadOutcome::Hold;
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["muxflow-gpui.log"]));
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, uploading"
+        );
+        shell.hover("chat-item-u1");
+        shell.click("chat-edit-u1");
+        shell.uploads_settle();
+        assert!(!shell.shows("chat-attachment-1"));
+        assert_eq!(shell.host.state().cancelled_uploads, ["t1"]);
+        // The cancelled record does not stay to fill the shared list.
+        assert_eq!(chat_records(&mut shell), 0);
+    }
+
+    #[gpui_kit::test]
+    fn a_sent_file_opens_from_the_keyboard(cx: &mut TestAppContext) {
+        let mut shell = shell(cx);
+        let mut sent = item("u1", ChatItemKind::User, "Why does it overlap?");
+        let path = format!("{STAGED}/card.png");
+        sent.attachments = vec![ChatAttachment {
+            path: path.clone(),
+            name: "card.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1_468_006,
+        }];
+        shell.chat(snapshot(10, vec![sent], ""));
+        assert_eq!(
+            shell
+                .visual
+                .update(|window, _| window.find("chat-sent-u1-0").role()),
+            Some(gpui_kit::Role::Button)
+        );
+        // Back from the composer: the message's Edit and Copy, then its file.
+        for _ in 0..3 {
+            shell.press("shift-tab");
+        }
+        shell.press("enter");
+        assert_eq!(shell.host.state().files, [path.clone()]);
+        shell.press("space");
+        assert_eq!(shell.host.state().files, [path.clone(), path]);
     }
 }

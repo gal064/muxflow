@@ -344,6 +344,14 @@ impl TerminalSurface {
         cx.set_global(crate::terminal::integration::agents::TerminalVisibility(
             visible,
         ));
+        // A chat on the surface is on screen only while the surface is: one
+        // under an app tab ticks nothing and has nothing seen. The kept ones
+        // off the surface are off screen already.
+        for mounted in &self.panes {
+            if let Mount::Chat(pane) = &mounted.pane {
+                pane.update(cx, |pane, cx| pane.set_shown(visible, cx));
+            }
+        }
         if visible {
             self.schedule_resize(cx);
         } else {
@@ -467,11 +475,13 @@ impl TerminalSurface {
         let id: SharedString = geometry.id.clone().into();
         let key = (profile_id.clone(), server.clone(), geometry.id.clone());
         // A chat this window kept comes back as it was left, with no `OPEN`.
+        // Mounted under an app tab, it is on screen once the tab goes.
+        let shown = self.terminal_visible;
         let pane = match self.chats.show(&key) {
             Some(pane) => {
                 pane.update(cx, |pane, cx| {
                     pane.set_tmux_pane(&geometry, cx);
-                    pane.set_shown(true, cx);
+                    pane.set_shown(shown, cx);
                 });
                 pane
             }
@@ -480,6 +490,9 @@ impl TerminalSurface {
                 let tmux = geometry.clone();
                 let pane =
                     cx.new(|cx| ChatPane::new(profile_id, server, tmux, controller, window, cx));
+                if !shown {
+                    pane.update(cx, |pane, cx| pane.set_shown(false, cx));
+                }
                 self.chats.insert(key, pane.clone());
                 pane
             }
