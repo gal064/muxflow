@@ -761,9 +761,14 @@ All eight packages are built and committed on `gpui/chat`, in the order W,
 A, B, C, G, D, E, F (the hashes are in §0). The two optional items of §3.12
 and C2/C3 of §3.10 are not built.
 
-Reviewed once by four independent readers (host code, desktop code,
-invariants, a render of the real pane against the mock); what they found
-and was accepted is fixed in the commits after `5ff96360`.
+Reviewed by four independent readers (host code, desktop code,
+invariants, a render of the real pane against the mock) and once more
+after the fixes; then driven in the real app against a real Claude Code
+chat on a separate dev daemon. What was found and accepted is fixed in the
+commits after `5ff96360`. Two things only the real run showed: with Stop
+hooks set, the entry before a user's message is a hook's summary, so a
+fork or a rewind must be cut at the nearest message before (§3.8); and
+the background subagent below.
 
 Known and left as they are:
 
@@ -772,9 +777,13 @@ Known and left as they are:
   running when a chat is reopened is not shown (`thread/read` leaves it
   out). Compaction and subagent items are built from the schema and were
   not run live.
-- **Claude, background subagent.** Its row gets no figures after its
-  `tool_result`; it stays listed in the chip. The chip is empty after a host
-  restart until the agent next reports its list.
+- **Claude, background subagent.** Claude Code runs a subagent in the
+  background by default (seen live, 2.1.326): its tool call returns at
+  once and its report comes back later as a line marked `isSynthetic`. The
+  row stays running with its figures until the task ends, between turns
+  too, and the report's line is not drawn. A chat reopened while one runs
+  shows the row as done, as the record has it. The chip is empty after a
+  host restart until the agent next reports its list.
 - **Light theme.** Dim ink is 4.62:1 on the pane, but 4.39:1 on raised
   surfaces and 3.77–3.95:1 on washes. Open with the owner: darken light
   `chromeDim` everywhere, or add an ink for dim text on raised surfaces.

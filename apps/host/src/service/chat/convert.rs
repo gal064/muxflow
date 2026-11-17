@@ -540,8 +540,9 @@ fn replace<G>(
 }
 
 /// Opens a chat started from `launch` in a split beside `source_pane_id`,
-/// in the folder and with the environment of the chat's agent there, and
-/// answers the new pane: how a reply is forked (chat-polish-plan §3.8).
+/// in the folder and with the environment of the chat's agent there (save
+/// `TMUX_PANE`, which `chat-pipe` sets to the new pane's), and answers the
+/// new pane: how a reply is forked (chat-polish-plan §3.8).
 /// Tagged in the same step as the split, so nobody sees the new agent
 /// without its tag and takes it for a terminal one. Never marked as a side
 /// question's pane: the fork is listed in History (D12).
