@@ -62,6 +62,7 @@ gpui_kit::assets::icon_assets!(
         // Attachments.
         Paperclip,
         X,
+        Image,
         // Background tasks and compacting.
         Layers,
         Shrink,

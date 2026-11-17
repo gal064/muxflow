@@ -246,7 +246,9 @@ fn deliver(
 /// The upload list, in the terminal's bottom-right corner. Port of
 /// `TerminalTransferHistory`.
 pub fn upload_list(cx: &mut App) -> Option<AnyElement> {
-    let records = cx.try_global::<Uploads>()?.0.records.clone();
+    let mut records = cx.try_global::<Uploads>()?.0.records.clone();
+    // A chat's uploads are drawn on its own chips.
+    records.retain(|record| !record.pane_id.starts_with(crate::chat::CHAT_UPLOAD_PREFIX));
     if records.is_empty() {
         return None;
     }

@@ -505,6 +505,7 @@ impl<D: Dialect + Wire> Replay<D> {
         self.command(SessionCommand::Send {
             text: text.into(),
             item_id: id.into(),
+            attachments: Vec::new(),
         })
         .unwrap();
     }

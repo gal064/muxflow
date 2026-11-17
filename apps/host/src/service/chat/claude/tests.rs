@@ -288,13 +288,13 @@ fn a_user_entry_is_a_message_a_stop_or_the_agents_own_note() {
         |content: Value| json!({"type": "user", "message": {"role": "user", "content": content}});
     assert_eq!(
         said(&entry(json!("  fix it "))),
-        Said::User("fix it".into())
+        Said::User("fix it".into(), Vec::new())
     );
     assert_eq!(
         said(&entry(
             json!([{"type": "text", "text": "one"}, {"type": "text", "text": "two"}])
         )),
-        Said::User("one\ntwo".into())
+        Said::User("one\ntwo".into(), Vec::new())
     );
     assert_eq!(
         said(&entry(
@@ -306,7 +306,7 @@ fn a_user_entry_is_a_message_a_stop_or_the_agents_own_note() {
         said(&entry(json!(
             "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>42</command-args>"
         ))),
-        Said::User("/review 42".into())
+        Said::User("/review 42".into(), Vec::new())
     );
     for own in [
         json!("<local-command-stdout>done</local-command-stdout>"),
@@ -325,7 +325,7 @@ fn a_user_entry_is_a_message_a_stop_or_the_agents_own_note() {
     // Markup inside a message is the user's own.
     assert_eq!(
         said(&entry(json!("why does <T> not compile?"))),
-        Said::User("why does <T> not compile?".into())
+        Said::User("why does <T> not compile?".into(), Vec::new())
     );
 }
 
@@ -885,6 +885,7 @@ async fn a_chat_reached_mid_turn_picks_up_where_the_agent_is() {
         .command(SessionCommand::Send {
             text: "anyone?".into(),
             item_id: "late".into(),
+            attachments: Vec::new(),
         })
         .unwrap_err();
     assert_eq!(refused.code, "chat_unavailable");
@@ -1040,6 +1041,7 @@ async fn a_skill_named_with_a_dollar_at_the_start_is_sent_with_a_slash() {
             .command(SessionCommand::Send {
                 text: text.into(),
                 item_id: text.into(),
+                attachments: Vec::new(),
             })
             .unwrap();
         replay.written.last().unwrap()["message"]["content"].clone()
@@ -1052,6 +1054,105 @@ async fn a_skill_named_with_a_dollar_at_the_start_is_sent_with_a_slash() {
     // Not one of the agent's, or not at the start: as typed.
     assert_eq!(sent("$HOME is where"), "$HOME is where");
     assert_eq!(sent("use $release-notes"), "use $release-notes");
+}
+
+fn attached(path: &str, media_type: &str, inline: Option<&str>) -> Attached {
+    Attached {
+        path: path.into(),
+        name: path.rsplit('/').next().unwrap().into(),
+        media_type: media_type.into(),
+        size: 9,
+        inline: inline.map(str::to_owned),
+    }
+}
+
+#[tokio::test]
+async fn a_small_image_goes_as_an_image_and_anything_else_as_its_path() {
+    let mut lines = STREAM.lines().peekable();
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    replay.done(Done::History(history::load(
+        Path::new("/nonexistent"),
+        SESSION,
+        "",
+    )));
+    replay.play(&mut lines, "@get_settings");
+    let staged = "/home/u/.cache/muxflow/uploads";
+    let shot = attached(&format!("{staged}/shot.png"), "image/png", Some("iVBORw0K"));
+    let large = attached(&format!("{staged}/big.jpg"), "image/jpeg", None);
+    let log = attached(&format!("{staged}/app log.txt"), "", None);
+    replay
+        .command(SessionCommand::Send {
+            text: "Why does it overlap?".into(),
+            item_id: "m-files".into(),
+            attachments: vec![shot.clone(), large.clone(), log.clone()],
+        })
+        .unwrap();
+    let written = replay.written.last().unwrap();
+    assert_eq!(
+        written["message"]["content"],
+        json!([
+            {"type": "text", "text": format!(
+                "Why does it overlap?\n\n{staged}/big.jpg\n{staged}/app log.txt")},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": "iVBORw0K"}},
+        ])
+    );
+    // The chat shows the message as it was typed, with its files.
+    let item = replay.client.item("m-files").unwrap();
+    assert_eq!(item.text, "Why does it overlap?");
+    let names: Vec<&str> = item.attachments.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["shot.png", "big.jpg", "app log.txt"]);
+    assert_eq!(item.attachments[0].path, shot.path);
+
+    // An image alone is a message.
+    replay
+        .command(SessionCommand::Send {
+            text: String::new(),
+            item_id: "m-image".into(),
+            attachments: vec![shot],
+        })
+        .unwrap();
+    let content = &replay.written.last().unwrap()["message"]["content"];
+    assert_eq!(content.as_array().unwrap().len(), 1);
+    assert_eq!(content[0]["type"], "image");
+    // No files: the text alone, as before.
+    replay
+        .command(SessionCommand::Send {
+            text: "plain".into(),
+            item_id: "m-plain".into(),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(
+        replay.written.last().unwrap()["message"]["content"],
+        "plain"
+    );
+}
+
+#[test]
+fn a_recorded_message_gives_back_its_inline_images_and_named_files() {
+    let staged = attach::staging_directory().unwrap();
+    let path = staged.join("notes.md");
+    let entry = json!({"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": format!("Read these.\n\n{}", path.display())},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+    ]}});
+    let Said::User(text, attachments) = said(&entry) else {
+        panic!("a message of the user's");
+    };
+    assert_eq!(text, "Read these.");
+    let read: Vec<(&str, &str, &str)> = attachments
+        .iter()
+        .map(|a| (a.name.as_str(), a.path.as_str(), a.media_type.as_str()))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("notes.md", path.to_str().unwrap(), ""),
+            ("Image", "", "image/png")
+        ]
+    );
 }
 
 #[test]

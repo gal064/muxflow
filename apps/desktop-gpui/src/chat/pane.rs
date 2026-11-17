@@ -26,8 +26,8 @@ use desktop_core::connection::chat::{
 };
 use futures::future::BoxFuture;
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable, Global, Pixels,
-    Point, ScrollHandle, SharedString, Subscription, Task, Window,
+    AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    Global, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
     component::{
         input::{InputEvent, InputState, TextareaState},
         message_scroller::MessageScrollerState,
@@ -42,10 +42,14 @@ use crate::{
         connection_reducer::ConnectionPhase,
         controller::{ConnectionController, ConnectionEvent},
     },
-    terminal::integration::agents::note_activity,
+    terminal::integration::{
+        agents::note_activity,
+        upload::{ScopeOf, Uploads},
+    },
 };
 
 use super::{
+    attach::{self, Attachment, Upload},
     links::{self, Probe},
     model::{Chat, Outcome, PageOutcome, PageRequest},
     slash,
@@ -107,6 +111,7 @@ struct Live {
 pub(super) struct Sending {
     pub id: String,
     pub text: SharedString,
+    pub attachments: Vec<Attachment>,
 }
 
 /// What has been picked for one question of a pending request.
@@ -247,9 +252,16 @@ struct OpenChats(HashMap<(String, String, String), usize>);
 
 impl Global for OpenChats {}
 
-/// A composer's unsent text, kept while its pane is off screen.
+/// A composer's unsent text and the files already on the host, kept when its
+/// pane is let go. A file still uploading is not: its upload stops with the
+/// pane.
+struct Draft {
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
 #[derive(Default)]
-struct Drafts(HashMap<(String, String, String), String>);
+struct Drafts(HashMap<(String, String, String), Draft>);
 
 impl Global for Drafts {}
 
@@ -349,6 +361,22 @@ pub struct ChatPane {
     pub(super) withdraw: Option<String>,
     /// What the empty composer says, as last told to it.
     pub(super) placeholder: &'static str,
+    /// The files the next message goes with, in the order added.
+    pub(super) attachments: Vec<Attachment>,
+    pub(super) next_attachment: u64,
+    /// The file whose upload batch runs, or is about to.
+    pub(super) uploading: Option<u64>,
+    /// An upload batch runs: the next waits for it.
+    pub(super) batch_running: bool,
+    /// The window uploads were started in, which starts the next one.
+    pub(super) upload_window: Option<AnyWindowHandle>,
+    /// Files just uploaded, showing their check until the task ends.
+    pub(super) uploaded: HashMap<u64, Task<()>>,
+    /// The file on this machine each sent image was uploaded from, by its
+    /// host path, for its thumbnail in the message.
+    pub(super) previews: HashMap<String, String>,
+    /// How an upload reads the chat's connection.
+    pub(super) upload_scope: ScopeOf<ChatPane>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -363,6 +391,10 @@ impl ChatPane {
     ) -> Self {
         let key = (profile_id.clone(), server_identity.clone(), tmux.id.clone());
         let draft = cx.default_global::<Drafts>().0.remove(&key);
+        let (draft, kept) = match draft {
+            Some(draft) => (Some(draft.text), draft.attachments),
+            None => (None, Vec::new()),
+        };
         *cx.default_global::<OpenChats>()
             .0
             .entry(key.clone())
@@ -406,6 +438,12 @@ impl ChatPane {
                 _ => {}
             }),
             cx.subscribe_in(&composer, window, Self::on_composer),
+            // An upload's progress: the chip's bar follows it.
+            cx.observe_global::<Uploads>(|this, cx| {
+                if this.uploading.is_some() {
+                    cx.notify();
+                }
+            }),
             // The list scrolled: the jump button and the header follow it.
             cx.observe(&list, |_, _, cx| cx.notify()),
             // A press on the conversation lands on the pane itself, which
@@ -478,6 +516,14 @@ impl ChatPane {
             resend: None,
             withdraw: None,
             placeholder: "",
+            next_attachment: kept.iter().map(|kept| kept.id).max().unwrap_or(0),
+            attachments: kept,
+            uploading: None,
+            batch_running: false,
+            upload_window: None,
+            uploaded: HashMap::new(),
+            previews: HashMap::new(),
+            upload_scope: attach::live_scope(),
             _subscriptions: subscriptions,
         };
         this.follow_link(cx);
@@ -513,7 +559,7 @@ impl ChatPane {
     }
 
     /// Says the agent's call has been seen, from a pane on screen only.
-    fn seen(&self, cx: &mut App) {
+    pub(super) fn seen(&self, cx: &mut App) {
         if self.on_screen {
             note_activity(&self.profile_id, &self.pane_id, cx);
         }
@@ -533,6 +579,16 @@ impl ChatPane {
         &self.tmux
     }
 
+    pub(super) fn controller(&self) -> &Entity<ConnectionController> {
+        &self.controller
+    }
+
+    /// The client and terminal epoch the chat is open on, while it is.
+    pub(super) fn live_link(&self) -> Option<(String, u64)> {
+        let live = self.live.as_ref()?;
+        Some((live.client_id.clone(), live.terminal_epoch))
+    }
+
     /// The tmux pane as the last topology described it.
     pub fn set_tmux_pane(&mut self, pane: &Pane, cx: &mut Context<Self>) {
         if self.tmux.current_path != pane.current_path {
@@ -549,8 +605,15 @@ impl ChatPane {
     /// The last pane holding this chat closes it; the chat itself runs on.
     fn released(&mut self, key: (String, String, String), cx: &mut App) {
         let text = self.composer.read(cx).value().to_string();
-        if !text.trim().is_empty() && self.editing.is_none() {
-            cx.default_global::<Drafts>().0.insert(key.clone(), text);
+        let attachments: Vec<Attachment> = self
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.upload == Upload::Ready)
+            .cloned()
+            .collect();
+        if (!text.trim().is_empty() || !attachments.is_empty()) && self.editing.is_none() {
+            let draft = Draft { text, attachments };
+            cx.default_global::<Drafts>().0.insert(key.clone(), draft);
         }
         let open = cx.default_global::<OpenChats>();
         let held_elsewhere = match open.0.get_mut(&key) {
@@ -1398,7 +1461,7 @@ impl ChatPane {
 
     // Actions.
 
-    fn refused(&mut self, error: &str, cx: &mut Context<Self>) {
+    pub(super) fn refused(&mut self, error: &str, cx: &mut Context<Self>) {
         self.notice = Some(error_message(error).to_owned().into());
         cx.notify();
     }
@@ -1407,16 +1470,17 @@ impl ChatPane {
     /// one, or as a side question in a fork.
     pub(super) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_owned();
-        if text.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         self.seen(cx);
         self.notice = None;
         // A side question goes to a fork, so the turn here need not be idle.
+        // It takes the text alone: the files wait for the next message.
         let side = slash::side_question(&self.chat.catalog, &text).map(str::to_owned);
         let refusal = match side {
             Some(_) => self.agent_refusal(),
-            None => self.send_refusal(),
+            None => self.send_refusal().or_else(|| self.attachments_refusal()),
         };
         if let Some(reason) = refusal {
             return self.refused(reason, cx);
@@ -1432,15 +1496,17 @@ impl ChatPane {
         };
         let rewind = self.editing.take();
         self.set_composer("", window, cx);
+        let attachments = std::mem::take(&mut self.attachments);
         self.sending.push(Sending {
             id: id.clone(),
             text: text.clone().into(),
+            attachments: attachments.clone(),
         });
         self.sync_trail(cx);
         self.list.update(cx, |list, cx| list.scroll_to_end(cx));
         cx.notify();
         let Some(item_id) = rewind else {
-            return self.deliver(id, text, cx);
+            return self.deliver(id, text, attachments, cx);
         };
         // The host drops the edited message and what follows it; the new
         // text then goes as any message does.
@@ -1455,18 +1521,26 @@ impl ChatPane {
         self.send(rewind, cx, move |this, result, cx| {
             let _pane = pane;
             match result {
-                Ok(_) => this.deliver(id, text, cx),
-                Err(error) => this.unsent(&id, &text, Some(item_id), &error, cx),
+                Ok(_) => this.deliver(id, text, attachments, cx),
+                Err(error) => this.unsent(&id, &text, attachments, Some(item_id), &error, cx),
             }
         });
     }
 
-    /// Sends one message under the id its pending bubble has.
-    fn deliver(&mut self, id: String, text: String, cx: &mut Context<Self>) {
+    /// Sends one message under the id its pending bubble has, with the
+    /// files' host paths.
+    fn deliver(
+        &mut self,
+        id: String,
+        text: String,
+        attachments: Vec<Attachment>,
+        cx: &mut Context<Self>,
+    ) {
         let message = ChatRequest {
             action: ChatAction::Send.into(),
             text: text.clone(),
             client_message_id: id.clone(),
+            attachments: attachments.iter().filter_map(Attachment::wire).collect(),
             ..Default::default()
         };
         self.send(message, cx, move |this, result, cx| match result {
@@ -1478,7 +1552,7 @@ impl ChatPane {
                 this.sync_trail(cx);
                 cx.notify();
             }
-            Err(error) => this.unsent(&id, &text, None, &error, cx),
+            Err(error) => this.unsent(&id, &text, attachments, None, &error, cx),
             Ok(_) => {}
         });
     }
@@ -1488,6 +1562,7 @@ impl ChatPane {
         &mut self,
         id: &str,
         text: &str,
+        attachments: Vec<Attachment>,
         editing: Option<String>,
         error: &str,
         cx: &mut Context<Self>,
@@ -1495,6 +1570,9 @@ impl ChatPane {
         self.sending.retain(|sending| sending.id != id);
         self.sync_trail(cx);
         self.restore = Some(text.to_owned());
+        // Before any added since, as the text goes before what was typed.
+        let added = std::mem::replace(&mut self.attachments, attachments);
+        self.attachments.extend(added);
         self.resend = Some((text.to_owned(), id.to_owned()));
         if let Some(item_id) = editing.filter(|id| self.chat.item(id).is_some()) {
             self.editing = Some(item_id);
@@ -1657,11 +1735,25 @@ impl ChatPane {
     }
 
     /// Puts an earlier message back in the composer; sending it rewinds.
+    /// Its files come back with its text, as they are on the host; an image
+    /// the host could only read back from the agent's record has no path,
+    /// and is not sent again.
     pub(super) fn edit(&mut self, item_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = self.chat.item(item_id).filter(|item| item.rewindable) else {
             return;
         };
         let text = item.text.clone();
+        let mut next = self.next_attachment;
+        let attachments: Vec<Attachment> = item
+            .attachments
+            .iter()
+            .filter_map(|sent| {
+                next += 1;
+                Attachment::from_host(next, sent)
+            })
+            .collect();
+        self.next_attachment = next;
+        self.attachments = attachments;
         self.editing = Some(item_id.to_owned());
         self.notice = None;
         self.set_composer(&text, window, cx);
@@ -1672,6 +1764,7 @@ impl ChatPane {
     pub(super) fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing.take().is_some() {
             self.set_composer("", window, cx);
+            self.attachments.clear();
             cx.notify();
         }
     }

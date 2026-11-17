@@ -27,6 +27,7 @@ use tmux_agent_protocol::v1;
 use super::events::{Delivery, send_control_event_to, send_required_control_event_to};
 use super::snapshot::{load_sidecar, save_sidecar};
 
+mod attach;
 mod claude;
 mod codex;
 mod convert;
@@ -40,6 +41,7 @@ mod session;
 mod tests;
 mod websocket;
 
+pub(crate) use attach::{Attached, admit as admit_attachments};
 pub(crate) use convert::{agent_hooked, agents_detected};
 pub(crate) use pane::{ADAPTER as CHAT_OPTION, SIDE as SIDE_OPTION};
 use provider::{Change, ChatProvider, ChatSession, ChatSink};
@@ -913,8 +915,12 @@ impl Pane {
     fn admit(&self, command: &mut SessionCommand) -> Result<(), ChatError> {
         let capabilities = self.catalog.capabilities.unwrap_or_default();
         match command {
-            SessionCommand::Send { text, item_id } => {
-                if text.trim().is_empty() {
+            SessionCommand::Send {
+                text,
+                item_id,
+                attachments,
+            } => {
+                if text.trim().is_empty() && attachments.is_empty() {
                     return Err(invalid("A message needs some text."));
                 }
                 if text.len() > MAX_ITEM_TEXT_BYTES {
@@ -1136,6 +1142,11 @@ fn bound_item(item: &mut v1::ChatItem) -> bool {
         return false;
     }
     cut(&mut item.text, MAX_ITEM_TEXT_BYTES);
+    item.attachments.truncate(attach::MAX_ATTACHMENTS);
+    for attachment in &mut item.attachments {
+        cut_labels([&mut attachment.name, &mut attachment.media_type]);
+        cut(&mut attachment.path, MAX_PATH_BYTES);
+    }
     if let Some(tool) = &mut item.tool {
         cut_labels([
             &mut tool.title,

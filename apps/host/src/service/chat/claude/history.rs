@@ -172,12 +172,13 @@ pub(in crate::service::chat) fn load(
                         None => items.push(finished),
                     }
                 }
-                let (kind, text) = match said(entry) {
-                    Said::User(text) => (Kind::User, text),
-                    Said::Interrupted => (Kind::Notice, "Interrupted".to_owned()),
+                let (kind, text, attachments) = match said(entry) {
+                    Said::User(text, attachments) => (Kind::User, text, attachments),
+                    Said::Interrupted => (Kind::Notice, "Interrupted".to_owned(), Vec::new()),
                     Said::Nothing => continue,
                 };
                 let mut item = items::text(id.as_str(), kind, text);
+                item.attachments = attachments;
                 item.rewindable = kind == Kind::User;
                 item.at_unix_millis = items::unix_millis(string(entry, "timestamp"));
                 items.push(item);

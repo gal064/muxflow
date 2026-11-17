@@ -12,12 +12,12 @@ use desktop_core::{
     connection::{
         ConnectionSpec, ProfileStore,
         chat::{
-            ChatAction, ChatAgentMode, ChatBackgroundTask, ChatCapabilities, ChatCatalog,
-            ChatChange, ChatCommand, ChatCommandKind, ChatConnection, ChatEvent, ChatItem,
-            ChatItemDelta, ChatItemKind, ChatModel, ChatOption, ChatOptions, ChatPendingRequest,
-            ChatPermissionMode, ChatQuestion, ChatRequest, ChatRequestKind, ChatResponse,
-            ChatSnapshot, ChatState, ChatTaskKind, ChatTool, ChatToolKind, ChatToolStatus,
-            ChatTruncate, ChatTurnState, ChatUsage,
+            ChatAction, ChatAgentMode, ChatAttachment, ChatBackgroundTask, ChatCapabilities,
+            ChatCatalog, ChatChange, ChatCommand, ChatCommandKind, ChatConnection, ChatEvent,
+            ChatItem, ChatItemDelta, ChatItemKind, ChatModel, ChatOption, ChatOptions,
+            ChatPendingRequest, ChatPermissionMode, ChatQuestion, ChatRequest, ChatRequestKind,
+            ChatResponse, ChatSnapshot, ChatState, ChatTaskKind, ChatTool, ChatToolKind,
+            ChatToolStatus, ChatTruncate, ChatTurnState, ChatUsage,
         },
         helper::HelperInstallReport,
     },
@@ -394,6 +394,59 @@ struct HostState {
     /// Git's answer to a summary, by `summary_base`; one not given is never
     /// answered.
     summaries: std::collections::HashMap<String, Value>,
+    /// What an upload does once started; preflights always pass.
+    upload_outcome: UploadOutcome,
+    /// Every upload and preflight started, in order.
+    uploads: Vec<Uploaded>,
+    cancelled_uploads: Vec<String>,
+}
+
+/// What the fake host does with an upload.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum UploadOutcome {
+    #[default]
+    Complete,
+    Fail,
+    /// Runs until the test finishes it.
+    Hold,
+}
+
+struct Uploaded {
+    id: String,
+    preflight: bool,
+    image_png: bool,
+    collision: crate::terminal::integration::transfers::UploadCollisionPolicy,
+    source: String,
+    name: String,
+    epoch: String,
+    sink: Arc<dyn EventSink>,
+}
+
+/// Where the fake host stages an upload.
+const STAGED: &str = "/home/u/.cache/muxflow/uploads";
+
+fn transfer(uploaded: &Uploaded, state: &str, extra: Value) -> EventBody {
+    let mut value = json!({
+        "transferId": uploaded.id, "sourcePath": uploaded.source, "name": uploaded.name,
+        "state": state, "serverIdentity": "tmux", "connectionEpoch": uploaded.epoch,
+    });
+    value
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    EventBody::Json(value.to_string())
+}
+
+fn completed(uploaded: &Uploaded) -> EventBody {
+    transfer(
+        uploaded,
+        "completed",
+        json!({
+            "destination": format!("{STAGED}/{}", uploaded.name), "blake3": "af1349b9",
+            "outcome": "published", "cleanupError": "",
+            "transferredBytes": "12", "totalBytes": "12",
+        }),
+    )
 }
 
 #[derive(Clone, Default)]
@@ -508,16 +561,54 @@ impl TerminalBackend for FakeHost {
         async { Ok(json!({ "topologyGeneration": 1 })) }.boxed()
     }
 
+    /// Answers on the caller's thread: a preflight completes at once, and an
+    /// upload runs, then ends as the test asked.
     fn start_upload(
         &self,
-        _: crate::terminal::integration::transfers::UploadRequest,
-        _: Arc<dyn EventSink>,
+        request: crate::terminal::integration::transfers::UploadRequest,
+        events: Arc<dyn EventSink>,
     ) -> Result<String, String> {
-        Err("no uploads here".into())
+        let mut state = self.state();
+        let uploaded = Uploaded {
+            id: format!("t{}", state.uploads.len()),
+            preflight: request.preflight,
+            image_png: request.image_png,
+            collision: request.collision,
+            source: request.source_path.clone(),
+            name: request.destination_name.clone(),
+            epoch: request.scope.terminal_epoch.to_string(),
+            sink: events,
+        };
+        if request.preflight {
+            let size = json!({"sizeBytes": "12", "sourceKind": "regularFile", "readable": true});
+            uploaded.sink.send(transfer(&uploaded, "completed", size))?;
+        } else {
+            let moving = json!({"transferredBytes": "3", "totalBytes": "12"});
+            uploaded.sink.send(transfer(&uploaded, "running", moving))?;
+            match state.upload_outcome {
+                UploadOutcome::Complete => uploaded.sink.send(completed(&uploaded))?,
+                UploadOutcome::Fail => uploaded.sink.send(transfer(
+                    &uploaded,
+                    "failed",
+                    json!({"error": "disk full"}),
+                ))?,
+                UploadOutcome::Hold => {}
+            }
+        }
+        let id = uploaded.id.clone();
+        state.uploads.push(uploaded);
+        Ok(id)
     }
 
-    fn cancel_upload(&self, _: String) -> Result<Value, String> {
-        Ok(json!({}))
+    fn cancel_upload(&self, transfer_id: String) -> Result<Value, String> {
+        let mut state = self.state();
+        state.cancelled_uploads.push(transfer_id.clone());
+        if let Some(uploaded) = state.uploads.iter().find(|upload| upload.id == transfer_id) {
+            uploaded
+                .sink
+                .send(transfer(uploaded, "cancelled", json!({})))?;
+        }
+        Ok(json!({"disposition": "cancelled"}))
     }
 
     fn chat_request(
@@ -3230,4 +3321,345 @@ fn the_working_line_says_compacting_whatever_the_turn_says(cx: &mut TestAppConte
     shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
     assert!(!shell.shows("chat-working"));
     assert!(!ticking(&mut shell));
+}
+
+// Attachments (S6).
+
+mod attachments {
+    use std::{path::PathBuf, rc::Rc, time::Duration};
+
+    use gpui_kit::{ExternalPaths, FileDropEvent};
+
+    use super::*;
+    use crate::chat::attach::ClipboardRead;
+    use crate::terminal::integration::transfers::UploadCollisionPolicy;
+
+    const SCREENSHOT: &str = "clipboard-0f8fad5b-d9cb-469f-a165-70867728950e.png";
+
+    impl Shell {
+        /// What the clipboard holds, as the native reader says it.
+        fn clipboard(&mut self, answer: Value) {
+            self.visual.update(|_, cx| {
+                cx.set_global(ClipboardRead(Rc::new(move || Ok(Some(answer.clone())))));
+            });
+        }
+
+        fn paste(&mut self) {
+            self.press("ctrl-v");
+            self.uploads_settle();
+        }
+
+        /// Lets the upload batches poll until nothing is left to do.
+        fn uploads_settle(&mut self) {
+            for _ in 0..20 {
+                self.visual
+                    .executor()
+                    .advance_clock(Duration::from_millis(50));
+                self.visual.run_until_parked();
+            }
+            self.settle();
+        }
+
+        fn click_and_settle(&mut self, id: &str) {
+            self.click(id);
+            self.uploads_settle();
+        }
+
+        /// Files dropped on the middle of the chat.
+        fn drop_files(&mut self, paths: &[PathBuf]) {
+            let at = self
+                .visual
+                .update(|window, _| window.find(format!("chat-{PANE}")).bounds().center());
+            // GPUI hit-tests nothing after a key press until the pointer
+            // moves, and a file drag does not count as moving it. The
+            // pointer is moved first, as a user who types and then drops
+            // must do too (the terminal's drop is the same).
+            self.visual
+                .simulate_mouse_move(at, None, Default::default());
+            let paths = ExternalPaths(paths.iter().cloned().collect());
+            self.visual.simulate_event(FileDropEvent::Entered {
+                position: at,
+                paths,
+            });
+            self.visual
+                .simulate_event(FileDropEvent::Pending { position: at });
+            self.visual
+                .simulate_event(FileDropEvent::Submit { position: at });
+            self.uploads_settle();
+        }
+
+        fn composer_text(&mut self) -> String {
+            let pane = self.pane();
+            self.visual
+                .update(|_, cx| pane.read(cx).composer.read(cx).value().to_string())
+        }
+
+        /// The uploads started, preflights left out.
+        fn uploaded(&self) -> Vec<(String, bool)> {
+            self.host
+                .state()
+                .uploads
+                .iter()
+                .filter(|upload| !upload.preflight)
+                .map(|upload| (upload.name.clone(), upload.image_png))
+                .collect()
+        }
+
+        /// Finishes the upload the fake host holds.
+        fn finish_upload(&mut self) {
+            {
+                let state = self.host.state();
+                let held = state.uploads.last().expect("an upload");
+                held.sink.send(completed(held)).unwrap();
+            }
+            self.uploads_settle();
+        }
+
+        /// Says the chat's host is a remote one, as an upload sees it.
+        fn remote(&mut self) {
+            let pane = self.pane();
+            self.visual.update(|_, cx| {
+                pane.update(cx, |pane, _| {
+                    pane.upload_scope = Rc::new(|pane, cx| {
+                        pane.transfer_scope(cx).map(|scope| TransferScope {
+                            local: false,
+                            ..scope
+                        })
+                    });
+                });
+            });
+        }
+    }
+
+    use crate::terminal::integration::transfers::TransferScope;
+
+    fn files(dir: &tempfile::TempDir, names: &[&str]) -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, b"twelve bytes").unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn a_pasted_image_is_uploaded_and_sent_by_its_host_path(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let staged = files(&dir, &[SCREENSHOT]).remove(0);
+        shell.clipboard(json!({"kind": "image", "staged": {
+            "path": staged, "name": SCREENSHOT, "sizeBytes": "12",
+        }}));
+        shell.paste();
+        assert!(shell.shows("chat-attachment-1"));
+        assert_eq!(shell.composer_text(), "", "an image is not text");
+        // Uploaded as a screenshot, and its name kept: the host may rename
+        // it, unasked.
+        assert_eq!(shell.uploaded(), [(SCREENSHOT.to_owned(), true)]);
+        assert!(matches!(
+            shell.host.state().uploads[1].collision,
+            UploadCollisionPolicy::Rename
+        ));
+        // Ready: on this machine's host there is no bar and no check.
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            format!("{SCREENSHOT}, 12 B")
+        );
+        assert!(!shell.shows("chat-attachment-progress-1"));
+
+        shell.input("The card covers the composer.");
+        shell.host.hold_next();
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "The card covers the composer.");
+        assert_eq!(sent.attachments.len(), 1);
+        assert_eq!(sent.attachments[0].path, format!("{STAGED}/{SCREENSHOT}"));
+        assert_eq!(sent.attachments[0].media_type, "image/png");
+        // The pending bubble shows the file, and the composer is clear of it.
+        let id = sent.client_message_id.clone();
+        assert!(shell.shows(&format!("chat-sent-{id}-0")));
+        assert!(!shell.shows("chat-attachment-1"));
+        shell.host.release();
+
+        // The host's item takes its place, with the same chip.
+        let mut arrived = item(&id, ChatItemKind::User, "The card covers the composer.");
+        arrived.attachments = sent.attachments.clone();
+        shell.chat(event(11, ChatChange::Item(arrived)));
+        assert_eq!(
+            shell.label(&format!("chat-sent-{id}-0")),
+            format!("{SCREENSHOT}, 12 B")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn two_dropped_files_upload_one_after_the_other_and_one_can_be_removed(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let dropped = files(&dir, &["muxflow-gpui.log", "card.png"]);
+        shell.drop_files(&dropped);
+        assert!(shell.shows("chat-attachment-1"));
+        assert!(shell.shows("chat-attachment-2"));
+        assert_eq!(
+            shell.uploaded(),
+            [
+                ("muxflow-gpui.log".to_owned(), false),
+                ("card.png".to_owned(), false)
+            ]
+        );
+        shell.hover("chat-attachment-1");
+        shell.click("chat-attachment-x-1");
+        assert!(!shell.shows("chat-attachment-1"));
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "", "the files alone are a message");
+        let paths: Vec<&str> = sent.attachments.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(paths, [format!("{STAGED}/card.png")]);
+        assert_eq!(sent.attachments[0].media_type, "image/png");
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_upload_keeps_send_off_until_it_is_retried_or_removed(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.host.state().upload_outcome = UploadOutcome::Fail;
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["muxflow-gpui.log"]));
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, upload failed: disk full"
+        );
+        assert!(shell.shows("chat-attachment-retry-1"));
+        shell.input("The log from the crash is attached.");
+        shell.press("enter");
+        assert_eq!(shell.host.count(ChatAction::Send), 0);
+        assert_eq!(
+            shell.label("chat-notice"),
+            "An attachment failed to upload. Retry or remove it."
+        );
+        // The chip says it; the terminal's upload list does not.
+        let listed = shell
+            .visual
+            .update(|_, cx| crate::terminal::integration::upload_list(cx).is_some());
+        assert!(!listed);
+
+        shell.host.state().upload_outcome = UploadOutcome::Complete;
+        shell.click_and_settle("chat-attachment-retry-1");
+        assert_eq!(shell.label("chat-attachment-1"), "muxflow-gpui.log, 12 B");
+        shell.press("enter");
+        assert_eq!(shell.host.last(ChatAction::Send).attachments.len(), 1);
+
+        // Removed instead, a failed file goes, and Send is on again.
+        shell.host.state().upload_outcome = UploadOutcome::Fail;
+        shell.drop_files(&files(&dir, &["again.log"]));
+        shell.click("chat-attachment-remove-2");
+        assert!(!shell.shows("chat-attachment-2"));
+        shell.input("Never mind.");
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(
+            (sent.text.as_str(), sent.attachments.len()),
+            ("Never mind.", 0)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn send_waits_while_a_file_uploads_to_a_remote_host(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.remote();
+        shell.host.state().upload_outcome = UploadOutcome::Hold;
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["muxflow-gpui.log"]));
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, uploading"
+        );
+        assert!(shell.shows("chat-attachment-progress-1"), "the bar");
+        shell.input("Screenshots and the log attached.");
+        shell.press("enter");
+        assert_eq!(shell.host.count(ChatAction::Send), 0);
+        assert_eq!(
+            shell.label("chat-notice"),
+            "The attachments are still uploading."
+        );
+        assert_eq!(shell.composer_text(), "Screenshots and the log attached.");
+
+        shell.finish_upload();
+        // Its check, for a moment, where the bar was.
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, uploaded"
+        );
+        assert!(!shell.shows("chat-attachment-progress-1"));
+        shell.wait(Duration::from_secs(2));
+        assert_eq!(shell.label("chat-attachment-1"), "muxflow-gpui.log, 12 B");
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(
+            sent.attachments[0].path,
+            format!("{STAGED}/muxflow-gpui.log")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn pasted_text_is_still_text(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.input("Look at ");
+        shell.clipboard(json!({"kind": "text", "text": "wrapped paths"}));
+        shell.paste();
+        assert_eq!(shell.composer_text(), "Look at wrapped paths");
+        assert!(!shell.shows("chat-attachments"));
+        assert!(shell.host.state().uploads.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn the_limits_are_said_over_the_composer(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.png");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(26 * 1024 * 1024)
+            .unwrap();
+        shell.drop_files(&[big]);
+        assert_eq!(
+            shell.label("chat-notice"),
+            "huge.png is over 25 MB, the most an image can be."
+        );
+        assert!(!shell.shows("chat-attachments"));
+        let names: Vec<String> = (0..11).map(|n| format!("f{n}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        shell.drop_files(&files(&dir, &names));
+        assert!(shell.shows("chat-attachment-10"));
+        assert!(!shell.shows("chat-attachment-11"));
+        assert_eq!(
+            shell.label("chat-notice"),
+            "A message takes at most 10 attachments."
+        );
+    }
+
+    #[gpui_kit::test]
+    fn an_edited_message_keeps_its_files(cx: &mut TestAppContext) {
+        let mut shell = shell(cx);
+        let mut sent = item("u1", ChatItemKind::User, "Why does it overlap?");
+        sent.attachments = vec![ChatAttachment {
+            path: format!("{STAGED}/card.png"),
+            name: "card.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1_468_006,
+        }];
+        shell.chat(snapshot(10, vec![sent], ""));
+        assert_eq!(shell.label("chat-sent-u1-0"), "card.png, 1.4 MB");
+        shell.hover("chat-item-u1");
+        shell.click("chat-edit-u1");
+        assert!(shell.shows("chat-attachment-1"));
+        shell.input(" Below 940px.");
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "Why does it overlap? Below 940px.");
+        assert_eq!(sent.attachments[0].path, format!("{STAGED}/card.png"));
+        assert!(shell.host.state().uploads.is_empty(), "already on the host");
+    }
 }

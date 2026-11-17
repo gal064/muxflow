@@ -9,7 +9,9 @@ use std::sync::Mutex;
 use tmux_agent_protocol::v1;
 
 use super::super::SequencerControl;
-use super::super::chat::{ChatError, ChatRuntime, PaneKey, SessionCommand};
+use super::super::chat::{
+    Attached, ChatError, ChatRuntime, PaneKey, SessionCommand, admit_attachments,
+};
 use super::super::snapshot::tmux_command;
 use super::super::terminal::validate_tmux_id;
 use super::super::tmux_actions::escaped_format_literal;
@@ -32,7 +34,25 @@ pub(super) async fn handle(
 ) {
     let outcome = match request.chat {
         None => Err(invalid("A chat operation needs a chat payload.")),
-        Some(chat) => dispatch(chat, connection_id, topology_baseline),
+        Some(mut chat) => {
+            // The files a message names are checked, and its inline images
+            // read, before anything else of it: off the runtime, and with no
+            // lock held.
+            let wanted = std::mem::take(&mut chat.attachments);
+            let sends = chat.action == i32::from(v1::ChatAction::Send);
+            let attached = match wanted.is_empty() || !sends {
+                true => Ok(Vec::new()),
+                false => tokio::task::spawn_blocking(move || admit_attachments(wanted))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ChatError::new(
+                            "chat_attachment_missing",
+                            "The attachments could not be read.",
+                        ))
+                    }),
+            };
+            attached.and_then(|attached| dispatch(chat, attached, connection_id, topology_baseline))
+        }
     };
     let response = match outcome {
         Ok(chat) => v1::Response {
@@ -47,6 +67,7 @@ pub(super) async fn handle(
 
 fn dispatch(
     request: v1::ChatRequest,
+    attachments: Vec<Attached>,
     connection_id: u64,
     topology_baseline: &Mutex<Option<(tmux_control::TmuxSnapshot, String)>>,
 ) -> Result<v1::ChatResponse, ChatError> {
@@ -146,6 +167,7 @@ fn dispatch(
         Action::Send => command(SessionCommand::Send {
             text: request.text,
             item_id: request.client_message_id,
+            attachments,
         }),
         Action::Interrupt => command(SessionCommand::Interrupt),
         // A missing answer is not a denial.
@@ -301,7 +323,7 @@ mod tests {
         let connection = register_control_event_sink(sender);
         let seen = Mutex::new(baseline(OLD, &[PANE]));
         let outcome = |request: v1::ChatRequest| {
-            dispatch(request, connection.id, &seen)
+            dispatch(request, Vec::new(), connection.id, &seen)
                 .map(|_| ())
                 .map_err(|error| error.code)
         };

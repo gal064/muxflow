@@ -9,10 +9,10 @@ use desktop_core::connection::chat::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, FontWeight, HighlightStyle,
-    Hsla, ImageCacheError, ImageSource, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement, StyleRefinement,
-    Styled, Window,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, ExternalPaths, FontWeight,
+    HighlightStyle, Hsla, ImageCacheError, ImageSource, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement,
+    StyleRefinement, Styled, Window,
     base::{TextView, TextViewStyle},
     canvas,
     component::{
@@ -28,7 +28,7 @@ use crate::{
     context_menu::{self, Entry, Item},
     fonts,
     markdown::is_click,
-    terminal::integration::agents::note_activity,
+    terminal::integration::{agents::note_activity, transfers::InternalPathDrag},
     theme::{self, Palette, metrics::ui},
     ui::{
         dialog::{self, Action},
@@ -115,8 +115,8 @@ fn markdown_style(p: &Palette, dark: bool) -> TextViewStyle {
         .with_dark(dark)
 }
 
-/// `.u`: one of the user's messages.
-fn bubble(text: SharedString, palette: &Palette) -> Div {
+/// `.u`: one of the user's messages, its files' chips above its text.
+fn bubble(text: SharedString, chips: Option<AnyElement>, palette: &Palette) -> Div {
     div()
         .max_w(relative(0.82))
         .min_w_0()
@@ -130,7 +130,8 @@ fn bubble(text: SharedString, palette: &Palette) -> Div {
         .px(ui(12.))
         .py(ui(8.))
         .text_color(palette.chrome_ink_strong)
-        .child(text)
+        .children(chips)
+        .when(!text.is_empty(), |bubble| bubble.child(text))
 }
 
 /// A right click on `element` offers to copy each of `texts` under its label.
@@ -308,12 +309,18 @@ impl ChatPane {
             Some(Row::Sending(sending)) => {
                 let sending = &self.sending[sending];
                 let text = sending.text.clone();
+                let sent: Vec<_> = sending
+                    .attachments
+                    .iter()
+                    .filter_map(super::attach::Attachment::wire)
+                    .collect();
+                let chips = self.message_chips(&sending.id, &sent, &palette);
                 // Dimmed until the host has it.
                 h_flex()
                     .w_full()
                     .justify_end()
                     .child(
-                        bubble(text.clone(), &palette)
+                        bubble(text.clone(), chips, &palette)
                             .opacity(0.6)
                             .id(SharedString::from(format!("chat-sending-{}", sending.id)))
                             .test_support()
@@ -450,6 +457,7 @@ impl ChatPane {
         let item: &ChatItem = &self.chat.items[index];
         let id = item.id.clone();
         let text: SharedString = item.text.clone().into();
+        let chips = self.message_chips(&id, &item.attachments, palette);
         let editing = self.editing.as_deref() == Some(id.as_str());
         let group = SharedString::from(format!("chat-user-{id}"));
         let name = SharedString::from(format!("chat-item-{id}"));
@@ -470,14 +478,13 @@ impl ChatPane {
                 cx.listener(move |this, _, window, cx| this.edit(&id, window, cx)),
             ));
         }
-        // Package D puts the message's attachment chips in the bubble.
         v_flex()
             .group(group)
             .w_full()
             .items_end()
             .gap(ui(3.))
             .child(copyable(
-                bubble(text.clone(), palette)
+                bubble(text.clone(), chips, palette)
                     .when(editing, |bubble| bubble.border_color(palette.accent))
                     .id(name)
                     .test_support()
@@ -1337,6 +1344,14 @@ impl Render for ChatPane {
             .aria_label("Chat")
             .track_focus(&self.focus)
             .key_context(super::CONTEXT)
+            // Files dropped anywhere on the chat are attached (S6).
+            .group(super::attach::DROP_GROUP)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.dropped(paths, window, cx);
+            }))
+            .on_drop(cx.listener(|this, drag: &InternalPathDrag, window, cx| {
+                this.dropped_from_app(drag, window, cx);
+            }))
             // Escape that nothing inside the chat took.
             .on_action(cx.listener(|this, _: &super::Escape, window, cx| this.escape(window, cx)))
             .relative()
@@ -1382,6 +1397,8 @@ impl Render for ChatPane {
                         .child(card),
                 )
             })
+            // Last, over everything, while files are dragged over the pane.
+            .child(super::attach::drop_hint(&palette))
     }
 }
 

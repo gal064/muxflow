@@ -150,9 +150,13 @@ pub(crate) trait ChatSession: Send {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SessionCommand {
     Send {
+        /// Empty only when the message is its attachments.
         text: String,
         /// The id the USER item must carry; never empty.
         item_id: String,
+        /// Staged files, checked and with inline images read; the USER item
+        /// carries them.
+        attachments: Vec<super::Attached>,
     },
     Interrupt,
     Answer {
