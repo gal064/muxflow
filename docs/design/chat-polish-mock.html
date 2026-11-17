@@ -1,0 +1,1565 @@
+<meta charset="utf-8">
+<title>Muxflow Chat — polish pass</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a review document, in the format of chat-mock.html. Each section is a short brief, then mocks drawn with Muxflow's own palette and metrics. */
+:root{
+  --page:#eeeef1;--bg:#fafafa;--raised:#f4f4f5;--hair:#e4e4e7;--border:#d4d4d8;--hover:#ececee;--sel:#ffffff;
+  --ink-strong:#18181b;--ink:#27272a;--dim:#71717b;--faint:#85858e;
+  --accent:#2f6fe0;--wash:#2f6fe01f;--ok:#16a34a;--warn:#b45309;--danger:#dc2626;--working:#d97706;--done:#0e7490;
+  --add:#16a34a1f;--del:#dc26261c;--shadow:0 14px 34px #18181b24;
+  --ui:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --page:#1f2329;--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;--hover:#2f343e;--sel:#353b45;
+  --ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;
+  --accent:#7aa6da;--wash:#7aa6da24;--ok:#28c840;--warn:#febc2e;--danger:#cc6566;--working:#f0c674;--done:#8abeb7;
+  --add:#28c84024;--del:#cc656626;--shadow:0 18px 44px #00000070;color-scheme:dark}}
+:root[data-theme="dark"]{
+  --page:#1f2329;--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;--hover:#2f343e;--sel:#353b45;
+  --ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;
+  --accent:#7aa6da;--wash:#7aa6da24;--ok:#28c840;--warn:#febc2e;--danger:#cc6566;--working:#f0c674;--done:#8abeb7;
+  --add:#28c84024;--del:#cc656626;--shadow:0 18px 44px #00000070;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--page);color:var(--ink);font-family:var(--ui);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;margin:0}
+.wrap{max-width:1180px;margin:0 auto;padding-block:36px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:44px}
+h1{font-size:28px;font-weight:600;letter-spacing:-.5px;color:var(--ink-strong);margin:0;text-wrap:balance}
+h2{font-size:19px;font-weight:600;letter-spacing:-.2px;color:var(--ink-strong);margin:0;text-wrap:balance}
+h3{font-size:13px;font-weight:600;color:var(--ink-strong);margin:0}
+p{margin:0;max-width:68ch}
+.lede{color:var(--dim);font-size:15px}
+.kicker{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:600}
+section{display:flex;flex-direction:column;gap:14px}
+.brief{display:flex;flex-direction:column;gap:8px}
+ul.pts{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px;max-width:74ch}
+ul.pts b,p b{color:var(--ink-strong);font-weight:600}
+code{font-family:var(--mono);font-size:12px;background:var(--raised);border:1px solid var(--hair);border-radius:4px;padding:0 4px}
+.toc{display:flex;flex-wrap:wrap;gap:6px 8px}
+.toc a{font-size:12.5px;color:var(--ink);text-decoration:none;border:1px solid var(--border);border-radius:999px;padding:3px 10px;background:var(--bg)}
+.toc a:hover,.toc a:focus-visible{border-color:var(--accent);color:var(--accent);outline:none}
+.scroll{overflow-x:auto;border-radius:10px}
+.cap{font-size:12.5px;color:var(--dim);max-width:80ch}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+@media(max-width:860px){.grid2,.grid3{grid-template-columns:minmax(0,1fr)}}
+.tile{display:flex;flex-direction:column;gap:8px;min-width:0}
+
+/* ---- mock window ---- */
+.win{min-width:980px;border:1px solid var(--border);border-radius:10px;background:var(--bg);overflow:hidden;font-size:13.5px;line-height:1.45;color:var(--ink)}
+.win.small{min-width:0}
+.dots{display:flex;gap:6px}.dots i{width:10px;height:10px;border-radius:50%;background:var(--border);display:block}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;min-width:0}
+.chip{flex:none;width:18px;height:18px;border-radius:5px;display:grid;place-items:center;font-size:9px;font-weight:600;font-family:var(--mono);background:var(--raised);border:1px solid var(--border);color:var(--dim)}
+.tabs{height:34px;display:flex;align-items:stretch;border-bottom:1px solid var(--hair);font-size:12.5px;color:var(--dim)}
+.tab{display:flex;align-items:center;gap:7px;padding:0 12px;border-right:1px solid var(--hair);white-space:nowrap}
+.tab.on{background:var(--sel);color:var(--ink-strong)}
+.tabs .sp{flex:1}
+.seg{display:flex;border:1px solid var(--border);border-radius:5px;overflow:hidden;font-size:11px;flex:none}
+.seg span{padding:2px 8px;color:var(--dim)}.seg span.on{background:var(--wash);color:var(--accent)}
+
+/* ---- chat ---- */
+.u{align-self:flex-end;max-width:82%;background:var(--raised);border:1px solid var(--hair);border-radius:12px 12px 3px 12px;padding:8px 12px;color:var(--ink-strong);position:relative}
+.u.editing{border-color:var(--accent)}
+.a{color:var(--ink);max-width:100%}
+.a p{max-width:none}.a p+p{margin-top:8px}
+.tool{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);border:1px solid var(--hair);border-radius:7px;padding:5px 9px;background:var(--bg);min-width:0}
+.tool .k{font-family:var(--mono);font-size:11px;color:var(--faint);flex:none}
+.tool .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:12px;color:var(--ink)}
+.tool .t.ui{font-family:var(--ui);font-size:12.5px}
+.tool .r{flex:none;font-size:11px;display:inline-flex;align-items:center;gap:4px}
+.tool>.ic{color:var(--faint)}
+.tool.box{flex-direction:column;align-items:stretch;padding:0;gap:0;overflow:hidden}
+.tool.box>.hd2{display:flex;align-items:center;gap:8px;padding:5px 9px;min-width:0}
+.tool.box>.out{border-top:1px solid var(--hair);background:var(--raised);padding:6px 10px;color:var(--dim);font-size:12.5px;line-height:1.5}
+.okc{color:var(--ok)}.badc{color:var(--danger)}.wkc{color:var(--working)}
+.card{border:1px solid var(--border);border-radius:9px;background:var(--bg);overflow:hidden}
+.card .hd{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--hair);font-size:12.5px;color:var(--ink-strong)}
+.card .hd .sp{flex:1}.card .hd small{color:var(--faint);font-size:11px}
+.card.ask{border-color:var(--danger)}.card.ask .hd{background:var(--del)}
+.card .bd{padding:9px 10px;display:flex;flex-direction:column;gap:8px}
+.cmd{font-family:var(--mono);font-size:12px;background:var(--raised);border:1px solid var(--hair);border-radius:5px;padding:5px 8px;color:var(--ink-strong);overflow-x:auto;white-space:nowrap}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+.b{font-size:12px;padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--ink);white-space:nowrap}
+.b.pri{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:500}
+.b.ghost{border-color:transparent;color:var(--dim)}
+.comp{width:min(640px,100%);margin:0 auto 14px;border:1px solid var(--border);border-radius:11px;background:var(--bg);box-shadow:0 1px 0 var(--hair);position:relative}
+.comp.in{margin:0;width:100%}
+.comp .ta{padding:10px 12px 4px;min-height:44px;color:var(--faint)}
+.comp .ta.txt{color:var(--ink-strong)}
+.comp .bar{display:flex;align-items:center;gap:6px;padding:6px 8px 8px;flex-wrap:wrap}
+.comp .note{padding:8px 12px 0;font-size:12px;color:var(--danger)}
+.pill{font-size:11.5px;border:1px solid var(--border);border-radius:999px;padding:2px 9px;color:var(--ink);white-space:nowrap;background:var(--bg);display:inline-flex;align-items:center;gap:4px}
+.pill .ic{width:12px;height:12px;color:var(--dim);margin-right:-3px}
+.pill.pending{opacity:.6}
+.pill.open{border-color:var(--accent)}
+.comp .bar .sp{flex:1}
+.comp .bar .end{margin-left:auto;display:flex;align-items:center;gap:6px;flex:none}
+.ctx{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.meter{width:54px;height:4px;border-radius:2px;background:var(--hair);overflow:hidden}.meter i{display:block;height:100%;width:21%;background:var(--dim)}
+.send{width:26px;height:26px;border-radius:7px;background:var(--accent);color:var(--bg);display:grid;place-items:center;font-size:13px;font-weight:600;flex:none;position:relative}
+.send .ic{width:15px;height:15px;stroke-width:2.4}
+.send .ic.sq{width:10px;height:10px;fill:currentColor}
+.send.stop{background:var(--danger)}
+.send.off{opacity:.42}
+.banner{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink);background:var(--wash);border-bottom:1px solid var(--hair);padding:6px 12px;border-radius:10px 10px 0 0}
+.banner .sp{flex:1}
+.pop{border:1px solid var(--border);border-radius:9px;background:var(--raised);box-shadow:var(--shadow);overflow:hidden;font-size:12.5px}
+.pop .it{display:flex;align-items:baseline;gap:10px;padding:5px 10px;min-width:0}
+.pop .it.on{background:var(--wash)}
+.pop .it b{font-family:var(--mono);font-weight:500;font-size:12px;color:var(--ink-strong);white-space:nowrap}
+.pop .it span{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.pad{padding:14px;display:flex;flex-direction:column;gap:10px}
+
+/* ---- details card ---- */
+.dcard{width:238px;border:1px solid var(--border);border-radius:10px;background:var(--bg);box-shadow:var(--shadow);font-size:12.5px;flex:none}
+.dcard .g{padding:8px 10px;display:flex;flex-direction:column;gap:7px;border-bottom:1px solid var(--hair)}
+.dcard .g:last-child{border-bottom:0}
+.dcard .l{display:flex;align-items:center;gap:8px;min-width:0;position:relative}
+.dcard .l .v{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink-strong)}
+.dcard .l .v .f{color:var(--faint)}
+.dcard .l .x{color:var(--faint);font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;display:inline-flex;align-items:center;gap:4px}
+.dcard .l .x.caret{font-size:13px;color:var(--dim)}
+.dcard .l.dim .v,.dcard .l.dim .x{color:var(--faint)}
+.dcard .l.hov{background:var(--hover);margin:-2px -4px;padding:2px 4px;border-radius:5px}
+.v.start{direction:rtl;text-align:left}
+.gl{flex:none;width:14px;text-align:center;color:var(--faint);font-family:var(--mono);font-size:11px;display:grid;place-items:center}
+.bar2{flex:1;height:4px;border-radius:2px;background:var(--hair);overflow:hidden}.bar2 i{display:block;height:100%;width:21%;background:var(--dim)}
+
+/* ---- tables ---- */
+.tbl{overflow-x:auto;border:1px solid var(--border);border-radius:9px;background:var(--bg)}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:620px}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--hair);vertical-align:top}
+th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600;background:var(--raised)}
+tr:last-child td{border-bottom:0}
+td b{color:var(--ink-strong);font-weight:600}
+.tag{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.04em;border-radius:4px;padding:0 6px;border:1px solid var(--border);white-space:nowrap;line-height:1.6}
+.tag.y{color:var(--ok);border-color:var(--ok)}.tag.n{color:var(--warn);border-color:var(--warn)}
+
+/* ================= additions for this pass ================= */
+.ic{width:14px;height:14px;flex:none;display:inline-block;vertical-align:-2px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ic.s12{width:12px;height:12px}.ic.s16{width:16px;height:16px}.ic.s20{width:20px;height:20px}
+.wk{width:10px;height:10px;flex:none;display:inline-block;fill:currentColor;stroke:none;color:var(--working)}
+.sid{font-family:var(--mono);font-size:12.5px;font-weight:500;color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:0 6px;margin-right:9px;vertical-align:2px}
+.tag.t{color:var(--dim)}.tag.p{color:var(--accent);border-color:var(--accent)}.tag.alt{color:var(--warn);border-color:var(--warn)}
+h3 .tag{margin-right:7px;vertical-align:1px}
+.cv{display:flex;flex-direction:column;gap:14px;padding:16px;min-width:0}
+.stage{padding:16px;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.rel{position:relative}
+.tip{position:absolute;z-index:3;background:var(--raised);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow);padding:4px 8px;font-size:11.5px;line-height:1.4;color:var(--ink-strong);white-space:nowrap;font-family:var(--ui);font-weight:400;pointer-events:none}
+.tip.wrap{white-space:normal;width:226px}
+.tip.mono{font-family:var(--mono);font-size:11px}
+.alts{display:flex;flex-direction:column;gap:10px;padding:14px}
+.alts .set{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.alts .set>span:first-child{width:62px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);flex:none}
+.alt{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--hair);border-radius:7px;padding:4px 9px;font-size:12px;color:var(--ink-strong);background:var(--bg)}
+.alt .ic{color:var(--faint)}
+.alt small{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.alt.rec{border-color:var(--accent);background:var(--wash)}
+.alt.rec .ic{color:var(--accent)}
+
+/* message buttons */
+.msg{display:flex;flex-direction:column;gap:3px;min-width:0}
+.msg.me{align-items:flex-end}
+.mrow{display:flex;gap:2px;height:24px;opacity:0}
+.msg:hover .mrow,.msg:focus-within .mrow,.mrow.show{opacity:1}
+.mb{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--faint);position:relative;border:0;background:none;padding:0;cursor:pointer;font:inherit}
+.mb:hover,.mb.hov{color:var(--ink-strong);background:var(--hover)}
+.mb:focus-visible{outline:none;box-shadow:inset 0 0 0 1px var(--accent);color:var(--ink-strong)}
+.mb.on{color:var(--accent)}
+.mb .b2{display:none}
+.mb.done{color:var(--ok)}.mb.done .b1{display:none}.mb.done .b2{display:block}
+.mb .tip{top:27px;left:50%;transform:translateX(-50%)}
+.ed{flex:none;margin-top:6px;font-size:11px;color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:1px 6px;background:var(--bg)}
+
+/* tool groups */
+.grp{display:flex;flex-direction:column;gap:6px;min-width:0}
+.gh{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);padding:3px 6px;margin:0 -6px;border-radius:6px;min-width:0;cursor:pointer;user-select:none}
+.gh:hover{background:var(--hover)}
+.gh>.ic{color:var(--faint)}
+.gh .n{color:var(--ink);flex:none;font-weight:500;white-space:nowrap}
+.gh .n.live{color:var(--ink-strong)}
+.gh .sum{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--faint)}
+.gh .fail{color:var(--danger);flex:none;font-weight:500;white-space:nowrap}
+.gh .cnt{flex:none;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.fch{font-family:var(--mono);font-size:11px;color:var(--ink);border:1px solid var(--hair);background:var(--raised);border-radius:4px;padding:0 5px;flex:none;line-height:1.6}
+.fch:hover{border-color:var(--accent);color:var(--accent)}
+.gb{display:flex;flex-direction:column;gap:6px;padding-left:22px;min-width:0}
+.grp .cd{display:none}.grp.open .cd{display:inline-block}.grp.open .cr{display:none}
+.grp:not(.open)>.gb.fold{display:none}
+
+/* status line */
+.stl{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);min-width:0;padding:0 1px}
+.stl .mk{width:14px;flex:none;display:grid;place-items:center}
+.stl .lbl{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.stl .tm{flex:none;color:var(--faint);font-variant-numeric:tabular-nums}
+.stl .esc{flex:none;color:var(--faint);white-space:nowrap}
+.stl .esc kbd{font-family:var(--ui);font-size:10.5px;border:1px solid var(--border);border-radius:4px;padding:0 4px;color:var(--dim)}
+.prev{margin-top:-10px;padding-left:23px;font-size:12px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spin{animation:spin 1s linear infinite;color:var(--working)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.shim{background:linear-gradient(90deg,var(--dim) 0%,var(--dim) 38%,var(--ink-strong) 50%,var(--dim) 62%,var(--dim) 100%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent!important;animation:shim 2.4s linear infinite}
+@keyframes shim{from{background-position:100% 0}to{background-position:0% 0}}
+@media (prefers-reduced-motion:reduce){.spin,.shim{animation:none}.shim{background:none;color:var(--ink)!important}}
+.top-note{text-align:center;font-size:12.5px;color:var(--faint)}
+
+/* attachments */
+.atts{display:flex;flex-wrap:wrap;gap:8px;padding:10px 10px 0}
+.att{position:relative;display:flex;align-items:center;gap:9px;height:54px;padding:4px 12px 4px 4px;border:1px solid var(--border);border-radius:9px;background:var(--raised);max-width:164px;min-width:0;overflow:hidden;flex:none}
+.att .th{width:44px;height:44px;border-radius:6px;flex:none;overflow:hidden;border:1px solid var(--hair);display:block}
+.att .th svg{display:block;width:100%;height:100%}
+.att .fi{width:44px;height:44px;border-radius:6px;flex:none;display:grid;place-items:center;background:var(--bg);border:1px solid var(--hair);color:var(--dim)}
+.att .nm{display:flex;flex-direction:column;min-width:0;font-size:12px;line-height:1.35}
+.att .nm b{font-weight:500;color:var(--ink-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.att .nm span{color:var(--faint);font-size:11px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px}
+.att .rm{position:absolute;top:3px;right:3px;width:18px;height:18px;border-radius:50%;background:var(--bg);border:1px solid var(--border);display:grid;place-items:center;color:var(--dim);opacity:0}
+.att .rm .ic{width:11px;height:11px;stroke-width:2.4}
+.att:hover .rm,.att.hov .rm{opacity:1}
+.att .pg{position:absolute;left:0;bottom:0;height:2px;background:var(--accent)}
+.att.bad{border-color:var(--danger);background:var(--del)}
+.att.bad .nm span{color:var(--danger)}
+.att .lk{font-size:11px;color:var(--accent);margin-left:6px}
+.att .lk.d{color:var(--dim)}
+.u .atts{padding:0 0 8px;justify-content:flex-end}
+.u .att{background:var(--bg)}
+.drop{position:absolute;inset:0;background:var(--wash);border:2px solid var(--accent);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--accent);font-weight:500;font-size:13.5px}
+.drop .ic{width:16px;height:16px}
+.drop .lbl2{display:inline-flex;align-items:center;gap:7px;background:var(--bg);border:1px solid var(--accent);border-radius:999px;padding:5px 12px;box-shadow:var(--shadow)}
+
+/* split window */
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.split>div{min-width:0;display:flex;flex-direction:column}
+.split>div+div{border-left:1px solid var(--hair)}
+.ph-h{height:30px;display:flex;align-items:center;gap:7px;padding:0 10px;border-bottom:1px solid var(--hair);font-size:12px;color:var(--dim);white-space:nowrap}
+.ph-h.on{color:var(--ink-strong);background:var(--sel)}
+
+/* colour table */
+.sw{display:inline-block;width:18px;height:18px;border-radius:4px;border:1px solid var(--border);background:var(--c,transparent);vertical-align:middle;margin-right:8px}
+.ph{color:var(--faint);font-family:var(--mono);font-size:12px}
+
+.swh{display:inline-flex;align-items:center;margin-right:10px;white-space:nowrap;color:var(--dim);font-size:12px}
+.swh code{margin-right:4px}
+table.cols td{vertical-align:middle}
+td.low{color:var(--danger)}td.low b{color:var(--danger)}
+.fxg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 16px}
+.fxl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
+.fx{border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--ink);font-size:13.5px;line-height:1.45;overflow:hidden}
+.fx.dk{--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;--hover:#2f343e;--sel:#353b45;--ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;--accent:#7aa6da;--wash:#7aa6da24;--ok:#28c840;--danger:#cc6566;--working:#f0c674;--dink:#e79596;--okt:#28c840;--wkt:#f0c674;--lnk:#7aa6da}
+.fx.lt{--bg:#fafafa;--raised:#f4f4f5;--hair:#e4e4e7;--border:#d4d4d8;--hover:#ececee;--sel:#ffffff;--ink-strong:#18181b;--ink:#27272a;--dim:#71717b;--faint:#85858e;--accent:#2f6fe0;--wash:#2f6fe01f;--ok:#16a34a;--danger:#dc2626;--working:#d97706;--dink:#b91c1c;--okt:#15803d;--wkt:#b45309;--lnk:#2563eb}
+.fx .lnk{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.fx .ntc{text-align:center;font-size:12.5px;color:var(--faint)}
+.fx.c1 .tool .k,.fx.c1 .gh .sum,.fx.c1 .ntc{color:var(--dim)}
+.fx.c1 .badc{color:var(--dink)}
+.fx.c1.lt .okc{color:var(--okt)}.fx.c1.lt .wkc{color:var(--wkt)}.fx.c1.lt .lnk{color:var(--lnk)}
+.fx.c2.dk .u{background:#353b45;border-color:transparent}.fx.c2.lt .u{background:#e4e4e7;border-color:transparent}
+.fx.c3.dk .comp{background:#2c313a;border-color:var(--hair)}.fx.c3.lt .comp{background:#ffffff;border-color:var(--hair)}
+@media(max-width:860px){.fxg{grid-template-columns:minmax(0,1fr)}}
+
+/* background tasks, subagents, compacting */
+.subs{display:flex;flex-direction:column;gap:8px;margin-top:-6px;padding-left:22px;min-width:0}
+.sub{display:flex;gap:8px;min-width:0;font-size:12.5px}
+.sub .mk{width:14px;height:18px;flex:none;display:grid;place-items:center}
+.sub .sb{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.sub .l1{display:flex;gap:7px;min-width:0;white-space:nowrap}
+.sub .ty{flex:none;color:var(--ink-strong);font-weight:500}
+.sub .ds{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.sub .l2{font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.tool .fg{color:var(--faint)}
+.comp.hasbg{margin-top:6px}
+.comp.hasbg .ta{padding-top:15px}
+.comp .bgt{position:absolute;top:-11px;left:10px;font-size:11px;padding:1px 8px;gap:5px;cursor:pointer}
+.comp .bgt .ic{margin-right:0;color:var(--dim)}
+.comp .bgt.open .ic{color:var(--accent)}
+.pop .bt{display:flex;align-items:center;gap:8px;padding:5px 10px;min-width:0;height:30px}
+.pop .bt>.ic{color:var(--faint)}
+.pop .bt .d{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink-strong)}
+.pop .bt .tm{flex:none;font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.pop .bt .mb{width:20px;height:20px;margin-right:-5px}
+.pop .bt .mb .ic{width:12px;height:12px}
+/* theme switch */
+.thm{position:fixed;top:12px;right:12px;z-index:10;display:inline-flex;align-items:center;gap:6px;font:500 12px var(--ui);color:var(--ink);background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:4px 10px;cursor:pointer}
+.thm:hover{border-color:var(--accent);color:var(--accent)}
+.thm .d{display:none}
+:root[data-theme="dark"] .thm .d{display:inline-block}:root[data-theme="dark"] .thm .l{display:none}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .thm .d{display:inline-block}:root:not([data-theme="light"]) .thm .l{display:none}}
+/* The answer form and its bar. */
+.qhead{display:flex;align-items:baseline;gap:10px;margin-top:10px}
+.qlist{display:flex;flex-direction:column;gap:10px}
+.q{border:1px solid var(--border);border-radius:10px;background:var(--bg);padding:12px 14px;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px}
+.q.done{border-color:var(--ok)}
+.q .qt{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.q .qid{font:600 12px var(--mono);color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:0 6px;flex:none}
+.q .qq{font-weight:600;color:var(--ink-strong);font-size:14.5px}
+.q .qs{font-size:12.5px;color:var(--accent);text-decoration:none;white-space:nowrap}
+.q .qs:hover{text-decoration:underline}
+.q .qst{margin-left:auto;font-size:11.5px;color:var(--faint);white-space:nowrap}
+.q.done .qst{color:var(--ok)}
+.q .qh{font-size:12.5px;color:var(--dim);max-width:86ch}
+.opts{display:flex;flex-direction:column;gap:6px}
+.opts.row{flex-direction:row;flex-wrap:wrap}
+.opt{display:flex;align-items:flex-start;gap:9px;border:1px solid var(--border);border-radius:8px;padding:8px 11px;cursor:pointer;background:var(--bg);min-height:38px}
+.opt:hover{border-color:var(--accent)}
+.opt input{margin:3px 0 0;accent-color:var(--accent);flex:none;width:15px;height:15px}
+.opt .ol{color:var(--ink-strong)}
+.opt .od{display:block;font-size:12.5px;color:var(--dim)}
+.opt .tag{margin-left:8px;vertical-align:1px}
+.opt:has(input:checked){border-color:var(--accent);background:var(--wash)}
+.opt:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:1px}
+.qnote{font:13px/1.5 var(--ui);color:var(--ink-strong);background:var(--raised);border:1px solid var(--hair);border-radius:7px;padding:7px 10px;width:100%;resize:vertical;min-height:34px}
+.qnote::placeholder{color:var(--faint)}
+.qnote:focus{outline:none;border-color:var(--accent)}
+.qnote.big{background:var(--bg);border-color:var(--border)}
+.qnote.mono{font:12px/1.5 var(--mono);color:var(--ink)}
+.q.need .qnote{border-color:var(--warn)}
+body{padding-bottom:64px}
+.ansbar{position:fixed;left:0;right:0;bottom:0;z-index:20;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px max(16px,env(safe-area-inset-right,0px)) 9px max(16px,env(safe-area-inset-left,0px));background:var(--bg);border-top:1px solid var(--border);box-shadow:0 -6px 18px #00000018;font-size:12.5px}
+.ansbar .prog{color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ansbar .prog b{color:var(--ink-strong)}
+.ansbar .meterw{width:120px;height:5px;border-radius:3px;background:var(--hair);overflow:hidden;flex:none}
+.ansbar .meterw i{display:block;height:100%;width:0;background:var(--ok)}
+.ansbar .sp{flex:1}
+.ab{font:500 12.5px var(--ui);padding:5px 12px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--ink);cursor:pointer;text-decoration:none;white-space:nowrap}
+.ab:hover,.ab:focus-visible{border-color:var(--accent);color:var(--accent);outline:none}
+.ab.pri{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600}
+.ab.pri:hover,.ab.pri:focus-visible{color:var(--bg);filter:brightness(1.08)}
+.ab.ok{background:var(--ok);border-color:var(--ok);color:var(--bg)}
+@media (max-width:760px){.ansbar .meterw,.ansbar #ab-dl,.ansbar #ab-clear{display:none}}
+.answers{border:1px solid var(--accent);border-radius:12px;background:var(--wash);padding:12px;display:flex;flex-direction:column;gap:10px;margin-top:6px}
+.answers>h3{display:flex;align-items:center;gap:8px;font-size:13.5px}
+.answers .qgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(460px,100%),1fr));gap:10px;align-items:start}
+.answers .q.wide{grid-column:1/-1}
+.qopen{display:flex;flex-wrap:wrap;gap:6px}
+.qopen a{font:600 12px var(--mono);color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:1px 7px;text-decoration:none}
+.qopen span{color:var(--ok);font-size:13px}
+.q.flash{box-shadow:0 0 0 3px var(--wash),0 0 0 1px var(--accent)}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<!-- Lucide icons, copied from gpui-kit-assets 0.9.0 (assets/icons). -->
+<symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2" /><rect width="20" height="8" x="2" y="14" rx="2" ry="2" /><line x1="6" x2="6.01" y1="6" y2="6" /><line x1="6" x2="6.01" y1="18" y2="18" /></symbol>
+<symbol id="i-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></symbol>
+<symbol id="i-laptop" viewBox="0 0 24 24"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z" /><path d="M20.054 15.987H3.946" /></symbol>
+<symbol id="i-hard-drive" viewBox="0 0 24 24"><path d="M10 16h.01" /><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /><path d="M21.946 12.013H2.054" /><path d="M6 16h.01" /></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></symbol>
+<symbol id="i-git-branch" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></symbol>
+<symbol id="i-git-commit-horizontal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><line x1="3" x2="9" y1="12" y2="12" /><line x1="15" x2="21" y1="12" y2="12" /></symbol>
+<symbol id="i-git-commit-vertical" viewBox="0 0 24 24"><path d="M12 3v6" /><circle cx="12" cy="12" r="3" /><path d="M12 15v6" /></symbol>
+<symbol id="i-file-diff" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M9 10h6" /><path d="M12 13V7" /><path d="M9 17h6" /></symbol>
+<symbol id="i-diff" viewBox="0 0 24 24"><path d="M12 3v14" /><path d="M5 10h14" /><path d="M5 21h14" /></symbol>
+<symbol id="i-git-compare" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 0 1 2 2v7" /><path d="M11 18H8a2 2 0 0 1-2-2V9" /></symbol>
+<symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7" /><path d="M12 19V5" /></symbol>
+<symbol id="i-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+<symbol id="i-git-fork" viewBox="0 0 24 24"><circle cx="12" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><circle cx="18" cy="6" r="3" /><path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" /><path d="M12 12v3" /></symbol>
+<symbol id="i-square-terminal" viewBox="0 0 24 24"><path d="m7 11 2-2-2-2" /><path d="M11 13h4" /><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /></symbol>
+<symbol id="i-file-text" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></symbol>
+<symbol id="i-file-pen-line" viewBox="0 0 24 24"><path d="M14.364 13.634a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506l4.013-4.009a1 1 0 0 0-3.004-3.004z" /><path d="M14.487 7.858A1 1 0 0 1 14 7V2" /><path d="M20 19.645V20a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l2.516 2.516" /><path d="M8 18h1" /></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34" /><circle cx="11" cy="11" r="8" /></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /><path d="M2 12h20" /></symbol>
+<symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z" /></symbol>
+<symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8" /><rect width="16" height="12" x="4" y="8" rx="2" /><path d="M2 14h2" /><path d="M20 14h2" /><path d="M15 13v2" /><path d="M9 13v2" /></symbol>
+<symbol id="i-loader-circle" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></symbol>
+<symbol id="i-brain" viewBox="0 0 24 24"><path d="M12 18V5" /><path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4" /><path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5" /><path d="M17.997 5.125a4 4 0 0 1 2.526 5.77" /><path d="M18 18a4 4 0 0 0 2-7.464" /><path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517" /><path d="M6 18a4 4 0 0 1-2-7.464" /><path d="M6.003 5.125a4 4 0 0 0-2.526 5.77" /></symbol>
+<symbol id="i-paperclip" viewBox="0 0 24 24"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" /></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></symbol>
+<symbol id="i-shrink" viewBox="0 0 24 24"><path d="m15 15 6 6m-6-6v4.8m0-4.8h4.8" /><path d="M9 19.8V15m0 0H4.2M9 15l-6 6" /><path d="M15 4.2V9m0 0h4.8M15 9l6-6" /><path d="M9 4.2V9m0 0H4.2M9 9 3 3" /></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" /><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" /><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" /></symbol>
+<!-- The app's still working mark (motion::WorkingMark::Bars at 10px). -->
+<symbol id="i-working" viewBox="0 0 10 10"><rect x="1" y="3" width="2" height="4" rx="1"/><rect x="4" y="1" width="2" height="8" rx="1"/><rect x="7" y="2" width="2" height="6" rx="1"/></symbol>
+</defs></svg>
+
+<button class="thm" type="button" id="thm" title="Switch light and dark"><svg class="ic l"><use href="#i-moon"/></svg><svg class="ic d"><use href="#i-sun"/></svg>Theme</button>
+
+<div class="wrap">
+
+<header class="brief">
+  <span class="kicker">Muxflow · Chat · polish pass · for review</span>
+  <h1>Muxflow Chat — polish pass</h1>
+  <p class="lede">Changes to the chat pane after its first build, from the owner's list of problems. Each section says what is wrong today, what changes, and shows it next to today where that helps. Mocks use sample data. Nothing here is built yet. Answer in the form at the end: one question per section and per open decision (D1 to D18), then press Copy answers in the bar at the bottom.</p>
+  <nav class="toc" aria-label="Sections">
+    <a href="#s1">S1 Details card</a><a href="#s2">S2 Model picker</a><a href="#s3">S3 Message buttons</a><a href="#s4">S4 Tool calls grouped</a><a href="#s5">S5 Working and thinking</a><a href="#s6">S6 Attachments</a><a href="#s7">S7 Slow link</a><a href="#s8">S8 Colours</a><a href="#s9">S9 Background tasks</a><a href="#decide">Your answers</a><a href="#same">No visual change</a>
+  </nav>
+</header>
+
+<!-- ============ S1 DETAILS CARD ============ -->
+<section id="s1">
+  <div class="brief">
+    <h2><span class="sid">S1</span>Details card</h2>
+    <p>Today the rows start with text glyphs (▣ / ⑂ ○ ±), the folder is an absolute path, and one row, "Changes vs main", mixes uncommitted work with the whole branch.</p>
+    <ul class="pts">
+      <li><b>Icons</b> from the UI kit's Lucide set, in the same 14px column and the same faint colour: <code>server</code> for the host, <code>folder</code>, <code>git-branch</code>, <code>git-commit-horizontal</code> for Commit…, <code>file-diff</code> for the changes rows. The branch row ends with <code>chevron-down</code> instead of ▾.</li>
+      <li><b>The folder is never absolute.</b> Inside a repository it starts with the repository's folder name: <code>muxflow</code> at the root, <code>muxflow/apps/desktop-gpui</code> below it. In a worktree that is the worktree's own folder. Outside a repository it is relative to home: <code>~/notes/drafts</code>.</li>
+      <li><b>A long folder</b> is still cut from the start, so the end stays readable. Hovering the row shows the full absolute path.</li>
+      <li><b>Changes becomes two rows.</b> Each opens the Git panel in that scope.
+        <b>Uncommitted</b>: staged, unstaged and untracked files against the last commit.
+        <b>Branch vs main</b>: everything on this branch since it split from <code>origin/main</code>, uncommitted and untracked included.</li>
+      <li><b>States:</b> nothing uncommitted reads "none", dim. A repository with no default branch has no second row. While counts load, each row shows a dim "…".</li>
+      <li><b>Context</b> is unchanged.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3><span class="tag t">Today</span>Glyphs, absolute folder, one changes row</h3>
+      <div class="win small"><div class="stage">
+        <div class="dcard">
+          <div class="g"><div class="l"><span class="gl">▣</span><span class="v">devbox</span></div><div class="l"><span class="gl">/</span><span class="v start"><bdi>/home/gal/dev/muxflow/apps/desktop-gpui</bdi></span></div></div>
+          <div class="g" style="gap:3px"><div class="l"><span class="gl">⑂</span><span class="v">gpui/chat</span><span class="x caret">▾</span></div><div class="l"><span class="gl">○</span><span class="v">Commit…</span></div><div class="l"><span class="gl">±</span><span class="v">Changes <span class="f">vs main</span></span><span class="x"><span class="okc">+182</span> <span class="badc">−41</span></span></div></div>
+          <div class="g"><div class="l"><span style="color:var(--faint);font-size:11px">Context</span><span class="bar2"><i></i></span><span class="x">209k / 1M</span></div></div>
+        </div>
+      </div></div>
+      <p class="cap">As drawn by <code>details.rs</code> today. The folder is the pane's path as the host reports it, cut from the start.</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Icons, short folder, two changes rows</h3>
+      <div class="win small"><div class="stage" style="padding-bottom:40px">
+        <div class="dcard">
+          <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-server"/></svg></span><span class="v">devbox</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-folder"/></svg></span><span class="v start"><bdi>muxflow/apps/desktop-gpui</bdi></span></div></div>
+          <div class="g" style="gap:3px"><div class="l"><span class="gl"><svg class="ic"><use href="#i-git-branch"/></svg></span><span class="v">gpui/chat</span><span class="x"><svg class="ic" style="color:var(--dim)"><use href="#i-chevron-down"/></svg></span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg></span><span class="v">Commit…</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Uncommitted</span><span class="x"><span class="okc">+12</span> <span class="badc">−3</span></span></div><div class="l hov"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Branch <span class="f">vs main</span></span><span class="x"><span class="okc">+182</span> <span class="badc">−41</span></span><span class="tip wrap" style="top:26px;left:-6px">Everything on this branch since it split from origin/main, uncommitted and untracked included.</span></div></div>
+          <div class="g"><div class="l"><span style="color:var(--faint);font-size:11px">Context</span><span class="bar2"><i></i></span><span class="x">209k / 1M</span></div></div>
+        </div>
+      </div></div>
+      <p class="cap">The recommended icon set. The pointer is on Branch vs main, so its tooltip shows. Uncommitted's tooltip reads "Staged, unstaged and untracked files against the last commit."</p>
+    </div>
+  </div>
+
+  <div class="tile">
+    <h3>Icon alternatives (D1, D2)</h3>
+    <div class="win small"><div class="alts">
+      <div class="set"><span>Host</span>
+        <span class="alt rec"><svg class="ic"><use href="#i-server"/></svg>devbox <small>server · rec</small></span>
+        <span class="alt"><svg class="ic"><use href="#i-monitor"/></svg>devbox <small>monitor</small></span>
+        <span class="alt"><svg class="ic"><use href="#i-laptop"/></svg>devbox <small>laptop</small></span>
+        <span class="alt"><svg class="ic"><use href="#i-hard-drive"/></svg>devbox <small>hard-drive</small></span></div>
+      <div class="set"><span>Commit</span>
+        <span class="alt rec"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg>Commit… <small>git-commit-horizontal · rec</small></span>
+        <span class="alt"><svg class="ic"><use href="#i-git-commit-vertical"/></svg>Commit… <small>git-commit-vertical</small></span></div>
+      <div class="set"><span>Changes</span>
+        <span class="alt rec"><svg class="ic"><use href="#i-file-diff"/></svg>Uncommitted <small>file-diff · rec</small></span>
+        <span class="alt"><svg class="ic"><use href="#i-diff"/></svg>Uncommitted <small>diff</small></span>
+        <span class="alt"><svg class="ic"><use href="#i-git-compare"/></svg>Uncommitted <small>git-compare</small></span></div>
+    </div></div>
+    <p class="cap">Each candidate drawn at the card's size and colour. The recommended one is outlined.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="tile">
+      <h3>Folder: repository root</h3>
+      <div class="win small"><div class="stage"><div class="dcard">
+        <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-server"/></svg></span><span class="v">devbox</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-folder"/></svg></span><span class="v start"><bdi>muxflow</bdi></span></div></div>
+        <div class="g" style="gap:3px"><div class="l"><span class="gl"><svg class="ic"><use href="#i-git-branch"/></svg></span><span class="v">main</span><span class="x"><svg class="ic" style="color:var(--dim)"><use href="#i-chevron-down"/></svg></span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg></span><span class="v">Commit…</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Uncommitted</span><span class="x"><span class="okc">+4</span> <span class="badc">−1</span></span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Branch <span class="f">vs main</span></span><span class="x"><span class="okc">+4</span> <span class="badc">−1</span></span></div></div>
+      </div></div></div>
+      <p class="cap">The chat runs in <code>/home/gal/dev/muxflow</code>, the repository's root: the folder reads <code>muxflow</code>. On main itself both rows count the same work.</p>
+    </div>
+    <div class="tile">
+      <h3>Folder: below the root, pointer on it</h3>
+      <div class="win small"><div class="stage" style="padding-bottom:44px"><div class="dcard">
+        <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-server"/></svg></span><span class="v">devbox</span></div><div class="l hov"><span class="gl"><svg class="ic"><use href="#i-folder"/></svg></span><span class="v start"><bdi>muxflow/apps/desktop-gpui</bdi></span><span class="tip mono" style="top:24px;left:-4px">/home/gal/dev/muxflow/apps/desktop-gpui</span></div></div>
+        <div class="g" style="gap:3px"><div class="l"><span class="gl"><svg class="ic"><use href="#i-git-branch"/></svg></span><span class="v">gpui/chat</span><span class="x"><svg class="ic" style="color:var(--dim)"><use href="#i-chevron-down"/></svg></span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg></span><span class="v">Commit…</span></div></div>
+      </div></div></div>
+      <p class="cap">Starts with the repository's folder name. The tooltip is the full absolute path. Clicking still reveals the folder in the Files panel.</p>
+    </div>
+    <div class="tile">
+      <h3>Folder: outside a repository</h3>
+      <div class="win small"><div class="stage"><div class="dcard">
+        <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-server"/></svg></span><span class="v">devbox</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-folder"/></svg></span><span class="v start"><bdi>~/notes/drafts</bdi></span></div></div>
+        <div class="g"><div class="l"><span style="color:var(--faint);font-size:11px">Context</span><span class="bar2"><i style="width:4%"></i></span><span class="x">38k / 1M</span></div></div>
+      </div></div></div>
+      <p class="cap">Relative to home. No Git rows, as today. A folder outside home stays absolute, since there is nothing shorter to say.</p>
+    </div>
+    <div class="tile">
+      <h3>Folder: too long for the card</h3>
+      <div class="win small"><div class="stage"><div class="dcard">
+        <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-server"/></svg></span><span class="v">devbox</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-folder"/></svg></span><span class="v start"><bdi>muxflow/apps/host/src/service/chat/fixtures</bdi></span></div></div>
+      </div></div></div>
+      <p class="cap"><code>muxflow/apps/host/src/service/chat/fixtures</code>, cut from the start, as today.</p>
+    </div>
+  </div>
+
+  <div class="grid3">
+    <div class="tile">
+      <h3>Nothing uncommitted</h3>
+      <div class="win small"><div class="stage"><div class="dcard"><div class="g" style="gap:3px">
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-git-branch"/></svg></span><span class="v">gpui/chat</span><span class="x"><svg class="ic" style="color:var(--dim)"><use href="#i-chevron-down"/></svg></span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg></span><span class="v">Commit…</span></div>
+        <div class="l dim"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Uncommitted</span><span class="x">none</span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Branch <span class="f">vs main</span></span><span class="x"><span class="okc">+182</span> <span class="badc">−41</span></span></div>
+      </div></div></div></div>
+      <p class="cap">The row stays, dim, so the card does not change height after a commit.</p>
+    </div>
+    <div class="tile">
+      <h3>No default branch</h3>
+      <div class="win small"><div class="stage"><div class="dcard"><div class="g" style="gap:3px">
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-git-branch"/></svg></span><span class="v">main</span><span class="x"><svg class="ic" style="color:var(--dim)"><use href="#i-chevron-down"/></svg></span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg></span><span class="v">Commit…</span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Uncommitted</span><span class="x"><span class="okc">+12</span> <span class="badc">−3</span></span></div>
+      </div></div></div></div>
+      <p class="cap">No <code>origin</code>, or no default branch on it: the second row is left out. Today this reads "Changes no default branch".</p>
+    </div>
+    <div class="tile">
+      <h3>Counts loading</h3>
+      <div class="win small"><div class="stage"><div class="dcard"><div class="g" style="gap:3px">
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-git-branch"/></svg></span><span class="v">gpui/chat</span><span class="x"><svg class="ic" style="color:var(--dim)"><use href="#i-chevron-down"/></svg></span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-git-commit-horizontal"/></svg></span><span class="v">Commit…</span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Uncommitted</span><span class="x">…</span></div>
+        <div class="l"><span class="gl"><svg class="ic"><use href="#i-file-diff"/></svg></span><span class="v">Branch <span class="f">vs main</span></span><span class="x">…</span></div>
+      </div></div></div></div>
+      <p class="cap">Both rows show while the host counts. The rows already open the Git panel.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ S2 MODEL PICKER ============ -->
+<section id="s2">
+  <div class="brief">
+    <h2><span class="sid">S2</span>Model picker</h2>
+    <p>Today Claude's pill reads "Default (recommended) ▾". That is Claude Code's own name for its default entry, and it hides which model runs. Every other entry already carries its model and version. The host knows what the default resolves to: <code>claude-opus-5-5</code>.</p>
+    <ul class="pts">
+      <li><b>The default entry is named after its model</b>, with "(default)": <b>Opus 5.5 (default)</b>. The pill says the same. Only that one label changes.</li>
+      <li><b>The menu keeps Claude Code's order:</b> the default first, ticked while it is the choice, then the rest. Claude Code 2.1.326 lists 14 entries, so the menu scrolls.</li>
+      <li><b>Icons instead of characters:</b> each pill ends with <code>chevron-down</code> instead of ▾. Send is <code>arrow-up</code> and Stop is a filled <code>square</code>, instead of ↑ and ■.</li>
+      <li>Codex already names its models, so only the icons change there.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3><span class="tag t">Today</span>Claude Code's labels</h3>
+      <div class="win small"><div class="pad" style="padding-top:18px">
+        <div class="pop" style="width:230px;position:relative">
+          <div class="it on" style="align-items:center"><svg class="ic s12" style="color:var(--accent)"><use href="#i-check"/></svg><b style="font-family:var(--ui);font-weight:400">Default (recommended)</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Opus 5.5</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Fable 5.2</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Sonnet 5.5</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Haiku 5.5</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Fable 5.1</b></div>
+          <div class="it" style="padding-left:32px;opacity:.45"><b style="font-family:var(--ui);font-weight:400">Haiku 4.5</b></div>
+          <span style="position:absolute;right:3px;top:4px;width:4px;height:44%;border-radius:2px;background:var(--border)"></span>
+        </div>
+        <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div>
+          <div class="bar"><span class="pill open">Default (recommended) ▾</span><span class="pill">High ▾</span><span class="pill">Auto ▾</span><span class="seg"><span class="on">Standard</span><span>Fast</span></span><span class="end"><span class="ctx"><span class="meter"><i></i></span>209k / 1M</span><span class="send">↑</span></span></div></div>
+      </div></div>
+      <p class="cap">The labels exactly as Claude Code 2.1.326 sends them. Seven of the 14 entries shown; the list scrolls.</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>The default named after its model</h3>
+      <div class="win small"><div class="pad" style="padding-top:18px">
+        <div class="pop" style="width:230px;position:relative">
+          <div class="it on" style="align-items:center"><svg class="ic s12" style="color:var(--accent)"><use href="#i-check"/></svg><b style="font-family:var(--ui);font-weight:400">Opus 5.5 (default)</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Opus 5.5</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Fable 5.2</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Sonnet 5.5</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Haiku 5.5</b></div>
+          <div class="it" style="padding-left:32px"><b style="font-family:var(--ui);font-weight:400">Fable 5.1</b></div>
+          <div class="it" style="padding-left:32px;opacity:.45"><b style="font-family:var(--ui);font-weight:400">Haiku 4.5</b></div>
+          <span style="position:absolute;right:3px;top:4px;width:4px;height:44%;border-radius:2px;background:var(--border)"></span>
+        </div>
+        <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div>
+          <div class="bar"><span class="pill open">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">Auto<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="seg"><span class="on">Standard</span><span>Fast</span></span><span class="end"><span class="ctx"><span class="meter"><i></i></span>209k / 1M</span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+      </div></div>
+      <p class="cap">The same list; only the first label differs. Seven of the 14 entries shown; the list scrolls.</p>
+    </div>
+  </div>
+  <div class="tile" style="max-width:582px">
+    <h3>Send and Stop</h3>
+    <div class="win small"><div class="pad" style="flex-direction:row;align-items:center;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--dim)">
+      <span>Today</span><span class="send">↑</span><span class="send stop">■</span>
+      <span style="width:1px;height:22px;background:var(--hair)"></span>
+      <span>Proposed</span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span><span class="send stop"><svg class="ic sq"><use href="#i-square"/></svg></span>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ S3 MESSAGE BUTTONS ============ -->
+<section id="s3">
+  <div class="brief">
+    <h2><span class="sid">S3</span>Message buttons</h2>
+    <p>Today "Edit" is a text button to the left of your bubble, shown on hover. Copy is only in the right-click menu. The agent's messages have no buttons at all.</p>
+    <ul class="pts">
+      <li><b>Your message:</b> a small row of icons under the bubble, at the right: <code>copy</code>, then <code>pencil</code> for Edit. It shows on hover and on keyboard focus.</li>
+      <li><b>24px targets,</b> faint icons that turn strong on hover. Tooltips "Copy" and "Edit and resend". The row keeps its height when hidden, so nothing moves when it appears.</li>
+      <li><b>After copying</b> the icon is <code>check</code> for a second.</li>
+      <li><b>While a message is being edited</b> its pencil stays on, in the accent colour, and the bubble keeps its accent border, as today.</li>
+      <li><b>The agent's reply:</b> the same kind of row, at the left, under the last text of the reply only, not under every paragraph or tool row. <code>copy</code> takes the reply's text as Markdown. <code>git-fork</code>, "Fork from here", opens the conversation up to and including that reply in a split, titled "name (fork)", as <code>/btw</code> does, but with no question sent. Unlike a <code>/btw</code> fork, it is listed in History (D12).</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3><span class="tag t">Today</span>Pointer on your message</h3>
+      <div class="win small"><div class="cv">
+        <div style="display:flex;justify-content:flex-end;align-items:flex-start;gap:6px"><span class="ed">Edit</span><div class="u" style="max-width:76%">Group the tool rows in the chat and run the chat tests.</div></div>
+        <div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+        <div class="pop" style="width:170px;align-self:flex-end;margin-top:-6px"><div class="it on"><b style="font-family:var(--ui);font-weight:400">Copy message</b></div></div>
+      </div></div>
+      <p class="cap">Edit appears to the left of the bubble. Copy needs a right click. Nothing on the agent's reply.</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Idle: try it, point at a message</h3>
+      <div class="win small"><div class="cv">
+        <div class="msg me"><div class="u">Group the tool rows in the chat and run the chat tests.</div>
+          <div class="mrow"><button class="mb" data-copy title="Copy"><svg class="ic b1"><use href="#i-copy"/></svg><svg class="ic b2"><use href="#i-check"/></svg></button><button class="mb" title="Edit and resend"><svg class="ic"><use href="#i-pencil"/></svg></button></div></div>
+        <div class="msg"><div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+          <div class="mrow"><button class="mb" data-copy title="Copy"><svg class="ic b1"><use href="#i-copy"/></svg><svg class="ic b2"><use href="#i-check"/></svg></button><button class="mb" title="Fork from here"><svg class="ic"><use href="#i-git-fork"/></svg></button></div></div>
+      </div></div>
+      <p class="cap">Live: hover a message to see its row, click Copy to see the check.</p>
+    </div>
+    <div class="tile">
+      <h3>Your message: hovered</h3>
+      <div class="win small"><div class="cv" style="padding-bottom:30px">
+        <div class="msg me"><div class="u">Group the tool rows in the chat and run the chat tests.</div>
+          <div class="mrow show"><span class="mb"><svg class="ic"><use href="#i-copy"/></svg></span><span class="mb hov"><svg class="ic"><use href="#i-pencil"/></svg><span class="tip" style="left:auto;right:0;transform:none">Edit and resend</span></span></div></div>
+      </div></div>
+    </div>
+    <div class="tile">
+      <h3>Your message: just copied</h3>
+      <div class="win small"><div class="cv" style="padding-bottom:30px">
+        <div class="msg me"><div class="u">Group the tool rows in the chat and run the chat tests.</div>
+          <div class="mrow show"><span class="mb done hov"><svg class="ic b1"><use href="#i-copy"/></svg><svg class="ic b2"><use href="#i-check"/></svg></span><span class="mb"><svg class="ic"><use href="#i-pencil"/></svg></span></div></div>
+      </div></div>
+    </div>
+    <div class="tile">
+      <h3>Your message: being edited</h3>
+      <div class="win small"><div class="cv">
+        <div class="msg me"><div class="u editing">Group the tool rows in the chat and run the chat tests.</div>
+          <div class="mrow show"><span class="mb"><svg class="ic"><use href="#i-copy"/></svg></span><span class="mb on"><svg class="ic"><use href="#i-pencil"/></svg></span></div></div>
+        <div class="comp in"><div class="banner">Editing an earlier message. Sending removes everything after it. Files on disk stay as they are.<span class="sp"></span><span class="b ghost">Cancel</span></div><div class="ta txt">Group the tool rows in the chat, then run only the chat tests.</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">The row stays on while editing; the pencil is in the accent colour. The banner is today's.</p>
+    </div>
+    <div class="tile">
+      <h3>The agent's reply: hovered</h3>
+      <div class="win small"><div class="cv" style="padding-bottom:30px">
+        <div class="msg"><div class="a"><p>I'll start with how rows are built in the view.</p></div></div>
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span></div></div>
+        <div class="msg"><div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+          <div class="mrow show"><span class="mb"><svg class="ic"><use href="#i-copy"/></svg></span><span class="mb hov"><svg class="ic"><use href="#i-git-fork"/></svg><span class="tip">Fork from here</span></span></div></div>
+      </div></div>
+      <p class="cap">One row per reply, under its last text. The first paragraph and the steps have none. Copy takes both paragraphs, as Markdown.</p>
+    </div>
+  </div>
+  <div class="tile">
+    <h3>Fork from here: the fork opens in a split</h3>
+    <div class="scroll"><div class="win" style="min-width:900px">
+      <div class="split">
+        <div>
+          <div class="ph-h"><span class="chip">CC</span>Chat pane polish</div>
+          <div class="cv">
+            <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+            <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span></div></div>
+            <div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+            <div class="u">Now add the working line under the conversation.</div>
+            <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Working…</span><span class="tm" data-t="3">3s</span><span class="esc">· Esc to stop</span></div>
+          </div>
+        </div>
+        <div>
+          <div class="ph-h on"><span class="chip">CC</span>Chat pane polish (fork)</div>
+          <div class="cv" style="flex:1">
+            <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+            <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span></div></div>
+            <div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+            <div style="flex:1"></div>
+            <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+    <p class="cap">Left, the source keeps working on the next message. Right, the fork holds the conversation up to and including the forked reply, and waits for you. It is a normal session with its own row in the Agents list, the same permissions, and, unlike a <code>/btw</code> fork, it is listed in History: it is a conversation of its own (D12).</p>
+  </div>
+</section>
+
+<!-- ============ S4 TOOL GROUPS ============ -->
+<section id="s4">
+  <div class="brief">
+    <h2><span class="sid">S4</span>Tool calls grouped</h2>
+    <p>Today every tool call is its own bordered row. A turn with 30 calls is 30 rows, and the agent's words get lost between them.</p>
+    <ul class="pts">
+      <li><b>One block per run.</b> The tool calls and thinking between two pieces of the agent's text fold into one block.</li>
+      <li><b>Finished, it is collapsed:</b> one quiet line with no border. <code>chevron-right</code>, "12 steps", a faint summary such as "read 5 · ran 4 · searched 1 · edited 2 files", and the line counts at the right when files were edited. Click or Enter opens it.</li>
+      <li><b>Opened:</b> <code>chevron-down</code>, then the rows as they are today, slightly indented. Each row still opens its own output, and an edit row still opens its diff.</li>
+      <li><b>While the agent works,</b> the run it is in is only its line, closed: <code>chevron-right</code>, "7 steps so far", and the edited-file chips and counts as usual. No row under it. What runs right now is said once, by the working line of S5 just below. Opening the line shows every row, the running one with the still working mark.</li>
+      <li><b>Not grouped:</b> a run of one or two calls stays as plain rows.</li>
+      <li><b>A failed call</b> puts "1 failed" on its group's line, in the danger colour.</li>
+      <li><b>Edits are never hidden completely.</b> The collapsed line names up to three edited files as small chips, each opening its diff. Past three, two names and a count: <code>view.rs</code> <code>pane.rs</code> <code>+2</code>.</li>
+      <li><b>Each row gets a leading icon</b>, before the mono verb, which stays: run <code>square-terminal</code>, read <code>file-text</code>, edit <code>file-pen-line</code>, search <code>search</code>, web <code>globe</code>, mcp <code>wrench</code>, agent <code>bot</code>, anything else <code>wrench</code>.</li>
+    </ul>
+  </div>
+  <div class="grid2" style="align-items:start">
+    <div class="tile">
+      <h3><span class="tag t">Today</span>One reply, twelve rows</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+        <div class="a"><p>I'll start with how rows are built in the view.</p></div>
+        <div class="tool"><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">search</span><span class="t">fn render_row</span><span class="r okc">3 matches</span></div>
+        <div class="tool"><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/model.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">read</span><span class="t">crates/desktop-core/src/connection/chat.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+84</span> <span class="badc">−9</span></span></div>
+        <div class="tool"><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r"><span class="okc">+36</span> <span class="badc">−5</span></span></div>
+        <div class="tool"><span class="k">run</span><span class="t">cargo check -p muxflow-gpui</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/tests.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r okc">41 passed</span></div>
+        <div class="tool"><span class="k">run</span><span class="t">cargo clippy -p muxflow-gpui</span><span class="r okc">done</span></div>
+        <div class="tool"><span class="k">run</span><span class="t">cargo fmt --check</span><span class="r okc">done</span></div>
+        <div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+      </div></div>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>The same reply, one line of steps</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+        <div class="a"><p>I'll start with how rows are built in the view.</p></div>
+        <div class="grp" data-fold>
+          <div class="gh" tabindex="0" role="button" aria-expanded="false"><svg class="ic cr"><use href="#i-chevron-right"/></svg><svg class="ic cd"><use href="#i-chevron-down"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span><span class="fch">view.rs</span><span class="fch">pane.rs</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div>
+          <div class="gb fold">
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-search"/></svg><span class="k">search</span><span class="t">fn render_row</span><span class="r okc">3 matches</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/model.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">crates/desktop-core/src/connection/chat.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+84</span> <span class="badc">−9</span></span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r"><span class="okc">+36</span> <span class="badc">−5</span></span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo check -p muxflow-gpui</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/tests.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r okc">41 passed</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo clippy -p muxflow-gpui</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo fmt --check</span><span class="r okc">done</span></div>
+          </div>
+        </div>
+        <div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+      </div></div>
+      <p class="cap">Live: click the steps line to open it.</p>
+    </div>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3>Collapsed, more than three files edited</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">18 steps</span><span class="sum">read 7 · ran 5 · searched 2 · edited 4 files</span><span class="fch">view.rs</span><span class="fch">pane.rs</span><span class="fch">+2</span><span class="cnt"><span class="okc">+211</span> <span class="badc">−38</span></span></div></div>
+      </div></div>
+      <p class="cap">The summary is cut first; the chips and counts stay. <code>+2</code> opens the group.</p>
+    </div>
+    <div class="tile">
+      <h3>Two calls: no group</h3>
+      <div class="win small"><div class="cv">
+        <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/details.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/details.rs</span><span class="r"><span class="okc">+22</span> <span class="badc">−6</span></span></div>
+      </div></div>
+      <p class="cap">One or two calls stay plain rows, now with their icons.</p>
+    </div>
+    <div class="tile">
+      <h3>Opened</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp open"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><svg class="ic cd"><use href="#i-chevron-down"/></svg><span class="n">5 steps</span><span class="sum">read 2 · ran 1 · edited 2 files</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div>
+          <div class="gb">
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+84</span> <span class="badc">−9</span></span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r"><span class="okc">+36</span> <span class="badc">−5</span></span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r okc">41 passed</span></div>
+          </div></div>
+      </div></div>
+      <p class="cap">Opened, the chips are not needed: the edit rows are there. Rows keep today's look and clicks.</p>
+    </div>
+    <div class="tile">
+      <h3>Live, while the agent works</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp" data-fold><div class="gh" tabindex="0" role="button" aria-expanded="false"><svg class="ic cr"><use href="#i-chevron-right"/></svg><svg class="ic cd"><use href="#i-chevron-down"/></svg><span class="n">7 steps so far</span><span class="sum"></span><span class="fch">view.rs</span><span class="cnt"><span class="okc">+84</span> <span class="badc">−9</span></span></div>
+          <div class="gb fold">
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-search"/></svg><span class="k">search</span><span class="t">fn render_row</span><span class="r okc">3 matches</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/model.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+84</span> <span class="badc">−9</span></span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo check -p muxflow-gpui</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r"><svg class="wk"><use href="#i-working"/></svg></span></div>
+          </div></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Running cargo test -p muxflow-gpui chat…</span><span class="tm" data-t="50">50s</span><span class="esc">· Esc to stop</span></div>
+      </div></div>
+      <p class="cap">The run is one closed line; what runs now is said once, by the working line under it (S5). Live: click the line to open it; the running row has the still working mark.</p>
+    </div>
+    <div class="tile">
+      <h3>With a failure</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">9 steps</span><span class="fail">1 failed</span><span class="sum">read 4 · ran 3 · edited 2 files</span><span class="fch">view.rs</span><span class="fch">pane.rs</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+        <div class="a"><p>Two tests in <code>chat/tests.rs</code> still expect one row per tool call. I'll update them.</p></div>
+      </div></div>
+      <p class="cap">Opening it shows the failed row as today: <code>run cargo test -p muxflow-gpui chat</code>, "failed" in the danger colour.</p>
+    </div>
+    <div class="tile">
+      <h3>Row icons</h3>
+      <div class="win small"><div class="cv" style="gap:6px">
+        <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r okc">41 passed</span></div>
+        <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r okc">done</span></div>
+        <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+84</span> <span class="badc">−9</span></span></div>
+        <div class="tool"><svg class="ic"><use href="#i-search"/></svg><span class="k">search</span><span class="t">ChatToolKind::</span><span class="r okc">12 matches</span></div>
+        <div class="tool"><svg class="ic"><use href="#i-globe"/></svg><span class="k">web</span><span class="t">lucide.dev/icons/git-fork</span><span class="r okc">done</span></div>
+        <div class="tool"><svg class="ic"><use href="#i-wrench"/></svg><span class="k">mcp</span><span class="t">github.get_pull_request</span><span class="r okc">done</span></div>
+        <div class="tool"><svg class="ic"><use href="#i-bot"/></svg><span class="k">agent</span><span class="t">Explore the git module</span><span class="r okc">done</span></div>
+      </div></div>
+      <p class="cap">The verb stays in mono after the icon. A provider's own title, when it sends one, still replaces the verb.</p>
+    </div>
+  </div>
+  <div class="tile" style="max-width:780px">
+    <h3><span class="tag alt">Alternative wording</span>The collapsed line as a sentence</h3>
+    <div class="win small"><div class="cv">
+      <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n" style="font-weight:400;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">Ran 4 commands, read 5 files and edited 2 files</span><span class="fch">view.rs</span><span class="fch">pane.rs</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+      <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n" style="font-weight:400;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">Ran 4 commands, read 5 files, edited 2 files and 1 other step</span><span class="fch">view.rs</span><span class="fch">pane.rs</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+    </div></div>
+    <p class="cap">The two or three largest kinds in words, the rest as "and 1 other step". Chips and counts as in the recommended line. Longer, and harder to compare between runs at a glance (D13).</p>
+  </div>
+</section>
+
+<!-- ============ S5 WORKING AND THINKING ============ -->
+<section id="s5">
+  <div class="brief">
+    <h2><span class="sid">S5</span>Working indicator and thinking</h2>
+    <p>Today nothing says the agent is working except Send turning into Stop: no mark, no timer. Thinking shows only when the model streams it, as dim text in the conversation.</p>
+    <ul class="pts">
+      <li><b>A working line</b> at the end of the conversation, shown the whole time a turn works: the still working mark the Agents list uses, in the working colour, then what the agent is doing, the time since the turn started, and a faint "Esc to stop". For example "Thinking… 12s", "Running cargo test -p muxflow-gpui chat… 50s", "Working… 3s", "Waiting on 1 subagent… 2m 05s". A running subagent also gets its own row under the line, as drawn in S9.</li>
+      <li><b>The only motion is the seconds,</b> once a second. The mark holds still, as it does in the Agents list: a moving mark costs CPU for as long as an agent works (see the alternative below).</li>
+      <li><b>When the turn ends the line goes.</b> Nothing is left behind; the steps line already says how many steps there were.</li>
+      <li><b>Thinking is a step, like a tool call.</b> While it streams, the line reads "Thinking…" and the latest sentence of the thinking shows under it, one faint line, cut to fit. Finished, it is a row, "Thought for 8s" with a <code>brain</code> icon, that opens to the text and folds into the steps of S4.</li>
+      <li><b>When the model keeps its thinking to itself</b> there is no row, only the working line while it thinks.</li>
+      <li><b>While the agent waits on you,</b> for a permission or a question, there is no working line: the card is the status.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Thinking, with the latest sentence</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">Fold thinking into the steps too.</div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Thinking…</span><span class="tm" data-t="12">12s</span><span class="esc">· Esc to stop</span></div>
+        <div class="prev">A group has to end where the agent's text starts, so the row index alone is not enough to place it.</div>
+      </div></div>
+      <p class="cap">The seconds tick in this mock as they would in the app.</p>
+    </div>
+    <div class="tile">
+      <h3>Thought, finished and opened</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp open"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><svg class="ic cd"><use href="#i-chevron-down"/></svg><span class="n">4 steps</span><span class="sum">thought for 8s · read 2 · edited 1 file</span></div>
+          <div class="gb">
+            <div class="tool box"><div class="hd2"><svg class="ic" style="color:var(--faint)"><use href="#i-brain"/></svg><span class="t ui">Thought for 8s</span><svg class="ic s12" style="color:var(--faint)"><use href="#i-chevron-down"/></svg></div><div class="out">A group has to end where the agent's text starts, so the row index alone is not enough to place it. The list already knows each item's kind; a run is the items between two assistant items.</div></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/model.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-pen-line"/></svg><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/pane.rs</span><span class="r"><span class="okc">+31</span> <span class="badc">−4</span></span></div>
+          </div></div>
+      </div></div>
+      <p class="cap">The thought counts as a step. Opened, its text is dim, in the box tool output uses.</p>
+    </div>
+    <div class="tile">
+      <h3>Running a command</h3>
+      <div class="win small"><div class="cv">
+        <div class="a"><p>The view compiles. Running the chat tests now.</p></div>
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">7 steps so far</span><span class="sum"></span><span class="fch">view.rs</span><span class="cnt"><span class="okc">+84</span> <span class="badc">−9</span></span></div></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Running cargo test -p muxflow-gpui chat…</span><span class="tm" data-t="50">50s</span><span class="esc">· Esc to stop</span></div>
+      </div></div>
+      <p class="cap">The same state as S4's live tile: the run is one closed line, and the working line says what runs now.</p>
+    </div>
+    <div class="tile">
+      <h3>Waiting on a subagent</h3>
+      <div class="win small"><div class="cv">
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Waiting on 1 subagent…</span><span class="tm" data-t="125">2m 05s</span><span class="esc">· Esc to stop</span></div>
+        <div class="subs">
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ty">Explore</span><span class="ds">Explore the git module</span></div><div class="l2">Reading git/status.rs · 11 tools · 32.4k tokens · <span data-t="118">1m 58s</span></div></div></div>
+        </div>
+      </div></div>
+    </div>
+    <div class="tile">
+      <h3>Waiting on you: no line</h3>
+      <div class="win small"><div class="cv">
+        <div class="a"><p>I need to change the Git panel's scope type. That touches the panel itself.</p></div>
+        <div class="card ask"><div class="hd">Auto mode is asking: edit this file?<span class="sp"></span><small>waiting for you</small></div><div class="bd"><div class="cmd">apps/desktop-gpui/src/git/panel.rs</div><div class="btns"><span class="b pri">Allow</span><span class="b ghost">Deny</span></div></div></div>
+      </div></div>
+      <p class="cap">The card is the status. The line returns once you answer and the agent goes on.</p>
+    </div>
+    <div class="tile">
+      <h3>After the turn</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">thought for 8s · read 5 · ran 4 · edited 2 files</span><span class="fch">view.rs</span><span class="fch">pane.rs</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+        <div class="a"><p>Thinking now folds into the steps. The chat tests pass.</p></div>
+        <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">No line, no "Worked for" summary (D8). Stop is Send again.</p>
+    </div>
+  </div>
+  <div class="tile" style="max-width:582px">
+    <h3><span class="tag alt">Alternative</span>A spinner and shimmering text</h3>
+    <div class="win small"><div class="cv">
+      <div class="stl"><span class="mk"><svg class="ic spin"><use href="#i-loader-circle"/></svg></span><span class="lbl shim">Running cargo test -p muxflow-gpui chat…</span><span class="tm" data-t="50">50s</span><span class="esc">· Esc to stop</span></div>
+    </div></div>
+    <p class="cap">Costs CPU while it runs: about 5% of a core was measured for six animated marks in the Agents list. It would be stepped on the shared 75 ms clock and only in chats on screen. Under reduced motion it holds still, as drawn by the recommended line. Not recommended (D11).</p>
+  </div>
+</section>
+
+<!-- ============ S6 ATTACHMENTS ============ -->
+<section id="s6">
+  <div class="brief">
+    <h2><span class="sid">S6</span>Attachments: paste images, drop files</h2>
+    <p>Today pasting an image or dropping a file on a chat does nothing. Only terminals take them.</p>
+    <ul class="pts">
+      <li><b>Drop</b> files anywhere on the chat pane. While they are dragged over it, the pane shows "Drop to attach" with a <code>paperclip</code>, an accent wash and a solid 2px accent border, as the terminal's drop hint.</li>
+      <li><b>Paste</b> an image, or copied files, into the composer to attach them. Pasted text is still text.</li>
+      <li><b>Chips in the composer,</b> in a row above the text. An image is a 44px rounded thumbnail and its name; a file is a <code>file</code> icon, its name and size. Each has an <code>x</code> to remove it, on hover and focus.</li>
+      <li><b>On a remote host</b> each chip shows its upload: a thin bar along its bottom, then a <code>check</code> for a moment. Send is off, with the tooltip "Uploading…", until every upload has finished. A failed upload turns its chip to the danger colour with Retry and Remove. On this machine nothing uploads, so there is no bar.</li>
+      <li><b>Sent,</b> your bubble shows the same chips above its text. Clicking an image opens it in the app's viewer; clicking a file opens the file.</li>
+      <li><b>Limits:</b> images up to 25 MiB, the existing upload limit, and at most 10 attachments per message. Past either, the notice line over the composer says why.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3>Dragging files over the chat</h3>
+      <div class="win small"><div class="tabs"><div class="tab on"><span class="chip">CC</span>Chat pane polish</div><span class="sp"></span></div>
+        <div class="rel"><div class="cv">
+          <div class="u">The details card covers the composer at this width.</div>
+          <div class="a"><p>Can you send a screenshot of the window at that size?</p></div>
+          <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+        </div>
+        <div class="drop"><span class="lbl2"><svg class="ic"><use href="#i-paperclip"/></svg>Drop to attach</span></div></div>
+      </div>
+      <p class="cap">The whole pane is the target. Wash and solid 2px border as the terminal's drop hint.</p>
+    </div>
+    <div class="tile">
+      <h3>In the composer, uploading to a remote host</h3>
+      <div class="win small"><div class="cv" style="padding-top:20px">
+        <div class="comp in">
+          <div class="atts">
+            <div class="att"><span class="th"><svg viewBox="0 0 44 44"><rect width="44" height="44" fill="#282c34"/><rect x="0" y="0" width="44" height="6" fill="#1f2329"/><rect x="0" y="6" width="12" height="38" fill="#2c313a"/><rect x="16" y="11" width="18" height="4" rx="2" fill="#3e4451"/><rect x="22" y="18" width="18" height="5" rx="2" fill="#353b45"/><rect x="16" y="27" width="24" height="3" rx="1.5" fill="#7f8794"/><rect x="26" y="20" width="16" height="20" rx="2" fill="#2c313a" stroke="#7aa6da" stroke-width=".8"/></svg></span><span class="nm"><b>card-overlap.png</b><span><svg class="ic s12 okc"><use href="#i-check"/></svg>1.4 MB</span></span></div>
+            <div class="att hov"><span class="th"><svg viewBox="0 0 44 44"><rect width="44" height="44" fill="#fafafa"/><rect x="0" y="0" width="44" height="6" fill="#eeeef1"/><rect x="6" y="11" width="32" height="3" rx="1.5" fill="#d4d4d8"/><rect x="6" y="17" width="26" height="3" rx="1.5" fill="#d4d4d8"/><rect x="6" y="28" width="32" height="12" rx="3" fill="#fff" stroke="#d4d4d8" stroke-width=".8"/><rect x="30" y="33" width="5" height="5" rx="1" fill="#2f6fe0"/></svg></span><span class="nm"><b>composer-light.png</b><span>860 KB</span></span><span class="rm" title="Remove"><svg class="ic"><use href="#i-x"/></svg></span><span class="pg" style="width:68%"></span></div>
+            <div class="att"><span class="fi"><svg class="ic s16"><use href="#i-file"/></svg></span><span class="nm"><b>muxflow-gpui.log</b><span>2.1 MB</span></span><span class="pg" style="width:31%"></span></div>
+          </div>
+          <div class="ta txt">The card covers the composer below 940px. Screenshots and the log attached.</div>
+          <div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="rel" style="margin-left:auto;display:inline-flex"><span class="send off"><svg class="ic"><use href="#i-arrow-up"/></svg></span><span class="tip" style="bottom:32px;right:-4px">Uploading…</span></span></div>
+        </div>
+      </div></div>
+      <p class="cap">First image uploaded (the check fades after a moment). The pointer is on the second, so its <code>x</code> shows. Send is off until both bars finish.</p>
+    </div>
+    <div class="tile">
+      <h3>A failed upload</h3>
+      <div class="win small"><div class="cv">
+        <div class="comp in">
+          <div class="atts">
+            <div class="att bad" style="max-width:260px"><span class="fi"><svg class="ic s16"><use href="#i-file"/></svg></span><span class="nm"><b>muxflow-gpui.log</b><span>Upload failed<span class="lk">Retry</span><span class="lk d">Remove</span></span></span></div>
+          </div>
+          <div class="ta txt">The log from the crash is attached.</div>
+          <div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send off"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div>
+        </div>
+      </div></div>
+      <p class="cap">Send stays off until the chip is retried or removed.</p>
+    </div>
+    <div class="tile">
+      <h3>Sent</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">
+          <div class="atts">
+            <div class="att"><span class="th"><svg viewBox="0 0 44 44"><rect width="44" height="44" fill="#282c34"/><rect x="0" y="0" width="44" height="6" fill="#1f2329"/><rect x="0" y="6" width="12" height="38" fill="#2c313a"/><rect x="16" y="11" width="18" height="4" rx="2" fill="#3e4451"/><rect x="22" y="18" width="18" height="5" rx="2" fill="#353b45"/><rect x="16" y="27" width="24" height="3" rx="1.5" fill="#7f8794"/><rect x="26" y="20" width="16" height="20" rx="2" fill="#2c313a" stroke="#7aa6da" stroke-width=".8"/></svg></span><span class="nm"><b>card-overlap.png</b><span>1.4 MB</span></span></div>
+            <div class="att"><span class="fi"><svg class="ic s16"><use href="#i-file"/></svg></span><span class="nm"><b>muxflow-gpui.log</b><span>2.1 MB</span></span></div>
+          </div>
+          The card covers the composer below 940px. Screenshot and the log attached.
+        </div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Working…</span><span class="tm" data-t="3">3s</span><span class="esc">· Esc to stop</span></div>
+      </div></div>
+      <p class="cap">The chips sit above the text in the bubble. The agent gets the image as an image and the log as its path on the host (D9).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ S7 SLOW LINK ============ -->
+<section id="s7">
+  <div class="brief">
+    <h2><span class="sid">S7</span>Faster feel on a slow link</h2>
+    <p>Most of this work does not show. Three states do. Today each waits for the host before anything on screen changes.</p>
+    <ul class="pts">
+      <li><b>Model, effort, permissions and speed:</b> the pill shows the new choice at once, dimmed, until the host confirms. If the host refuses, it snaps back and the notice line over the composer says why.</li>
+      <li><b>Stop:</b> pressing Stop, or Esc, dims Stop and turns it off at once, and the working line reads "Stopping…", until the host confirms the turn ended.</li>
+      <li><b>Reopening a chat you had open:</b> the conversation is there at once, from memory. If the host has to refresh it, a faint "Updating…" sits at the top until the fresh copy arrives. No blank "Opening the chat…" for a chat that was already loaded.</li>
+    </ul>
+  </div>
+  <div class="grid2">
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>A new model, not yet confirmed</h3>
+      <div class="win small"><div class="cv">
+        <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill pending">Sonnet 5.5<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">Auto<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="end"><span class="ctx"><span class="meter"><i></i></span>209k / 1M</span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+      </div></div>
+      <p class="cap">At 0.6 opacity until the host confirms, the same dimming as a message still being sent.</p>
+    </div>
+    <div class="tile">
+      <h3>The host refused it</h3>
+      <div class="win small"><div class="cv">
+        <div class="comp in"><div class="note">The model was not changed: the agent is not running.</div><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">Auto<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="end"><span class="ctx"><span class="meter"><i></i></span>209k / 1M</span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+      </div></div>
+      <p class="cap">Back to the previous choice. The notice is today's notice line, with the host's reason (sample text).</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag t">Today</span>Stop pressed</h3>
+      <div class="win small"><div class="cv">
+        <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui</span><span class="r wkc">running</span></div>
+        <div class="comp in"><div class="ta">Send a follow-up while it works</div><div class="bar"><span class="pill">Default (recommended) ▾</span><span class="sp"></span><span class="send stop">■</span></div></div>
+      </div></div>
+      <p class="cap">Nothing changes until the host reports the turn ended. On a slow link Stop looks ignored, and gets pressed again.</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Stop pressed</h3>
+      <div class="win small"><div class="cv">
+        <div class="tool"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="k">run</span><span class="t">cargo test -p muxflow-gpui</span><span class="r"><svg class="wk"><use href="#i-working"/></svg></span></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Stopping…</span></div>
+        <div class="comp in"><div class="ta">Send a follow-up while it works</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send stop off"><svg class="ic sq"><use href="#i-square"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">Stop is dimmed and off at once. No spinner. The line says Stopping… until the host confirms.</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag t">Today</span>Reopening a chat that was open</h3>
+      <div class="win small"><div class="tabs"><div class="tab on"><span class="chip">CC</span>Chat pane polish</div><span class="sp"></span></div>
+        <div style="height:220px;display:grid;place-items:center;color:var(--faint)">Opening the chat…</div>
+      </div>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Reopening a chat that was open</h3>
+      <div class="win small"><div class="tabs"><div class="tab on"><span class="chip">CC</span>Chat pane polish</div><span class="sp"></span></div>
+        <div class="cv" style="height:220px;overflow:hidden">
+          <div class="top-note">Updating…</div>
+          <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+          <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+          <div class="a"><p>Runs of three or more tool calls now fold into one row. The chat tests pass.</p></div>
+        </div>
+      </div>
+      <p class="cap">The last copy shows at once; "Updating…" goes when the fresh copy arrives. A chat never opened before still shows "Opening the chat…".</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ S8 COLOURS ============ -->
+<section id="s8">
+  <div class="brief">
+    <h2><span class="sid">S8</span>Colours</h2>
+    <p>The comparison that was not done. T3 Code's default theme against Muxflow's, for the roles the chat uses. T3's values are its <code>:root</code> tokens converted from OKLCH to sRGB; translucent ones are flattened over its pane.</p>
+  </div>
+  <div class="tbl"><table class="cols">
+    <thead><tr><th>Role</th><th>Muxflow dark</th><th>T3 dark</th><th>Muxflow light</th><th>T3 light</th></tr></thead>
+    <tbody>
+      <tr><td><b>Pane background</b></td><td><span class="swh"><span class="sw" style="--c:#282c34"></span><code>#282c34</code></span></td><td><span class="swh"><span class="sw" style="--c:#000000"></span><code>#000000</code></span></td><td><span class="swh"><span class="sw" style="--c:#fafafa"></span><code>#fafafa</code></span></td><td><span class="swh"><span class="sw" style="--c:#fcfcfc"></span><code>#fcfcfc</code></span></td></tr>
+      <tr><td><b>User bubble fill</b></td><td><span class="swh"><span class="sw" style="--c:#2c313a"></span><code>#2c313a</code></span></td><td><span class="swh"><span class="sw" style="--c:#1e1e1e"></span><code>#1e1e1e</code></span></td><td><span class="swh"><span class="sw" style="--c:#f4f4f5"></span><code>#f4f4f5</code></span></td><td><span class="swh"><span class="sw" style="--c:#ebebed"></span><code>#ebebed</code></span></td></tr>
+      <tr><td><b>User bubble border</b></td><td><span class="swh"><span class="sw" style="--c:#313640"></span><code>#313640</code></span></td><td><span class="ph">–</span></td><td><span class="swh"><span class="sw" style="--c:#e4e4e7"></span><code>#e4e4e7</code></span></td><td><span class="ph">–</span></td></tr>
+      <tr><td><b>Tool row fill</b></td><td><span class="swh"><span class="sw" style="--c:#282c34"></span><code>#282c34</code></span></td><td><span class="ph">–</span></td><td><span class="swh"><span class="sw" style="--c:#fafafa"></span><code>#fafafa</code></span></td><td><span class="ph">–</span></td></tr>
+      <tr><td><b>Tool row border</b></td><td><span class="swh"><span class="sw" style="--c:#313640"></span><code>#313640</code></span></td><td><span class="ph">–</span></td><td><span class="swh"><span class="sw" style="--c:#e4e4e7"></span><code>#e4e4e7</code></span></td><td><span class="ph">–</span></td></tr>
+      <tr><td><b>Composer fill</b></td><td><span class="swh"><span class="sw" style="--c:#282c34"></span><code>#282c34</code></span></td><td><span class="swh"><span class="sw" style="--c:#0e0e0e"></span><code>#0e0e0e</code></span></td><td><span class="swh"><span class="sw" style="--c:#fafafa"></span><code>#fafafa</code></span></td><td><span class="swh"><span class="sw" style="--c:#fefefe"></span><code>#fefefe</code></span></td></tr>
+      <tr><td><b>Composer border</b></td><td><span class="swh"><span class="sw" style="--c:#3e4451"></span><code>#3e4451</code></span></td><td><span class="swh"><span class="sw" style="--c:#1a1a1a"></span><code>#1a1a1a</code></span></td><td><span class="swh"><span class="sw" style="--c:#d4d4d8"></span><code>#d4d4d8</code></span></td><td><span class="swh"><span class="sw" style="--c:#eaeaea"></span><code>#eaeaea</code></span></td></tr>
+      <tr><td><b>Body text</b></td><td><span class="swh"><span class="sw" style="--c:#c4c8c6"></span><code>#c4c8c6</code></span></td><td><span class="swh"><span class="sw" style="--c:#f5f5f5"></span><code>#f5f5f5</code></span></td><td><span class="swh"><span class="sw" style="--c:#27272a"></span><code>#27272a</code></span></td><td><span class="swh"><span class="sw" style="--c:#18181b"></span><code>#18181b</code></span></td></tr>
+      <tr><td><b>Strong text</b></td><td><span class="swh"><span class="sw" style="--c:#ffffff"></span><code>#ffffff</code></span></td><td><span class="swh"><span class="sw" style="--c:#f5f5f5"></span><code>#f5f5f5</code></span></td><td><span class="swh"><span class="sw" style="--c:#18181b"></span><code>#18181b</code></span></td><td><span class="swh"><span class="sw" style="--c:#18181b"></span><code>#18181b</code></span></td></tr>
+      <tr><td><b>Dim text</b></td><td><span class="swh"><span class="sw" style="--c:#a4abb6"></span><code>#a4abb6</code></span></td><td><span class="swh"><span class="sw" style="--c:#a1a1a1"></span><code>#a1a1a1</code></span></td><td><span class="swh"><span class="sw" style="--c:#71717b"></span><code>#71717b</code></span></td><td><span class="swh"><span class="sw" style="--c:#71717b"></span><code>#71717b</code></span></td></tr>
+      <tr><td><b>Faint text</b></td><td><span class="swh"><span class="sw" style="--c:#7f8794"></span><code>#7f8794</code></span></td><td><span class="swh"><span class="sw" style="--c:#707070"></span><code>#707070</code></span></td><td><span class="swh"><span class="sw" style="--c:#85858e"></span><code>#85858e</code></span></td><td><span class="swh"><span class="sw" style="--c:#9b9ba2"></span><code>#9b9ba2</code></span></td></tr>
+      <tr><td><b>Link / accent</b></td><td><span class="swh"><span class="sw" style="--c:#7aa6da"></span><code>#7aa6da</code></span></td><td><span class="swh"><span class="sw" style="--c:#51a2ff"></span><code>#51a2ff</code> link</span><span class="swh"><span class="sw" style="--c:#346bf1"></span><code>#346bf1</code> primary</span></td><td><span class="swh"><span class="sw" style="--c:#2f6fe0"></span><code>#2f6fe0</code></span></td><td><span class="swh"><span class="sw" style="--c:#1447e6"></span><code>#1447e6</code> link</span><span class="swh"><span class="sw" style="--c:#1b4ed8"></span><code>#1b4ed8</code> primary</span></td></tr>
+      <tr><td><b>Code block fill</b></td><td><span class="swh"><span class="sw" style="--c:#2c313a"></span><code>#2c313a</code></span></td><td><span class="swh"><span class="sw" style="--c:#090909"></span><code>#090909</code></span></td><td><span class="swh"><span class="sw" style="--c:#f4f4f5"></span><code>#f4f4f5</code></span></td><td><span class="swh"><span class="sw" style="--c:#fafafa"></span><code>#fafafa</code></span></td></tr>
+    </tbody>
+  </table></div>
+  <div class="tbl"><table>
+    <thead><tr><th>Contrast (WCAG, text on its background)</th><th>Muxflow dark</th><th>T3 dark</th><th>Muxflow light</th><th>T3 light</th></tr></thead>
+    <tbody>
+      <tr><td><b>Body on pane</b></td><td>8.28</td><td>19.25</td><td>14.27</td><td>17.33</td></tr>
+      <tr><td><b>Strong on pane</b></td><td>14.00</td><td>19.25</td><td>16.97</td><td>17.33</td></tr>
+      <tr><td><b>Dim on pane</b></td><td>6.05</td><td>8.10</td><td>4.62</td><td>4.72</td></tr>
+      <tr><td><b>Faint on pane</b></td><td class="low">3.86 <b>low</b></td><td class="low">4.27 <b>low</b></td><td class="low">3.50 <b>low</b></td><td class="low">2.71 <b>low</b></td></tr>
+      <tr><td><b>Faint on bubble or raised (Muxflow)</b></td><td class="low">3.61 <b>low</b></td><td>–</td><td class="low">3.33 <b>low</b></td><td>–</td></tr>
+      <tr><td><b>Link on pane</b></td><td>5.53</td><td>7.96</td><td class="low">4.50 <b>low</b> (4.49999)</td><td>6.67</td></tr>
+      <tr><td><b>“done” and +N green on pane</b></td><td>6.28</td><td>10.86</td><td class="low">3.16 <b>low</b></td><td>5.25</td></tr>
+      <tr><td><b>“failed” and −N red on pane</b></td><td class="low">3.75 <b>low</b></td><td>7.26</td><td>4.63</td><td>6.27</td></tr>
+      <tr><td><b>“running” amber on pane</b></td><td>8.69</td><td>–</td><td class="low">3.05 <b>low</b></td><td>–</td></tr>
+      <tr><td><b>Bubble fill against pane (surface step)</b></td><td>1.07</td><td>1.26</td><td>1.05</td><td>1.16</td></tr>
+    </tbody>
+  </table></div>
+  <p class="cap">Under 4.5:1 is marked low. The last row is a surface step, not text: how far the bubble's fill stands off the pane.</p>
+  <div class="brief">
+    <h3>What differs</h3>
+    <ul class="pts">
+      <li>T3's dark theme is neutral black; Muxflow's is the blue-grey One Dark ground. The light grounds are nearly the same.</li>
+      <li>T3 separates the user's bubble by fill alone, a much bigger step from the pane (1.26 against 1.07 in dark), and no border. Muxflow uses a small fill step and a hairline.</li>
+      <li>T3's tool rows are bare lines with no box. Muxflow boxes each one; S4 already removes most boxes by grouping.</li>
+      <li>T3's composer is a raised surface lighter than the pane. Muxflow's is the pane's colour with an outline.</li>
+      <li>T3's body text is its strongest ink. Muxflow's body text is a step under its strong ink.</li>
+      <li>Faint text is under 4.5:1 in both apps. Muxflow also has three coloured-text cases under 4.5: green and amber in light, red in dark.</li>
+    </ul>
+  </div>
+  <div class="brief">
+    <h3>Options</h3>
+    <p>Three independent changes. Take any combination (D14).</p>
+  </div>
+  <div class="tile">
+    <h3><span class="sid" style="font-size:11.5px">C1</span>Readable small text <span class="tag y" style="margin-left:6px">Recommended</span></h3>
+    <p class="cap" style="color:var(--ink)">No surface changes. In the chat only, text that has to be read stops using the faint ink and uses the dim ink: tool verbs, notices such as "Interrupted" and "Loading earlier messages…", the steps line's summary. Decoration stays faint: "Esc to stop", timestamps. Red text ("failed", −N) uses the existing danger ink (#e79596 dark, 6.09; #b91c1c light). In light, green text ("done", +N) is #15803d (4.81), amber ("running") #b45309 (4.81), links #2563eb (4.95).</p>
+    <div class="fxg">
+      <div><div class="fxl">Today · dark</div><div class="fx dk"><div class="cv" style="gap:10px;padding:14px">
+  <div class="ntc">Interrupted</div>
+  <div class="u">Run the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">5 steps</span><span class="sum">read 3 · ran 2</span></div></div>
+  <div class="a"><p>One test fails in <span class="lnk">view.rs</span>. Fixing it.</p></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r badc">failed</span></div>
+  <div class="tool"><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+31</span> <span class="badc">−4</span></span></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r wkc">running</span></div>
+  <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Working…</span><span class="tm">4s</span><span class="esc">· Esc to stop</span></div>
+</div></div></div>
+      <div><div class="fxl">Today · light</div><div class="fx lt"><div class="cv" style="gap:10px;padding:14px">
+  <div class="ntc">Interrupted</div>
+  <div class="u">Run the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">5 steps</span><span class="sum">read 3 · ran 2</span></div></div>
+  <div class="a"><p>One test fails in <span class="lnk">view.rs</span>. Fixing it.</p></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r badc">failed</span></div>
+  <div class="tool"><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+31</span> <span class="badc">−4</span></span></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r wkc">running</span></div>
+  <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Working…</span><span class="tm">4s</span><span class="esc">· Esc to stop</span></div>
+</div></div></div>
+      <div><div class="fxl">C1 · dark</div><div class="fx dk c1"><div class="cv" style="gap:10px;padding:14px">
+  <div class="ntc">Interrupted</div>
+  <div class="u">Run the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">5 steps</span><span class="sum">read 3 · ran 2</span></div></div>
+  <div class="a"><p>One test fails in <span class="lnk">view.rs</span>. Fixing it.</p></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r badc">failed</span></div>
+  <div class="tool"><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+31</span> <span class="badc">−4</span></span></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r wkc">running</span></div>
+  <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Working…</span><span class="tm">4s</span><span class="esc">· Esc to stop</span></div>
+</div></div></div>
+      <div><div class="fxl">C1 · light</div><div class="fx lt c1"><div class="cv" style="gap:10px;padding:14px">
+  <div class="ntc">Interrupted</div>
+  <div class="u">Run the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">5 steps</span><span class="sum">read 3 · ran 2</span></div></div>
+  <div class="a"><p>One test fails in <span class="lnk">view.rs</span>. Fixing it.</p></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r badc">failed</span></div>
+  <div class="tool"><span class="k">edit</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r"><span class="okc">+31</span> <span class="badc">−4</span></span></div>
+  <div class="tool"><span class="k">run</span><span class="t">cargo test -p muxflow-gpui chat</span><span class="r wkc">running</span></div>
+  <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Working…</span><span class="tm">4s</span><span class="esc">· Esc to stop</span></div>
+</div></div></div>
+    </div>
+  </div>
+  <div class="tile">
+    <h3><span class="sid" style="font-size:11.5px">C2</span>The bubble by fill, no border</h3>
+    <p class="cap" style="color:var(--ink)">The user's bubble loses its hairline and takes a stronger fill: #353b45 in dark (step 1.24), #e4e4e7 in light (step 1.22).</p>
+    <div class="fxg">
+      <div><div class="fxl">Today · dark</div><div class="fx dk"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+  <div class="a"><p>I'll start with how rows are built in the view.</p></div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+  <div class="u">Now run only the chat tests.</div>
+</div></div></div>
+      <div><div class="fxl">Today · light</div><div class="fx lt"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+  <div class="a"><p>I'll start with how rows are built in the view.</p></div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+  <div class="u">Now run only the chat tests.</div>
+</div></div></div>
+      <div><div class="fxl">C2 · dark</div><div class="fx dk c2"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+  <div class="a"><p>I'll start with how rows are built in the view.</p></div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+  <div class="u">Now run only the chat tests.</div>
+</div></div></div>
+      <div><div class="fxl">C2 · light</div><div class="fx lt c2"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Group the tool rows in the chat and run the chat tests.</div>
+  <div class="a"><p>I'll start with how rows are built in the view.</p></div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">12 steps</span><span class="sum">read 5 · ran 4 · searched 1 · edited 2 files</span><span class="cnt"><span class="okc">+120</span> <span class="badc">−14</span></span></div></div>
+  <div class="u">Now run only the chat tests.</div>
+</div></div></div>
+    </div>
+  </div>
+  <div class="tile">
+    <h3><span class="sid" style="font-size:11.5px">C3</span>A raised composer</h3>
+    <p class="cap" style="color:var(--ink)">The composer's fill is one step off the pane (dark #2c313a, light #ffffff), with the hairline instead of the stronger border.</p>
+    <div class="fxg">
+      <div><div class="fxl">Today · dark</div><div class="fx dk"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Now run only the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">3 steps</span><span class="sum">ran 3</span></div></div>
+  <div class="a"><p>41 passed. Nothing else changed.</p></div>
+  <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="end"><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+</div></div></div>
+      <div><div class="fxl">Today · light</div><div class="fx lt"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Now run only the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">3 steps</span><span class="sum">ran 3</span></div></div>
+  <div class="a"><p>41 passed. Nothing else changed.</p></div>
+  <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="end"><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+</div></div></div>
+      <div><div class="fxl">C3 · dark</div><div class="fx dk c3"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Now run only the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">3 steps</span><span class="sum">ran 3</span></div></div>
+  <div class="a"><p>41 passed. Nothing else changed.</p></div>
+  <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="end"><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+</div></div></div>
+      <div><div class="fxl">C3 · light</div><div class="fx lt c3"><div class="cv" style="gap:10px;padding:14px">
+  <div class="u">Now run only the chat tests.</div>
+  <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">3 steps</span><span class="sum">ran 3</span></div></div>
+  <div class="a"><p>41 passed. Nothing else changed.</p></div>
+  <div class="comp in"><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="pill">High<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="end"><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></span></div></div>
+</div></div></div>
+    </div>
+  </div>
+  <p class="cap">Not proposed: moving to T3's black ground. The app's palette is shared with the terminal, the sidebar and the phone.</p>
+</section>
+
+<!-- ============ S9 BACKGROUND TASKS, SUBAGENTS, COMPACTING ============ -->
+<section id="s9">
+  <div class="brief">
+    <h2><span class="sid">S9</span>Background tasks, subagents, compacting</h2>
+    <p>Today the host drops what the agent says about work outside the turn. A command left running in the background shows nothing once the turn ends. A subagent that works for minutes is one unchanging row. While the agent compacts its context the chat looks stuck.</p>
+    <ul class="pts">
+      <li><b>Compacting:</b> the working line reads "Compacting context…" with its time, whatever else the turn is doing, with the same still mark. When it ends, a notice in the conversation says so, with the size before it (D17).</li>
+      <li><b>Running subagents</b> get a row each under the working line, outside any steps line, because several run side by side for minutes: the mark, the agent's type, its description, and under it what it does now, its tool count, tokens and time. The figures are Claude Code's own (D16). S5's tile uses the same form.</li>
+      <li><b>A finished subagent</b> is an ordinary step and folds into its steps line (S4): "Explore: Find where uploads are staged · 12 tools · 61k tokens".</li>
+      <li><b>Codex</b> reports no figures. Its row has "Agent", the first line of the prompt, and its state. On Codex the chip appears only if it turns out to have background work that outlives a turn (to be verified).</li>
+      <li><b>Background tasks:</b> a chip on the composer's top edge, "2 background tasks", while anything runs outside the turn, working or idle. It is the only thing that tells an idle chat with a command still running from a finished one, so it does not hide in the details card (D15).</li>
+      <li><b>The chip opens a list:</b> an icon for the kind, the description, the time it has run. A stop button per row where the agent can stop a task: Claude Code can (checked live), Codex rows have none (D18).</li>
+      <li><b>Times tick</b> on the working line's one-second timer. Nothing else moves.</li>
+      <li><b>Icons:</b> <code>shrink</code> for the compaction notice, <code>layers</code> for the chip, <code>square-terminal</code> for a command, <code>bot</code> for a subagent, <code>x</code> for stop.</li>
+    </ul>
+  </div>
+
+  <div class="grid2">
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Compacting</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">Keep going with the upload path.</div>
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">18 steps</span><span class="sum">read 9 · ran 5 · searched 4</span></div></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Compacting context…</span><span class="tm" data-t="12">12s</span><span class="esc">· Esc to stop</span></div>
+      </div></div>
+      <p class="cap">The working line while the agent compacts. It says this whether the turn is working or not; Esc to stop is offered only while the turn works.</p>
+    </div>
+    <div class="tile">
+      <h3>After compacting</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">18 steps</span><span class="sum">read 9 · ran 5 · searched 4</span></div></div>
+        <div class="top-note"><svg class="ic s12" style="margin-right:6px"><use href="#i-shrink"/></svg>Context compacted, was 182k tokens</div>
+        <div class="a"><p>Picking up where I left off: uploads are staged in <code>terminal_upload.rs</code>.</p></div>
+      </div></div>
+      <p class="cap">The notice row closes it, in the place it happened. The size is the one before compacting.</p>
+    </div>
+  </div>
+
+  <div class="grid2" style="align-items:start">
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>One subagent running</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">Find where uploads are staged.</div>
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">3 steps so far</span><span class="sum"></span></div></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Waiting on 1 subagent…</span><span class="tm" data-t="48">48s</span><span class="esc">· Esc to stop</span></div>
+        <div class="subs">
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ty">Explore</span><span class="ds">Find where uploads are staged</span></div><div class="l2">Reading terminal_upload.rs · 7 tools · 24.1k tokens · <span data-t="41">41s</span></div></div></div>
+        </div>
+      </div></div>
+      <p class="cap">The subagent's row sits under the working line, not inside the steps line above it.</p>
+    </div>
+    <div class="tile">
+      <h3>Three subagents side by side</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">5 steps so far</span><span class="sum"></span></div></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Waiting on 3 subagents…</span><span class="tm" data-t="72">1m 12s</span><span class="esc">· Esc to stop</span></div>
+        <div class="subs">
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ty">Explore</span><span class="ds">Find where uploads are staged</span></div><div class="l2">Reading terminal_upload.rs · 14 tools · 38.6k tokens · <span data-t="65">1m 05s</span></div></div></div>
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ty">general-purpose</span><span class="ds">Check the upload size limits on the host</span></div><div class="l2">Running rg max_upload apps/host · 9 tools · 21.3k tokens · <span data-t="58">58s</span></div></div></div>
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ty">Plan</span><span class="ds">Plan the drop target for the chat pane</span></div><div class="l2">Reading view.rs · 8 tools · 17.9k tokens · <span data-t="52">52s</span></div></div></div>
+        </div>
+      </div></div>
+      <p class="cap">One row each, in the order they started. A row leaves when its subagent ends.</p>
+    </div>
+    <div class="tile">
+      <h3>Finished, in an opened steps line</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp open"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><svg class="ic cd"><use href="#i-chevron-down"/></svg><span class="n">4 steps</span><span class="sum">read 2 · searched 1 · 1 subagent</span></div>
+          <div class="gb">
+            <div class="tool"><svg class="ic"><use href="#i-search"/></svg><span class="k">search</span><span class="t">fn stage_upload</span><span class="r okc">2 matches</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-bot"/></svg><span class="t ui">Explore: Find where uploads are staged<span class="fg"> · 12 tools · 61k tokens</span></span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/host/src/terminal_upload.rs</span><span class="r okc">done</span></div>
+            <div class="tool"><svg class="ic"><use href="#i-file-text"/></svg><span class="k">read</span><span class="t">apps/desktop-gpui/src/chat/view.rs</span><span class="r okc">done</span></div>
+          </div></div>
+        <div class="a"><p>Uploads are staged in <code>terminal_upload.rs</code>, then moved into place on the host.</p></div>
+      </div></div>
+      <p class="cap">Once it ends, the subagent is a step like any other. Its row still opens its result.</p>
+    </div>
+    <div class="tile">
+      <h3>Codex: no figures are reported</h3>
+      <div class="win small"><div class="cv">
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Waiting on 1 subagent…</span><span class="tm" data-t="48">48s</span><span class="esc">· Esc to stop</span></div>
+        <div class="subs">
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ty">Agent</span><span class="ds">Find where uploads are staged and list each caller</span></div><div class="l2">running</div></div></div>
+        </div>
+      </div></div>
+      <p class="cap">Codex names no agent type and counts no tools or tokens. The second line is its state.</p>
+    </div>
+  </div>
+
+  <div class="grid2" style="align-items:start">
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>Idle, with a command still running</h3>
+      <div class="win small"><div class="cv">
+        <div class="u">Start the dev server and leave it running.</div>
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">3 steps</span><span class="sum">read 1 · ran 2</span></div></div>
+        <div class="a"><p>The dev server is running on port 5173.</p></div>
+        <div class="comp in hasbg"><span class="pill bgt"><svg class="ic"><use href="#i-layers"/></svg>1 background task</span><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">The turn is over, a command still runs. A task that ends leaves the list, and the chip goes with the last one; the agent then starts a turn and says what came of it.</p>
+    </div>
+    <div class="tile">
+      <h3>Working, with background tasks</h3>
+      <div class="win small"><div class="cv">
+        <div class="grp"><div class="gh"><svg class="ic cr"><use href="#i-chevron-right"/></svg><span class="n">7 steps so far</span><span class="sum"></span><span class="fch">view.rs</span><span class="cnt"><span class="okc">+84</span> <span class="badc">−9</span></span></div></div>
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Running cargo test -p muxflow-gpui chat…</span><span class="tm" data-t="50">50s</span><span class="esc">· Esc to stop</span></div>
+        <div class="comp in hasbg"><span class="pill bgt"><svg class="ic"><use href="#i-layers"/></svg>2 background tasks</span><div class="ta">Send a follow-up while it works</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send stop"><svg class="ic sq"><use href="#i-square"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">The chip and the working line say different things: the turn, and what runs outside it.</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag p">Proposed</span>The chip opened, with stop</h3>
+      <div class="win small"><div class="cv">
+        <div class="a"><p>The dev server is running, and a subagent is auditing the tests.</p></div>
+        <div class="pop" style="width:300px;margin-bottom:-4px">
+          <div class="bt"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="d">Run the dev server</span><span class="tm" data-t="252">4m 12s</span><button class="mb" type="button" title="Stop" aria-label="Stop Run the dev server"><svg class="ic"><use href="#i-x"/></svg></button></div>
+          <div class="bt"><svg class="ic"><use href="#i-bot"/></svg><span class="d">Explore: audit the tests</span><span class="tm" data-t="63">1m 03s</span><button class="mb hov" type="button" title="Stop" aria-label="Stop Explore: audit the tests"><svg class="ic"><use href="#i-x"/></svg></button></div>
+        </div>
+        <div class="comp in hasbg"><span class="pill bgt open"><svg class="ic"><use href="#i-layers"/></svg>2 background tasks</span><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">The list is a popover, as the model picker's is. Each row ends with a stop button, if the agent supports stopping one task; the pointer is on the second (D18).</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag alt">Alternative</span>The chip opened, read-only</h3>
+      <div class="win small"><div class="cv">
+        <div class="a"><p>The dev server is running, and a subagent is auditing the tests.</p></div>
+        <div class="pop" style="width:300px;margin-bottom:-4px">
+          <div class="bt"><svg class="ic"><use href="#i-square-terminal"/></svg><span class="d">Run the dev server</span><span class="tm" data-t="252">4m 12s</span></div>
+          <div class="bt"><svg class="ic"><use href="#i-bot"/></svg><span class="d">Explore: audit the tests</span><span class="tm" data-t="63">1m 03s</span></div>
+        </div>
+        <div class="comp in hasbg"><span class="pill bgt open"><svg class="ic"><use href="#i-layers"/></svg>2 background tasks</span><div class="ta">Reply, or type / for commands and $ for skills</div><div class="bar"><span class="pill">Opus 5.5 (default)<svg class="ic"><use href="#i-chevron-down"/></svg></span><span class="sp"></span><span class="send"><svg class="ic"><use href="#i-arrow-up"/></svg></span></div></div>
+      </div></div>
+      <p class="cap">The same list with nothing to press. To stop a task you ask the agent, or Stop ends everything (D18).</p>
+    </div>
+  </div>
+
+  <div class="grid2" style="align-items:start">
+    <div class="tile">
+      <h3><span class="tag alt">Alternative</span>Background tasks in the details card</h3>
+      <div class="win small"><div class="stage"><div class="dcard">
+        <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-server"/></svg></span><span class="v">devbox</span></div><div class="l"><span class="gl"><svg class="ic"><use href="#i-folder"/></svg></span><span class="v start"><bdi>muxflow</bdi></span></div></div>
+        <div class="g"><div class="l"><span class="gl"><svg class="ic"><use href="#i-layers"/></svg></span><span class="v">Background</span><span class="x">2 running</span></div></div>
+        <div class="g"><div class="l"><span style="color:var(--faint);font-size:11px">Context</span><span class="bar2"><i></i></span><span class="x">209k / 1M</span></div></div>
+      </div></div></div>
+      <p class="cap">Out of sight until the card is open, so an idle chat with a command running looks finished (D15).</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag alt">Alternative</span>Background tasks as a line in the timeline</h3>
+      <div class="win small"><div class="cv">
+        <div class="a"><p>The dev server is running on port 5173.</p></div>
+        <div class="stl"><span class="mk"><svg class="ic s12" style="color:var(--faint)"><use href="#i-layers"/></svg></span><span class="lbl" style="color:var(--dim)">2 background tasks: Run the dev server · Explore: audit the tests</span></div>
+      </div></div>
+      <p class="cap">A line where the working line would be. Easy to read as a turn still working, and it has nowhere to open a list (D15).</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag alt">Alternative</span>Running subagents as one counted line</h3>
+      <div class="win small"><div class="cv">
+        <div class="stl"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><span class="lbl">Waiting on 3 subagents…</span><span class="tm" data-t="72">1m 12s</span><span class="esc">· Esc to stop</span></div>
+        <div class="subs">
+          <div class="sub"><span class="mk"><svg class="wk"><use href="#i-working"/></svg></span><div class="sb"><div class="l1"><span class="ds">3 subagents running · 31 tools · <span data-t="72">1m 12s</span></span></div></div></div>
+        </div>
+      </div></div>
+      <p class="cap">Shorter, but it no longer says what each one does or which is stuck (D16).</p>
+    </div>
+    <div class="tile">
+      <h3><span class="tag alt">Alternative wording</span>The notice without the size</h3>
+      <div class="win small"><div class="cv">
+        <div class="top-note"><svg class="ic s12" style="margin-right:6px"><use href="#i-shrink"/></svg>Context compacted</div>
+      </div></div>
+      <p class="cap">Also what shows when the agent does not report the size before (D17).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DECISIONS ============ -->
+<section id="decide">
+  <div class="brief">
+    <h2>Your answers</h2>
+    <p>The questions sit under the section they belong to: first whether the section is fine as drawn, then its open decisions, with the recommended option marked. Add a note where you want something else. <b>Next unanswered</b> in the bar at the bottom takes you to the next one. When you are done, press <b>Copy answers</b> and paste the result to Claude. Answers are kept in this browser, so a reload does not lose them.</p>
+  </div>
+  <div class="qhead"><h3>Still open</h3></div>
+  <div id="q-open" class="qopen"></div>
+  <div class="qhead"><h3>Anything else</h3></div>
+  <textarea id="q-notes" class="qnote big" rows="4" placeholder="Anything the questions above do not cover"></textarea>
+  <div class="qhead"><h3>The answers as text</h3><span class="cap">The same thing the Copy button copies. If copying fails, select all of it here.</span></div>
+  <textarea id="q-json" class="qnote big mono" rows="10" readonly spellcheck="false"></textarea>
+</section>
+
+<!-- ============ NO VISUAL CHANGE ============ -->
+<section id="same">
+  <div class="brief">
+    <h2>No visual change</h2>
+    <p>In this pass, with nothing to look at:</p>
+    <ul class="pts">
+      <li>The copy shortcut, Cmd+C or Ctrl+C, copies the agent's text you selected.</li>
+      <li>Esc stops a working agent, after closing the command list or cancelling an edit.</li>
+      <li>Typing or clicking in a chat clears its notification, as in a terminal.</li>
+      <li>The local branch was synced with origin's latency fixes.</li>
+    </ul>
+  </div>
+</section>
+
+</div>
+
+<div class="ansbar" id="ansbar" role="region" aria-label="Your answers">
+  <span class="prog"><b id="ab-n">0</b> of <span id="ab-t">0</span> answered</span>
+  <span class="meterw"><i id="ab-m"></i></span>
+  <span class="sp"></span>
+  <button class="ab" type="button" id="ab-next">Next unanswered ↓</button>
+  <button class="ab" type="button" id="ab-rec" title="Fill every unanswered question with its recommended option">Use recommended for the rest</button>
+  <button class="ab" type="button" id="ab-clear">Clear</button>
+  <button class="ab pri" type="button" id="ab-copy">Copy answers</button>
+  <a class="ab" id="ab-dl" download="chat-polish-answers.json" href="#">Download</a>
+</div>
+
+<script>
+/* Light or dark: ?theme=light|dark, or the button. Otherwise the system's. */
+(function(){
+  var root=document.documentElement;
+  var q=new URLSearchParams(location.search).get('theme');
+  if(q==='light'||q==='dark')root.dataset.theme=q;
+  function dark(){return root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches}
+  document.getElementById('thm').addEventListener('click',function(){root.dataset.theme=dark()?'light':'dark'});
+  /* Steps lines that open and close. */
+  document.querySelectorAll('.grp[data-fold]>.gh').forEach(function(h){
+    function flip(){var g=h.parentNode;g.classList.toggle('open');h.setAttribute('aria-expanded',g.classList.contains('open'))}
+    h.addEventListener('click',flip);
+    h.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();flip()}});
+  });
+  /* Copy shows a check for a second. */
+  document.querySelectorAll('[data-copy]').forEach(function(b){
+    b.addEventListener('click',function(){b.classList.add('done');setTimeout(function(){b.classList.remove('done')},1000)});
+  });
+  /* The working line's seconds: the only motion it has. */
+  var timers=[].slice.call(document.querySelectorAll('[data-t]'));
+  function fmt(s){if(s<60)return s+'s';var m=Math.floor(s/60),r=s%60;return m+'m '+(r<10?'0':'')+r+'s'}
+  setInterval(function(){timers.forEach(function(t){var s=+t.dataset.t+1;t.dataset.t=s;t.textContent=fmt(s)})},1000);
+})();
+/* The answer form: one card per question, kept in this browser, copied out as JSON. */
+(function(){
+  var KEY='muxflow-chat-polish-answers-v1';
+  var SECTIONS=[
+    ['S1','Details card','s1'],['S2','Model picker','s2'],['S3','Message buttons','s3'],
+    ['S4','Tool calls grouped','s4'],['S5','Working and thinking','s5'],['S6','Attachments','s6'],
+    ['S7','Slow link','s7'],['S8','Colours','s8'],['S9','Background tasks, subagents, compacting','s9']];
+  /* id, question, section, options: [value, label, detail]. The first option is the recommended one. */
+  var DECISIONS=[
+    ['D1','Host icon','s1',[['server','server'],['monitor','monitor'],['laptop','laptop'],['hard-drive','hard-drive']],1],
+    ['D2a','Commit icon','s1',[['git-commit-horizontal','git-commit-horizontal'],['git-commit-vertical','git-commit-vertical']],1],
+    ['D2b','Changes icon','s1',[['file-diff','file-diff'],['diff','diff'],['git-compare','git-compare']],1],
+    ['D3','Wording of the changes rows','s1',[['uncommitted-branch','"Uncommitted" and "Branch vs main"'],['working-tree-since','"Working tree" and "Since main"'],['one-row-switch','Keep one row and add a switch']]],
+    ['D4a','Default model label','s2',[['model-default','"Opus 5.5 (default)"'],['default-model','"Default · Opus 5.5"']]],
+    ['D4b','The plain "Opus 5.5" entry beside the default','s2',[['keep','Keep both entries','The default and the plain entry are different choices: the default follows the account.'],['hide','Hide the plain entry while it is the same model as the default']]],
+    ['D5','Where the agent\'s message buttons go','s3',[['last-text','Under the last text of each reply'],['every-block','Under every block of agent text']]],
+    ['D6','Where a fork cuts','s3',[['whole-reply','Keep the whole reply the button is under','Claude and Codex can both cut at a turn.'],['exact-message','Cut exactly at the clicked message','Claude only.']]],
+    ['D7','Which runs of steps collapse','s4',[['three-or-more','Runs of 3 or more'],['every-run','Every run'],['three-or-more-edits-open','Runs of 3 or more, but edits never collapse']]],
+    ['D8','A summary after the turn','s5',[['none','None'],['worked-for','A faint "Worked for 2m 14s" line']]],
+    ['D9','How attachments reach the agent','s6',[['images-as-images','Images as images, other files as their path on the host'],['all-paths','Everything as paths']]],
+    ['D10','Esc to stop','s5',[['one-press','One press stops'],['double-press','A double press']]],
+    ['D11','Motion of the working mark','s5',[['still','A still mark and ticking seconds'],['spinner','A spinner and shimmering text','Costs CPU while it runs.']]],
+    ['D12','A fork made from a reply','s3',[['in-history','Listed in History'],['hidden','Hidden, like /btw forks']]],
+    ['D13','Wording of the collapsed steps line','s4',[['counts','"12 steps · read 5 · ran 4 · edited 2 files"'],['sentence','"Ran 4 commands, read 5 files and edited 2 files"']]],
+    ['D14','Colours','s8',[['c1','C1 only','Readable small text.'],['c1-c2','C1 + C2','Also the bubble by fill, no border.'],['c1-c2-c3','C1 + C2 + C3','Also a raised composer.'],['none','None']]],
+    ['D15','Where background tasks show','s9',[['chip','A chip on the composer\'s top edge that opens a list'],['card-row','A row in the details card'],['timeline-line','A line in the timeline']]],
+    ['D16','Running subagents','s9',[['row-each','One row each under the working line'],['counted-line','One counted line']]],
+    ['D17','Compaction notice','s9',[['with-size','"Context compacted, was 182k tokens"'],['plain','"Context compacted"']]],
+    ['D18','Stopping a background task from the list','s9',[['stop-button','A stop button per row, where the agent supports it','Claude Code does, checked live. Codex rows have none.'],['read-only','The list is read-only']]]
+  ];
+  var state={sections:{},decisions:{},notes:''};
+  try{var saved=JSON.parse(localStorage.getItem(KEY)||'null');if(saved&&saved.sections&&saved.decisions)state=saved}catch(e){}
+  function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+  function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+  var cards=[],lastShown=-1;
+  function card(kind,id,question,sec,options,mono){
+    var bag=state[kind];bag[id]=bag[id]||{answer:null,note:''};
+    var q=el('div','q');q.id=(kind==='sections'?'ans-':'')+id.toLowerCase();
+    var qt=el('div','qt');
+    qt.appendChild(el('span','qid',id));qt.appendChild(el('span','qq',question));
+    var st=el('span','qst','Not answered');qt.appendChild(st);q.appendChild(qt);
+    var opts=el('div','opts'+(options.length<=4&&options.every(function(o){return !o[2]&&o[1].length<26})?' row':''));
+    options.concat([['other','Something else']]).forEach(function(o,i){
+      var lab=el('label','opt');var inp=el('input');inp.type='radio';inp.name=kind+'-'+id;inp.value=o[0];
+      inp.checked=bag[id].answer===o[0];
+      inp.addEventListener('change',function(){bag[id].answer=o[0];save();refresh()});
+      var txt=el('span');var ol=el(mono?'code':'span','ol',o[1]);txt.appendChild(ol);
+      if(i===0&&kind==='decisions'){var t=el('span','tag y','Recommended');txt.appendChild(t)}
+      if(o[2])txt.appendChild(el('span','od',o[2]));
+      lab.appendChild(inp);lab.appendChild(txt);opts.appendChild(lab);
+    });
+    q.appendChild(opts);
+    var note=el('textarea','qnote');note.rows=1;note.placeholder='Note (optional)';note.value=bag[id].note||'';
+    note.addEventListener('input',function(){bag[id].note=note.value;save();refresh()});
+    q.appendChild(note);
+    cards.push({q:q,st:st,kind:kind,id:id,options:options,question:question,note:note});
+    return q;
+  }
+  /* Each section's questions go under that section, so they are answered while looking at it. */
+  SECTIONS.forEach(function(s){
+    var box=el('div','answers');var h=el('h3',null,'Your answers for '+s[0]);box.appendChild(h);
+    var grid=el('div','qgrid');box.appendChild(grid);
+    var first=card('sections',s[0],'Is this section fine as drawn?',s[2],[['ok','Fine as drawn'],['change','Needs changes']]);
+    first.classList.add('wide');grid.appendChild(first);
+    DECISIONS.forEach(function(d){if(d[2]===s[2])grid.appendChild(card('decisions',d[0],d[1],d[2],d[3],d[4]))});
+    document.getElementById(s[2]).appendChild(box);
+  });
+  /* Sections have no "something else": drop it there. */
+  cards.forEach(function(c){if(c.kind==='sections'){var o=c.q.querySelector('input[value="other"]');if(o)o.closest('.opt').remove()}});
+  var notes=document.getElementById('q-notes');notes.value=state.notes||'';
+  notes.addEventListener('input',function(){state.notes=notes.value;save();refresh()});
+  function label(c,v){for(var i=0;i<c.options.length;i++)if(c.options[i][0]===v)return c.options[i][1];return v==='other'?'Something else':null}
+  function output(){
+    var out={doc:'chat-polish-mock',sections:{},decisions:{},notes:state.notes||''};
+    cards.forEach(function(c){
+      var a=state[c.kind][c.id],row={question:c.question,answer:a.answer,label:label(c,a.answer)};
+      if(c.kind==='decisions')row.recommended=a.answer==null?null:a.answer===c.options[0][0];
+      if(a.note)row.note=a.note;
+      out[c.kind][c.id]=row;
+    });
+    return JSON.stringify(out,null,2);
+  }
+  var json=document.getElementById('q-json'),n=document.getElementById('ab-n'),t=document.getElementById('ab-t'),m=document.getElementById('ab-m'),dl=document.getElementById('ab-dl');
+  function refresh(){
+    var done=0;
+    cards.forEach(function(c){
+      var a=state[c.kind][c.id],need=(a.answer==='other'||a.answer==='change')&&!a.note.trim();
+      c.q.classList.toggle('done',a.answer!=null&&!need);c.q.classList.toggle('need',need);
+      c.st.textContent=a.answer==null?'Not answered':need?'Add a note':'Answered';
+      c.note.placeholder=need?'Say what you want instead':'Note (optional)';
+      if(a.answer!=null)done++;
+    });
+    var open=document.getElementById('q-open');open.textContent='';
+    cards.forEach(function(c){var a=state[c.kind][c.id];if(a.answer==null||c.q.classList.contains('need')){var l=el('a',null,c.id);l.href='#'+c.q.id;open.appendChild(l)}});
+    if(!open.firstChild)open.appendChild(el('span',null,'Nothing. Press Copy answers.'));
+    n.textContent=done;t.textContent=cards.length;m.style.width=(100*done/cards.length)+'%';
+    json.value=output();
+    dl.href='data:application/json;charset=utf-8,'+encodeURIComponent(json.value);
+  }
+  function sync(){cards.forEach(function(c){var a=state[c.kind][c.id];c.q.querySelectorAll('input').forEach(function(i){i.checked=i.value===a.answer});c.note.value=a.note||''});notes.value=state.notes||''}
+  document.getElementById('ab-rec').addEventListener('click',function(){
+    cards.forEach(function(c){var a=state[c.kind][c.id];if(a.answer==null)a.answer=c.options[0][0]});save();sync();refresh();
+  });
+  document.getElementById('ab-clear').addEventListener('click',function(){
+    if(!confirm('Clear every answer and note?'))return;
+    cards.forEach(function(c){state[c.kind][c.id]={answer:null,note:''}});state.notes='';save();sync();refresh();
+  });
+  document.getElementById('ab-next').addEventListener('click',function(){
+    var open=cards.filter(function(c){return state[c.kind][c.id].answer==null||c.q.classList.contains('need')});
+    if(!open.length){document.getElementById('decide').scrollIntoView({behavior:'smooth'});return}
+    /* In page order, after the one shown last, so a skipped question is not shown twice in a row. */
+    var next=open.filter(function(c){return cards.indexOf(c)>lastShown})[0]||open[0];lastShown=cards.indexOf(next);
+    next.q.scrollIntoView({behavior:'smooth',block:'center'});next.q.classList.add('flash');setTimeout(function(){next.q.classList.remove('flash')},1200);
+  });
+  var copy=document.getElementById('ab-copy');
+  copy.addEventListener('click',function(){
+    var text=output();
+    function shown(ok){copy.textContent=ok?'Copied. Paste it to Claude':'Select the text below and copy it';copy.classList.toggle('ok',ok);
+      if(!ok){json.scrollIntoView({block:'center'});json.focus();json.select()}
+      setTimeout(function(){copy.textContent='Copy answers';copy.classList.remove('ok')},2600)}
+    function fallback(){json.value=text;json.focus();json.select();var ok=false;try{ok=document.execCommand('copy')}catch(e){}shown(ok)}
+    /* The clipboard API needs https or localhost; this page is often served over plain http. */
+    if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(function(){shown(true)},fallback);else fallback();
+  });
+  refresh();
+})();
+</script>
