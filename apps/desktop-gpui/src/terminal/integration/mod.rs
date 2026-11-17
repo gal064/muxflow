@@ -168,6 +168,8 @@ pub fn children(
             .border_2()
             .border_color(palette.accent)
             .text_color(palette.accent_ink)
+            // A hitbox, without which GPUI applies no drag-over style.
+            .on_mouse_move(|_, _, _| {})
             .group_drag_over::<ExternalPaths>(DROP_GROUP, |style| style.visible())
             .group_drag_over::<InternalPathDrag>(DROP_GROUP, |style| style.visible())
             .child("Drop files to paste paths")

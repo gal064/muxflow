@@ -55,6 +55,9 @@ const CARD_MARGIN: f32 = 24.;
 /// `.dcard { top: 14px; right: 14px; width: 238px }`.
 const CARD_INSET: f32 = 14.;
 const CARD_WIDTH: f32 = 238.;
+/// The Details button's height over a narrow chat: 13px text at the Kit
+/// button's 1.25 line height, 3px above and below, and its border.
+const DETAILS_TOGGLE: f32 = 25.;
 /// `.tl { gap: 14px }`.
 const ROW_GAP: f32 = 14.;
 /// The tallest a tool's output is shown before it scrolls.
@@ -1032,15 +1035,18 @@ impl ChatPane {
                             .text_color(palette.chrome_ink)
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .id("chat-working-time")
-                            .test_support()
-                            .aria_label(SharedString::from(time.clone()))
-                            .flex_none()
-                            .text_color(palette.chrome_faint)
-                            .child(time),
-                    )
+                    // "Stopping…" alone, with no time (S7).
+                    .when(!self.stopping, |line| {
+                        line.child(
+                            div()
+                                .id("chat-working-time")
+                                .test_support()
+                                .aria_label(SharedString::from(time.clone()))
+                                .flex_none()
+                                .text_color(palette.chrome_faint)
+                                .child(time),
+                        )
+                    })
                     .when(escape, |line| {
                         line.child(
                             div()
@@ -1319,6 +1325,16 @@ impl Render for ChatPane {
             let card = card.is_some();
             move |width| column(width, card, rem)
         });
+        // Over a narrow chat the card is a Details button at the top right:
+        // the conversation starts under it, so no first row is hidden by it.
+        // `.tl { padding: 18px 0 12px }`, less the header row's gap.
+        let toggle =
+            card.is_some() && width.is_some_and(|width| width < ui(DETAILS_ROOM).to_pixels(rem));
+        let top = if toggle {
+            CARD_INSET + DETAILS_TOGGLE
+        } else {
+            18. - ROW_GAP
+        };
         let measured = self.width.clone();
         let press = self.pressed.clone();
         let (profile_id, pane_id) = (self.profile_id.clone(), self.pane_id.clone());
@@ -1337,8 +1353,7 @@ impl Render for ChatPane {
                         },
                     )
                     .with_jump_button_label("Jump to latest")
-                    // `.tl { padding: 18px 0 12px }`, less the header row's gap.
-                    .with_list_style(StyleRefinement::default().pt(ui(18. - ROW_GAP)).pb(ui(12.)))
+                    .with_list_style(StyleRefinement::default().pt(ui(top)).pb(ui(12.)))
                     .with_row_style(
                         StyleRefinement::default()
                             .pl(left)

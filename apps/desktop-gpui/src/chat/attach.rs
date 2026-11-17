@@ -10,7 +10,12 @@
 //! Each file is its own batch, so one that fails is retried or removed alone.
 //! Progress is the upload's record in [`Uploads`], read by its transfer.
 
-use std::{path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use desktop_core::connection::{
     ConnectionSpec, chat::ChatAttachment, files::native_clipboard::read_native_terminal_clipboard,
@@ -18,9 +23,9 @@ use desktop_core::connection::{
 use desktop_core::platform;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, Context, ExternalPaths, FontWeight, InteractiveElement, IntoElement,
-    ObjectFit, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
-    StyledImage as _, Window,
+    AnyElement, App, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FontWeight,
+    InteractiveElement, IntoElement, ObjectFit, ParentElement, Role, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage as _, Window,
     component::{h_flex, tooltip::Tooltip, v_flex},
     div, img,
     prelude::FluentBuilder,
@@ -151,6 +156,25 @@ pub(super) fn size_label(bytes: u64) -> String {
     }
 }
 
+/// What the clipboard holds as GPUI reads it, when it is text alone: no
+/// image or file with it, and not the URIs or paths a file manager puts
+/// there for files it copied, which the native reader tells apart.
+fn plain_text(item: Option<ClipboardItem>) -> Option<String> {
+    let mut text = String::new();
+    for entry in item?.entries() {
+        match entry {
+            ClipboardEntry::String(string) => text.push_str(string.text()),
+            _ => return None,
+        }
+    }
+    let names_files = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .all(|line| line.starts_with("file://") || Path::new(line).is_absolute());
+    (!names_files).then_some(text)
+}
+
 /// What a test reads in place of the native clipboard, as
 /// `read_native_terminal_clipboard` answers.
 #[cfg(test)]
@@ -178,6 +202,10 @@ impl UploadTarget for ChatPane {
         // The batch ended one way or another: its chip has said how, so
         // the next file goes.
         self.uploading = None;
+        // Its records too have said all they will: a chip reads one only
+        // while it moves, and the terminal's list leaves a chat's out, so
+        // nobody would dismiss them and they would fill the shared list.
+        self.dismiss_finished(cx);
         if let Some(window) = self.upload_window {
             let pane = cx.entity().downgrade();
             cx.defer(move |cx| {
@@ -208,7 +236,13 @@ impl UploadTarget for ChatPane {
     fn started(&mut self, _: &str, transfer_id: &str, cx: &mut Context<Self>) {
         if let Some(attachment) = self.uploading_attachment() {
             attachment.upload = Upload::Uploading(Some(transfer_id.to_owned()));
-            cx.notify();
+            return cx.notify();
+        }
+        // Its chip went before its transfer had an id: it stops now.
+        if self.uploading.is_some() {
+            let _ = self
+                .connection_backend(cx)
+                .cancel_upload(transfer_id.to_owned());
         }
     }
 
@@ -423,17 +457,19 @@ impl ChatPane {
             return;
         };
         let removed = self.attachments.remove(index);
-        match &removed.upload {
-            Upload::Uploading(Some(transfer)) => {
-                let _ = self.connection_backend(cx).cancel_upload(transfer.clone());
-            }
-            Upload::Failed(_) => self.forget_record(&removed, cx),
-            _ => {}
-        }
-        // One whose batch runs leaves `uploading` as it is: the batch still
-        // ends, finds no chip to tell, and lets the next file go.
-        self.uploaded.remove(&id);
+        self.let_go(&removed, cx);
         cx.notify();
+    }
+
+    /// A chip has left the composer, removed or replaced: its upload stops.
+    /// One whose batch runs leaves `uploading` as it is: the batch still
+    /// ends, finds no chip to tell, and lets the next file go. One whose
+    /// transfer has no id yet is stopped once it has one, in `started`.
+    pub(super) fn let_go(&mut self, removed: &Attachment, cx: &mut Context<Self>) {
+        if let Upload::Uploading(Some(transfer)) = &removed.upload {
+            let _ = self.connection_backend(cx).cancel_upload(transfer.clone());
+        }
+        self.uploaded.remove(&removed.id);
     }
 
     /// Uploads a failed file again.
@@ -450,17 +486,16 @@ impl ChatPane {
         if !matches!(attachment.upload, Upload::Failed(_)) {
             return;
         }
-        let failed = attachment.clone();
         attachment.upload = Upload::Queued;
-        self.forget_record(&failed, cx);
         self.notice = None;
         self.pump_uploads(window, cx);
         cx.notify();
     }
 
-    /// A failed upload's record is the chip's to show; once it is retried or
-    /// removed the record goes.
-    fn forget_record(&self, attachment: &Attachment, cx: &mut App) {
+    /// Dismisses this chat's finished upload records, as the user dismisses
+    /// a terminal's from its list. One still moving stays.
+    fn dismiss_finished(&self, cx: &mut App) {
+        let pane_id = format!("{CHAT_UPLOAD_PREFIX}{}", self.pane_id);
         let ids: Vec<String> = cx
             .try_global::<Uploads>()
             .map(|uploads| {
@@ -468,16 +503,14 @@ impl ChatPane {
                     .0
                     .records
                     .iter()
-                    .filter(|record| {
-                        record.pane_id.starts_with(CHAT_UPLOAD_PREFIX)
-                            && record.progress.source_path == attachment.local
-                    })
+                    .filter(|record| record.pane_id == pane_id)
                     .map(|record| record.progress.transfer_id.clone())
                     .collect()
             })
             .unwrap_or_default();
+        let uploads = &mut cx.default_global::<Uploads>().0;
         for id in ids {
-            cx.default_global::<Uploads>().0.dismiss(&id);
+            uploads.dismiss(&id);
         }
     }
 
@@ -527,23 +560,40 @@ impl ChatPane {
     /// image become attachments, and text is inserted as the field would.
     pub(super) fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.seen(cx);
-        #[cfg(test)]
-        if let Some(read) = cx.try_global::<ClipboardRead>() {
-            let answer = (read.0)();
-            return self.pasted(answer, window, cx);
+        // Text alone goes in at once, as the field puts it. Only files and an
+        // image need the native reader, which may wait on the app that owns
+        // the clipboard.
+        if let Some(text) = plain_text(cx.read_from_clipboard()) {
+            return self.insert_text(&text, window, cx);
         }
-        // Read on the runtime and polled, as the terminal reads it.
-        let read = platform::spawn(read_native_terminal_clipboard());
+        #[cfg(test)]
+        let known = cx.try_global::<ClipboardRead>().map(|read| (read.0)());
+        #[cfg(not(test))]
+        let known: Option<Result<Option<Value>, String>> = None;
+        let draft = self.draft_generation;
         cx.spawn_in(window, async move |this, cx| {
-            while !read.is_finished() {
-                cx.background_executor().timer(READ_POLL).await;
-            }
-            let answer = match read.await {
-                Ok(answer) => answer,
-                Err(error) => Err(format!("native clipboard read failed: {error}")),
+            let answer = match known {
+                Some(answer) => answer,
+                None => {
+                    // Read on the runtime and polled, as the terminal reads it.
+                    let read = platform::spawn(read_native_terminal_clipboard());
+                    while !read.is_finished() {
+                        cx.background_executor().timer(READ_POLL).await;
+                    }
+                    match read.await {
+                        Ok(answer) => answer,
+                        Err(error) => Err(format!("native clipboard read failed: {error}")),
+                    }
+                }
             };
-            this.update_in(cx, |this, window, cx| this.pasted(answer, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                // Sent, or set aside for an edit, while the clipboard was
+                // read: what it held is not for the draft there now.
+                if this.draft_generation == draft {
+                    this.pasted(answer, window, cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -812,6 +862,7 @@ impl ChatPane {
             let detail = div().child(size.clone()).into_any_element();
             let path = sent.path.clone();
             let pane_id = pane_id.clone();
+            let ring = p.accent;
             chip(
                 format!("chat-sent-{key}-{index}"),
                 &shown,
@@ -823,10 +874,15 @@ impl ChatPane {
             )
             .bg(p.chrome_bg)
             .text_color(p.chrome_dim)
+            // A button the keyboard reaches and presses, as the chat's others.
             .when(!path.is_empty(), |chip| {
-                chip.cursor_pointer().on_click(move |_, _, cx: &mut App| {
-                    crate::editor::open_terminal_path(&pane_id, &path, None, cx);
-                })
+                chip.role(Role::Button)
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .focus_visible(move |style| style.border_color(ring))
+                    .on_click(move |_, _, cx: &mut App| {
+                        crate::editor::open_terminal_path(&pane_id, &path, None, cx);
+                    })
             })
             .test_support()
             .into_any_element()
@@ -867,8 +923,12 @@ fn chip(
             .border_1()
             .border_color(p.chrome_hairline)
             .child(
+                // Rounded itself: `overflow_hidden` clips to a square, and
+                // the image's corners would show past the border's. The
+                // border's radius less its width.
                 img(PathBuf::from(path))
                     .size_full()
+                    .rounded(ui(5.))
                     .object_fit(ObjectFit::Cover),
             ),
         None => div()
@@ -938,6 +998,7 @@ fn chip(
 pub(super) fn drop_hint(p: &Palette) -> AnyElement {
     div()
         .id("chat-drop-hint")
+        .test_support()
         .role(Role::Status)
         .absolute()
         .inset_0()
@@ -948,6 +1009,11 @@ pub(super) fn drop_hint(p: &Palette) -> AnyElement {
         .bg(p.accent_wash)
         .border_2()
         .border_color(p.accent)
+        // GPUI applies a drag-over style only to an element with a hitbox,
+        // and a drag-over style alone does not make one. A listener that
+        // does nothing does, and an ordinary hitbox takes no press, wheel
+        // or hover from the conversation under it.
+        .on_mouse_move(|_, _, _| {})
         .group_drag_over::<ExternalPaths>(DROP_GROUP, |style| style.visible())
         .group_drag_over::<InternalPathDrag>(DROP_GROUP, |style| style.visible())
         .child(
@@ -984,5 +1050,20 @@ mod tests {
         assert_eq!(size_label(880_640), "860 KB");
         assert_eq!(size_label(2_202_009), "2.1 MB");
         assert_eq!(size_label(12), "12 B");
+    }
+
+    #[test]
+    fn only_text_that_names_no_files_is_pasted_without_the_native_reader() {
+        let text = |text: &str| plain_text(Some(ClipboardItem::new_string(text.to_owned())));
+        assert_eq!(text("wrapped paths").as_deref(), Some("wrapped paths"));
+        assert_eq!(
+            text("see /work/repo/src/view.rs").as_deref(),
+            Some("see /work/repo/src/view.rs")
+        );
+        // What a file manager copies, and nothing at all, go to the reader.
+        assert_eq!(text("file:///home/u/card.png"), None);
+        assert_eq!(text("/home/u/card.png\n/home/u/log.txt\n"), None);
+        assert_eq!(text(""), None);
+        assert_eq!(plain_text(None), None);
     }
 }

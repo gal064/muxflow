@@ -110,6 +110,25 @@ struct Live {
     terminal_epoch: u64,
 }
 
+/// The message that last failed to send, as it went back to the composer.
+struct Resend {
+    id: String,
+    text: String,
+    /// Its files' host paths: the same text with other files is another
+    /// message, and goes under a new id.
+    paths: Vec<String>,
+    /// The chips it put back, which go again if the host had taken it.
+    chips: Vec<u64>,
+}
+
+/// The host paths of the files on the host among `attachments`.
+fn host_paths(attachments: &[Attachment]) -> Vec<String> {
+    attachments
+        .iter()
+        .filter_map(|attachment| attachment.host.clone())
+        .collect()
+}
+
 /// A message on its way to the host, shown until its item arrives.
 pub(super) struct Sending {
     pub id: String,
@@ -361,8 +380,12 @@ pub struct ChatPane {
     pub(super) pressed: Arc<Mutex<Option<Point<Pixels>>>>,
     /// Text a refused send gives back to the composer at the next draw.
     pub(super) restore: Option<String>,
-    /// The text of the message that last failed to send, and its id.
-    resend: Option<(String, String)>,
+    /// The message that last failed to send.
+    resend: Option<Resend>,
+    /// Counts the drafts the composer has held: one is sent, or set aside
+    /// for an edit, and the next begins. What a slow read of the clipboard
+    /// finds lands only in the draft it was asked for.
+    pub(super) draft_generation: u64,
     /// Text put back in the composer whose message turned out to be sent.
     pub(super) withdraw: Option<String>,
     /// What the empty composer says, as last told to it.
@@ -521,6 +544,7 @@ impl ChatPane {
             pressed: Arc::default(),
             restore: None,
             resend: None,
+            draft_generation: 0,
             withdraw: None,
             placeholder: "",
             next_attachment: kept.iter().map(|kept| kept.id).max().unwrap_or(0),
@@ -1024,10 +1048,16 @@ impl ChatPane {
         let chat = &self.chat;
         self.sending
             .retain(|sending| chat.item(&sending.id).is_none());
-        if let Some((text, _)) = self.resend.take_if(|(_, id)| chat.item(id).is_some()) {
+        if let Some(resend) = self
+            .resend
+            .take_if(|resend| chat.item(&resend.id).is_some())
+        {
             // The host had taken it after all: it is in the conversation,
-            // and its text is not left in the composer to be sent twice.
-            self.withdraw = Some(text);
+            // and neither its text nor its files are left in the composer
+            // to be sent twice.
+            self.withdraw = Some(resend.text);
+            self.attachments
+                .retain(|attachment| !resend.chips.contains(&attachment.id));
         }
         if self
             .editing
@@ -1495,12 +1525,15 @@ impl ChatPane {
         if let Some(question) = side {
             return self.side_fork(question, text, window, cx);
         }
-        // The same text again goes under the id it had: if the host took it
-        // and only the answer was lost, it says so instead of taking it twice.
+        // The same message again goes under the id it had: if the host took
+        // it and only the answer was lost, it says so instead of taking it
+        // twice. The same text with other files is another message.
+        let paths = host_paths(&self.attachments);
         let id = match self.resend.take() {
-            Some((sent, id)) if sent == text => id,
+            Some(resend) if resend.text == text && resend.paths == paths => resend.id,
             _ => uuid::Uuid::new_v4().to_string(),
         };
+        self.draft_generation += 1;
         let rewind = self.editing.take();
         self.set_composer("", window, cx);
         let attachments = std::mem::take(&mut self.attachments);
@@ -1576,11 +1609,21 @@ impl ChatPane {
     ) {
         self.sending.retain(|sending| sending.id != id);
         self.sync_trail(cx);
+        if self.chat.item(id).is_some() {
+            // Its item came before the answer: the host has it, and nothing
+            // goes back to be sent twice.
+            return cx.notify();
+        }
         self.restore = Some(text.to_owned());
+        self.resend = Some(Resend {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            paths: host_paths(&attachments),
+            chips: attachments.iter().map(|attachment| attachment.id).collect(),
+        });
         // Before any added since, as the text goes before what was typed.
         let added = std::mem::replace(&mut self.attachments, attachments);
         self.attachments.extend(added);
-        self.resend = Some((text.to_owned(), id.to_owned()));
         if let Some(item_id) = editing.filter(|id| self.chat.item(id).is_some()) {
             self.editing = Some(item_id);
         }
@@ -1600,6 +1643,7 @@ impl ChatPane {
         if !self.capabilities().fork {
             return self.refused("This agent cannot fork its conversation.", cx);
         }
+        self.draft_generation += 1;
         self.set_composer("", window, cx);
         let fork = ChatRequest {
             action: ChatAction::SideFork.into(),
@@ -1619,6 +1663,11 @@ impl ChatPane {
 
     /// Shows the fork's pane once the topology has it, as Branch does.
     fn follow_fork(&mut self, pane_id: String, source: &str, cx: &mut Context<Self>) {
+        // Someone who has moved on from this chat while the host answered is
+        // not pulled back to it; the fork is there to be found.
+        if !self.on_screen {
+            return;
+        }
         let Some(agents) = cx.try_global::<Agents>() else {
             return;
         };
@@ -1762,7 +1811,11 @@ impl ChatPane {
             })
             .collect();
         self.next_attachment = next;
-        self.attachments = attachments;
+        // The files it replaces stop uploading.
+        for replaced in std::mem::replace(&mut self.attachments, attachments) {
+            self.let_go(&replaced, cx);
+        }
+        self.draft_generation += 1;
         self.editing = Some(item_id.to_owned());
         self.notice = None;
         self.set_composer(&text, window, cx);
@@ -1773,7 +1826,10 @@ impl ChatPane {
     pub(super) fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing.take().is_some() {
             self.set_composer("", window, cx);
-            self.attachments.clear();
+            for dropped in std::mem::take(&mut self.attachments) {
+                self.let_go(&dropped, cx);
+            }
+            self.draft_generation += 1;
             cx.notify();
         }
     }

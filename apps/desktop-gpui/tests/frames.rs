@@ -50,9 +50,7 @@ mod frames {
 
     use std::{collections::HashSet, path::Path, sync::Arc};
 
-    use gpui_kit::{
-        AnyWindowHandle, Bounds, HeadlessAppContext, Rgba, WindowBounds, assets::Assets, px, size,
-    };
+    use gpui_kit::{AnyWindowHandle, Bounds, HeadlessAppContext, Rgba, WindowBounds, px, size};
     use muxflow_gpui::{
         app::{self, Core},
         fonts,
@@ -63,7 +61,7 @@ mod frames {
     fn context(state_path: &Path) -> HeadlessAppContext {
         let mut cx = HeadlessAppContext::with_platform(
             gpui_kit::platform::current_platform(true).text_system(),
-            Arc::new(Assets),
+            Arc::new(app::AppAssets),
             gpui_kit::platform::current_headless_renderer,
         );
         cx.update(|cx| {
