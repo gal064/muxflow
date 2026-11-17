@@ -11,13 +11,15 @@ use std::{
 
 use desktop_core::app_state::{AppStateStore, load_app_state};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, EntityInputHandler, Focusable, MouseButton, Role,
-    Task, TestAppContext, Window, WindowBounds, WindowOptions,
+    AnyWindowHandle, App, AppContext, Bounds, EntityInputHandler, Focusable, InteractiveElement,
+    MouseButton, ParentElement, Role, Styled, Task, TestAppContext, TestSupportExt, Window,
+    WindowBounds, WindowOptions,
+    base::TextView,
     component::{
         WindowExt,
         input::{Input, InputState},
     },
-    point, px, size,
+    div, point, px, size,
     test::{TestEventExt, TestQueryExt, TestWindowExt},
 };
 use muxflow_gpui::{
@@ -476,6 +478,70 @@ fn a_composition_keeps_positional_selectors_from_running(cx: &mut TestAppContext
     });
     press(field, "secondary-3", cx);
     assert_eq!(*ran.borrow(), ["workspace.select3"], "with no composition");
+}
+
+/// An agent's message in a chat pane: selectable prose, not an input.
+struct SelectableProse;
+
+impl gpui_kit::Render for SelectableProse {
+    fn render(
+        &mut self,
+        _: &mut Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        div().id("prose").test_support().w(px(400.)).child(
+            TextView::markdown("prose-text", "The detector joins rows.\n\nThen it scans.")
+                .selectable(true),
+        )
+    }
+}
+
+#[gpui_kit::test]
+fn selected_prose_keeps_copy_and_select_all_but_not_the_apps_shortcuts(cx: &mut TestAppContext) {
+    let (_dir, _handle) = no_state(cx);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let log = ran.clone();
+    cx.update(|cx| {
+        implement_all(log, cx);
+        fully_available_context(cx);
+        // A terminal elsewhere still holds a selection: on Linux that makes
+        // Ctrl+C the terminal's copy, not its interrupt.
+        commands::update_context(cx, |context| context.has_terminal_selection = true);
+    });
+    let prose = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+            cx.new(|_| SelectableProse)
+        })
+        .unwrap()
+        .0
+    });
+    let copied = |cx: &mut TestAppContext| {
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
+    };
+    // A drag across the first line selects it and gives the text the keyboard.
+    with_window(prose, cx, |window, cx| {
+        let bounds = window.find("prose").bounds();
+        let y = bounds.top() + px(8.);
+        window.drag(
+            point(bounds.left() + px(1.), y),
+            point(bounds.right() - px(1.), y),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    press(prose, "secondary-c", cx);
+    assert_eq!(copied(cx), "The detector joins rows.");
+    press(prose, "secondary-a", cx);
+    press(prose, "secondary-c", cx);
+    assert!(copied(cx).contains("Then it scans."), "{:?}", copied(cx));
+    assert!(ran.borrow().is_empty(), "{:?}", ran.borrow());
+
+    // What the text does not bind is still the app's.
+    press(prose, "secondary-3", cx);
+    press(prose, "secondary-b", cx);
+    assert_eq!(*ran.borrow(), ["workspace.select3", "view.toggleSidebar"]);
 }
 
 #[gpui_kit::test]
