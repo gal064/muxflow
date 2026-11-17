@@ -28,7 +28,9 @@ use tokio::{
 use super::{
     PaneKey,
     pane::{self, Tag},
-    provider::{Change, ChatError, ChatSession, ChatSink, SessionCommand},
+    provider::{
+        Change, ChatError, ChatSession, ChatSink, ForkAt, ForkPlan, SessionCommand, cannot_fork,
+    },
     websocket,
 };
 
@@ -82,6 +84,10 @@ pub(super) trait Dialect: Sized + Send + 'static {
         command: SessionCommand,
         out: &mut Out<Self::Job>,
     ) -> Result<(), ChatError>;
+    /// [`ChatSession::fork`].
+    fn fork(&mut self, _at: &ForkAt, _out: &mut Out<Self::Job>) -> Result<ForkPlan, ChatError> {
+        Err(cannot_fork())
+    }
     /// The link is gone and is being looked for again.
     fn disconnected(&mut self, out: &mut Out<Self::Job>);
     /// The agent is gone for good: `failure` is empty when it had been
@@ -235,6 +241,12 @@ impl<D: Dialect> ChatSession for Session<D> {
         let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         let Shared { dialect, out, .. } = &mut *shared;
         dialect.command(command, out)
+    }
+
+    fn fork(&mut self, at: &ForkAt) -> Result<ForkPlan, ChatError> {
+        let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let Shared { dialect, out, .. } = &mut *shared;
+        dialect.fork(at, out)
     }
 }
 

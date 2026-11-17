@@ -215,6 +215,23 @@ impl ChatSession for ScriptedSession {
         let _ = self.wake.try_send(());
         result
     }
+
+    /// A copy cut at the reply's last item, as a real provider settles one.
+    /// There is no agent to start it with, so it never opens.
+    fn fork(
+        &mut self,
+        at: &super::provider::ForkAt,
+    ) -> Result<super::provider::ForkPlan, ChatError> {
+        let launch = super::provider::Launch {
+            resume: super::provider::Resume::Session {
+                id: ADAPTER_ID.to_owned(),
+                fork: true,
+            },
+            resume_at: at.through.clone(),
+            ..Default::default()
+        };
+        Ok(Box::new(move || Ok(launch)))
+    }
 }
 
 fn lock(script: &Mutex<Script>) -> std::sync::MutexGuard<'_, Script> {

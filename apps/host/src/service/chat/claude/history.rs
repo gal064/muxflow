@@ -154,7 +154,42 @@ pub(in crate::service::chat) fn load(
     let Some((entries, Some(newest))) = read_entries(&file) else {
         return History::unavailable();
     };
-    let (mut ids, rooted) = chain(&entries, &newest);
+    read_chain(&entries, &newest, rewound)
+}
+
+/// Reads the conversation of `session` as it was up to and including the
+/// entry `through`: what a copy cut there holds.
+pub(in crate::service::chat) fn load_through(
+    configuration: &Path,
+    session: &str,
+    through: &str,
+) -> History {
+    let Ok(Some(file)) = session_file(configuration, session) else {
+        return History::unavailable();
+    };
+    match read_entries(&file) {
+        Some((entries, _)) if entries.contains_key(through) => read_chain(&entries, through, ""),
+        _ => History::unavailable(),
+    }
+}
+
+/// The newest message of `session`'s conversation, the user's or the
+/// agent's: where a copy of all of it is cut. `None` when there is none.
+pub(in crate::service::chat) fn last_message(
+    configuration: &Path,
+    session: &str,
+) -> Option<String> {
+    let file = session_file(configuration, session).ok()??;
+    let (entries, newest) = read_entries(&file)?;
+    let (ids, _) = chain(&entries, &newest?);
+    ids.into_iter()
+        .find(|id| matches!(string(&entries[id].value, "type"), "assistant" | "user"))
+}
+
+/// The conversation from `leaf` back to its root, as items, without
+/// `rewound` and what came before it on that chain.
+fn read_chain(entries: &BTreeMap<String, Entry>, leaf: &str, rewound: &str) -> History {
+    let (mut ids, rooted) = chain(entries, leaf);
     if let Some(dropped) = ids.iter().position(|id| id == rewound) {
         ids.drain(..=dropped);
     }
@@ -196,7 +231,7 @@ pub(in crate::service::chat) fn load(
     // running may have its result in an entry beside it.
     if reader.has_open() {
         let on_chain: std::collections::BTreeSet<&String> = ids.iter().collect();
-        for (id, entry) in &entries {
+        for (id, entry) in entries {
             if on_chain.contains(id) || string(&entry.value, "type") != "user" {
                 continue;
             }

@@ -74,6 +74,9 @@ const WANTED_WAIT: Duration = Duration::from_secs(3);
 const STOP_WAIT: Duration = Duration::from_secs(10);
 /// How long Copy shows its check.
 const COPIED_FOR: Duration = Duration::from_secs(1);
+/// How long Fork from here stays pending without an answer, so an answer
+/// lost on the way cannot leave it off for good.
+const FORK_WAIT: Duration = Duration::from_secs(10);
 /// The working line's seconds tick this often.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -322,6 +325,9 @@ pub struct ChatPane {
     pub(super) stopping_tasks: HashMap<String, Task<()>>,
     /// The message whose Copy shows its check, until the check goes.
     copied: Option<(String, Task<()>)>,
+    /// The reply whose Fork the host has not answered yet, until it does or
+    /// the wait for that runs out.
+    forking: Option<(String, Task<()>)>,
     pub(super) composer: Entity<TextareaState>,
     /// The message being edited: sending rewinds to it first.
     pub(super) editing: Option<String>,
@@ -492,6 +498,7 @@ impl ChatPane {
             tasks_open: false,
             stopping_tasks: HashMap::new(),
             copied: None,
+            forking: None,
             composer,
             editing: None,
             slash_active: 0,
@@ -1600,7 +1607,9 @@ impl ChatPane {
             ..Default::default()
         };
         self.send(fork, cx, move |this, result, cx| match result {
-            Ok(response) => this.follow_fork(response.forked_pane_id, cx),
+            Ok(response) => {
+                this.follow_fork(response.forked_pane_id, "The side question's fork", cx)
+            }
             Err(error) => {
                 this.restore = Some(typed);
                 this.refused(&error, cx);
@@ -1609,7 +1618,7 @@ impl ChatPane {
     }
 
     /// Shows the fork's pane once the topology has it, as Branch does.
-    fn follow_fork(&mut self, pane_id: String, cx: &mut Context<Self>) {
+    fn follow_fork(&mut self, pane_id: String, source: &str, cx: &mut Context<Self>) {
         let Some(agents) = cx.try_global::<Agents>() else {
             return;
         };
@@ -1621,7 +1630,7 @@ impl ChatPane {
         let pending = PendingOpen {
             profile_id: self.profile_id.clone(),
             pane_id,
-            source: "The side question's fork".into(),
+            source: source.to_owned(),
             expected_by: now + BRANCH_PANE_WAIT_MS,
         };
         cx.defer(move |cx| open_when_present(pending, cx));
@@ -1812,11 +1821,53 @@ impl ChatPane {
     }
 
     /// Forks the conversation through the end of the reply whose last text
-    /// is `item_id` (D6), into a split, as Fork from here does. The one place
-    /// `CHAT_ACTION_FORK` is to be sent from; until the host carries it out,
-    /// it does nothing.
+    /// is `item_id` (D6). The host opens the fork in a split beside this
+    /// pane, which is then shown. The button is pending until the host
+    /// answers, so a slow link does not invite a second fork.
     pub(super) fn fork_reply(&mut self, item_id: &str, cx: &mut Context<Self>) {
-        let _ = (item_id, cx);
+        if self.forking.is_some() {
+            return;
+        }
+        self.seen(cx);
+        self.notice = None;
+        if let Some(reason) = self.agent_refusal() {
+            return self.refused(reason, cx);
+        }
+        let id = item_id.to_owned();
+        let wait = cx.background_executor().timer(FORK_WAIT);
+        let waited = id.clone();
+        let wait = cx.spawn(async move |this, cx| {
+            wait.await;
+            this.update(cx, |this, cx| this.forked(&waited, cx)).ok();
+        });
+        self.forking = Some((id.clone(), wait));
+        let fork = ChatRequest {
+            action: ChatAction::Fork.into(),
+            item_id: id.clone(),
+            ..Default::default()
+        };
+        self.send(fork, cx, move |this, result, cx| {
+            this.forked(&id, cx);
+            match result {
+                // Followed even after the wait ran out: the fork is there.
+                Ok(response) => this.follow_fork(response.forked_pane_id, "The fork", cx),
+                Err(error) => this.refused(&error, cx),
+            }
+        });
+        cx.notify();
+    }
+
+    /// Fork from here under `item_id` is itself again.
+    fn forked(&mut self, item_id: &str, cx: &mut Context<Self>) {
+        if self.forking.as_ref().is_some_and(|(id, _)| id == item_id) {
+            self.forking = None;
+            cx.notify();
+        }
+    }
+
+    /// Whether the reply `item_id` ends has a fork on its way.
+    pub(super) fn forking(&self, item_id: &str) -> bool {
+        self.forking.as_ref().is_some_and(|(id, _)| id == item_id)
     }
 
     /// Whether `item` is one of the user's own that may be edited.

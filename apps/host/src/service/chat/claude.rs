@@ -10,7 +10,9 @@
 //!
 //! The agent cannot go back in a conversation while it runs. A rewind stops
 //! it and starts it again on the same session at the message before the one
-//! rewound (`--resume-session-at`).
+//! rewound (`--resume-session-at`). A reply is forked the same way, in a
+//! pane of its own: a copy of the session (`--fork-session`) cut after the
+//! reply.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -30,8 +32,8 @@ use super::{
     items::{self, string},
     pane::{self, Tag},
     provider::{
-        Change, ChatError, ChatProvider, ChatSession, ChatSink, Launch, PaneCommand, Resume,
-        SessionCommand,
+        Change, ChatError, ChatProvider, ChatSession, ChatSink, ForkAt, ForkPlan, Launch,
+        PaneCommand, Resume, SessionCommand, still_writing,
     },
     session::{Dialect, Framing, Out, Session},
 };
@@ -299,6 +301,12 @@ impl ChatProvider for ClaudeProvider {
                     &new_session,
                 ];
                 push(&mut argv, &copy);
+                // A reply's fork keeps the conversation through that reply.
+                // Taken in print mode only (verified on 2.1.326), which is
+                // what runs here; a side question's fork has no cut.
+                if !launch.resume_at.is_empty() {
+                    push(&mut argv, &["--resume-session-at", &launch.resume_at]);
+                }
                 new_session
             }
             Resume::Session { id, fork: false } => {
@@ -377,6 +385,10 @@ pub(super) enum Job {
         pane_id: String,
         session: String,
         rewound_to: String,
+        /// A copy cut at a reply: the session it copies and the entry it
+        /// was cut at, read while the copy's own record is empty. The agent
+        /// writes none until something is said in it.
+        copied: Option<(String, String)>,
     },
     /// Note the session's id on the pane, for the daemon that comes next.
     Tag { pane_id: String, session: String },
@@ -775,6 +787,46 @@ fn message_uuid(item_id: &str) -> String {
     }
 }
 
+/// The launch of a copy of `session` that ends where the reply before the
+/// message `next` ends, or with the newest message when there is none. The
+/// cut is the entry the agent gave `next` as its parent, the one a rewind
+/// of `next` goes back to.
+fn fork_launch(
+    configuration: &std::path::Path,
+    session: &str,
+    next: Option<&str>,
+    mut launch: Launch,
+) -> Result<Launch, ChatError> {
+    let through = match next {
+        Some(next) => match history::parent_of(configuration, session, next) {
+            Some(Some(entry)) => entry,
+            // The agent has not taken the next message yet: it may still be
+            // adding to the reply.
+            None => return Err(still_writing()),
+            Some(None) => {
+                return Err(ChatError::new(
+                    "chat_fork_unavailable",
+                    "That reply cannot be forked.",
+                ));
+            }
+        },
+        None => history::last_message(configuration, session).ok_or_else(nothing_to_fork)?,
+    };
+    launch.resume = Resume::Session {
+        id: session.to_owned(),
+        fork: true,
+    };
+    launch.resume_at = through;
+    Ok(launch)
+}
+
+fn nothing_to_fork() -> ChatError {
+    ChatError::new(
+        "chat_fork_unavailable",
+        "This chat has no conversation to fork yet.",
+    )
+}
+
 /// One model as the agent lists it.
 struct Model {
     id: String,
@@ -892,6 +944,7 @@ impl Claude {
                 pane_id: out.pane_id().to_owned(),
                 session: self.session.clone(),
                 rewound_to: String::new(),
+                copied: self.copied(),
             });
         }
     }
@@ -1122,17 +1175,34 @@ impl Claude {
         self.request(json!({"subtype": "get_settings"}), Asked::Settings, out);
     }
 
+    /// How the agent is started to be as it is now, not as it was first
+    /// started: with the model, effort and permissions the chat is set to.
+    fn launch_now(&self) -> Launch {
+        let mut launch = self.launch.clone();
+        let options = self.state.options.clone().unwrap_or_default();
+        launch.model.clone_from(&options.model);
+        launch.effort.clone_from(&options.effort);
+        launch.full_access = options.permission == i32::from(Permission::Full);
+        launch
+    }
+
+    /// The session this chat's is a copy of and where it was cut, for a
+    /// chat started as a reply's fork.
+    fn copied(&self) -> Option<(String, String)> {
+        match &self.launch.resume {
+            Resume::Session { id, fork: true } if !self.launch.resume_at.is_empty() => {
+                Some((id.clone(), self.launch.resume_at.clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn start_rewind(&mut self, out: &mut Output) {
+        let launch = self.launch_now();
         let Some(rewind) = &mut self.rewind else {
             return;
         };
         rewind.restarting = true;
-        let mut launch = self.launch.clone();
-        let options = self.state.options.clone().unwrap_or_default();
-        // The agent starts again as it is now, not as it was first started.
-        launch.model.clone_from(&options.model);
-        launch.effort.clone_from(&options.effort);
-        launch.full_access = options.permission == i32::from(Permission::Full);
         out.job(Job::Rewind {
             pane_id: out.pane_id().to_owned(),
             session: self.session.clone(),
@@ -1739,11 +1809,19 @@ impl Dialect for Claude {
                 pane_id,
                 session,
                 rewound_to,
-            } => Done::History(history::load(
-                &configuration(&pane_id),
-                &session,
-                &rewound_to,
-            )),
+                copied,
+            } => {
+                let configuration = configuration(&pane_id);
+                let read = history::load(&configuration, &session, &rewound_to);
+                Done::History(match copied {
+                    // Nothing said in the copy yet: it holds what its source
+                    // held up to the cut.
+                    Some((source, through)) if read.items.is_empty() => {
+                        history::load_through(&configuration, &source, &through)
+                    }
+                    _ => read,
+                })
+            }
             Job::Tag { pane_id, session } => {
                 let _ = pane::set(&pane_id, &[(pane::SESSION, &session)]);
                 Done::Tagged
@@ -1876,6 +1954,7 @@ impl Dialect for Claude {
                 pane_id: out.pane_id().to_owned(),
                 session: self.session.clone(),
                 rewound_to: self.rewound_to.clone(),
+                copied: self.copied(),
             });
         }
         self.request(json!({"subtype": "initialize"}), Asked::Initialize, out);
@@ -2060,6 +2139,39 @@ impl Dialect for Claude {
                 Ok(())
             }
         }
+    }
+
+    /// A copy of the session cut at the last entry before the user's next
+    /// message, or at the newest message for the newest reply: where the
+    /// agent itself would go on from (D6).
+    fn fork(&mut self, at: &ForkAt, out: &mut Output) -> Result<ForkPlan, ChatError> {
+        if self.ended {
+            return Err(ChatError::new("chat_unavailable", "The agent has exited."));
+        }
+        if self.session.is_empty() {
+            return Err(nothing_to_fork());
+        }
+        if self.rewind.is_some() {
+            return Err(ChatError::new(
+                "chat_turn_busy",
+                "The chat is already going back to an earlier message.",
+            ));
+        }
+        let next = (!at.next.is_empty()).then(|| message_uuid(&at.next));
+        // The next message waits behind the turn that runs, which is the
+        // reply's own.
+        if next
+            .as_ref()
+            .is_some_and(|next| self.outstanding.get(next) == Some(&true))
+        {
+            return Err(still_writing());
+        }
+        let pane_id = out.pane_id().to_owned();
+        let session = self.session.clone();
+        let launch = self.launch_now();
+        Ok(Box::new(move || {
+            fork_launch(&configuration(&pane_id), &session, next.as_deref(), launch)
+        }))
     }
 
     fn disconnected(&mut self, out: &mut Output) {

@@ -529,63 +529,127 @@ fn replace<G>(
     rewound_to: &str,
     guard: impl FnOnce() -> anyhow::Result<G>,
 ) -> anyhow::Result<()> {
-    use anyhow::Context;
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-
-    let processes = processes::system();
-    let environment = processes
-        .environment(agent.pid)
-        .context("read the environment")?;
-    if environment.len() > MAX_ENVIRONMENT_BYTES {
-        anyhow::bail!("the agent's environment is too large");
-    }
-    let started_in = processes.folder(agent.pid).context("read the folder")?;
-    let cwd = if launch.cwd.is_empty() {
-        started_in
-    } else {
-        started_in.join(&launch.cwd)
-    };
-    let (socket, environment_path) = pane::new_paths()?;
-    let command = provider
-        .pane_command(launch, &socket)
-        .context("the provider has no pane process")?;
-    // A helper that was replaced on disk can start nothing: the agent is
-    // left as it is rather than stopped for a chat that cannot start.
-    let helper = std::env::current_exe().context("locate the helper")?;
-    if !helper.is_file() {
-        anyhow::bail!("the helper is no longer where it was started from");
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&environment_path)
-        .and_then(|mut file| file.write_all(&environment))
-        .context("write the environment")?;
-    let line = pane::shell_line(
-        &helper,
-        Some(&environment_path),
-        command.piped.then_some(socket.as_path()),
-        &command.argv,
-    );
-    let started = guard().and_then(|_guard| {
-        pane::respawn(
-            pane_id,
-            &cwd.to_string_lossy(),
-            &line,
-            &[
-                (pane::ADAPTER, provider.adapter_id()),
-                (pane::SOCKET, &socket.to_string_lossy()),
-                (pane::SESSION, &command.session),
-                (pane::REWOUND_TO, rewound_to),
-                (pane::START, &pane::encode_launch(launch)),
-            ],
-        )
-    });
+    let start = Start::prepare(provider, agent, launch)?;
+    let tags = start.tags(provider, launch, rewound_to);
+    let tags = tags.each_ref().map(|(name, value)| (*name, value.as_str()));
+    let started = guard().and_then(|_guard| pane::respawn(pane_id, &start.cwd, &start.line, &tags));
     if started.is_err() {
-        let _ = std::fs::remove_file(&environment_path);
+        start.discard();
     }
     started
+}
+
+/// Opens a chat started from `launch` in a split beside `source_pane_id`,
+/// in the folder and with the environment of the chat's agent there, and
+/// answers the new pane: how a reply is forked (chat-polish-plan §3.8).
+/// Tagged in the same step as the split, so nobody sees the new agent
+/// without its tag and takes it for a terminal one. Never marked as a side
+/// question's pane: the fork is listed in History (D12).
+pub(crate) fn open_fork(
+    source_pane_id: &str,
+    provider: &dyn ChatProvider,
+    launch: &Launch,
+) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let tag = pane::read(source_pane_id).context("the pane is gone")?;
+    let agent = find_agent(&processes::system(), tag.pid, provider.adapter_id())
+        .context("the agent is not running")?;
+    let start = Start::prepare(provider, &agent, launch)?;
+    let tags = start.tags(provider, launch, "");
+    let tags = tags.each_ref().map(|(name, value)| (*name, value.as_str()));
+    let opened = pane::split(source_pane_id, &start.cwd, &start.line, &tags, &launch.name);
+    if opened.is_err() {
+        start.discard();
+    }
+    opened
+}
+
+/// What a chat pane runs for one launch, with what it was given ready on
+/// disk.
+struct Start {
+    cwd: String,
+    socket: std::path::PathBuf,
+    environment_path: std::path::PathBuf,
+    line: String,
+    session: String,
+}
+
+impl Start {
+    /// The shell line that starts `launch` as `agent` was started: in its
+    /// folder, with its environment, which is written for the line to read.
+    fn prepare(
+        provider: &dyn ChatProvider,
+        agent: &Agent,
+        launch: &Launch,
+    ) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+        let processes = processes::system();
+        let environment = processes
+            .environment(agent.pid)
+            .context("read the environment")?;
+        if environment.len() > MAX_ENVIRONMENT_BYTES {
+            anyhow::bail!("the agent's environment is too large");
+        }
+        let started_in = processes.folder(agent.pid).context("read the folder")?;
+        let cwd = if launch.cwd.is_empty() {
+            started_in
+        } else {
+            started_in.join(&launch.cwd)
+        };
+        let (socket, environment_path) = pane::new_paths()?;
+        let command = provider
+            .pane_command(launch, &socket)
+            .context("the provider has no pane process")?;
+        // A helper that was replaced on disk can start nothing: the agent is
+        // left as it is rather than stopped for a chat that cannot start.
+        let helper = std::env::current_exe().context("locate the helper")?;
+        if !helper.is_file() {
+            anyhow::bail!("the helper is no longer where it was started from");
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&environment_path)
+            .and_then(|mut file| file.write_all(&environment))
+            .context("write the environment")?;
+        let line = pane::shell_line(
+            &helper,
+            Some(&environment_path),
+            command.piped.then_some(socket.as_path()),
+            &command.argv,
+        );
+        Ok(Self {
+            cwd: cwd.to_string_lossy().into_owned(),
+            socket,
+            environment_path,
+            line,
+            session: command.session,
+        })
+    }
+
+    /// The options that make the pane this chat's.
+    fn tags(
+        &self,
+        provider: &dyn ChatProvider,
+        launch: &Launch,
+        rewound_to: &str,
+    ) -> [(&'static str, String); 5] {
+        [
+            (pane::ADAPTER, provider.adapter_id().to_owned()),
+            (pane::SOCKET, self.socket.to_string_lossy().into_owned()),
+            (pane::SESSION, self.session.clone()),
+            (pane::REWOUND_TO, rewound_to.to_owned()),
+            (pane::START, pane::encode_launch(launch)),
+        ]
+    }
+
+    /// The chat did not start: nothing will read what it was given.
+    fn discard(self) {
+        let _ = std::fs::remove_file(&self.environment_path);
+    }
 }
 
 /// What the pane's agent has for `names` in its environment, for a provider

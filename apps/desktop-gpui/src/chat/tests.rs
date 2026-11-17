@@ -399,6 +399,8 @@ struct HostState {
     /// Every upload and preflight started, in order.
     uploads: Vec<Uploaded>,
     cancelled_uploads: Vec<String>,
+    /// Every tmux action asked for, in order.
+    actions: Vec<Value>,
 }
 
 /// What the fake host does with an upload.
@@ -557,7 +559,8 @@ impl TerminalBackend for FakeHost {
         Ok(())
     }
 
-    fn tmux_action(&self, _: String, _: Value) -> BoxFuture<'static, Result<Value, String>> {
+    fn tmux_action(&self, _: String, action: Value) -> BoxFuture<'static, Result<Value, String>> {
+        self.state().actions.push(action);
         async { Ok(json!({ "topologyGeneration": 1 })) }.boxed()
     }
 
@@ -3058,7 +3061,7 @@ fn a_message_has_its_buttons_and_a_reply_only_under_its_last_text(cx: &mut TestA
     assert_eq!(shell.label("chat-fork-a2"), "Fork from here");
     // The reply a turn is still writing has none yet.
     shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
-    assert!(!shell.shows("chat-copy-a2"));
+    assert!(!shell.shows("chat-copy-a2") && !shell.shows("chat-fork-a2"));
     assert!(shell.shows("chat-copy-a0"));
     // The pencil edits.
     shell.hover("chat-item-u1");
@@ -3088,9 +3091,104 @@ fn copy_takes_the_message_or_its_whole_reply_and_shows_a_check_for_a_second(
         Some("I'll start with the view.\n\nRuns now fold.")
     );
     assert_eq!(shell.label("chat-copy-a2"), "Copied");
-    // Fork from here asks nothing of the host until the host can fork.
+}
+
+/// The agents' runtime, which shows a pane the host opened once the
+/// topology has it, as the app runs it.
+fn follow_panes(shell: &mut Shell) {
+    struct NoAgents;
+    impl crate::agents::runtime::AgentTransport for NoAgents {
+        fn agent_request(
+            &self,
+            _: String,
+            _: desktop_core::connection::agent::AgentCommand,
+        ) -> BoxFuture<'static, Result<Value, String>> {
+            async { Err("not asked here".to_owned()) }.boxed()
+        }
+    }
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        let effects = crate::agents::tests::Recorded(std::rc::Rc::default());
+        let runtime = cx.new(|_| {
+            crate::agents::runtime::AgentRuntime::new(
+                std::rc::Rc::new(NoAgents),
+                std::rc::Rc::new(effects),
+            )
+        });
+        cx.set_global(crate::agents::Agents {
+            runtime,
+            controller,
+        });
+    });
+}
+
+fn forking(shell: &mut Shell, id: &str) -> bool {
+    let pane = shell.pane();
+    shell.visual.update(|_, cx| pane.read(cx).forking(id))
+}
+
+#[gpui_kit::test]
+fn fork_from_here_sends_the_reply_waits_for_the_host_and_shows_the_fork(cx: &mut TestAppContext) {
+    let mut shell = replies(cx);
+    follow_panes(&mut shell);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        forked_pane_id: "%3".into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.hover("chat-item-a2");
     shell.click("chat-fork-a2");
-    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+    assert_eq!(shell.host.last(ChatAction::Fork).item_id, "a2");
+    // Pending until the host answers: a second press sends nothing.
+    assert!(forking(&mut shell, "a2"));
+    assert!(shell.shows("chat-fork-a2"));
+    shell.click("chat-fork-a2");
+    assert_eq!(shell.host.count(ChatAction::Fork), 1);
+
+    // The fork's pane, beside its source, is shown once it is there.
+    let mut with_fork = panes();
+    with_fork.push(Pane {
+        chat_adapter_id: "claude".into(),
+        title: "Group the tool rows. (fork)".into(),
+        ..pane("%3", "@1", "$1", (0, 25, 100, 10))
+    });
+    shell.publish(vec![topology(2, with_fork)]);
+    shell.host.release();
+    shell.settle();
+    assert!(!forking(&mut shell, "a2"));
+    let focused = shell
+        .host
+        .state()
+        .actions
+        .iter()
+        .any(|action| action["kind"] == "focusPane" && action["pane_id"] == "%3");
+    assert!(focused, "{:?}", shell.host.state().actions);
+}
+
+#[gpui_kit::test]
+fn a_fork_the_host_refuses_says_why_and_its_button_comes_back(cx: &mut TestAppContext) {
+    let mut shell = replies(cx);
+    shell
+        .host
+        .refuse_next("chat_fork_unavailable: This agent cannot fork from a reply.");
+    shell.hover("chat-item-a0");
+    shell.click("chat-fork-a0");
+    assert_eq!(shell.host.last(ChatAction::Fork).item_id, "a0");
+    assert_eq!(
+        shell.label("chat-notice"),
+        "This agent cannot fork from a reply."
+    );
+    assert!(!forking(&mut shell, "a0"));
+    shell.click("chat-fork-a0");
+    assert_eq!(shell.host.count(ChatAction::Fork), 2);
+
+    // An answer that never comes leaves the button pending only so long.
+    shell.host.hold_next();
+    shell.hover("chat-item-a2");
+    shell.click("chat-fork-a2");
+    assert!(forking(&mut shell, "a2"));
+    shell.wait(std::time::Duration::from_secs(10));
+    assert!(!forking(&mut shell, "a2"));
 }
 
 // Background tasks, subagents, compacting (S9).

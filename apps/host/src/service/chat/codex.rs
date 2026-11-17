@@ -24,8 +24,8 @@ use super::{
     items::{self, string},
     pane::{self, Tag},
     provider::{
-        Change, ChatError, ChatProvider, ChatSession, ChatSink, Launch, PaneCommand, Resume,
-        SessionCommand,
+        Change, ChatError, ChatProvider, ChatSession, ChatSink, ForkAt, ForkPlan, Launch,
+        PaneCommand, Resume, SessionCommand, still_writing,
     },
     session::{Dialect, Framing, Out, Session},
 };
@@ -649,7 +649,13 @@ impl Codex {
                 self.request("thread/resume", resumed(params, &id), Asked::Thread, out);
             }
             Resume::Session { id, fork: true } => {
-                self.request("thread/fork", resumed(params, &id), Asked::Thread, out);
+                let mut params = resumed(params, &id);
+                // A reply's fork: through that turn, inclusive (0.169.0
+                // schema; not yet tried against a live server).
+                if !self.launch.resume_at.is_empty() {
+                    params["lastTurnId"] = json!(self.launch.resume_at);
+                }
+                self.request("thread/fork", params, Asked::Thread, out);
             }
             Resume::Latest => {
                 let params = json!({
@@ -672,7 +678,13 @@ impl Codex {
             self.thread = id.to_owned();
             self.noted = false;
         }
-        out.name(string(thread, "name"));
+        // A reply's fork goes by its source's name and "(fork)", whatever
+        // the copied thread was called.
+        let name = match self.launch.name.as_str() {
+            "" => string(thread, "name"),
+            name => name,
+        };
+        out.name(name);
         let options = self.state.options.get_or_insert_default();
         if !self.permission_chosen {
             options.permission = permission(&result["approvalPolicy"], &result["sandbox"]).into();
@@ -1524,6 +1536,53 @@ impl Dialect for Codex {
             // its turn, and how one would be stopped, is not known yet.
             SessionCommand::StopTask { .. } => Err(super::cannot_stop()),
         }
+    }
+
+    /// A copy of the thread through the reply's turn: `thread/fork` with
+    /// `lastTurnId`, which takes no turn still in progress (0.169.0 schema;
+    /// not yet tried against a live server).
+    fn fork(&mut self, at: &ForkAt, _out: &mut Output) -> Result<ForkPlan, ChatError> {
+        if self.ended {
+            return Err(ChatError::new("chat_unavailable", "The agent has exited."));
+        }
+        if self.thread.is_empty() {
+            return Err(ChatError::new(
+                "chat_fork_unavailable",
+                "This chat has no conversation to fork yet.",
+            ));
+        }
+        if self.rewind.is_some() {
+            return Err(ChatError::new(
+                "chat_turn_busy",
+                "The chat is already going back to an earlier message.",
+            ));
+        }
+        // The turn the newest message that opened one opened: a message
+        // sent into a running turn joined it.
+        let turn = at
+            .before
+            .iter()
+            .find_map(|id| self.turns.iter().find(|(opened, _)| opened == id))
+            .map(|(_, turn)| turn.clone())
+            .ok_or_else(|| {
+                ChatError::new("chat_fork_unavailable", "That reply cannot be forked.")
+            })?;
+        // Not yet named by the server, or still running.
+        if turn.is_empty() || self.turn.as_deref() == Some(turn.as_str()) {
+            return Err(still_writing());
+        }
+        let mut launch = self.launch.clone();
+        let options = self.state.options.clone().unwrap_or_default();
+        // The copy is set as the chat is now, not as it was first started.
+        launch.model = options.model;
+        launch.effort = options.effort;
+        launch.full_access = options.permission == i32::from(Permission::Full);
+        launch.resume = Resume::Session {
+            id: self.thread.clone(),
+            fork: true,
+        };
+        launch.resume_at = turn;
+        Ok(Box::new(move || Ok(launch)))
     }
 
     fn disconnected(&mut self, out: &mut Output) {
