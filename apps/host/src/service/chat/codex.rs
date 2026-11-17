@@ -292,6 +292,9 @@ pub(super) struct Codex {
     /// Stop was asked for a turn that has no id yet.
     stop_wanted: bool,
     rewind: Option<Rewind>,
+    /// The row of each subagent spawned in the thread, by its thread, for
+    /// the collab calls that say how it is.
+    agents: BTreeMap<String, v1::ChatItem>,
 }
 
 type Output = Out<Job>;
@@ -415,9 +418,14 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
             }
             row
         }
-        "collabAgentToolCall" => {
+        // Only a spawn is a row: the subagent's. Waiting on it, writing to it
+        // and the rest say how it is (`agent_states`), and are no rows.
+        "collabAgentToolCall" if field("tool") == SPAWN => {
             let mut row = items::tool(id, ToolKind::Subagent, "agent", field("prompt"));
-            status(row.tool.as_mut()?, false);
+            match agent_states(source).first() {
+                Some((_, state)) => agent_state(&mut row, state),
+                None => status(row.tool.as_mut()?, false),
+            }
             row
         }
         "dynamicToolCall" => {
@@ -428,13 +436,83 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
             );
             row
         }
-        "contextCompaction" => items::text(id, Kind::Notice, "Conversation compacted."),
+        // Read when it has ended: while it runs the working line says so. The
+        // item names no size.
+        "contextCompaction" => items::text(id, Kind::Notice, "Context compacted"),
         _ => return None,
     };
     if produced.at_unix_millis == 0 {
         produced.at_unix_millis = source["startedAtMs"].as_i64().unwrap_or(0);
     }
     Some(produced)
+}
+
+/// The collab tool that starts a subagent.
+const SPAWN: &str = "spawnAgent";
+
+/// What a collab tool call says of each subagent it names: its thread, and
+/// how it is (`running`, `completed`, …). The spawned one first.
+fn agent_states(source: &Value) -> Vec<(&str, &str)> {
+    let states = &source["agentsStates"];
+    let named = source["receiverThreadIds"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(Value::as_str);
+    let mut seen: Vec<(&str, &str)> = named
+        .filter_map(|thread| Some((thread, states[thread]["status"].as_str()?)))
+        .collect();
+    for (thread, state) in states.as_object().into_iter().flatten() {
+        if let Some(state) = state["status"].as_str()
+            && !seen.iter().any(|(known, _)| known == thread)
+        {
+            seen.push((thread.as_str(), state));
+        }
+    }
+    seen
+}
+
+/// Remembers the subagent a spawn's `row` stands for, under its thread.
+fn remember_agent(agents: &mut BTreeMap<String, v1::ChatItem>, source: &Value, row: &v1::ChatItem) {
+    let thread = source["receiverThreadIds"][0].as_str().unwrap_or_default();
+    if row.tool.is_some() && !thread.is_empty() {
+        agents.insert(thread.to_owned(), row.clone());
+    }
+}
+
+/// The rows of the subagents a collab call other than a spawn says how they
+/// are, changed to say so. A subagent spawned before what was read has no
+/// row, and is passed over.
+fn note_agents(agents: &mut BTreeMap<String, v1::ChatItem>, source: &Value) -> Vec<v1::ChatItem> {
+    let mut changed = Vec::new();
+    for (thread, state) in agent_states(source) {
+        if let Some(row) = agents.get_mut(thread) {
+            let before = row.clone();
+            agent_state(row, state);
+            if *row != before {
+                changed.push(row.clone());
+            }
+        }
+    }
+    changed
+}
+
+/// A subagent's row as its state says: running while it starts or runs, and
+/// what it is now on the line under it.
+fn agent_state(row: &mut v1::ChatItem, state: &str) {
+    let Some(tool) = row.tool.as_mut() else {
+        return;
+    };
+    let (status, summary, activity) = match state {
+        "pendingInit" => (Status::Running, "", "starting"),
+        "running" => (Status::Running, "", "running"),
+        "completed" => (Status::Ok, "done", ""),
+        "interrupted" | "shutdown" => (Status::Failed, "stopped", ""),
+        _ => (Status::Failed, "failed", ""),
+    };
+    tool.status = status.into();
+    summary.clone_into(&mut tool.result_summary);
+    activity.clone_into(&mut tool.activity);
 }
 
 fn permission(policy: &Value, sandbox: &Value) -> Permission {
@@ -577,13 +655,15 @@ impl Codex {
         let fast = string(result, "serviceTier") == FAST_TIER;
         options.speed = if fast { Speed::Fast } else { Speed::Standard }.into();
 
-        let mut timeline = Vec::new();
+        let mut timeline: Vec<v1::ChatItem> = Vec::new();
         self.turns.clear();
         // Text that was arriving when the link was lost is not in the thread
         // until it is whole.
         let mut streamed = std::mem::take(&mut self.open);
         streamed.retain(|_, item| item.streaming);
         self.turn = None;
+        self.agents.clear();
+        self.state.compacting = false;
         let turns = thread["turns"].as_array().map_or(&[][..], Vec::as_slice);
         for turn in turns {
             let running = string(turn, "status") == "inProgress";
@@ -592,10 +672,27 @@ impl Codex {
                 self.turn = Some(turn_id.to_owned());
             }
             let mut opened = false;
-            for item in turn["items"].as_array().map_or(&[][..], Vec::as_slice) {
-                let Some(mut item) = thread_item(item, !running) else {
+            for source in turn["items"].as_array().map_or(&[][..], Vec::as_slice) {
+                if string(source, "type") == "collabAgentToolCall"
+                    && string(source, "tool") != SPAWN
+                {
+                    for row in note_agents(&mut self.agents, source) {
+                        if let Some(held) = timeline.iter_mut().find(|held| held.id == row.id) {
+                            *held = row;
+                        }
+                    }
+                    continue;
+                }
+                let Some(mut item) = thread_item(source, !running) else {
                     continue;
                 };
+                // A step of a turn that is over runs no more.
+                if !running {
+                    items::stop(&mut item);
+                }
+                if string(source, "type") == "collabAgentToolCall" {
+                    remember_agent(&mut self.agents, source, &item);
+                }
                 // Going back to a message goes back to before its turn, so
                 // only the message that opened a turn can be gone back to.
                 if item.kind == i32::from(Kind::User) && !std::mem::replace(&mut opened, true) {
@@ -763,9 +860,31 @@ impl Codex {
     }
 
     fn item(&mut self, params: &Value, finished: bool, out: &mut Output) {
-        let Some(mut item) = thread_item(&params["item"], finished) else {
+        let source = &params["item"];
+        match (string(source, "type"), string(source, "tool")) {
+            // While it compacts, the working line says so; the notice is for
+            // when it has.
+            ("contextCompaction", _) => {
+                self.state.compacting = !finished;
+                if !finished {
+                    return self.publish_state(out);
+                }
+            }
+            ("collabAgentToolCall", tool) if tool != SPAWN => {
+                for item in note_agents(&mut self.agents, source) {
+                    self.track(&item);
+                    out.publish(Change::Item(item));
+                }
+                return;
+            }
+            _ => {}
+        }
+        let Some(mut item) = thread_item(source, finished) else {
             return;
         };
+        if string(source, "type") == "collabAgentToolCall" {
+            remember_agent(&mut self.agents, source, &item);
+        }
         if item.kind == i32::from(Kind::User) {
             // The first message of a turn is the one a rewind can name.
             let turn = string(params, "turnId");
@@ -778,12 +897,20 @@ impl Codex {
                 turn.clone_into(known);
             }
         }
-        if item.streaming || items::is_running(&item) {
+        self.track(&item);
+        out.publish(Change::Item(item));
+        if string(source, "type") == "contextCompaction" {
+            self.publish_state(out);
+        }
+    }
+
+    /// Keeps `item` among the open ones while it streams or runs.
+    fn track(&mut self, item: &v1::ChatItem) {
+        if item.streaming || items::is_running(item) {
             self.open.insert(item.id.clone(), item.clone());
         } else {
             self.open.remove(&item.id);
         }
-        out.publish(Change::Item(item));
     }
 
     fn delta(&mut self, params: &Value, kind: Kind, out: &mut Output) {
@@ -819,10 +946,14 @@ impl Codex {
         self.turn = None;
         self.starting = false;
         self.pending.clear();
+        self.state.compacting = false;
         for mut item in std::mem::take(&mut self.open).into_values() {
             items::stop(&mut item);
             out.publish(Change::Item(item));
         }
+        // Whether a subagent outlives the turn that spawned it is not known
+        // (not seen live): its row ends with the turn, as every step does.
+        self.agents.values_mut().for_each(items::stop);
         match string(turn, "status") {
             "interrupted" => self.notice(format!("{id}-interrupted"), "Interrupted", out),
             "failed" => {
@@ -1333,6 +1464,9 @@ impl Dialect for Codex {
                 self.publish_state(out);
                 Ok(())
             }
+            // It lists no background tasks: whether a Codex task outlives
+            // its turn, and how one would be stopped, is not known yet.
+            SessionCommand::StopTask { .. } => Err(super::cannot_stop()),
         }
     }
 
@@ -1351,6 +1485,8 @@ impl Dialect for Codex {
         self.pending.clear();
         self.held.clear();
         self.rewind = None;
+        self.agents.clear();
+        self.state.compacting = false;
         for mut item in std::mem::take(&mut self.open).into_values() {
             items::stop(&mut item);
             out.publish(Change::Item(item));

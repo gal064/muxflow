@@ -280,8 +280,8 @@ fn each_item_of_a_thread_is_drawn_as_the_row_of_its_kind() {
     );
     assert_eq!(
         row(
-            json!({"type": "collabAgentToolCall", "id": "a", "prompt": "Find the callers",
-                   "status": "completed"}),
+            json!({"type": "collabAgentToolCall", "id": "a", "tool": "spawnAgent",
+                   "prompt": "Find the callers", "status": "completed"}),
             true
         ),
         expect(
@@ -291,6 +291,15 @@ fn each_item_of_a_thread_is_drawn_as_the_row_of_its_kind() {
             Status::Ok,
             "done"
         )
+    );
+    // Waiting on a subagent is no row of its own.
+    assert!(
+        thread_item(
+            &json!({"type": "collabAgentToolCall", "id": "w", "tool": "wait",
+                    "status": "inProgress"}),
+            false
+        )
+        .is_none()
     );
 
     let change = thread_item(
@@ -1005,4 +1014,122 @@ async fn a_turn_that_fails_says_why_and_another_threads_events_are_not_this_chat
         })
         .unwrap_err();
     assert_eq!(refused.code, "chat_unavailable");
+}
+
+// --- compacting and subagents ----------------------------------------------
+//
+// Composed from the 0.169.0 schema: neither was seen live.
+
+fn item_event(method: &str, item: Value) -> String {
+    json!({"method": method, "params": {"threadId": THREAD, "turnId": "t1", "item": item}})
+        .to_string()
+}
+
+#[tokio::test]
+async fn compacting_is_said_while_it_runs_and_its_notice_comes_when_it_has() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let compaction = json!({"type": "contextCompaction", "id": "cc1"});
+    replay.agent(&item_event("item/started", compaction.clone()));
+    assert!(replay.client.state.compacting);
+    assert!(
+        replay.client.item("cc1").is_none(),
+        "nothing has been compacted yet"
+    );
+    replay.agent(&item_event("item/completed", compaction.clone()));
+    assert!(!replay.client.state.compacting);
+    let notice = replay.client.item("cc1").unwrap();
+    assert_eq!(
+        (notice.kind, notice.text.as_str()),
+        (i32::from(Kind::Notice), "Context compacted")
+    );
+
+    // A turn that ends while it compacts ends the compacting too.
+    replay.agent(&item_event(
+        "item/started",
+        json!({"type": "contextCompaction", "id": "cc2"}),
+    ));
+    assert!(replay.client.state.compacting);
+    let completed = json!({"method": "turn/completed", "params": {
+        "threadId": THREAD, "turn": {"id": "t1", "status": "completed"}}});
+    replay.agent(&completed.to_string());
+    assert!(!replay.client.state.compacting);
+}
+
+#[tokio::test]
+async fn a_subagent_is_its_spawns_row_and_the_calls_after_it_say_how_it_is() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let call = |id: &str, tool: &str, status: &str, state: &str| {
+        json!({"type": "collabAgentToolCall", "id": id, "tool": tool, "status": status,
+               "senderThreadId": THREAD, "receiverThreadIds": ["sub-1"],
+               "prompt": if tool == "spawnAgent" { "Find where uploads are staged\nand list each caller" } else { "" },
+               "agentsStates": {"sub-1": {"status": state}}})
+    };
+    replay.agent(&item_event(
+        "item/started",
+        call("spawn", "spawnAgent", "inProgress", "pendingInit"),
+    ));
+    replay.agent(&item_event(
+        "item/completed",
+        call("spawn", "spawnAgent", "completed", "running"),
+    ));
+    let row = |replay: &Replay<Codex>| replay.client.item("spawn").unwrap().tool.clone().unwrap();
+    let spawned = row(&replay);
+    assert_eq!(spawned.kind, i32::from(ToolKind::Subagent));
+    assert_eq!(
+        spawned.detail,
+        "Find where uploads are staged\nand list each caller"
+    );
+    // Codex names no type and counts nothing: the line under it is its state.
+    assert_eq!(
+        (
+            spawned.status,
+            spawned.activity.as_str(),
+            spawned.agent_type.as_str()
+        ),
+        (i32::from(Status::Running), "running", "")
+    );
+    assert_eq!((spawned.tool_uses, spawned.tokens), (0, 0));
+
+    // Waiting on it is no row; its end is the spawn's.
+    replay.agent(&item_event(
+        "item/started",
+        call("wait-1", "wait", "inProgress", "running"),
+    ));
+    assert!(replay.client.item("wait-1").is_none());
+    replay.agent(&item_event(
+        "item/completed",
+        call("wait-1", "wait", "completed", "completed"),
+    ));
+    assert!(replay.client.item("wait-1").is_none());
+    let done = row(&replay);
+    assert_eq!(
+        (
+            done.status,
+            done.result_summary.as_str(),
+            done.activity.as_str()
+        ),
+        (i32::from(Status::Ok), "done", "")
+    );
+    // A call about a subagent this chat never saw spawned changes nothing.
+    let stranger = json!({"type": "collabAgentToolCall", "id": "w2", "tool": "wait",
+        "status": "completed", "receiverThreadIds": ["sub-9"],
+        "agentsStates": {"sub-9": {"status": "errored"}}});
+    replay.agent(&item_event("item/completed", stranger));
+    assert!(replay.client.item("w2").is_none());
+    let completed = json!({"method": "turn/completed", "params": {
+        "threadId": THREAD, "turn": {"id": "t1", "status": "completed"}}});
+    replay.agent(&completed.to_string());
+    replay.client.assert_settled();
+
+    // Nothing to stop: a Codex chat lists no background tasks.
+    let refused = replay
+        .command(SessionCommand::StopTask {
+            task_id: "sub-1".into(),
+        })
+        .unwrap_err();
+    assert_eq!(refused.code, "chat_task_not_found");
 }

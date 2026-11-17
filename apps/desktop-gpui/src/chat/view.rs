@@ -5,7 +5,7 @@
 use std::{rc::Rc, sync::Arc};
 
 use desktop_core::connection::chat::{
-    ChatConnection, ChatItem, ChatItemKind, ChatTool, ChatToolKind, ChatToolStatus,
+    ChatConnection, ChatItem, ChatItemKind, ChatTool, ChatToolKind, ChatToolStatus, ChatTurnState,
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
@@ -59,6 +59,8 @@ const CARD_WIDTH: f32 = 238.;
 const ROW_GAP: f32 = 14.;
 /// The tallest a tool's output is shown before it scrolls.
 const OUTPUT_HEIGHT: f32 = 260.;
+/// How the host's notice of a compaction starts, whichever agent it was.
+const COMPACTED: &str = "Context compacted";
 
 /// The space left and right of the column in a pane `width` wide, in pixels
 /// at `rem`. With the details card on show and room for both, the column
@@ -249,6 +251,18 @@ fn verb(tool: &ChatTool) -> SharedString {
     .into()
 }
 
+/// A finished subagent's row as it reads: "Explore: Find where uploads are
+/// staged · 12 tools · 61k tokens".
+fn subagent_title(tool: &ChatTool) -> SharedString {
+    let (kind, asked) = timeline::subagent_name(tool);
+    let figures = timeline::figures(tool);
+    if figures.is_empty() {
+        format!("{kind}: {asked}").into()
+    } else {
+        format!("{kind}: {asked} · {figures}").into()
+    }
+}
+
 /// `.tool .r`: the row's outcome, or its line counts for an edit that made any.
 fn outcome(tool: &ChatTool, palette: &Palette) -> AnyElement {
     let status = ChatToolStatus::try_from(tool.status).unwrap_or_default();
@@ -384,12 +398,19 @@ impl ChatPane {
             ChatItemKind::Reasoning => self.thought_row(index, palette, cx),
             ChatItemKind::Notice | ChatItemKind::Unspecified => {
                 let text: SharedString = self.chat.items[index].text.clone().into();
-                div()
+                // A notice carries no kind: a compaction's is known by what
+                // the host words it as, and has its mark (S9).
+                let compacted = text.starts_with(COMPACTED);
+                h_flex()
                     .w_full()
-                    .text_center()
+                    .justify_center()
+                    .gap(ui(6.))
                     .text_size(ui(12.5))
                     .text_color(palette.chrome_faint)
-                    .child(text)
+                    .when(compacted, |notice| {
+                        notice.child(icon(IconName::Shrink, 12., palette.chrome_faint))
+                    })
+                    .child(div().min_w_0().text_center().child(text))
                     .into_any_element()
             }
         }
@@ -542,11 +563,52 @@ impl ChatPane {
         } else {
             tool.detail.clone().into()
         };
-        let name = SharedString::from(format!("{verb} {detail}"));
+        let subagent = tool.kind == i32::from(ChatToolKind::Subagent);
+        let name = if subagent {
+            subagent_title(&tool)
+        } else {
+            SharedString::from(format!("{verb} {detail}"))
+        };
         let mut copies = vec![("Copy", detail.clone())];
         if !tool.output_preview.is_empty() {
             copies.push(("Copy output", tool.output_preview.clone().into()));
         }
+        // A subagent's row says who it was and what it was asked, in prose,
+        // with its figures faint after it (S9).
+        let what = if subagent {
+            let (kind, asked) = timeline::subagent_name(&tool);
+            let figures = timeline::figures(&tool);
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .text_size(ui(13.))
+                .text_color(palette.chrome_ink)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(format!("{kind}: {asked}"))),
+                )
+                .when(!figures.is_empty(), |what| {
+                    what.child(
+                        div()
+                            .flex_none()
+                            .text_color(palette.chrome_faint)
+                            .child(SharedString::from(format!(" · {figures}"))),
+                    )
+                })
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family(fonts::MONO)
+                .text_size(ui(13.))
+                .text_color(palette.chrome_ink)
+                .child(detail)
+                .into_any_element()
+        };
         let head = h_flex()
             .gap(ui(8.))
             .px(ui(9.))
@@ -554,24 +616,17 @@ impl ChatPane {
             .text_size(ui(13.5))
             .text_color(palette.chrome_dim)
             .child(icon(tool_icon(&tool), 14., palette.chrome_faint))
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(fonts::MONO)
-                    .text_size(ui(12.))
-                    .text_color(palette.chrome_faint)
-                    .child(verb),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(fonts::MONO)
-                    .text_size(ui(13.))
-                    .text_color(palette.chrome_ink)
-                    .child(detail),
-            )
+            .when(!subagent, |head| {
+                head.child(
+                    div()
+                        .flex_none()
+                        .font_family(fonts::MONO)
+                        .text_size(ui(12.))
+                        .text_color(palette.chrome_faint)
+                        .child(verb),
+                )
+            })
+            .child(what)
             .child(
                 div()
                     .flex_none()
@@ -581,6 +636,7 @@ impl ChatPane {
         let row = v_flex()
             .id(SharedString::from(format!("chat-tool-{id}")))
             .test_support()
+            .when(subagent, |row| row.aria_label(name.clone()))
             .w_full()
             .min_w_0()
             .border_1()
@@ -756,12 +812,12 @@ impl ChatPane {
         else {
             return div().into_any_element();
         };
-        let busy = timeline::is_busy(self.turn());
+        let turn = self.turn();
         let items = &self.chat.items;
         let key = items[first].id.clone();
         let open = self.open_groups.contains(&key);
         let drawn: Vec<usize> = (first..end)
-            .filter(|index| timeline::is_drawn(&items[*index], busy))
+            .filter(|index| timeline::is_drawn(&items[*index], turn))
             .collect();
         let summary = timeline::summary(drawn.iter().map(|index| &items[*index]), |item| {
             self.thought_took(&item.id)
@@ -914,13 +970,16 @@ impl ChatPane {
     /// Its mark holds still; only the seconds change, once a second. Stop,
     /// once pressed, says so here until the turn ends.
     fn working_row(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let said = |label: &str| timeline::Doing {
+            label: label.into(),
+            preview: None,
+        };
         let doing = if self.stopping {
-            timeline::Doing {
-                label: "Stopping…".into(),
-                preview: None,
-            }
+            said("Stopping…")
+        } else if self.compacting() {
+            // Whatever else the turn is doing.
+            said("Compacting context…")
         } else {
-            // Package G: "Compacting context…" while the agent compacts.
             timeline::doing(&self.chat.items)
         };
         let label: SharedString = doing.label.into();
@@ -967,6 +1026,8 @@ impl ChatPane {
                     .when(escape, |line| {
                         line.child(
                             div()
+                                .id("chat-working-escape")
+                                .test_support()
                                 .flex_none()
                                 .text_color(palette.chrome_faint)
                                 .child("· Esc to stop"),
@@ -986,9 +1047,95 @@ impl ChatPane {
                     .text_color(palette.chrome_faint)
                     .child(preview)
             }))
-            // Package G: a row for each running subagent goes here, under
-            // the line.
+            .children(self.subagent_rows(palette))
             .into_any_element()
+    }
+
+    /// `.subs`: a row for each subagent that runs while the turn works,
+    /// under the working line and outside any group (D16), in the order
+    /// they started.
+    fn subagent_rows(&self, palette: &Palette) -> Option<AnyElement> {
+        if self.turn() != ChatTurnState::Working {
+            return None;
+        }
+        let rows: Vec<AnyElement> = timeline::running_subagents(&self.chat.items)
+            .filter_map(|item| {
+                let tool = item.tool.as_ref()?;
+                let (kind, asked) = timeline::subagent_name(tool);
+                let line =
+                    timeline::subagent_line(tool, Self::since_unix_millis(item.at_unix_millis));
+                let name = SharedString::from(format!("{kind} {asked}"));
+                Some(
+                    h_flex()
+                        .id(SharedString::from(format!("chat-subagent-{}", item.id)))
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(name)
+                        .items_start()
+                        .gap(ui(8.))
+                        .min_w_0()
+                        .text_size(ui(12.5))
+                        .child(
+                            // `.sub .mk`: the mark, on the first line.
+                            h_flex()
+                                .flex_none()
+                                .w(ui(14.))
+                                .h(ui(18.))
+                                .justify_center()
+                                .child(WorkingIcon::new(10., palette.state_working)),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(ui(1.))
+                                .child(
+                                    h_flex()
+                                        .gap(ui(7.))
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(palette.chrome_ink_strong)
+                                                .child(SharedString::from(kind.to_owned())),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(palette.chrome_ink)
+                                                .child(SharedString::from(asked.to_owned())),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "chat-subagent-line-{}",
+                                            item.id
+                                        )))
+                                        .test_support()
+                                        .aria_label(SharedString::from(line.clone()))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(ui(12.))
+                                        .text_color(palette.chrome_dim)
+                                        .child(line),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        (!rows.is_empty()).then(|| {
+            v_flex()
+                .gap(ui(8.))
+                .pl(ui(22.))
+                .pt(ui(6.))
+                .min_w_0()
+                .children(rows)
+                .into_any_element()
+        })
     }
 
     fn retry_button(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {

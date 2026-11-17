@@ -22,7 +22,7 @@ use std::{
 use desktop_core::connection::chat::{
     ChatAction, ChatAnswer, ChatCapabilities, ChatCommand, ChatConnection, ChatEvent, ChatItem,
     ChatItemKind, ChatModel, ChatOptions, ChatPendingRequest, ChatRequest, ChatRequestKind,
-    ChatResponse, ChatSpeed, ChatTurnState,
+    ChatResponse, ChatSpeed, ChatToolKind, ChatTurnState,
 };
 use futures::future::BoxFuture;
 use gpui_kit::{
@@ -298,8 +298,16 @@ pub struct ChatPane {
     thoughts: HashMap<String, Thought>,
     /// When the turn in progress started, as near as this pane knows.
     turn_started: Option<Instant>,
-    /// Ticks the working line's seconds while it is on screen.
+    /// When the agent started compacting, as near as this pane knows.
+    compacting_since: Option<Instant>,
+    /// Ticks the working line's seconds, and the background list's, while
+    /// either is on screen.
     ticker: Option<Task<()>>,
+    /// The background tasks' list is open above its chip.
+    pub(super) tasks_open: bool,
+    /// Background tasks Stop was pressed for, until they leave the list or
+    /// the wait for that runs out.
+    pub(super) stopping_tasks: HashMap<String, Task<()>>,
     /// The message whose Copy shows its check, until the check goes.
     copied: Option<(String, Task<()>)>,
     pub(super) composer: Entity<TextareaState>,
@@ -441,7 +449,10 @@ impl ChatPane {
             open_groups: HashSet::new(),
             thoughts: HashMap::new(),
             turn_started: None,
+            compacting_since: None,
             ticker: None,
+            tasks_open: false,
+            stopping_tasks: HashMap::new(),
             copied: None,
             composer,
             editing: None,
@@ -748,18 +759,45 @@ impl ChatPane {
         }
     }
 
-    /// The working line is shown: the turn works. Not while it waits on the
-    /// user, whose card is the status then.
+    /// The working line is shown: the turn works, or the agent compacts,
+    /// whatever the turn says. Not while it waits on the user, whose card is
+    /// the status then.
     pub(super) fn working(&self) -> bool {
-        self.chat.is_held() && self.turn() == ChatTurnState::Working
+        self.chat.is_held() && (self.turn() == ChatTurnState::Working || self.compacting())
     }
 
-    /// How long the turn in progress has run.
+    /// The agent is compacting the conversation's context.
+    pub(super) fn compacting(&self) -> bool {
+        self.chat.state.compacting
+    }
+
+    /// How long what the working line says has run: the compaction, else
+    /// the turn in progress.
     pub(super) fn elapsed(&self, cx: &App) -> Duration {
         let now = cx.background_executor().now();
-        self.turn_started
+        let since = if self.compacting() {
+            self.compacting_since
+        } else {
+            self.turn_started
+        };
+        since
             .map(|started| now.saturating_duration_since(started))
             .unwrap_or_default()
+    }
+
+    /// How long ago the host's clock said `at_unix_millis`, by this
+    /// machine's clock; `None` when the host gave no time.
+    pub(super) fn since_unix_millis(at_unix_millis: i64) -> Option<Duration> {
+        if at_unix_millis <= 0 {
+            return None;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |now| now.as_millis() as i64);
+        // A host clock ahead of this one is not a time still to come.
+        Some(Duration::from_millis(
+            u64::try_from(now - at_unix_millis).unwrap_or(0),
+        ))
     }
 
     /// How long a thought this pane watched stream took.
@@ -800,11 +838,79 @@ impl ChatPane {
         self.turn_started = Some(self.turn_started.map_or(since, |known| known.max(since)));
     }
 
+    /// Follows what the state says runs outside the turn: when compacting
+    /// began, and which tasks are still being stopped. The list closes with
+    /// its last task.
+    fn follow_background(&mut self, now: Instant) {
+        if self.compacting() {
+            self.compacting_since.get_or_insert(now);
+        } else {
+            self.compacting_since = None;
+        }
+        let background = &self.chat.state.background;
+        self.stopping_tasks
+            .retain(|id, _| background.iter().any(|task| task.id == *id));
+        if background.is_empty() {
+            self.tasks_open = false;
+        }
+    }
+
+    /// Opens or closes the background tasks' list.
+    pub(super) fn set_tasks_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        let open = open && !self.chat.state.background.is_empty();
+        if self.tasks_open != open {
+            self.tasks_open = open;
+            self.seen(cx);
+            self.sync_ticker(cx);
+            cx.notify();
+        }
+    }
+
+    /// Stops one background task. Its row stays dimmed until it leaves the
+    /// list, or for as long as a Stop waits for its turn to end, so a lost
+    /// answer cannot leave it so for good.
+    pub(super) fn stop_task(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        self.seen(cx);
+        if self.stopping_tasks.contains_key(task_id) || self.agent_refusal().is_some() {
+            return;
+        }
+        self.notice = None;
+        let id = task_id.to_owned();
+        let timer = cx.background_executor().timer(STOP_WAIT);
+        let wait = cx.spawn({
+            let id = id.clone();
+            async move |this, cx| {
+                timer.await;
+                this.update(cx, |this, cx| {
+                    if this.stopping_tasks.remove(&id).is_some() {
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        });
+        self.stopping_tasks.insert(id.clone(), wait);
+        let request = ChatRequest {
+            action: ChatAction::StopTask.into(),
+            task_id: id.clone(),
+            ..Default::default()
+        };
+        self.send(request, cx, move |this, result, cx| {
+            if let Err(error) = result {
+                this.stopping_tasks.remove(&id);
+                this.refused(&error, cx);
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     /// Ticks the working line once a second while it is on screen, from the
-    /// turn's start so the seconds turn over evenly. A pane kept off screen,
-    /// or one with no working line, has no timer and draws nothing.
+    /// turn's start so the seconds turn over evenly, and the background
+    /// list's times while it is open. A pane kept off screen, or one with
+    /// neither, has no timer and draws nothing.
     fn sync_ticker(&mut self, cx: &mut Context<Self>) {
-        if !(self.on_screen && self.working()) {
+        if !(self.on_screen && (self.working() || self.tasks_open)) {
             self.ticker = None;
             return;
         }
@@ -872,6 +978,7 @@ impl ChatPane {
         let now = cx.background_executor().now();
         if matches!(outcome, Outcome::Reset | Outcome::State) {
             self.follow_turn(outcome == Outcome::Reset, now);
+            self.follow_background(now);
         }
         match outcome {
             Outcome::Reset => {
@@ -912,7 +1019,16 @@ impl ChatPane {
                 let item = &self.chat.items[index];
                 self.shown.remove(&item.id);
                 // An item never changes kind, so only thinking, which is
-                // not drawn while it streams, can move a row.
+                // not drawn while it streams, and a subagent, which is not
+                // drawn while it runs, can move a row.
+                let subagent = item
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.kind == i32::from(ChatToolKind::Subagent));
+                if subagent {
+                    self.relayout(0, cx);
+                }
+                let item = &self.chat.items[index];
                 if item.kind == i32::from(ChatItemKind::Reasoning) {
                     if !item.streaming
                         && let Some(Thought::Since(since)) = self.thoughts.get(&item.id).copied()
@@ -1141,7 +1257,7 @@ impl ChatPane {
     }
 
     /// Why nothing at all can be asked of the agent now.
-    fn agent_refusal(&self) -> Option<&'static str> {
+    pub(super) fn agent_refusal(&self) -> Option<&'static str> {
         if !self.is_live() {
             return Some("The host is not connected.");
         }

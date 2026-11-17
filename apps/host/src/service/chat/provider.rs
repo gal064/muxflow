@@ -172,6 +172,11 @@ pub(crate) enum SessionCommand {
     /// filled in from the current ones. The session publishes the options it
     /// ends up with.
     SetOptions(v1::ChatOptions),
+    /// Stop one of the tasks the state lists in `background`, one it says is
+    /// `stoppable`. It leaves that list when the agent says it has ended.
+    StopTask {
+        task_id: String,
+    },
 }
 
 /// Where a session reports what changed in its pane. `Change::Item` is a new

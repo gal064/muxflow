@@ -1180,3 +1180,283 @@ fn the_sessions_are_where_the_agents_environment_says() {
         PathBuf::from("/account/.claude")
     );
 }
+
+// --- background tasks, subagents, compacting ----------------------------------
+
+/// One recorded headless turn (2.1.326): a command run in the background, an
+/// `Explore` subagent in the foreground, and a command in the foreground that
+/// waits for the first. Trimmed, with its paths and ids replaced.
+const TASKS: &str = include_str!("../fixtures/claude-tasks.stream.jsonl");
+/// Composed from the shapes the agent was seen sending live (2.1.326): a
+/// command left running when the turn ends, stopped from the chat, the turn
+/// the agent then starts by itself, and a manual `/compact`.
+const BACKGROUND: &str = include_str!("../fixtures/claude-background.stream.jsonl");
+
+/// A chat whose agent has answered `initialize`, so it takes commands.
+fn ready() -> Replay<Claude> {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    replay.agent(
+        &json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": "@initialize", "response": {}}})
+        .to_string(),
+    );
+    replay
+}
+
+fn listed(replay: &Replay<Claude>) -> Vec<(String, v1::ChatTaskKind, String, bool)> {
+    let task = |task: &v1::ChatBackgroundTask| {
+        (
+            task.id.clone(),
+            v1::ChatTaskKind::try_from(task.kind).unwrap(),
+            task.description.clone(),
+            task.stoppable,
+        )
+    };
+    replay.client.state.background.iter().map(task).collect()
+}
+
+fn tool_of<'a>(replay: &'a Replay<Claude>, id: &str) -> &'a v1::ChatTool {
+    let item = replay.client.item(id);
+    let item = item.unwrap_or_else(|| panic!("{id}: {:#?}", replay.client.outline()));
+    item.tool.as_ref().unwrap()
+}
+
+#[tokio::test]
+async fn background_work_is_listed_and_a_subagents_row_has_its_figures() {
+    let mut lines = TASKS.lines().peekable();
+    let mut replay = ready();
+    replay.send(M1, "Run a command in the background and count the files.");
+
+    // The background command: listed as soon as the agent says, and its
+    // row ends at once, as its tool says it has.
+    replay.play(&mut lines, "background_tasks_changed");
+    let command = (
+        "bemhbkm4q".to_owned(),
+        v1::ChatTaskKind::Command,
+        "Run sleep 12 then echo done in background".to_owned(),
+        true,
+    );
+    assert_eq!(listed(&replay), std::slice::from_ref(&command));
+    let started = replay.client.state.background[0].started_at_unix_millis;
+    assert!(started > 0);
+    replay.play(&mut lines, "Command running in background");
+    assert_eq!(
+        tool_of(&replay, "toolu_011J1VNnwubb3AU3yZ3Vxr17").status,
+        i32::from(Status::Ok)
+    );
+
+    // The subagent: its type, then what it does and its figures as it works.
+    let agent = "toolu_01GGX8A9njwe71AdehLB2HCD";
+    replay.play(&mut lines, "\"name\":\"Agent\"");
+    assert_eq!(tool_of(&replay, agent).agent_type, "Explore");
+    assert_eq!(tool_of(&replay, agent).status, i32::from(Status::Running));
+    replay.play(&mut lines, "task_started");
+    replay.play(&mut lines, "task_progress");
+    let tool = tool_of(&replay, agent);
+    assert_eq!(
+        (tool.activity.as_str(), tool.tool_uses, tool.tokens),
+        (
+            "Running List all entries in the current directory",
+            1,
+            15_264
+        )
+    );
+    assert!(!tool.background);
+    // Its own conversation stays its own.
+    replay.play(&mut lines, "img.out\"");
+    assert!(
+        replay
+            .client
+            .item("toolu_01XcxZShYVVe8Rt3ekCdgung")
+            .is_none()
+    );
+    // It ends with its last figures, and its result ends the row.
+    replay.play(&mut lines, "\"task_notification\"");
+    assert_eq!(tool_of(&replay, agent).tokens, 19_714);
+    replay.play(&mut lines, "The directory holds 3 files");
+    let tool = tool_of(&replay, agent);
+    assert_eq!(
+        (tool.status, tool.result_summary.as_str(), tool.tool_uses),
+        (i32::from(Status::Ok), "done", 1)
+    );
+
+    // A command in the foreground is a task too, and changes neither the
+    // list nor its row.
+    let waiting = "toolu_018G1A5HyUZN4Y8s5QnCji4N";
+    replay.play(&mut lines, "\"task_started\"");
+    assert_eq!(listed(&replay), [command]);
+    assert_eq!(
+        replay.client.state.background[0].started_at_unix_millis,
+        started
+    );
+    let before = tool_of(&replay, waiting).clone();
+    assert_eq!(before.kind, i32::from(ToolKind::Command));
+
+    // The background command ends: the list empties.
+    replay.play(&mut lines, "\"tasks\":[]");
+    assert!(replay.client.state.background.is_empty());
+    replay.play(&mut lines, "\"task_notification\"");
+    assert_eq!(tool_of(&replay, waiting), &before);
+    replay.play(&mut lines, "\"type\":\"result\"");
+    replay.client.assert_settled();
+}
+
+#[tokio::test]
+async fn a_task_outlives_its_turn_is_stopped_from_the_chat_and_the_agent_says_so() {
+    let mut lines = BACKGROUND.lines().peekable();
+    let mut replay = ready();
+    replay.send(M1, "Start the dev server and leave it running.");
+    replay.play(&mut lines, "\"type\":\"result\"");
+    // The turn is over and the command still runs.
+    replay.client.assert_settled();
+    assert_eq!(
+        listed(&replay),
+        [(
+            "bdev1".to_owned(),
+            v1::ChatTaskKind::Command,
+            "Run the dev server".to_owned(),
+            true
+        )]
+    );
+
+    // Only a task the list holds can be stopped.
+    let stop = |task_id: &str| SessionCommand::StopTask {
+        task_id: task_id.into(),
+    };
+    let refused = replay.command(stop("bgone")).unwrap_err();
+    assert_eq!(refused.code, "chat_task_not_found");
+    assert_eq!(
+        replay.command(stop("")).unwrap_err().code,
+        "chat_task_not_found"
+    );
+    replay.command(stop("bdev1")).unwrap();
+    assert_eq!(
+        replay.last_asked("stop_task")["request"],
+        json!({"subtype": "stop_task", "task_id": "bdev1"})
+    );
+    replay.play(&mut lines, "\"tasks\":[]");
+    assert!(replay.client.state.background.is_empty());
+    replay.play(&mut lines, "@stop_task");
+    let notices = |replay: &Replay<Claude>| {
+        replay
+            .client
+            .items
+            .iter()
+            .filter(|item| item.kind == i32::from(Kind::Notice))
+            .count()
+    };
+    assert_eq!(notices(&replay), 0);
+
+    // The agent starts a turn of its own about it: working, with no message
+    // of the user's to say so.
+    replay.play(&mut lines, "message_start");
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Working));
+    replay.play(&mut lines, "\"type\":\"result\"");
+    replay.client.assert_settled();
+    assert_eq!(
+        replay.client.items.last().unwrap().text,
+        "The dev server was stopped."
+    );
+}
+
+#[tokio::test]
+async fn compacting_is_said_while_it_lasts_and_leaves_a_notice_with_the_size_before() {
+    let mut lines = BACKGROUND
+        .lines()
+        .skip_while(|line| !line.contains("/compact"))
+        .peekable();
+    let mut replay = ready();
+    replay.send(M2, "/compact");
+    replay.play(&mut lines, "\"compacting\"");
+    assert!(replay.client.state.compacting);
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Working));
+    replay.play(&mut lines, "compact_result");
+    assert!(!replay.client.state.compacting);
+    replay.play(&mut lines, "\"type\":\"result\"");
+    replay.client.assert_settled();
+    // The summary and the command's output are the agent's, not the user's.
+    let outline: Vec<(i32, &str)> = replay
+        .client
+        .items
+        .iter()
+        .map(|item| (item.kind, item.text.as_str()))
+        .collect();
+    assert_eq!(
+        outline,
+        [
+            (i32::from(Kind::User), "/compact"),
+            (
+                i32::from(Kind::Notice),
+                "Context compacted, was 182k tokens"
+            ),
+        ]
+    );
+
+    // A turn that ends while it compacts ends the compacting too.
+    replay
+        .agent(&json!({"type": "system", "subtype": "status", "status": "compacting"}).to_string());
+    assert!(replay.client.state.compacting);
+    replay.agent(&json!({"type": "result", "subtype": "success", "is_error": false}).to_string());
+    assert!(!replay.client.state.compacting);
+    // So does the agent's end, which takes its tasks with it.
+    replay.agent(
+        &json!({"type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{"task_id": "b2", "task_type": "local_agent", "description": "Audit"}]})
+        .to_string(),
+    );
+    assert_eq!(listed(&replay)[0].1, v1::ChatTaskKind::Subagent);
+    replay
+        .agent(&json!({"type": "system", "subtype": "status", "status": "compacting"}).to_string());
+    replay.end("");
+    assert!(replay.client.state.background.is_empty());
+    assert!(!replay.client.state.compacting);
+}
+
+#[tokio::test]
+async fn a_stop_the_agent_refuses_is_said_and_the_task_stays() {
+    let mut replay = ready();
+    replay.agent(
+        &json!({"type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{"task_id": "b1", "task_type": "local_bash", "description": "Serve"}]})
+        .to_string(),
+    );
+    replay
+        .command(SessionCommand::StopTask {
+            task_id: "b1".into(),
+        })
+        .unwrap();
+    replay.agent(
+        &json!({"type": "control_response", "response": {
+            "subtype": "error", "request_id": "@stop_task", "error": "No such task"}})
+        .to_string(),
+    );
+    assert_eq!(
+        replay.client.items.last().unwrap().text,
+        "The task could not be stopped: No such task"
+    );
+    assert_eq!(listed(&replay).len(), 1);
+}
+
+#[test]
+fn token_counts_and_the_compaction_notice_read_as_the_chat_says_them() {
+    assert_eq!(tokens(950), "950");
+    assert_eq!(tokens(19_714), "19.7k");
+    assert_eq!(tokens(24_100), "24.1k");
+    assert_eq!(tokens(61_000), "61k");
+    assert_eq!(tokens(182_000), "182k");
+    assert_eq!(tokens(1_250_000), "1.3M");
+    assert_eq!(
+        compacted(&json!({"pre_tokens": 182_000})),
+        "Context compacted, was 182k tokens"
+    );
+    // The session's record names it in camel case.
+    assert_eq!(
+        compacted(&json!({"preTokens": 19_997})),
+        "Context compacted, was 20k tokens"
+    );
+    assert_eq!(compacted(&Value::Null), "Context compacted");
+    let summary = json!({"type": "user", "isReplay": true, "message": {"role": "user",
+        "content": "This session is being continued from a previous conversation that ran out of context."}});
+    assert_eq!(said(&summary), Said::Nothing);
+}

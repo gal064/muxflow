@@ -5,21 +5,23 @@
 use std::rc::Rc;
 
 use desktop_core::connection::chat::{
-    ChatCommand, ChatConnection, ChatOptions, ChatPermissionMode, ChatSpeed, ChatTurnState,
-    ChatUsage,
+    ChatCommand, ChatConnection, ChatOptions, ChatPermissionMode, ChatSpeed, ChatTaskKind,
+    ChatTurnState, ChatUsage,
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
     Anchor, AnyElement, App, Context, EntityInputHandler as _, FontWeight, InteractiveElement,
     IntoElement, ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement, Styled,
-    Window,
+    WeakEntity, Window,
     accesskit::Toggled,
     component::{
-        Disableable, Sizable,
+        Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Enter, Escape, IndentInline, MoveDown, MoveUp, OutdentInline, Textarea},
         menu::DropdownMenu,
+        popover::Popover,
+        tooltip::Tooltip,
         v_flex,
     },
     div,
@@ -38,6 +40,7 @@ use super::{
     icon::{IconName, icon},
     pane::ChatPane,
     slash::{self, Section},
+    timeline,
 };
 
 /// The rows of the command list on show before it scrolls.
@@ -106,6 +109,92 @@ fn pill(
     }
 }
 
+/// One row of the background list, as it is drawn.
+struct TaskRow {
+    id: String,
+    glyph: IconName,
+    description: SharedString,
+    /// How long it has run, when the host said when it started.
+    time: Option<SharedString>,
+    stoppable: bool,
+    /// Stop was pressed for it, and it has not left the list yet.
+    stopping: bool,
+}
+
+/// `.pop .bt`: the background list's rows. A row being stopped is dimmed,
+/// as a message being sent is, and its stop button is off.
+fn task_list(rows: &[TaskRow], p: &Palette, pane: &WeakEntity<ChatPane>) -> AnyElement {
+    let (hover, strong, wash) = (p.chrome_hover, p.chrome_ink_strong, p.accent_wash);
+    v_flex()
+        .id("chat-tasks-rows")
+        .test_support()
+        .role(Role::List)
+        .aria_label("Background tasks")
+        .py(ui(2.))
+        .text_size(ui(12.5))
+        .children(rows.iter().map(|row| {
+            let stop = row.stoppable.then(|| {
+                let (id, pane) = (row.id.clone(), pane.clone());
+                div()
+                    .id(SharedString::from(format!("chat-task-stop-{}", row.id)))
+                    .test_support()
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("Stop {}", row.description)))
+                    .flex_none()
+                    .size(ui(20.))
+                    .mr(ui(-5.))
+                    .rounded(ui(6.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(p.chrome_faint)
+                    .child(Icon::new(IconName::X).size(ui(12.)))
+                    .when(!row.stopping, |button| {
+                        button
+                            .cursor_pointer()
+                            .tab_index(0)
+                            .hover(move |style| style.bg(hover).text_color(strong))
+                            .focus_visible(move |style| style.bg(wash).text_color(strong))
+                            .tooltip(|window, cx| Tooltip::new("Stop").build(window, cx))
+                            .on_click(move |_, _, cx| {
+                                pane.update(cx, |pane, cx| pane.stop_task(&id, cx)).ok();
+                            })
+                    })
+            });
+            h_flex()
+                .id(SharedString::from(format!("chat-task-{}", row.id)))
+                .test_support()
+                .role(Role::ListItem)
+                .aria_label(row.description.clone())
+                .h(ui(30.))
+                .px(ui(10.))
+                .gap(ui(8.))
+                .min_w_0()
+                .when(row.stopping, |row| row.opacity(0.6))
+                .child(icon(row.glyph, 14., p.chrome_faint))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(p.chrome_ink_strong)
+                        .child(row.description.clone()),
+                )
+                .children(row.time.clone().map(|time| {
+                    div()
+                        .id(SharedString::from(format!("chat-task-time-{}", row.id)))
+                        .test_support()
+                        .aria_label(time.clone())
+                        .flex_none()
+                        .text_size(ui(11.5))
+                        .text_color(p.chrome_faint)
+                        .child(time)
+                }))
+                .children(stop)
+        }))
+        .into_any_element()
+}
+
 impl ChatPane {
     fn composing(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.composer.update(cx, |composer, cx| {
@@ -118,10 +207,14 @@ impl ChatPane {
         self.turn() == ChatTurnState::Working && self.is_live()
     }
 
-    /// Closes the command list, or else cancels the edit. False when
-    /// neither was open.
+    /// Closes the command list, or else the background list, or else cancels
+    /// the edit. False when none was open.
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.slash_dismiss(cx) {
+            return true;
+        }
+        if self.tasks_open {
+            self.set_tasks_open(false, cx);
             return true;
         }
         if self.editing.is_some() {
@@ -131,9 +224,9 @@ impl ChatPane {
         false
     }
 
-    /// Escape anywhere in the chat that nothing inside it took: closes the
-    /// command list, else cancels the edit, else stops the agent while it
-    /// works, as Stop does. Otherwise it goes on to the app.
+    /// Escape anywhere in the chat that nothing inside it took: closes a
+    /// list, else cancels the edit, else stops the agent while it works, as
+    /// Stop does. Otherwise it goes on to the app.
     pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.composing(window, cx) || self.dismiss(window, cx) {
             return;
@@ -608,6 +701,83 @@ impl ChatPane {
             .into_any_element()
     }
 
+    /// `.pill.bgt` on the composer's top edge while anything runs outside the
+    /// turn, working or idle (D15): it is all that tells an idle chat with a
+    /// command still running from a finished one. It opens the list of what
+    /// runs, as the model pill opens its own, with a stop button on a row the
+    /// agent can stop (D18).
+    fn background_chip(&self, p: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tasks = &self.chat.state.background;
+        if tasks.is_empty() || !self.chat.is_held() {
+            return None;
+        }
+        let label = timeline::background_label(tasks.len());
+        let open = self.tasks_open;
+        let ink = if open { p.accent } else { p.chrome_dim };
+        let chip = Button::new("chat-tasks")
+            .icon(icon(IconName::Layers, 12., ink))
+            .label(label.clone())
+            .accessibility_label(label)
+            .xsmall()
+            .h_auto()
+            .px(ui(8.))
+            .py(ui(1.))
+            .gap(ui(5.))
+            .border_1()
+            .border_color(if open { p.accent } else { p.chrome_border })
+            .rounded_full()
+            .bg(p.chrome_bg)
+            .text_size(ui(11.))
+            .text_color(p.chrome_ink);
+        let off = self.agent_refusal().is_some();
+        let rows: Vec<TaskRow> = tasks
+            .iter()
+            .map(|task| TaskRow {
+                id: task.id.clone(),
+                glyph: match ChatTaskKind::try_from(task.kind).unwrap_or_default() {
+                    ChatTaskKind::Command => IconName::SquareTerminal,
+                    ChatTaskKind::Subagent => IconName::Bot,
+                    ChatTaskKind::Other | ChatTaskKind::Unspecified => IconName::Layers,
+                },
+                description: task.description.clone().into(),
+                time: Self::since_unix_millis(task.started_at_unix_millis)
+                    .map(|ran| timeline::elapsed(ran).into()),
+                stoppable: task.stoppable && !off,
+                stopping: self.stopping_tasks.contains_key(&task.id),
+            })
+            .collect();
+        let palette = *p;
+        let this = cx.entity().downgrade();
+        let opened = this.clone();
+        let popover = Popover::new("chat-tasks-list")
+            .anchor(Anchor::BottomLeft)
+            .open(open)
+            .on_open_change(move |open, _, cx| {
+                let open = *open;
+                opened
+                    .update(cx, |pane, cx| pane.set_tasks_open(open, cx))
+                    .ok();
+            })
+            .trigger(chip)
+            // `.pop`, as the model pill's list and the command list are.
+            .w(ui(300.))
+            .p(px(0.))
+            .border_1()
+            .border_color(p.chrome_border)
+            .rounded(ui(9.))
+            .bg(p.chrome_raised)
+            .shadow_lg()
+            .content(move |_, _, _| task_list(&rows, &palette, &this));
+        Some(
+            div()
+                .absolute()
+                .top(ui(-11.))
+                .left(ui(10.))
+                .child(popover)
+                .into_any_element(),
+        )
+    }
+
     /// `.comp`: the composer, in the conversation's column.
     pub(super) fn composer_area(
         &mut self,
@@ -710,6 +880,8 @@ impl ChatPane {
                     .child(self.send_button(p, cx)),
             );
         let open = !suggestions.is_empty();
+        let chip = self.background_chip(p, cx);
+        let has_chip = chip.is_some();
         let field = div()
             // Ahead of the field: these keys belong to the command list while
             // it is open, and Escape to the edit being made.
@@ -765,7 +937,8 @@ impl ChatPane {
                     .appearance(false)
                     .bordered(false)
                     .px(ui(2.))
-                    .pt(ui(10.))
+                    // `.comp.hasbg .ta`: clear of the chip on the edge.
+                    .pt(ui(if has_chip { 15. } else { 10. }))
                     .pb(ui(4.))
                     .text_size(ui(14.5))
                     .text_color(p.chrome_ink_strong),
@@ -775,6 +948,8 @@ impl ChatPane {
             .pl(left)
             .pr(right)
             .pb(ui(14.))
+            // `.comp.hasbg`: room above for the chip.
+            .when(has_chip, |area| area.pt(ui(6.)))
             .child(
                 div()
                     .id("chat-composer")
@@ -798,7 +973,9 @@ impl ChatPane {
                     .children(banner)
                     .children(notice)
                     .child(field)
-                    .child(bar),
+                    .child(bar)
+                    // Last, so it is drawn over the edge it sits on.
+                    .children(chip),
             )
             .into_any_element()
     }
