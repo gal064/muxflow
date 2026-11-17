@@ -3,7 +3,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
@@ -176,46 +176,113 @@ async fn wait_for_spawned_daemon(path: &Path) -> anyhow::Result<SpawnedDaemon> {
     bail!("host daemon did not create {}", path.display())
 }
 
+/// How long a bridge keeps probing a daemon that does not answer its hello
+/// before it retires it.
+///
+/// A daemon answers a hello on its runtime's workers, and no agent operation
+/// runs there any more (see `agent_dispatch::handle`), so a hello does not wait
+/// on the disk however stalled it is. Ten silent seconds therefore mean a
+/// wedged daemon, and retiring it is the recovery. The bound used to be one
+/// two-second probe, which retired daemons that were only slow: each was
+/// killed mid-ingest and its replacement started under the same load.
+const SILENT_DAEMON_BOUND: Duration = Duration::from_secs(10);
+
+/// How long one build probe waits for the daemon's hello.
+const BUILD_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The pause before probing again after a probe failed at once, as one the
+/// daemon hung up on does, so a failing daemon is not probed in a busy loop.
+const BUILD_PROBE_RETRY_PAUSE: Duration = Duration::from_millis(100);
+
+/// Why a bridge retires the daemon it found: the label of its `bridge.log` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetireReason {
+    /// It answered, as a different build or protocol major, or not with a hello.
+    DifferentBuild,
+    /// It did not answer a probe for the whole of [`SILENT_DAEMON_BOUND`].
+    Silent,
+}
+
+impl RetireReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DifferentBuild => "different-build",
+            Self::Silent => "silent",
+        }
+    }
+}
+
 /// Verifies a daemon before returning a stream from that same process. With
-/// auto-start enabled, an outdated or unproven daemon is cooperatively retired
-/// before the packaged helper starts its replacement. The probe has its own
-/// connection because the desktop must still own the real connection's first
-/// ClientHello.
+/// auto-start enabled, an outdated daemon, or one that stays silent past
+/// [`SILENT_DAEMON_BOUND`], is cooperatively retired before the packaged helper
+/// starts its replacement. The probe has its own connection because the
+/// desktop must still own the real connection's first ClientHello.
 async fn inspect_existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<ExistingDaemon> {
-    let Ok(mut probe) = UnixStream::connect(path).await else {
-        return Ok(ExistingDaemon::Missing);
-    };
-    let probe_pid = probe
-        .peer_cred()
-        .context("inspect daemon build-probe peer credentials")?
-        .pid()
-        .context("daemon build-probe peer omitted its process ID")?;
-    let same_build = matches!(
-        timeout(Duration::from_secs(2), daemon_is_current_build(&mut probe)).await,
-        Ok(Ok(true))
-    );
-    drop(probe);
-    if same_build {
-        return Ok(match UnixStream::connect(path).await {
-            Ok(stream)
-                if stream
-                    .peer_cred()
-                    .context("inspect forwarded daemon peer credentials")?
-                    .pid()
-                    == Some(probe_pid) =>
-            {
-                ExistingDaemon::Connected(stream)
+    inspect_existing_daemon_within(path, auto_start, SILENT_DAEMON_BOUND).await
+}
+
+/// [`inspect_existing_daemon`] with the silence bound as a parameter, so the
+/// tests need not wait ten seconds for a silent daemon to be retired.
+async fn inspect_existing_daemon_within(
+    path: &Path,
+    auto_start: bool,
+    silence_bound: Duration,
+) -> anyhow::Result<ExistingDaemon> {
+    let mut started = Instant::now();
+    let mut probed_pid = None;
+    let reason = loop {
+        let Ok(mut probe) = UnixStream::connect(path).await else {
+            return Ok(ExistingDaemon::Missing);
+        };
+        let probe_pid = probe
+            .peer_cred()
+            .context("inspect daemon build-probe peer credentials")?
+            .pid()
+            .context("daemon build-probe peer omitted its process ID")?;
+        // The bound is one daemon's silence. Another process holding the socket
+        // now, one a concurrent bridge started, is given the whole bound again.
+        if probed_pid
+            .replace(probe_pid)
+            .is_some_and(|pid| pid != probe_pid)
+        {
+            started = Instant::now();
+        }
+        let remaining = silence_bound.saturating_sub(started.elapsed());
+        let answer = timeout(
+            BUILD_PROBE_TIMEOUT.min(remaining),
+            daemon_is_current_build(&mut probe),
+        )
+        .await;
+        drop(probe);
+        match answer {
+            Ok(Ok(true)) => return forward_probed_daemon(path, probe_pid).await,
+            Ok(Ok(false)) => break RetireReason::DifferentBuild,
+            // Silence, or a transport error mid-probe, says nothing about the
+            // build: a daemon whose workers are busy is not a different one.
+            // Probe again until the bound has passed. No probe starts after it.
+            Ok(Err(_)) | Err(_) => {
+                let remaining = silence_bound.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    break RetireReason::Silent;
+                }
+                sleep(BUILD_PROBE_RETRY_PAUSE.min(remaining)).await;
+                if started.elapsed() >= silence_bound {
+                    break RetireReason::Silent;
+                }
             }
-            // The socket owner changed after the probe. Never forward the
-            // unverified peer; the caller will inspect the new owner on
-            // its next pass.
-            Ok(_) => ExistingDaemon::Missing,
-            Err(_) => ExistingDaemon::Missing,
-        });
-    }
+        }
+    };
     if !auto_start {
-        bail!("host daemon build differs and --no-start forbids replacing it");
+        match reason {
+            RetireReason::DifferentBuild => {
+                bail!("host daemon build differs and --no-start forbids replacing it")
+            }
+            RetireReason::Silent => {
+                bail!("host daemon did not answer and --no-start forbids replacing it")
+            }
+        }
     }
+    crate::diagnostics::write_bridge_retired_daemon_log(path.parent(), reason.label());
     daemon::stop_or_retire(path).await?;
     for _ in 0..100 {
         if UnixStream::connect(path).await.is_err() {
@@ -224,6 +291,27 @@ async fn inspect_existing_daemon(path: &Path, auto_start: bool) -> anyhow::Resul
         sleep(Duration::from_millis(20)).await;
     }
     bail!("incurrent host daemon did not release {}", path.display())
+}
+
+/// Opens the stream to forward for a daemon that just proved its build, but
+/// only if the same process still owns the socket.
+async fn forward_probed_daemon(path: &Path, probe_pid: i32) -> anyhow::Result<ExistingDaemon> {
+    Ok(match UnixStream::connect(path).await {
+        Ok(stream)
+            if stream
+                .peer_cred()
+                .context("inspect forwarded daemon peer credentials")?
+                .pid()
+                == Some(probe_pid) =>
+        {
+            ExistingDaemon::Connected(stream)
+        }
+        // The socket owner changed after the probe. Never forward the
+        // unverified peer; the caller will inspect the new owner on
+        // its next pass.
+        Ok(_) => ExistingDaemon::Missing,
+        Err(_) => ExistingDaemon::Missing,
+    })
 }
 
 #[cfg(test)]
@@ -416,6 +504,7 @@ mod tests {
                 .is_none()
         );
         server.await.unwrap();
+        assert_eq!(retired_reasons(&root), ["different-build"]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -491,10 +580,10 @@ mod tests {
 
     /// A daemon that cannot prove its version is retired, not refused forever.
     ///
-    /// A probe that times out, hangs up mid-frame or answers with something
-    /// other than a ServerHello says nothing about versions. Failing the
-    /// connection on it left the daemon running, so every later reconnect
-    /// failed exactly the same way until someone killed it by hand.
+    /// A probe that times out or hangs up mid-frame says nothing about
+    /// versions. Failing the connection on it left the daemon running, so every
+    /// later reconnect failed exactly the same way until someone killed it by
+    /// hand. It is probed again, and retired once the silence bound has passed.
     #[tokio::test]
     async fn a_daemon_that_cannot_prove_its_version_is_retired_rather_than_refused() {
         let root = temporary_runtime();
@@ -506,6 +595,12 @@ mod tests {
             // No ServerHello at all: the daemon hangs up mid-probe.
             drop(probe);
 
+            // The bridge probes again rather than retiring it at once, and this
+            // time the daemon says nothing for the rest of the bound.
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            assert!(read_frame(&mut probe).await.unwrap().is_none());
+
             let (mut shutdown, _) = listener.accept().await.unwrap();
             answer_cooperative_shutdown(&mut shutdown).await;
             drop(shutdown);
@@ -513,14 +608,137 @@ mod tests {
             fs::remove_file(&socket).unwrap();
         });
 
-        assert!(
-            existing_daemon(&root.join("host.sock"), true)
+        assert!(matches!(
+            inspect_existing_daemon_within(&root.join("host.sock"), true, TEST_SILENCE_BOUND)
                 .await
-                .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+            ExistingDaemon::Retired
+        ));
         server.await.unwrap();
+        assert_eq!(retired_reasons(&root), ["silent"]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Short enough for a fast test, longer than the pause between probes so a
+    /// daemon that hangs up is probed again inside it, and shorter than one
+    /// probe's own timeout so a silent daemon is probed exactly once.
+    const TEST_SILENCE_BOUND: Duration = Duration::from_millis(500);
+
+    /// A daemon too busy to answer for a few seconds is the daemon the desktop
+    /// wants. Two seconds of silence used to retire it, and under a stalled
+    /// disk each replacement was killed the same way.
+    #[tokio::test]
+    async fn a_daemon_slow_to_answer_is_connected_to_not_retired() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let busy_until = tokio::time::Instant::now() + Duration::from_secs(3);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    // The forwarded stream sends nothing; a probe sends its hello.
+                    let Ok(Some(_hello)) = read_frame(&mut connection).await else {
+                        return;
+                    };
+                    tokio::time::sleep_until(busy_until).await;
+                    let mut hello = envelope(
+                        1,
+                        0,
+                        Payload::ServerHello(v1::ServerHello {
+                            helper_version: HELPER_VERSION.into(),
+                            helper_build_digest: crate::build_identity::digest()
+                                .unwrap()
+                                .to_owned(),
+                            ..Default::default()
+                        }),
+                    );
+                    hello.protocol_major = PROTOCOL_MAJOR;
+                    // The first probe has given up by now and hung up.
+                    let _ = write_frame(&mut connection, &hello).await;
+                    let _ = read_frame(&mut connection).await;
+                });
+            }
+        });
+
+        let started = Instant::now();
+        let connected = existing_daemon(&socket, true).await.unwrap();
+        assert!(connected.is_some(), "a slow daemon was not connected to");
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert!(
+            retired_reasons(&root).is_empty(),
+            "a slow daemon was retired"
+        );
+        assert!(socket.exists());
+        server.abort();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A daemon that never answers is given the whole bound, then retired as
+    /// silent, through the same cooperative stop as a different build.
+    #[tokio::test]
+    async fn a_daemon_that_never_answers_is_retired_once_the_bound_has_passed() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            // Silent until the bridge gives up on it.
+            assert!(read_frame(&mut probe).await.unwrap().is_none());
+
+            let (mut shutdown, _) = listener.accept().await.unwrap();
+            answer_cooperative_shutdown(&mut shutdown).await;
+            drop(shutdown);
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+        });
+
+        let started = Instant::now();
+        assert!(matches!(
+            inspect_existing_daemon_within(&root.join("host.sock"), true, TEST_SILENCE_BOUND)
+                .await
+                .unwrap(),
+            ExistingDaemon::Retired
+        ));
+        assert!(started.elapsed() >= TEST_SILENCE_BOUND);
+        server.await.unwrap();
+        assert_eq!(retired_reasons(&root), ["silent"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_start_refuses_a_silent_daemon_without_retiring_it() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            assert!(read_frame(&mut probe).await.unwrap().is_none());
+            listener
+        });
+
+        let error = inspect_existing_daemon_within(&socket, false, TEST_SILENCE_BOUND)
+            .await
+            .err()
+            .expect("no-start accepted a silent daemon")
+            .to_string();
+        assert!(error.contains("did not answer"), "{error}");
+        drop(server.await.unwrap());
+        assert!(retired_reasons(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The reasons of the retirement lines in the runtime's `bridge.log`.
+    fn retired_reasons(root: &Path) -> Vec<String> {
+        fs::read_to_string(root.join("bridge.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|line| line["event"] == "daemonRetired")
+            .map(|line| line["reason"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     /// The handshake and reply `daemon::stop` expects from a cooperating daemon.

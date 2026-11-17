@@ -111,9 +111,9 @@ pub(crate) async fn handle_request(
                 operation,
                 request,
                 control_tx,
-                generation,
-                topology_baseline,
-                &cancellation,
+                Arc::clone(generation),
+                Arc::clone(topology_baseline),
+                Arc::clone(&cancellation),
             )
             .await;
             pending.lock().unwrap().remove(&request_id);
@@ -180,8 +180,16 @@ pub(crate) async fn handle_request(
         }
 
         (Handler::History, Some(_)) => {
-            let response =
-                super::history_dispatch::handle(request.history, generation, topology_baseline);
+            // Synchronous like an agent operation, and for the same reason off
+            // the runtime's workers: it runs tmux, writes the session record,
+            // and a snooze reads the agent state behind an ingest's fsyncs.
+            let generation = Arc::clone(generation);
+            let topology_baseline = Arc::clone(topology_baseline);
+            let response = tokio::task::spawn_blocking(move || {
+                super::history_dispatch::handle(request.history, &generation, &topology_baseline)
+            })
+            .await
+            .unwrap_or_else(|_| response_error("internal", "history request failed"));
             send_response(control_tx, request_id, response).await;
             pending.lock().unwrap().remove(&request_id);
             return;
