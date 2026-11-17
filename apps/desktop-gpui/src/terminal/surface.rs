@@ -139,6 +139,10 @@ pub struct TerminalSurface {
     controller: Entity<ConnectionController>,
     link: Option<Entity<TerminalLink>>,
     panes: Vec<Mounted>,
+    /// The chats this window holds open, on screen or not. Held here, with
+    /// the window, so they go when it closes; a chat that leaves the screen
+    /// comes back as it was left instead of being opened cold.
+    chats: chat::KeptChats,
     target: Option<SurfaceTarget>,
     grid: WindowGrid,
     actual: Option<GridSize>,
@@ -227,6 +231,7 @@ impl TerminalSurface {
                 controller,
                 link: None,
                 panes: Vec::new(),
+                chats: chat::KeptChats::default(),
                 target: None,
                 grid: WindowGrid {
                     width: 1,
@@ -303,7 +308,7 @@ impl TerminalSurface {
         let unchanged_link = self.link.as_ref().map(Entity::entity_id)
             == link_entity.as_ref().map(Entity::entity_id);
         if !unchanged_link {
-            self.unmount_all(cx);
+            self.unmount_all(window, cx);
             self.link = link_entity;
         }
         let target_changed = self.target != target;
@@ -322,6 +327,7 @@ impl TerminalSurface {
             self.pending_focus = true;
         }
         self.apply_panes(wanted, window, cx);
+        self.keep_chats(cx);
         if target_changed {
             self.schedule_resize(cx);
         }
@@ -347,26 +353,93 @@ impl TerminalSurface {
         }
     }
 
-    fn unmount_all(&mut self, cx: &mut Context<Self>) {
+    fn unmount_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(link) = self.link.clone() else {
             return;
         };
-        link.update(cx, |link, _| {
-            for mounted in self.panes.drain(..) {
-                // A chat was never mounted on the engine: it closes itself.
-                if matches!(mounted.pane, Mount::Terminal(_)) {
-                    link.unmount(&mounted.id);
-                }
-            }
-        });
+        for mounted in std::mem::take(&mut self.panes) {
+            self.take_off(mounted, &link, window, cx);
+        }
     }
 
-    /// Takes a pane off the surface, and its terminal off the engine.
-    fn unmount(&mut self, index: usize, link: &Entity<TerminalLink>, cx: &mut Context<Self>) {
+    /// Takes a pane off the surface.
+    fn unmount(
+        &mut self,
+        index: usize,
+        link: &Entity<TerminalLink>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let gone = self.panes.remove(index);
-        if matches!(gone.pane, Mount::Terminal(_)) {
-            link.update(cx, |link, _| link.unmount(gone.id.as_ref()));
+        self.take_off(gone, link, window, cx);
+    }
+
+    /// A terminal goes off the engine. A chat stays open among the window's
+    /// kept chats, without the keyboard; [`Self::keep_chats`] decides
+    /// whether it is let go.
+    fn take_off(
+        &mut self,
+        gone: Mounted,
+        link: &Entity<TerminalLink>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &gone.pane {
+            Mount::Terminal(_) => link.update(cx, |link, _| link.unmount(gone.id.as_ref())),
+            Mount::Chat(pane) => {
+                if gone.pane.holds_focus(window, cx) {
+                    // Typing goes to the pane on screen, not to one kept
+                    // off it: render hands the keyboard to the active pane.
+                    window.blur(cx);
+                    self.pending_focus = true;
+                }
+                pane.update(cx, |pane, cx| pane.set_shown(false, cx));
+            }
         }
+    }
+
+    /// Lets go of the kept chats that are gone: their tmux pane closed or is
+    /// no longer a chat, their host's tmux server is another one, or their
+    /// host left the app. Then of the least recently shown, beyond
+    /// [`chat::KEPT_CHATS`]. Each one let go closes its chat at the host.
+    fn keep_chats(&mut self, cx: &mut Context<Self>) {
+        let on_screen: Vec<chat::ChatKey> = self
+            .panes
+            .iter()
+            .filter_map(|mounted| match &mounted.pane {
+                Mount::Chat(pane) => Some(pane.read(cx).key()),
+                Mount::Terminal(_) => None,
+            })
+            .collect();
+        let controller = self.controller.read(cx);
+        let mut moved = Vec::new();
+        self.chats.retain(|key, pane| {
+            if on_screen.contains(key) {
+                return true;
+            }
+            let (profile_id, server, pane_id) = key;
+            let Some(link) = controller.link(profile_id) else {
+                return false;
+            };
+            // The last topology stays while the link is down: a kept chat
+            // waits for the link as the one on screen does.
+            let state = &link.host_state;
+            if state.server_identity.as_deref() != Some(server.as_str()) {
+                return false;
+            }
+            match state.snapshot.panes.iter().find(|tmux| tmux.id == *pane_id) {
+                Some(tmux) if chat::is_chat(tmux) => {
+                    moved.push((pane.clone(), tmux.clone()));
+                    true
+                }
+                _ => false,
+            }
+        });
+        // Its folder, for its links and its details card when it is back.
+        for (pane, tmux) in moved {
+            pane.update(cx, |pane, cx| pane.set_tmux_pane(&tmux, cx));
+        }
+        self.chats.trim(|key| on_screen.contains(key));
     }
 
     /// Mounts the chat of the agent in `geometry`'s pane, or tells the one
@@ -392,9 +465,25 @@ impl TerminalSurface {
             return;
         };
         let id: SharedString = geometry.id.clone().into();
-        let controller = self.controller.clone();
-        let tmux = geometry.clone();
-        let pane = cx.new(|cx| ChatPane::new(profile_id, server, tmux, controller, window, cx));
+        let key = (profile_id.clone(), server.clone(), geometry.id.clone());
+        // A chat this window kept comes back as it was left, with no `OPEN`.
+        let pane = match self.chats.show(&key) {
+            Some(pane) => {
+                pane.update(cx, |pane, cx| {
+                    pane.set_tmux_pane(&geometry, cx);
+                    pane.set_shown(true, cx);
+                });
+                pane
+            }
+            None => {
+                let controller = self.controller.clone();
+                let tmux = geometry.clone();
+                let pane =
+                    cx.new(|cx| ChatPane::new(profile_id, server, tmux, controller, window, cx));
+                self.chats.insert(key, pane.clone());
+                pane
+            }
+        };
         self.pending_focus = true;
         let focused = {
             let id = id.clone();
@@ -438,7 +527,7 @@ impl TerminalSurface {
             .filter(|id| !wanted_ids.contains(&id.as_ref()))
         {
             if let Some(index) = self.panes.iter().position(|mounted| mounted.id == *gone) {
-                self.unmount(index, &link, cx);
+                self.unmount(index, &link, window, cx);
             }
         }
         let server = self
@@ -464,7 +553,7 @@ impl TerminalSurface {
                     }
                 };
                 if stale {
-                    self.unmount(index, &link, cx);
+                    self.unmount(index, &link, window, cx);
                 }
             }
             if is_chat {

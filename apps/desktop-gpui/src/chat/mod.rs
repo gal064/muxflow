@@ -60,6 +60,63 @@ pub fn is_chat(pane: &Pane) -> bool {
     !pane.chat_adapter_id.is_empty()
 }
 
+/// Which chat a pane holds: its host's profile, its tmux server, its pane.
+pub type ChatKey = (String, String, String);
+
+/// How many chats one window holds open, those on screen among them.
+pub const KEPT_CHATS: usize = 8;
+
+/// The chats one window holds open, least recently shown first.
+///
+/// A chat that leaves the screen stays open at the host and keeps applying
+/// its events, so coming back to it shows it as it is at once, with its
+/// place, draft and open rows, instead of asking for its snapshot again over
+/// a slow link. Each costs about what its conversation weighs (see
+/// [`model::Chat`]); [`KEPT_CHATS`] bounds that. One let go closes its chat
+/// at the host, as a pane taken off the screen used to.
+pub struct KeptChats<P = Entity<ChatPane>>(Vec<(ChatKey, P)>);
+
+impl<P> Default for KeptChats<P> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<P: Clone> KeptChats<P> {
+    /// The chat's pane if it is held, now the most recently shown.
+    pub fn show(&mut self, key: &ChatKey) -> Option<P> {
+        let index = self.0.iter().position(|(kept, _)| kept == key)?;
+        let entry = self.0.remove(index);
+        let pane = entry.1.clone();
+        self.0.push(entry);
+        Some(pane)
+    }
+
+    /// Holds a chat just put on screen.
+    pub fn insert(&mut self, key: ChatKey, pane: P) {
+        self.0.retain(|(kept, _)| *kept != key);
+        self.0.push((key, pane));
+    }
+
+    /// Lets go of every chat `keep` turns down.
+    pub fn retain(&mut self, mut keep: impl FnMut(&ChatKey, &P) -> bool) {
+        self.0.retain(|(key, pane)| keep(key, pane));
+    }
+
+    /// Lets the least recently shown go until no more than [`KEPT_CHATS`]
+    /// are held. One on screen is never let go.
+    pub fn trim(&mut self, on_screen: impl Fn(&ChatKey) -> bool) {
+        let mut over = self.0.len().saturating_sub(KEPT_CHATS);
+        self.0.retain(|(key, _)| {
+            if over == 0 || on_screen(key) {
+                return true;
+            }
+            over -= 1;
+            false
+        });
+    }
+}
+
 /// What the details card is drawn for: one chat, in one pane.
 pub struct DetailsContext {
     pub profile_id: String,

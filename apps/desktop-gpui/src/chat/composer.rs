@@ -32,6 +32,7 @@ use crate::{
     context_menu::{Entry, Item, fill},
     fonts,
     theme::{Palette, metrics::ui},
+    ui::motion::WorkingIcon,
 };
 
 use super::{
@@ -71,11 +72,14 @@ fn capitalized(word: &str) -> String {
 }
 
 /// `.pill`: a choice in the composer's bar, opening its options above.
+/// `.pill.pending` while the host has not shown the choice yet: dimmed as a
+/// message still being sent is.
 fn pill(
     id: &'static str,
     label: SharedString,
     name: SharedString,
     off: bool,
+    pending: bool,
     p: &Palette,
 ) -> Button {
     let pill = Button::new(id)
@@ -94,7 +98,13 @@ fn pill(
         .text_size(ui(12.5))
         .text_color(p.chrome_ink)
         .disabled(off);
-    if off { pill.opacity(0.42) } else { pill }
+    if off {
+        pill.opacity(0.42)
+    } else if pending {
+        pill.opacity(0.6)
+    } else {
+        pill
+    }
 }
 
 impl ChatPane {
@@ -130,6 +140,7 @@ impl ChatPane {
             return;
         }
         if self.stoppable() {
+            // Once while it stops: a second press sends nothing more.
             self.interrupt(cx);
             cx.notify();
             return;
@@ -181,6 +192,7 @@ impl ChatPane {
                 label.clone(),
                 format!("Model: {label}").into(),
                 off,
+                self.wanted.model(),
                 p,
             )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
@@ -230,6 +242,7 @@ impl ChatPane {
                 label.clone(),
                 format!("Effort: {label}").into(),
                 off,
+                self.wanted.effort(),
                 p,
             )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
@@ -296,6 +309,7 @@ impl ChatPane {
                 label.clone(),
                 format!("Permissions: {label}").into(),
                 off,
+                self.wanted.permission(),
                 p,
             )
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, window, cx| {
@@ -386,6 +400,7 @@ impl ChatPane {
                 .overflow_hidden()
                 .text_size(ui(12.))
                 .when(off, |toggle| toggle.opacity(0.42))
+                .when(!off && self.wanted.speed(), |toggle| toggle.opacity(0.6))
                 .child(half(
                     "chat-speed-standard",
                     "Standard",
@@ -436,10 +451,15 @@ impl ChatPane {
             .into_any_element()
     }
 
-    /// `.send`, or `.send.stop` while the agent works.
+    /// `.send`, or `.send.stop` while the agent works: `.send.stop.off` once
+    /// pressed, until the turn ends.
     fn send_button(&self, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let stop = self.stoppable();
-        let off = !stop && self.send_refusal().is_some();
+        let off = if stop {
+            self.stopping
+        } else {
+            self.send_refusal().is_some()
+        };
         let ring = p.chrome_ink_strong;
         let (label, ground) = if stop {
             ("Stop", p.danger)
@@ -492,6 +512,39 @@ impl ChatPane {
                 }
             })
             .into_any_element()
+    }
+
+    /// `.stl` while Stop waits for the turn to end. It holds still: a pending
+    /// Stop is a state, not something moving.
+    fn stopping_line(&self, p: &Palette) -> Option<AnyElement> {
+        (self.stopping && self.stoppable()).then(|| {
+            h_flex()
+                .id("chat-stopping")
+                .test_support()
+                .role(Role::Status)
+                .aria_label("Stopping…")
+                .gap(ui(8.))
+                .px(ui(1.))
+                .pb(ui(8.))
+                .min_w_0()
+                .text_size(ui(12.5))
+                .child(
+                    // `.stl .mk`.
+                    h_flex()
+                        .flex_none()
+                        .w(ui(14.))
+                        .justify_center()
+                        .child(WorkingIcon::new(10., p.state_working)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(p.chrome_ink)
+                        .child("Stopping…"),
+                )
+                .into_any_element()
+        })
     }
 
     /// `.pop`: the commands a typed `/word` or `$word` matches, in their
@@ -756,6 +809,7 @@ impl ChatPane {
             .pl(left)
             .pr(right)
             .pb(ui(14.))
+            .children(self.stopping_line(p))
             .child(
                 div()
                     .id("chat-composer")

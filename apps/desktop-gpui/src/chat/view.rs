@@ -557,6 +557,28 @@ impl ChatPane {
         .into_any_element()
     }
 
+    /// `.top-note` over a conversation shown from what was held while the
+    /// host sends it again: a chat come back to after its link dropped, or
+    /// after a change to it was lost.
+    fn updating(&self, left: Pixels, right: Pixels, palette: &Palette) -> Option<AnyElement> {
+        (self.updating && self.chat.is_held()).then(|| {
+            div()
+                .id("chat-updating")
+                .test_support()
+                .role(Role::Status)
+                .aria_label("Updating…")
+                .flex_none()
+                .pl(left)
+                .pr(right)
+                .pt(ui(8.))
+                .text_center()
+                .text_size(ui(12.5))
+                .text_color(palette.chrome_faint)
+                .child("Updating…")
+                .into_any_element()
+        })
+    }
+
     /// Said under a conversation the host would not send again after a
     /// change to it was lost: what is shown may be behind what the host holds.
     fn stale(
@@ -749,6 +771,7 @@ impl Render for ChatPane {
                 .absolute()
                 .size_full(),
             )
+            .children(self.updating(left, right, &palette))
             .child(timeline)
             .children(self.stale(left, right, &palette, cx))
             .child(self.composer_area(left, right, &palette, window, cx))
