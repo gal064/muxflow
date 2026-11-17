@@ -26,28 +26,52 @@ use super::{response_error, send_response};
 // sigil and decimal digits, making `:` an unambiguous cross-version separator.
 pub(super) const PLACEMENT_FORMAT: &str = "#{session_id}:#{window_id}:#{pane_id}";
 
+/// Stands in, in tests, for agent work stuck on the disk: a request whose agent
+/// ID is [`TEST_AGENT_WORK`] never reaches the process-wide agent runtime, its
+/// state folder or tmux. A hook ingest waits for [`TEST_AGENT_WORK_GATE`] where
+/// a real one would wait for its locks and fsyncs; anything else answers at
+/// once.
+#[cfg(test)]
+pub(in crate::service) const TEST_AGENT_WORK: &str = "test-agent-work";
+#[cfg(test)]
+pub(in crate::service) static TEST_AGENT_WORK_GATE: Mutex<()> = Mutex::new(());
+/// How many stand-in hook ingests have reached the gate.
+#[cfg(test)]
+pub(in crate::service) static TEST_AGENT_WORK_WAITING: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(super) async fn handle(
     request_id: u64,
     operation: v1::Operation,
     request: v1::Request,
     control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
-    generation: &Arc<AtomicU64>,
-    topology_baseline: &Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
-    cancellation: &AtomicBool,
+    generation: Arc<AtomicU64>,
+    topology_baseline: Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
+    cancellation: Arc<AtomicBool>,
 ) {
-    let result = handle_inner(
-        operation,
-        request.agent.context("agent request payload is required"),
-        generation,
-        topology_baseline,
-        cancellation,
-    );
-    send_response(
-        control_tx,
-        request_id,
-        result.unwrap_or_else(|error| response_error("agent_request_failed", &error.to_string())),
-    )
+    // Every agent operation is synchronous: it takes the agent runtime's
+    // mutexes, runs tmux, and persists the state with two fsyncs while holding
+    // them. On a runtime worker a stalled disk parks the worker, and enough
+    // waiting hooks park all of them, so the daemon stops accepting and
+    // answering handshakes. On the blocking pool only that pool's threads wait,
+    // and the ordered lane awaits a join handle that its time bound can cut.
+    let agent = request.agent;
+    let result = tokio::task::spawn_blocking(move || {
+        handle_inner(
+            operation,
+            agent.context("agent request payload is required"),
+            &generation,
+            &topology_baseline,
+            &cancellation,
+        )
+    })
     .await;
+    let response = match result {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => response_error("agent_request_failed", &error.to_string()),
+        Err(_) => response_error("agent_request_failed", "agent request task failed"),
+    };
+    send_response(control_tx, request_id, response).await;
 }
 
 fn handle_inner(
@@ -61,6 +85,17 @@ fn handle_inner(
         bail!("agent request was cancelled");
     }
     let request = request?;
+    #[cfg(test)]
+    if request.agent_id == TEST_AGENT_WORK {
+        if operation == v1::Operation::AgentHookIngest {
+            TEST_AGENT_WORK_WAITING.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            drop(TEST_AGENT_WORK_GATE.lock());
+        }
+        return Ok(v1::Response {
+            ok: true,
+            ..Default::default()
+        });
+    }
     let runtime = AgentRuntime::global();
     let mut response = v1::AgentResponse::default();
     let mut diagnostic_lines = Vec::new();
