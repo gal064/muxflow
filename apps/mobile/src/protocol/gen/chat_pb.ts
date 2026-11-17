@@ -169,7 +169,8 @@ export const ChatToolSchema: GenMessage<ChatTool> = /*@__PURE__*/
  */
 export type ChatAttachment = Message<"tmux_agent.protocol.v1.ChatAttachment"> & {
   /**
-   * Absolute, on the host.
+   * Absolute, on the host. Empty on an item for an image the agent's record
+   * holds inline: there is no file to name.
    *
    * @generated from field: string path = 1;
    */

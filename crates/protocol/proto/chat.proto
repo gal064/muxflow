@@ -180,7 +180,8 @@ message ChatTool {
 
 // A file sent with a user message, already on the host.
 message ChatAttachment {
-  // Absolute, on the host.
+  // Absolute, on the host. Empty on an item for an image the agent's record
+  // holds inline: there is no file to name.
   string path = 1;
   // The name to show.
   string name = 2;
