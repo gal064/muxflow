@@ -9,15 +9,15 @@ use desktop_core::connection::chat::{
 };
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, Bounds, ClickEvent, ClipboardItem, Context, Div, FontWeight, HighlightStyle,
-    ImageCacheError, ImageSource, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Pixels, Render, Role, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
-    Window,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, FontWeight, HighlightStyle,
+    Hsla, ImageCacheError, ImageSource, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement, StyleRefinement,
+    Styled, Window,
     base::{TextView, TextViewStyle},
     canvas,
     component::{
-        h_flex, menu::ContextMenuExt, message_scroller::MessageScroller, scroll::ScrollableElement,
-        v_flex,
+        Icon, h_flex, menu::ContextMenuExt, message_scroller::MessageScroller,
+        scroll::ScrollableElement, tooltip::Tooltip, v_flex,
     },
     div,
     prelude::FluentBuilder,
@@ -30,12 +30,18 @@ use crate::{
     markdown::is_click,
     terminal::integration::agents::note_activity,
     theme::{self, Palette, metrics::ui},
-    ui::dialog::{self, Action},
+    ui::{
+        dialog::{self, Action},
+        motion::WorkingIcon,
+    },
 };
 
 use super::{
-    DETAILS_ROOM, DetailsContext, cards, details_card, open,
+    DETAILS_ROOM, DetailsContext, cards, details_card,
+    icon::{IconName, icon},
+    open,
     pane::{ChatPane, Row},
+    timeline::{self, Entry as Laid},
 };
 
 /// `.tl { width: min(640px, 100%) }`.
@@ -146,6 +152,85 @@ where
         .into_any_element()
 }
 
+/// `.mb`: one of a message's icon buttons, faint until pointed at. A hidden
+/// one keeps its room, so nothing moves when the row shows on hover or focus.
+fn message_button(
+    id: String,
+    name: &'static str,
+    glyph: IconName,
+    ink: Hsla,
+    // The message's hover group, while the button shows only on hover.
+    hidden_in: Option<SharedString>,
+    p: &Palette,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (hover, wash) = (p.chrome_hover, p.accent_wash);
+    // Faint turns strong under the pointer; a button in a state keeps its colour.
+    let pointed = if ink == Hsla::from(p.chrome_faint) {
+        p.chrome_ink_strong.into()
+    } else {
+        ink
+    };
+    div()
+        .id(SharedString::from(id))
+        .test_support()
+        .role(Role::Button)
+        .aria_label(name)
+        .flex_none()
+        .size(ui(24.))
+        .rounded(ui(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .tab_index(0)
+        .text_color(ink)
+        .hover(move |style| style.bg(hover).text_color(pointed))
+        .focus_visible(move |style| style.opacity(1.).bg(wash).text_color(pointed))
+        .when_some(hidden_in, |button, group| {
+            button
+                .opacity(0.)
+                .group_hover(group, |style| style.opacity(1.))
+        })
+        .tooltip(move |window, cx| Tooltip::new(name).build(window, cx))
+        // Drawn in the button's colour, which hover changes.
+        .child(Icon::new(glyph).size(ui(14.)))
+        .on_click(on_click)
+        .into_any_element()
+}
+
+/// `.mrow`: a message's buttons, 24px tall whether shown or not.
+fn message_buttons(buttons: Vec<AnyElement>) -> Div {
+    h_flex().h(ui(24.)).gap(ui(2.)).children(buttons)
+}
+
+/// `+120 −14`: what edits added and removed.
+fn line_counts(added: u32, removed: u32, palette: &Palette) -> Div {
+    h_flex()
+        .flex_none()
+        .gap(ui(5.))
+        .child(div().text_color(palette.ok).child(format!("+{added}")))
+        .child(
+            div()
+                .text_color(palette.danger)
+                // A minus sign, as wide as the plus.
+                .child(format!("\u{2212}{removed}")),
+        )
+}
+
+/// A tool row's leading icon, by its kind.
+fn tool_icon(tool: &ChatTool) -> IconName {
+    match ChatToolKind::try_from(tool.kind).unwrap_or_default() {
+        ChatToolKind::Command => IconName::SquareTerminal,
+        ChatToolKind::Read => IconName::FileText,
+        ChatToolKind::Edit => IconName::FilePenLine,
+        ChatToolKind::Search => IconName::Search,
+        ChatToolKind::Web => IconName::Globe,
+        ChatToolKind::Subagent => IconName::Bot,
+        ChatToolKind::Mcp | ChatToolKind::Other | ChatToolKind::Unspecified => IconName::Wrench,
+    }
+}
+
 /// The row's verb when the provider gave none.
 fn verb(tool: &ChatTool) -> SharedString {
     if !tool.title.is_empty() {
@@ -169,20 +254,11 @@ fn outcome(tool: &ChatTool, palette: &Palette) -> AnyElement {
     let status = ChatToolStatus::try_from(tool.status).unwrap_or_default();
     let edit = tool.kind == i32::from(ChatToolKind::Edit);
     if edit && status != ChatToolStatus::Failed && (tool.added > 0 || tool.removed > 0) {
-        return h_flex()
-            .gap(ui(5.))
-            .child(
-                div()
-                    .text_color(palette.ok)
-                    .child(format!("+{}", tool.added)),
-            )
-            .child(
-                div()
-                    .text_color(palette.danger)
-                    // A minus sign, as wide as the plus.
-                    .child(format!("\u{2212}{}", tool.removed)),
-            )
-            .into_any_element();
+        return line_counts(tool.added, tool.removed, palette).into_any_element();
+    }
+    if status == ChatToolStatus::Running && tool.result_summary.is_empty() {
+        // The still working mark: what runs is said by the working line.
+        return WorkingIcon::new(10., palette.state_working).into_any_element();
     }
     let (fallback, color) = match status {
         ChatToolStatus::Running => ("running", palette.state_working),
@@ -207,7 +283,14 @@ impl ChatPane {
         let palette = theme::palette(cx);
         match self.row(index) {
             Some(Row::Header) => self.header_row(&palette, cx),
-            Some(Row::Item(item)) => self.item_row(item, &palette, cx),
+            Some(Row::Entry(entry)) => match self.entries.get(entry).copied() {
+                Some(Laid::Item { index, reply_end }) => {
+                    self.item_row(index, reply_end, &palette, cx)
+                }
+                Some(group @ Laid::Group { .. }) => self.group_row(group, &palette, cx),
+                None => div().into_any_element(),
+            },
+            Some(Row::Working) => self.working_row(&palette, cx),
             Some(Row::Sending(sending)) => {
                 let sending = &self.sending[sending];
                 let text = sending.text.clone();
@@ -284,26 +367,21 @@ impl ChatPane {
         note("Loading earlier messages…").into_any_element()
     }
 
-    fn item_row(&mut self, index: usize, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn item_row(
+        &mut self,
+        index: usize,
+        reply_end: bool,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(kind) = self.chat.items.get(index).map(|item| item.kind) else {
             return div().into_any_element();
         };
         match ChatItemKind::try_from(kind).unwrap_or_default() {
             ChatItemKind::User => self.user_row(index, palette, cx),
-            ChatItemKind::Assistant => self.assistant_row(index, palette, cx),
+            ChatItemKind::Assistant => self.assistant_row(index, reply_end, palette, cx),
             ChatItemKind::Tool => self.tool_row(index, palette, cx),
-            ChatItemKind::Reasoning => {
-                let text: SharedString = self.chat.items[index].text.clone().into();
-                div()
-                    .w_full()
-                    .pl(ui(10.))
-                    .border_l_2()
-                    .border_color(palette.chrome_hairline)
-                    .text_size(ui(13.5))
-                    .text_color(palette.chrome_dim)
-                    .child(text)
-                    .into_any_element()
-            }
+            ChatItemKind::Reasoning => self.thought_row(index, palette, cx),
             ChatItemKind::Notice | ChatItemKind::Unspecified => {
                 let text: SharedString = self.chat.items[index].text.clone().into();
                 div()
@@ -317,6 +395,36 @@ impl ChatPane {
         }
     }
 
+    /// A message's Copy: a check for a second once it has copied.
+    fn copy_button(
+        &self,
+        index: usize,
+        shown: bool,
+        group: &SharedString,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = &self.chat.items[index].id;
+        let copied = self.just_copied(id);
+        let (name, glyph, ink) = if copied {
+            ("Copied", IconName::Check, palette.ok.into())
+        } else {
+            ("Copy", IconName::Copy, palette.chrome_faint.into())
+        };
+        message_button(
+            format!("chat-copy-{id}"),
+            name,
+            glyph,
+            ink,
+            (!shown && !copied).then(|| group.clone()),
+            palette,
+            cx.listener(move |this, _, _, cx| this.copy_message(index, cx)),
+        )
+    }
+
+    /// `.msg.me`: the bubble, and under it at the right Copy and Edit, shown
+    /// while the pointer or the keyboard is on the message, and while it is
+    /// the one being edited.
     fn user_row(&self, index: usize, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let item: &ChatItem = &self.chat.items[index];
         let id = item.id.clone();
@@ -324,42 +432,29 @@ impl ChatPane {
         let editing = self.editing.as_deref() == Some(id.as_str());
         let group = SharedString::from(format!("chat-user-{id}"));
         let name = SharedString::from(format!("chat-item-{id}"));
-        let ring = palette.accent;
-        let edit = self.editable(item).then(|| {
-            // `.u .ed`: shown while the pointer is on the message, and while
-            // the message is the one being edited.
-            div()
-                .id(SharedString::from(format!("chat-edit-{id}")))
-                .test_support()
-                .role(Role::Button)
-                .aria_label("Edit message")
-                .flex_none()
-                .mt(ui(6.))
-                .px(ui(6.))
-                .py(ui(1.))
-                .border_1()
-                .border_color(palette.chrome_border)
-                .rounded(ui(5.))
-                .bg(palette.chrome_bg)
-                .text_size(ui(12.))
-                .text_color(palette.chrome_faint)
-                .cursor_pointer()
-                .tab_index(0)
-                .when(!editing, |edit| {
-                    edit.opacity(0.)
-                        .group_hover(group.clone(), |style| style.opacity(1.))
-                })
-                .focus_visible(move |style| style.opacity(1.).border_color(ring))
-                .child("Edit")
-                .on_click(cx.listener(move |this, _, window, cx| this.edit(&id, window, cx)))
-        });
-        h_flex()
-            .group(group.clone())
+        let mut buttons = vec![self.copy_button(index, editing, &group, palette, cx)];
+        if self.editable(item) {
+            let ink = if editing {
+                palette.accent
+            } else {
+                palette.chrome_faint
+            };
+            buttons.push(message_button(
+                format!("chat-edit-{id}"),
+                "Edit and resend",
+                IconName::Pencil,
+                ink.into(),
+                (!editing).then(|| group.clone()),
+                palette,
+                cx.listener(move |this, _, window, cx| this.edit(&id, window, cx)),
+            ));
+        }
+        // Package D puts the message's attachment chips in the bubble.
+        v_flex()
+            .group(group)
             .w_full()
-            .justify_end()
-            .items_start()
-            .gap(ui(6.))
-            .children(edit)
+            .items_end()
+            .gap(ui(3.))
             .child(copyable(
                 bubble(text.clone(), palette)
                     .when(editing, |bubble| bubble.border_color(palette.accent))
@@ -368,12 +463,16 @@ impl ChatPane {
                     .aria_label(text.clone()),
                 vec![("Copy message", text)],
             ))
+            .child(message_buttons(buttons))
             .into_any_element()
     }
 
+    /// The agent's text. The last text of a finished reply has the reply's
+    /// buttons under it, at the left: Copy, and Fork from here.
     fn assistant_row(
         &mut self,
         index: usize,
+        reply_end: bool,
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -382,11 +481,30 @@ impl ChatPane {
         let dark = cx.global::<theme::Appearance>().is_dark;
         let pane_id = self.pane_id.clone();
         let pressed = self.pressed.clone();
-        div()
+        let group = SharedString::from(format!("chat-reply-{id}"));
+        let buttons = reply_end.then(|| {
+            let mut buttons = vec![self.copy_button(index, false, &group, palette, cx)];
+            if self.capabilities().fork {
+                let id = id.clone();
+                buttons.push(message_button(
+                    format!("chat-fork-{id}"),
+                    "Fork from here",
+                    IconName::GitFork,
+                    palette.chrome_faint.into(),
+                    Some(group.clone()),
+                    palette,
+                    cx.listener(move |this, _, _, cx| this.fork_reply(&id, cx)),
+                ));
+            }
+            message_buttons(buttons)
+        });
+        v_flex()
             .id(SharedString::from(format!("chat-item-{id}")))
             .test_support()
+            .group(group.clone())
             .w_full()
             .min_w_0()
+            .gap(ui(3.))
             .child(
                 TextView::markdown(SharedString::from(format!("chat-text-{id}")), text)
                     .style(markdown_style(palette, dark))
@@ -405,6 +523,7 @@ impl ChatPane {
                         }
                     }),
             )
+            .children(buttons)
             .into_any_element()
     }
 
@@ -434,6 +553,7 @@ impl ChatPane {
             .py(ui(5.))
             .text_size(ui(13.5))
             .text_color(palette.chrome_dim)
+            .child(icon(tool_icon(&tool), 14., palette.chrome_faint))
             .child(
                 div()
                     .flex_none()
@@ -492,7 +612,7 @@ impl ChatPane {
                 if !this.expanded.remove(&id) {
                     this.expanded.insert(id.clone());
                 }
-                this.remeasure_row(index + 1, cx);
+                this.remeasure_item(index, cx);
             }));
         let item = &self.chat.items[index];
         let output = expanded.then(|| {
@@ -539,6 +659,336 @@ impl ChatPane {
                 })
         });
         copyable(row.child(head).children(output), copies)
+    }
+
+    /// A finished thought: one row, "Thought for 8s" when this pane watched
+    /// it stream, that opens to its text in the box tool output uses.
+    fn thought_row(&self, index: usize, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let item = &self.chat.items[index];
+        let id = item.id.clone();
+        let text: SharedString = item.text.clone().into();
+        let open = self.expanded.contains(&id);
+        let label: SharedString = match self.thought_took(&id) {
+            Some(took) => format!(
+                "Thought for {}",
+                timeline::elapsed(took.max(std::time::Duration::from_secs(1)))
+            )
+            .into(),
+            None => "Thought".into(),
+        };
+        let (hover, wash) = (palette.chrome_hover, palette.accent_wash);
+        let chevron = if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        let head = h_flex()
+            .id(SharedString::from(format!("chat-thought-open-{id}")))
+            .test_support()
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .aria_expanded(open)
+            .cursor_pointer()
+            .tab_index(0)
+            .hover(move |style| style.bg(hover))
+            .focus_visible(move |style| style.bg(wash))
+            .gap(ui(8.))
+            .px(ui(9.))
+            .py(ui(5.))
+            .text_size(ui(13.5))
+            .child(icon(IconName::Brain, 14., palette.chrome_faint))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(palette.chrome_ink)
+                    .child(label),
+            )
+            .child(icon(chevron, 12., palette.chrome_faint))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.expanded.remove(&id) {
+                    this.expanded.insert(id.clone());
+                }
+                this.remeasure_item(index, cx);
+            }));
+        let body = open.then(|| {
+            div()
+                .id(SharedString::from(format!("chat-thought-text-{}", item.id)))
+                .test_support()
+                .border_t_1()
+                .border_color(palette.chrome_hairline)
+                .bg(palette.chrome_raised)
+                .px(ui(10.))
+                .py(ui(6.))
+                .text_size(ui(13.5))
+                .line_height(relative(1.5))
+                .text_color(palette.chrome_dim)
+                .child(text.clone())
+        });
+        copyable(
+            v_flex()
+                .id(SharedString::from(format!("chat-thought-{}", item.id)))
+                .test_support()
+                .w_full()
+                .min_w_0()
+                .border_1()
+                .border_color(palette.chrome_hairline)
+                .rounded(ui(7.))
+                .bg(palette.chrome_bg)
+                .overflow_hidden()
+                .child(head)
+                .children(body),
+            vec![("Copy", text)],
+        )
+    }
+
+    /// A run of steps as one line, its rows under it while it is open. The
+    /// run a working turn adds to reads "N steps so far" and says nothing of
+    /// its kinds: the working line under it says what runs.
+    fn group_row(&self, group: Laid, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Laid::Group {
+            first,
+            end,
+            steps,
+            live,
+        } = group
+        else {
+            return div().into_any_element();
+        };
+        let busy = timeline::is_busy(self.turn());
+        let items = &self.chat.items;
+        let key = items[first].id.clone();
+        let open = self.open_groups.contains(&key);
+        let drawn: Vec<usize> = (first..end)
+            .filter(|index| timeline::is_drawn(&items[*index], busy))
+            .collect();
+        let summary = timeline::summary(drawn.iter().map(|index| &items[*index]), |item| {
+            self.thought_took(&item.id)
+        });
+        let title = timeline::steps_label(steps, live);
+        let failed = (summary.failed > 0).then(|| format!("{} failed", summary.failed));
+        let counts = if live { String::new() } else { summary.counts };
+        let name: SharedString = [Some(title.clone()), failed.clone(), Some(counts.clone())]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into();
+        // Closed, the edited files stay in sight, each opening its diff.
+        let chips = (!open).then(|| {
+            let (names, rest) = timeline::chips(&summary.files);
+            let chip = |id: String, label: String| {
+                let (accent, ring) = (palette.accent, palette.accent);
+                div()
+                    .id(SharedString::from(id))
+                    .test_support()
+                    .role(Role::Button)
+                    .aria_label(label.clone())
+                    .flex_none()
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .font_family(fonts::MONO)
+                    .text_size(ui(12.))
+                    .line_height(relative(1.6))
+                    .text_color(palette.chrome_ink)
+                    .border_1()
+                    .border_color(palette.chrome_hairline)
+                    .bg(palette.chrome_raised)
+                    .rounded(ui(4.))
+                    .px(ui(5.))
+                    .hover(move |style| style.border_color(accent).text_color(accent))
+                    .focus_visible(move |style| style.border_color(ring))
+                    .child(label)
+            };
+            let mut chips: Vec<AnyElement> = names
+                .iter()
+                .zip(&summary.files)
+                .enumerate()
+                .map(|(at, (label, path))| {
+                    let path = path.clone();
+                    let tip = SharedString::from(path.clone());
+                    chip(format!("chat-group-file-{key}-{at}"), (*label).to_owned())
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // The file's diff, not the group's line under it.
+                            cx.stop_propagation();
+                            this.open_edit(&path, cx);
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            if let Some(rest) = rest {
+                let key = key.clone();
+                chips.push(
+                    chip(format!("chat-group-more-{key}"), format!("+{rest}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_group(&key, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            chips
+        });
+        let lines = (summary.added > 0 || summary.removed > 0).then(|| {
+            line_counts(summary.added, summary.removed, palette)
+                .text_size(ui(12.))
+                .into_any_element()
+        });
+        let (hover, wash) = (palette.chrome_hover, palette.accent_wash);
+        let chevron = if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        let toggle = key.clone();
+        let head = h_flex()
+            .id(SharedString::from(format!("chat-group-{key}")))
+            .test_support()
+            .role(Role::Button)
+            .aria_label(name)
+            .aria_expanded(open)
+            .cursor_pointer()
+            .tab_index(0)
+            .gap(ui(8.))
+            .px(ui(6.))
+            .mx(ui(-6.))
+            .py(ui(3.))
+            .rounded(ui(6.))
+            .min_w_0()
+            .text_size(ui(13.5))
+            .text_color(palette.chrome_dim)
+            .hover(move |style| style.bg(hover))
+            .focus_visible(move |style| style.bg(wash))
+            .child(icon(chevron, 14., palette.chrome_faint))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(palette.chrome_ink)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title),
+            )
+            .children(failed.map(|failed| {
+                div()
+                    .flex_none()
+                    .text_color(palette.danger)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(failed)
+            }))
+            // Cut first when the line is short of room; the chips and counts stay.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(palette.chrome_faint)
+                    .child(counts),
+            )
+            .children(chips.into_iter().flatten())
+            .children(lines)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(&toggle, cx)));
+        let body = open.then(|| {
+            v_flex()
+                .gap(ui(6.))
+                .pl(ui(22.))
+                .children(drawn.iter().map(|index| {
+                    if items[*index].tool.is_some() {
+                        self.tool_row(*index, palette, cx)
+                    } else {
+                        self.thought_row(*index, palette, cx)
+                    }
+                }))
+        });
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap(ui(6.))
+            .child(head)
+            .children(body)
+            .into_any_element()
+    }
+
+    /// `.stl`: the one line that says the turn works, under the conversation.
+    /// Its mark holds still; only the seconds change, once a second. Stop,
+    /// once pressed, says so here until the turn ends.
+    fn working_row(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let doing = if self.stopping {
+            timeline::Doing {
+                label: "Stopping…".into(),
+                preview: None,
+            }
+        } else {
+            // Package G: "Compacting context…" while the agent compacts.
+            timeline::doing(&self.chat.items)
+        };
+        let label: SharedString = doing.label.into();
+        let escape = self.stoppable() && !self.stopping;
+        let time = timeline::elapsed(self.elapsed(cx));
+        v_flex()
+            .id("chat-working")
+            .test_support()
+            .role(Role::Status)
+            .aria_label(label.clone())
+            .min_w_0()
+            .gap(ui(2.))
+            .child(
+                h_flex()
+                    .gap(ui(8.))
+                    .px(ui(1.))
+                    .min_w_0()
+                    .text_size(ui(13.5))
+                    .text_color(palette.chrome_dim)
+                    .child(
+                        // `.stl .mk`.
+                        h_flex()
+                            .flex_none()
+                            .w(ui(14.))
+                            .justify_center()
+                            .child(WorkingIcon::new(10., palette.state_working)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(palette.chrome_ink)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .id("chat-working-time")
+                            .test_support()
+                            .aria_label(SharedString::from(time.clone()))
+                            .flex_none()
+                            .text_color(palette.chrome_faint)
+                            .child(time),
+                    )
+                    .when(escape, |line| {
+                        line.child(
+                            div()
+                                .flex_none()
+                                .text_color(palette.chrome_faint)
+                                .child("· Esc to stop"),
+                        )
+                    }),
+            )
+            .children(doing.preview.map(|preview| {
+                // `.prev`: the latest sentence of the thinking, one faint line.
+                div()
+                    .id("chat-working-preview")
+                    .test_support()
+                    .aria_label(SharedString::from(preview.clone()))
+                    .pl(ui(23.))
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui(13.))
+                    .text_color(palette.chrome_faint)
+                    .child(preview)
+            }))
+            // Package G: a row for each running subagent goes here, under
+            // the line.
+            .into_any_element()
     }
 
     fn retry_button(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {

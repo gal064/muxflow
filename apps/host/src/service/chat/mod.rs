@@ -640,6 +640,25 @@ impl Panes {
         if streamed { None } else { pane.retitle() }
     }
 
+    /// Takes back `item`, published earlier, that turned out to have nothing
+    /// to show. While it is still the newest item it is cut off the end, as a
+    /// rewind cuts; behind a newer one, or alone, it stays, ended, and the
+    /// clients draw no row for its empty text.
+    pub(super) fn withdraw(&mut self, key: &PaneKey, mut item: v1::ChatItem) -> Option<String> {
+        let pane = self.0.get_mut(key)?;
+        let at = pane.items.iter().rposition(|held| held.id == item.id)?;
+        let change = match at.checked_sub(1) {
+            Some(before) if at + 1 == pane.items.len() => Change::Truncate(v1::ChatTruncate {
+                after_item_id: pane.items[before].id.clone(),
+            }),
+            _ => {
+                item.streaming = false;
+                Change::Updated(item)
+            }
+        };
+        self.publish(key, change)
+    }
+
     /// Takes the provider's own name for the pane's conversation, empty when
     /// it has none. Answers the pane's new title, when that changes it.
     pub(super) fn name(&mut self, key: &PaneKey, name: &str) -> Option<String> {

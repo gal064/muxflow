@@ -400,6 +400,10 @@ pub(super) struct Reader {
     /// Streaming text and running tools, by item id.
     open: BTreeMap<String, v1::ChatItem>,
     block: Option<Block>,
+    /// The item id of a thinking block that has started and has no item yet.
+    thinking: Option<String>,
+    /// Thinking items that ended with no text, to be taken back.
+    silent: Vec<v1::ChatItem>,
 }
 
 impl Reader {
@@ -457,13 +461,21 @@ impl Reader {
                 self.open.insert(item.id.clone(), item.clone());
             } else {
                 let streamed = self.open.remove(&item.id);
+                if self.thinking.as_deref() == Some(item.id.as_str()) {
+                    self.thinking = None;
+                }
                 // Thinking the agent keeps to itself arrives as an empty
                 // block: what was streamed of it, if anything, is all of it.
+                // An item that only said "thinking" while it lasted goes.
                 if item.text.is_empty() {
-                    produced.extend(streamed.map(|mut streamed| {
+                    if let Some(mut streamed) = streamed {
                         streamed.streaming = false;
-                        streamed
-                    }));
+                        if streamed.text.is_empty() {
+                            self.silent.push(streamed);
+                        } else {
+                            produced.push(streamed);
+                        }
+                    }
                     continue;
                 }
             }
@@ -512,10 +524,32 @@ impl Reader {
     /// Ends everything still streaming or running: the turn was stopped, and
     /// nothing more will be said of them.
     fn stop_open(&mut self) -> Vec<v1::ChatItem> {
-        let mut stopped: Vec<_> = std::mem::take(&mut self.open).into_values().collect();
+        self.thinking = None;
+        let (silent, mut stopped): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open)
+            .into_values()
+            .partition(is_silent_thinking);
+        self.silent.extend(silent);
         stopped.iter_mut().for_each(items::stop);
         stopped
     }
+
+    /// Ends the thinking item `id` if it has said nothing: its block is over.
+    fn end_thinking(&mut self, id: &str) {
+        if self.thinking.as_deref() == Some(id) {
+            self.thinking = None;
+        }
+        if self.open.get(id).is_some_and(is_silent_thinking)
+            && let Some(item) = self.open.remove(id)
+        {
+            self.silent.push(item);
+        }
+    }
+}
+
+/// A thinking item that has no text: one made only to say that the agent
+/// thinks.
+fn is_silent_thinking(item: &v1::ChatItem) -> bool {
+    item.kind == i32::from(Kind::Reasoning) && item.text.is_empty()
 }
 
 /// What a `user` entry's text is to the timeline.
@@ -1056,14 +1090,17 @@ impl Claude {
                     claimed: false,
                 });
                 let block = &event["content_block"];
+                let id = format!("{message_id}:{index}");
+                self.reader.thinking = None;
                 let mut item = match string(block, "type") {
-                    "text" => items::text(
-                        format!("{message_id}:{index}"),
-                        Kind::Assistant,
-                        string(block, "text"),
-                    ),
+                    "text" => items::text(id, Kind::Assistant, string(block, "text")),
                     "tool_use" => tool_item(string(block, "id"), string(block, "name"), &json!({})),
-                    // Thinking is shown once there is some to show.
+                    // Thinking is shown once there is some to show, or once
+                    // the agent says that it thinks (`thinking_tokens`).
+                    "thinking" => {
+                        self.reader.thinking = Some(id);
+                        return;
+                    }
                     _ => return,
                 };
                 item.streaming = item.tool.is_none();
@@ -1107,7 +1144,35 @@ impl Claude {
                     }
                 }
             }
+            ("content_block_stop", Some(index)) if !message_id.is_empty() => {
+                self.reader.end_thinking(&format!("{message_id}:{index}"));
+                self.withdraw_silent(out);
+            }
             _ => {}
+        }
+    }
+
+    /// The first `thinking_tokens` of a thinking block that streams no text
+    /// makes its item, empty, so the chat can say that the agent thinks. Text
+    /// that streams later goes into the same item.
+    fn thinking(&mut self, out: &mut Output) {
+        let Some(id) = self.reader.thinking.take() else {
+            return;
+        };
+        if self.reader.open.contains_key(&id) {
+            return;
+        }
+        let mut item = items::text(id.clone(), Kind::Reasoning, "");
+        item.streaming = true;
+        item.at_unix_millis = super::now_unix_millis();
+        self.reader.open.insert(id, item.clone());
+        out.publish(Change::Item(item));
+    }
+
+    /// Takes back the thinking items that ended with nothing to show.
+    fn withdraw_silent(&mut self, out: &mut Output) {
+        for item in std::mem::take(&mut self.reader.silent) {
+            out.withdraw(item);
         }
     }
 
@@ -1171,6 +1236,8 @@ impl Claude {
                     self.publish_state(out);
                 }
             }
+            // Sent while the model thinks, also when it streams no thinking.
+            "thinking_tokens" => self.thinking(out),
             "commands_changed" => {
                 if let Some(commands) = message["commands"].as_array() {
                     self.commands = commands.iter().map(command).collect();
@@ -1198,6 +1265,7 @@ impl Claude {
         for item in self.reader.stop_open() {
             out.publish(Change::Item(item));
         }
+        self.withdraw_silent(out);
         self.pending.clear();
         let waited = self.reported_blocked;
         let stopped = string(message, "terminal_reason").starts_with("aborted");
@@ -1573,6 +1641,7 @@ impl Dialect for Claude {
                     }
                     out.publish(Change::Item(item));
                 }
+                self.withdraw_silent(out);
             }
             "user" if !nested => self.user(&message, out),
             "system" => self.system(&message, out),
@@ -1733,6 +1802,7 @@ impl Dialect for Claude {
         for item in self.reader.stop_open() {
             out.publish(Change::Item(item));
         }
+        self.withdraw_silent(out);
         self.state.connection = if failure.is_empty() {
             Connection::Ended
         } else {

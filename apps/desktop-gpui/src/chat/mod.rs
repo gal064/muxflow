@@ -25,6 +25,7 @@ pub mod model;
 mod open;
 pub mod pane;
 mod slash;
+mod timeline;
 mod view;
 
 #[cfg(test)]

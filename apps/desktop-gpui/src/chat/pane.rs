@@ -26,8 +26,8 @@ use desktop_core::connection::chat::{
 };
 use futures::future::BoxFuture;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, Global, Pixels, Point,
-    ScrollHandle, SharedString, Subscription, Task, Window,
+    App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable, Global, Pixels,
+    Point, ScrollHandle, SharedString, Subscription, Task, Window,
     component::{
         input::{InputEvent, InputState, TextareaState},
         message_scroller::MessageScrollerState,
@@ -49,6 +49,7 @@ use super::{
     links::{self, Probe},
     model::{Chat, Outcome, PageOutcome, PageRequest},
     slash,
+    timeline::{self, Entry},
 };
 
 /// How long a refused `OPEN` waits before it is sent again, and how many
@@ -67,6 +68,10 @@ const WANTED_WAIT: Duration = Duration::from_secs(3);
 /// How long Stop stays pending without the turn ending, so an answer lost
 /// on the way cannot leave it off for good.
 const STOP_WAIT: Duration = Duration::from_secs(10);
+/// How long Copy shows its check.
+const COPIED_FOR: Duration = Duration::from_secs(1);
+/// The working line's seconds tick this often.
+const TICK: Duration = Duration::from_secs(1);
 
 /// The host's refusal as `"<error_code>: <display message>"`: its code.
 pub(super) fn error_code(error: &str) -> &str {
@@ -129,14 +134,24 @@ pub(super) struct AnswerDraft {
     _changes: Subscription,
 }
 
-/// What the timeline's rows are, in order: the header, the items, the
-/// messages being sent, and the pending request's card.
+/// What the timeline's rows are, in order: the header, the entries the items
+/// are laid out in, the messages being sent, the working line, and the
+/// pending request's card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Row {
     Header,
-    Item(usize),
+    Entry(usize),
     Sending(usize),
+    Working,
     Request,
+}
+
+/// When a thought this pane watched stream began, and once it ended, how
+/// long it took.
+#[derive(Clone, Copy)]
+enum Thought {
+    Since(Instant),
+    Took(Duration),
 }
 
 /// Choices sent to the host and not yet in its state, one per pill, drawn
@@ -273,8 +288,20 @@ pub struct ChatPane {
     pub(super) stopping: bool,
     stop_wait: Option<Task<()>>,
     pub(super) list: Entity<MessageScrollerState>,
-    /// The item and trailing rows the list was last told of.
+    /// The items as laid out in rows, as the list was last told of them.
+    pub(super) entries: Vec<Entry>,
+    /// The entry and trailing rows the list was last told of.
     rows: (usize, usize),
+    /// The groups of steps shown open, by their first item's id.
+    pub(super) open_groups: HashSet<String>,
+    /// Thoughts this pane watched stream, by item id.
+    thoughts: HashMap<String, Thought>,
+    /// When the turn in progress started, as near as this pane knows.
+    turn_started: Option<Instant>,
+    /// Ticks the working line's seconds while it is on screen.
+    ticker: Option<Task<()>>,
+    /// The message whose Copy shows its check, until the check goes.
+    copied: Option<(String, Task<()>)>,
     pub(super) composer: Entity<TextareaState>,
     /// The message being edited: sending rewinds to it first.
     pub(super) editing: Option<String>,
@@ -409,7 +436,13 @@ impl ChatPane {
             stopping: false,
             stop_wait: None,
             list,
+            entries: Vec::new(),
             rows: (0, 0),
+            open_groups: HashSet::new(),
+            thoughts: HashMap::new(),
+            turn_started: None,
+            ticker: None,
+            copied: None,
             composer,
             editing: None,
             slash_active: 0,
@@ -464,6 +497,7 @@ impl ChatPane {
         if shown && self.open_due {
             self.open(cx);
         }
+        self.sync_ticker(cx);
         cx.notify();
     }
 
@@ -697,19 +731,106 @@ impl ChatPane {
     // The rows.
 
     fn trail(&self) -> usize {
-        self.sending.len() + usize::from(self.pending().is_some())
+        self.sending.len() + usize::from(self.working()) + usize::from(self.pending().is_some())
     }
 
     pub(super) fn row(&self, index: usize) -> Option<Row> {
-        let items = self.chat.items.len();
-        let sending = self.sending.len();
+        let entries = self.entries.len();
+        let sending = entries + self.sending.len();
+        let working = sending + usize::from(self.working());
         match index {
             0 => Some(Row::Header),
-            index if index <= items => Some(Row::Item(index - 1)),
-            index if index <= items + sending => Some(Row::Sending(index - 1 - items)),
-            index if index == items + sending + 1 && self.pending().is_some() => Some(Row::Request),
+            index if index <= entries => Some(Row::Entry(index - 1)),
+            index if index <= sending => Some(Row::Sending(index - 1 - entries)),
+            index if index <= working => Some(Row::Working),
+            index if index == working + 1 && self.pending().is_some() => Some(Row::Request),
             _ => None,
         }
+    }
+
+    /// The working line is shown: the turn works. Not while it waits on the
+    /// user, whose card is the status then.
+    pub(super) fn working(&self) -> bool {
+        self.chat.is_held() && self.turn() == ChatTurnState::Working
+    }
+
+    /// How long the turn in progress has run.
+    pub(super) fn elapsed(&self, cx: &App) -> Duration {
+        let now = cx.background_executor().now();
+        self.turn_started
+            .map(|started| now.saturating_duration_since(started))
+            .unwrap_or_default()
+    }
+
+    /// How long a thought this pane watched stream took.
+    pub(super) fn thought_took(&self, id: &str) -> Option<Duration> {
+        match self.thoughts.get(id) {
+            Some(Thought::Took(took)) => Some(*took),
+            _ => None,
+        }
+    }
+
+    /// Keeps the turn's start: from when this pane saw it start, else from
+    /// the user's newest message, never later than now.
+    fn follow_turn(&mut self, reset: bool, now: Instant) {
+        if !timeline::is_busy(self.turn()) {
+            self.turn_started = None;
+            return;
+        }
+        if !reset {
+            self.turn_started.get_or_insert(now);
+            return;
+        }
+        let sent = self
+            .chat
+            .items
+            .iter()
+            .rev()
+            .find(|item| item.kind == i32::from(ChatItemKind::User))
+            .map(|item| item.at_unix_millis)
+            .filter(|at| *at > 0);
+        let since = sent.map_or(now, |at| {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |wall| wall.as_millis() as i64);
+            let ago = Duration::from_millis(u64::try_from(wall - at).unwrap_or(0));
+            now.checked_sub(ago).unwrap_or(now)
+        });
+        // A turn that began after the one this pane last knew of.
+        self.turn_started = Some(self.turn_started.map_or(since, |known| known.max(since)));
+    }
+
+    /// Ticks the working line once a second while it is on screen, from the
+    /// turn's start so the seconds turn over evenly. A pane kept off screen,
+    /// or one with no working line, has no timer and draws nothing.
+    fn sync_ticker(&mut self, cx: &mut Context<Self>) {
+        if !(self.on_screen && self.working()) {
+            self.ticker = None;
+            return;
+        }
+        if self.ticker.is_some() {
+            return;
+        }
+        self.ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(wait) = this.update(cx, |this, cx| {
+                    let into = this.elapsed(cx).as_nanos() % TICK.as_nanos();
+                    TICK - Duration::from_nanos(into as u64)
+                }) else {
+                    return;
+                };
+                cx.background_executor().timer(wait).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Whether the working line's timer runs.
+    #[cfg(test)]
+    pub(super) fn is_ticking(&self) -> bool {
+        self.ticker.is_some()
     }
 
     /// The request the agent waits on, while the host says it waits.
@@ -724,7 +845,6 @@ impl ChatPane {
     /// Tells the list what an event did to the items, and what that did to
     /// the rows after them.
     fn changed(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
-        let (old_items, old_trail) = self.rows;
         let chat = &self.chat;
         self.sending
             .retain(|sending| chat.item(&sending.id).is_none());
@@ -749,26 +869,10 @@ impl ChatPane {
         if !answered {
             self.answering = None;
         }
-        let (items, trail) = (self.chat.items.len(), self.trail());
-        let old_end = 1 + old_items + old_trail;
-        let mut changed_item = None;
-        self.list.update(cx, |list, cx| match outcome {
-            Outcome::Reset => list.reset(1 + items + trail, cx),
-            Outcome::Appended(count) => {
-                list.splice(1 + old_items..old_end, count + trail, cx);
-            }
-            Outcome::Truncated(at) => {
-                list.splice(1 + at.min(old_items)..old_end, trail, cx);
-            }
-            Outcome::Updated(index) => {
-                list.remeasure_items(1 + index..2 + index, cx);
-                changed_item = Some(index);
-            }
-            Outcome::State => {
-                list.remeasure_items(0..1, cx);
-            }
-            Outcome::Ignored | Outcome::Reopen => {}
-        });
+        let now = cx.background_executor().now();
+        if matches!(outcome, Outcome::Reset | Outcome::State) {
+            self.follow_turn(outcome == Outcome::Reset, now);
+        }
         match outcome {
             Outcome::Reset => {
                 // The `OPEN` has done its work, though its answer may still
@@ -780,15 +884,52 @@ impl ChatPane {
                 self.shown.clear();
                 self.loading_older = false;
                 self.older_failed = false;
+                // Not watched from their start.
+                self.thoughts.clear();
+                self.entries = timeline::layout(&self.chat.items, self.turn());
+                let rows = (self.entries.len(), self.trail());
+                self.list
+                    .update(cx, |list, cx| list.reset(1 + rows.0 + rows.1, cx));
+                self.rows = rows;
+            }
+            Outcome::Appended(count) => {
+                let start = self.chat.items.len().saturating_sub(count);
+                for item in &self.chat.items[start..] {
+                    if item.kind == i32::from(ChatItemKind::Reasoning) && item.streaming {
+                        self.thoughts.insert(item.id.clone(), Thought::Since(now));
+                    }
+                }
+                self.relayout(0, cx);
             }
             Outcome::Truncated(_) => {
                 let chat = &self.chat;
                 self.shown.retain(|id, _| chat.item(id).is_some());
+                self.thoughts.retain(|id, _| chat.item(id).is_some());
+                self.open_groups.retain(|id| chat.item(id).is_some());
+                self.relayout(0, cx);
             }
-            _ => {}
-        }
-        if let Some(item) = changed_item.and_then(|index| self.chat.items.get(index)) {
-            self.shown.remove(&item.id);
+            Outcome::Updated(index) => {
+                let item = &self.chat.items[index];
+                self.shown.remove(&item.id);
+                // An item never changes kind, so only thinking, which is
+                // not drawn while it streams, can move a row.
+                if item.kind == i32::from(ChatItemKind::Reasoning) {
+                    if !item.streaming
+                        && let Some(Thought::Since(since)) = self.thoughts.get(&item.id).copied()
+                    {
+                        let took = now.saturating_duration_since(since);
+                        self.thoughts.insert(item.id.clone(), Thought::Took(took));
+                    }
+                    self.relayout(0, cx);
+                }
+                self.remeasure_item(index, cx);
+            }
+            Outcome::State => {
+                self.list
+                    .update(cx, |list, cx| list.remeasure_items(0..1, cx));
+                self.relayout(0, cx);
+            }
+            Outcome::Ignored | Outcome::Reopen => {}
         }
         if matches!(outcome, Outcome::Reset | Outcome::State) {
             self.wanted.settle(&self.confirmed_options());
@@ -796,16 +937,68 @@ impl ChatPane {
                 self.stopped(cx);
             }
         }
-        self.rows = match outcome {
-            Outcome::Updated(_) | Outcome::State => (old_items, old_trail),
-            _ => (items, trail),
-        };
         self.sync_trail(cx);
+        self.sync_ticker(cx);
         cx.notify();
     }
 
-    /// Tells the list about the rows after the items, which follow state
-    /// that is not an item: a message being sent, the pending request.
+    /// Lays the items out again and tells the list about the entries that
+    /// differ, found as the run between the longest common start and end:
+    /// every other row keeps its measured height. `shift` items were put
+    /// before the first since the last layout.
+    fn relayout(&mut self, shift: usize, cx: &mut Context<Self>) {
+        let new = timeline::layout(&self.chat.items, self.turn());
+        let old = std::mem::replace(&mut self.entries, new);
+        let new = &self.entries;
+        let same = |old: &Entry, new: &Entry| old.shifted(shift) == *new;
+        let start = old
+            .iter()
+            .zip(new)
+            .take_while(|(old, new)| same(old, new))
+            .count();
+        let room = old.len().min(new.len()) - start;
+        let end = old
+            .iter()
+            .rev()
+            .zip(new.iter().rev())
+            .take(room)
+            .take_while(|(old, new)| same(old, new))
+            .count();
+        let (removed, added) = (old.len() - start - end, new.len() - start - end);
+        if removed > 0 || added > 0 {
+            let first = 1 + start;
+            self.list.update(cx, |list, cx| {
+                list.splice(first..first + removed, added, cx);
+            });
+        }
+        self.rows.0 = new.len();
+    }
+
+    /// The row of item `index` changed height: its entry's row.
+    pub(super) fn remeasure_item(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(entry) = timeline::entry_of(&self.entries, index) {
+            self.remeasure_row(1 + entry, cx);
+        }
+    }
+
+    /// Opens or closes the group whose first item is `key`.
+    pub(super) fn toggle_group(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.open_groups.remove(key) {
+            self.open_groups.insert(key.to_owned());
+        }
+        let items = &self.chat.items;
+        let entry = self
+            .entries
+            .iter()
+            .position(|entry| items.get(entry.first()).is_some_and(|item| item.id == key));
+        if let Some(entry) = entry {
+            self.remeasure_row(1 + entry, cx);
+        }
+    }
+
+    /// Tells the list about the rows after the entries, which follow state
+    /// that is not an item: a message being sent, the working line, the
+    /// pending request.
     pub(super) fn sync_trail(&mut self, cx: &mut Context<Self>) {
         let (items, old_trail) = self.rows;
         let trail = self.trail();
@@ -881,18 +1074,22 @@ impl ChatPane {
             PageOutcome::Held => self.loading_older = true,
             PageOutcome::AskAgain => self.load_older(cx),
             PageOutcome::Merged(count) => {
-                self.list.update(cx, |list, cx| {
-                    // The list keeps its place when rows go in above it, but
-                    // the header is above them: from there, stay on the item
-                    // that was first.
-                    let at_header =
-                        list.logical_scroll_top().item_ix == 0 && !list.is_following_tail();
-                    list.splice(1..1, count, cx);
-                    if at_header && count > 0 {
-                        list.scroll_to_item(count + 1, cx);
-                    }
-                });
-                self.rows.0 += count;
+                // The list keeps its place when rows go in above it, but the
+                // header is above them: from there, stay on the entry that
+                // was first.
+                let at_header = {
+                    let list = self.list.read(cx);
+                    list.logical_scroll_top().item_ix == 0 && !list.is_following_tail()
+                };
+                let before = self.entries.len();
+                // A run that the page continues joins the group it starts.
+                self.relayout(count, cx);
+                let added = self.entries.len().saturating_sub(before);
+                if at_header && added > 0 {
+                    self.list.update(cx, |list, cx| {
+                        list.scroll_to_item(added + 1, cx);
+                    });
+                }
             }
         }
         cx.notify();
@@ -1361,6 +1558,56 @@ impl ChatPane {
             self.set_composer("", window, cx);
             cx.notify();
         }
+    }
+
+    /// Copies a message: the user's text, or the whole reply an agent's
+    /// text ends, as its Markdown. Its Copy shows a check for a second.
+    pub(super) fn copy_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        let items = &self.chat.items;
+        let Some(item) = items.get(index) else {
+            return;
+        };
+        let text = if item.kind == i32::from(ChatItemKind::Assistant) {
+            let start = items[..index]
+                .iter()
+                .rposition(|item| item.kind == i32::from(ChatItemKind::User))
+                .map_or(0, |at| at + 1);
+            items[start..=index]
+                .iter()
+                .filter(|item| item.kind == i32::from(ChatItemKind::Assistant))
+                .map(|item| item.text.trim())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            item.text.clone()
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let id = item.id.clone();
+        let wait = cx.background_executor().timer(COPIED_FOR);
+        let done = cx.spawn(async move |this, cx| {
+            wait.await;
+            this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.copied = Some((id, done));
+        cx.notify();
+    }
+
+    /// Whether the message `id`'s Copy shows its check.
+    pub(super) fn just_copied(&self, id: &str) -> bool {
+        self.copied.as_ref().is_some_and(|(copied, _)| copied == id)
+    }
+
+    /// Forks the conversation through the end of the reply whose last text
+    /// is `item_id` (D6), into a split, as Fork from here does. The one place
+    /// `CHAT_ACTION_FORK` is to be sent from; until the host carries it out,
+    /// it does nothing.
+    pub(super) fn fork_reply(&mut self, item_id: &str, cx: &mut Context<Self>) {
+        let _ = (item_id, cx);
     }
 
     /// Whether `item` is one of the user's own that may be edited.

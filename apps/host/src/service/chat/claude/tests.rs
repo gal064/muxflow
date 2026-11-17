@@ -8,6 +8,7 @@ use super::*;
 const STREAM: &str = include_str!("../fixtures/claude-session.stream.jsonl");
 const RESUMED: &str = include_str!("../fixtures/claude-resumed.stream.jsonl");
 const SESSION_FILE: &str = include_str!("../fixtures/claude-session.jsonl");
+const THINKING: &str = include_str!("../fixtures/claude-thinking.stream.jsonl");
 const SESSION: &str = "5e551011-0000-4000-8000-000000000001";
 /// The ids the recorded messages were sent under.
 const M1: &str = "11111111-1111-4111-8111-111111111111";
@@ -668,6 +669,102 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     replay.play(&mut lines, "\"completed\"");
     replay.client.assert_answered(M5, list, "red or blue");
     assert_eq!(replay.client.snapshots, 0);
+}
+
+/// Thinking the model keeps to itself is an empty item from its first
+/// `thinking_tokens`, so the chat can say that the agent thinks, and is gone
+/// when its block ends. Thinking that streams text is one item, the same one,
+/// from its first `thinking_tokens` to its end. The fixture is cut from two
+/// recorded turns (2.1.326): `thinking_tokens` as a headless turn sent them,
+/// around the stream events of the recorded session.
+#[tokio::test]
+async fn thinking_is_one_item_and_one_with_no_text_goes_when_it_ends() {
+    let mut lines = THINKING.lines().peekable();
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    let reasoning = |replay: &Replay<Claude>| {
+        replay
+            .client
+            .items
+            .iter()
+            .filter(|item| item.kind == i32::from(Kind::Reasoning))
+            .map(|item| (item.id.clone(), item.text.clone(), item.streaming))
+            .collect::<Vec<_>>()
+    };
+
+    // A block that streams no text.
+    replay.play(&mut lines, "\"content_block_start\"");
+    assert!(reasoning(&replay).is_empty(), "nothing to say yet");
+    replay.play(&mut lines, "thinking_tokens");
+    assert_eq!(
+        reasoning(&replay),
+        [("msg_t1:0".into(), String::new(), true)]
+    );
+    replay.play(&mut lines, "thinking_tokens");
+    assert_eq!(reasoning(&replay).len(), 1, "one item per block");
+    replay.play(&mut lines, "\"type\":\"assistant\"");
+    assert!(reasoning(&replay).is_empty(), "gone with its block");
+    replay.play(&mut lines, "tool_result");
+    let ids: Vec<&str> = replay
+        .client
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(ids, [M1, "toolu_t1"]);
+
+    // A block that streams text.
+    replay.play(&mut lines, "thinking_tokens");
+    assert_eq!(
+        reasoning(&replay),
+        [("msg_t2:0".into(), String::new(), true)]
+    );
+    replay.play(&mut lines, "\" Say so.\"");
+    assert_eq!(
+        reasoning(&replay),
+        [(
+            "msg_t2:0".into(),
+            "The command printed done. Say so.".into(),
+            true
+        )]
+    );
+    replay.play(&mut lines, "\"type\":\"result\"");
+    assert_eq!(
+        reasoning(&replay),
+        [(
+            "msg_t2:0".into(),
+            "The command printed done. Say so.".into(),
+            false
+        )]
+    );
+    let ids: Vec<&str> = replay
+        .client
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(ids, [M1, "toolu_t1", "msg_t2:0", "msg_t2:1"]);
+}
+
+/// Thinking with no text that is not the newest item when it ends stays,
+/// ended: only the end of the timeline can be cut.
+#[tokio::test]
+async fn thinking_with_no_text_behind_a_newer_item_is_ended_in_place() {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    let mut lines = THINKING.lines();
+    // The user's message, the block's start and its first `thinking_tokens`.
+    for _ in 0..4 {
+        replay.agent(lines.next().unwrap());
+    }
+    assert!(replay.client.item("msg_t1:0").unwrap().streaming);
+    // A message the user sent meanwhile lands after it.
+    let user = json!({"type": "user", "isReplay": true, "session_id": SESSION,
+        "uuid": M2, "message": {"role": "user", "content": "And then?"}});
+    replay.agent(&user.to_string());
+    replay.agent(&json!({"type": "result", "subtype": "success", "is_error": false}).to_string());
+    let thinking = replay.client.item("msg_t1:0").unwrap();
+    assert_eq!((thinking.text.as_str(), thinking.streaming), ("", false));
 }
 
 /// A session started under a name (`--name`, as a fork is) goes by it, not by
