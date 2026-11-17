@@ -108,6 +108,22 @@ pub(crate) fn parse_environment(bytes: &[u8]) -> Vec<(OsString, OsString)> {
         .collect()
 }
 
+/// The agent's environment, in the pane `pane` this runs in (the
+/// `TMUX_PANE` tmux gave it). A reply's fork is started with its source's
+/// agent's environment, which names the source's pane: the fork's hooks
+/// would say its turns are the source's, and its session would be taken for
+/// the one running there.
+fn in_this_pane(
+    mut environment: Vec<(OsString, OsString)>,
+    pane: Option<OsString>,
+) -> Vec<(OsString, OsString)> {
+    if let Some(pane) = pane {
+        environment.retain(|(name, _)| name != "TMUX_PANE");
+        environment.push(("TMUX_PANE".into(), pane));
+    }
+    environment
+}
+
 pub(crate) async fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
     let options = parse(arguments)?;
     let mut command = std::process::Command::new(&options.command[0]);
@@ -116,6 +132,7 @@ pub(crate) async fn run(arguments: Vec<OsString>) -> anyhow::Result<()> {
     if let Some(path) = &options.environment
         && let Ok(environment) = take_environment(path)
     {
+        let environment = in_this_pane(environment, std::env::var_os("TMUX_PANE"));
         command.env_clear().envs(environment);
     }
     println!("Muxflow chat session");
@@ -379,6 +396,29 @@ mod tests {
             .map(|(name, value)| (name.to_str().unwrap(), value.to_str().unwrap()))
             .collect();
         assert_eq!(pairs, [("PATH", "/a:/b"), ("EMPTY", ""), ("X", "1=2")]);
+    }
+
+    /// A reply's fork runs with its source's environment, in a pane of its
+    /// own: its agent is told that pane, or its hooks land on the source.
+    #[test]
+    fn the_agent_is_told_the_pane_it_runs_in() {
+        let pairs = |environment: Vec<(OsString, OsString)>| -> Vec<(String, String)> {
+            environment
+                .into_iter()
+                .map(|(name, value)| (name.into_string().unwrap(), value.into_string().unwrap()))
+                .collect()
+        };
+        let source = parse_environment(b"PATH=/a\0TMUX_PANE=%4\0TMUX=/s,1,0\0");
+        assert_eq!(
+            pairs(in_this_pane(source.clone(), Some("%9".into()))),
+            [
+                ("PATH".into(), "/a".into()),
+                ("TMUX".into(), "/s,1,0".into()),
+                ("TMUX_PANE".into(), "%9".into()),
+            ]
+        );
+        // Outside tmux there is no pane to say: the environment is as given.
+        assert_eq!(pairs(in_this_pane(source.clone(), None)), pairs(source));
     }
 
     #[test]
