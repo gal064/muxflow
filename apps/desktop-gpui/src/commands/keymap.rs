@@ -616,6 +616,26 @@ mod tests {
     }
 
     #[test]
+    fn a_focused_text_keeps_copy_over_a_terminal_selection_on_both_platforms() {
+        for (platform, copy) in [(Platform::Mac, "cmd-c"), (Platform::Linux, "ctrl-c")] {
+            let none = ShortcutOverrides::new();
+            let run = |text_field| {
+                shortcut_disposition(
+                    &pressed(copy),
+                    false,
+                    text_field,
+                    platform,
+                    &none,
+                    true,
+                    |_| true,
+                )
+            };
+            assert_eq!(run(false), ShortcutDisposition::Run("terminal.copy"));
+            assert_eq!(run(true), ShortcutDisposition::Ignore, "{platform:?}");
+        }
+    }
+
+    #[test]
     fn modifier_only_keystrokes_claim_nothing() {
         let shift = Keystroke {
             modifiers: Modifiers::default(),
