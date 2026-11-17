@@ -67,6 +67,91 @@ async fn summarizes_committed_uncommitted_and_untracked_changes_against_the_defa
     assert_eq!((summary.added, summary.removed), (5, 3));
 }
 
+/// `(path, kind, added, removed)` for each file a summary lists.
+fn listed(summary: &v1::GitBranchSummary) -> Vec<(String, v1::GitChangeKind, u32, u32)> {
+    summary
+        .files
+        .iter()
+        .map(|file| {
+            (
+                String::from_utf8(file.path.clone()).unwrap(),
+                v1::GitChangeKind::try_from(file.kind).unwrap(),
+                file.added,
+                file.removed,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn summarizes_what_is_not_committed_against_head_beside_the_whole_branch() {
+    let fixture = with_default_branch("branch-summary-head");
+    fixture.write("edited", b"a\nB\nc\n");
+    fixture.git(&["commit", "-qam", "on the branch"]);
+    let head = String::from_utf8(fixture.git(&["rev-parse", "HEAD"]).stdout).unwrap();
+    // Staged, unstaged and untracked.
+    fixture.write("kept", b"one\nTWO\nthree\n");
+    fixture.git(&["add", "kept"]);
+    fixture.write("edited", b"a\nB\nc\nd\n");
+    fixture.write("new.txt", b"x\ny");
+    let service = service();
+    let mut request = identified(&service, &fixture).await;
+
+    request.summary_base = v1::GitSummaryBase::Head.into();
+    let uncommitted = service.branch_summary(&request, None).await.unwrap();
+    request.summary_base = v1::GitSummaryBase::Unspecified.into();
+    let branch = service.branch_summary(&request, None).await.unwrap();
+
+    assert_eq!(uncommitted.base_ref, "HEAD");
+    assert_eq!(uncommitted.merge_base_oid, head.trim());
+    assert_eq!(
+        listed(&uncommitted),
+        [
+            ("edited".into(), v1::GitChangeKind::Modified, 1, 0),
+            ("kept".into(), v1::GitChangeKind::Modified, 1, 1),
+            ("new.txt".into(), v1::GitChangeKind::Untracked, 2, 0),
+        ]
+    );
+    assert_eq!(uncommitted.total_file_count, 3);
+    assert_eq!((uncommitted.added, uncommitted.removed), (4, 1));
+
+    // The branch's own commit counts only against the default branch.
+    assert_eq!(branch.base_ref, "origin/main");
+    assert_eq!(
+        listed(&branch),
+        [
+            ("edited".into(), v1::GitChangeKind::Modified, 2, 1),
+            ("kept".into(), v1::GitChangeKind::Modified, 1, 1),
+            ("new.txt".into(), v1::GitChangeKind::Untracked, 2, 0),
+        ]
+    );
+    assert_eq!((branch.added, branch.removed), (5, 2));
+}
+
+#[tokio::test]
+async fn a_repository_with_no_commit_yet_has_everything_uncommitted() {
+    let fixture = Fixture::new("branch-summary-unborn");
+    fixture.write("staged", b"one\n");
+    fixture.git(&["add", "staged"]);
+    fixture.write("loose", b"a\nb\n");
+    let service = service();
+    let mut request = identified(&service, &fixture).await;
+    request.summary_base = v1::GitSummaryBase::Head.into();
+
+    let summary = service.branch_summary(&request, None).await.unwrap();
+
+    assert_eq!(summary.base_ref, "HEAD");
+    assert_eq!(summary.merge_base_oid, "");
+    assert_eq!(
+        listed(&summary),
+        [
+            ("loose".into(), v1::GitChangeKind::Untracked, 2, 0),
+            ("staged".into(), v1::GitChangeKind::Added, 1, 0),
+        ]
+    );
+    assert_eq!((summary.added, summary.removed), (3, 0));
+}
+
 #[tokio::test]
 async fn prefers_the_recorded_remote_head_and_says_when_there_is_no_default_branch() {
     let fixture = Fixture::new("branch-summary-none");

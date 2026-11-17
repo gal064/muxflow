@@ -1277,10 +1277,31 @@ impl BranchFile {
     }
 }
 
-/// What the working tree changes against the default branch.
+/// What a [`BranchSummary`] compares the working tree with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummaryBase {
+    /// The merge base with the default branch: the whole branch, uncommitted
+    /// work included.
+    DefaultBranch,
+    /// HEAD: staged, unstaged and untracked work only.
+    Head,
+}
+
+impl SummaryBase {
+    /// `GitCommand.summary_base`.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::DefaultBranch => "",
+            Self::Head => "head",
+        }
+    }
+}
+
+/// What the working tree changes against the default branch or HEAD.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BranchSummary {
-    /// `origin/main`; `None` when there is no default branch to compare with.
+    /// `origin/main`, or `HEAD`; `None` when there is no default branch to
+    /// compare with.
     pub base_ref: Option<String>,
     pub files: Vec<BranchFile>,
     pub total_file_count: u64,

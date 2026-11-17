@@ -1,6 +1,6 @@
 //! The session details card at the top right of a chat: the host and folder,
-//! the branch with a menu to switch it, Commit…, the changes against the
-//! default branch, and the context window's use.
+//! the branch with a menu to switch it, Commit…, the uncommitted changes and
+//! the branch's against the default branch, and the context window's use.
 //!
 //! The Git rows are the active repository's, as the Git panel follows it, and
 //! show only while the chat's folder lies in it. Clicking into the chat makes
@@ -24,6 +24,7 @@ use gpui_kit::{
         h_flex,
         input::{Enter, Input, InputEvent, InputState},
         popover::Popover,
+        tooltip::Tooltip,
         v_flex,
     },
     div,
@@ -32,17 +33,22 @@ use gpui_kit::{
 
 use crate::{
     connection_ui::ConnectionUi,
-    fonts,
     git::{
         self,
-        model::{self, BranchSummary, Branches, CommandResult, StatusSnapshot},
+        model::{self, BranchSummary, Branches, CommandResult, StatusSnapshot, SummaryBase},
         panel::{GitPanel, Scope},
     },
     theme::{self, Palette, metrics::ui},
     ui::toast,
+    workspaces::rows::{abbreviate_home, infer_home},
 };
 
-use super::{DETAILS_ROOM, DetailsContext, composer::tokens, set_details_card};
+use super::{
+    DETAILS_ROOM, DetailsContext,
+    composer::tokens,
+    icon::{IconName, icon},
+    set_details_card,
+};
 
 /// `.dcard { width: 238px }`, which the branch menu matches.
 const WIDTH: f32 = 238.;
@@ -103,8 +109,7 @@ pub(super) struct Card {
     /// The list being read; dropping it cancels the read at the host.
     listing: Option<Task<()>>,
     checkout: Option<Task<()>>,
-    /// Whether this card has asked the panel to read the default-branch
-    /// summary.
+    /// Whether this card has asked the panel to read the summaries.
     reading: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -125,7 +130,7 @@ impl Card {
                 move |card, cx| {
                     if card.reading {
                         panel
-                            .update(cx, |panel, cx| panel.read_branch_summary(false, cx))
+                            .update(cx, |panel, cx| panel.read_summaries(false, cx))
                             .ok();
                     }
                 }
@@ -147,9 +152,9 @@ impl Card {
         }
     }
 
-    /// Asks the panel to keep the changes against the default branch read
-    /// while the card shows them, whichever scope the panel lists, and no
-    /// longer. A menu whose row is gone is closed.
+    /// Asks the panel to keep the summaries read while the card shows them,
+    /// whichever scope the panel lists, and no longer. A menu whose row is
+    /// gone is closed.
     fn follow_repository(&mut self, cx: &mut Context<Self>) {
         let ours = self.repository(cx).is_some();
         if !ours {
@@ -161,13 +166,13 @@ impl Card {
         }
         self.reading = reading;
         if let Some(panel) = self.git.clone() {
-            panel.update(cx, |panel, cx| panel.read_branch_summary(reading, cx));
+            panel.update(cx, |panel, cx| panel.read_summaries(reading, cx));
         }
     }
 
     /// The repository the chat's folder lies in, while it is the one the Git
     /// panel follows on the same host.
-    fn repository(&self, cx: &App) -> Option<(Rc<StatusSnapshot>, Option<Rc<BranchSummary>>)> {
+    fn repository(&self, cx: &App) -> Option<Rc<StatusSnapshot>> {
         let panel = self.git.as_ref()?.read(cx);
         let scope = panel.context().scope.as_ref()?;
         if scope.host_profile_id != self.shown.profile_id
@@ -176,8 +181,30 @@ impl Card {
             return None;
         }
         let status = panel.status(cx)?;
-        within(&self.shown.path, &status.repository.worktree_root)
-            .then(|| (status, panel.branch_summary()))
+        within(&self.shown.path, &status.repository.worktree_root).then_some(status)
+    }
+
+    /// The summary against `base` as last read, and whether reading it failed.
+    fn summary(&self, base: SummaryBase, cx: &App) -> (Option<Rc<BranchSummary>>, bool) {
+        self.git.as_ref().map_or((None, false), |panel| {
+            let panel = panel.read(cx);
+            (panel.summary(base), panel.summary_failed(base))
+        })
+    }
+
+    /// The host's home, inferred from its panes' folders as the workspace
+    /// rows do.
+    fn home(&self, cx: &App) -> Option<String> {
+        let ui = cx.try_global::<ConnectionUi>()?;
+        let controller = ui.0.read(cx);
+        let link = controller.link(&self.shown.profile_id)?;
+        infer_home(
+            link.host_state
+                .snapshot
+                .panes
+                .iter()
+                .map(|pane| pane.current_path.as_str()),
+        )
     }
 
     fn host(&self, cx: &App) -> String {
@@ -227,7 +254,7 @@ impl Card {
             return;
         }
         // The panel may have moved to another repository since the menu opened.
-        let Some((status, _)) = self.repository(cx) else {
+        let Some(status) = self.repository(cx) else {
             return;
         };
         if status.repository.head_name.as_deref() == Some(branch.as_str()) {
@@ -269,6 +296,16 @@ impl Card {
         }
     }
 
+    /// A changes row that opens the Git panel listing `scope`.
+    fn opens(&self, row: Button, scope: Scope, narrow: bool, cx: &mut Context<Self>) -> Button {
+        row.on_click(cx.listener(move |this, _, window, cx| {
+            git::show(scope, window, cx);
+            if narrow {
+                this.close(cx);
+            }
+        }))
+    }
+
     fn branch_row(
         &self,
         status: &StatusSnapshot,
@@ -282,16 +319,14 @@ impl Card {
             _ => "Detached HEAD".into(),
         };
         let note = if self.switching.is_some() {
-            extra("Switching…".into(), p)
+            extra("Switching…".into(), p).into_any_element()
         } else {
-            // The caret says the row is a menu; the faint `.x` is too slight.
-            extra("\u{25be}".into(), p)
-                .text_size(ui(13.))
-                .text_color(p.chrome_dim)
+            // The chevron says the row is a menu; the faint `.x` is too slight.
+            icon(IconName::ChevronDown, 14., p.chrome_dim).into_any_element()
         };
         let trigger = action("chat-details-branch", format!("Branch: {name}"), p)
             .disabled(self.switching.is_some())
-            .child(row("\u{2442}", name, None, p).child(note));
+            .child(row(IconName::GitBranch, name, None, p).child(note));
         if self.switching.is_some() {
             // No menu opens while a switch runs.
             return trigger.into_any_element();
@@ -347,7 +382,7 @@ impl Card {
         let p = theme::palette(cx);
         let current = self
             .repository(cx)
-            .and_then(|(status, _)| status.repository.head_name.clone());
+            .and_then(|status| status.repository.head_name.clone());
         let matches = self.matches(cx);
         let note = |text: String| {
             div()
@@ -427,19 +462,26 @@ impl Card {
     fn card(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = theme::palette(cx);
         let narrow = !self.shown.wide;
-        let host = group(false, &p).child(row("\u{25a3}", self.host(cx).into(), None, &p));
+        let repository = self.repository(cx);
+        let host = group(false, &p).child(row(IconName::Server, self.host(cx).into(), None, &p));
         let host = if self.shown.path.is_empty() {
             host
         } else {
+            let root = repository
+                .as_ref()
+                .map(|status| status.repository.worktree_root.as_str());
+            let label = folder_label(&self.shown.path, self.home(cx).as_deref(), root);
+            let path = SharedString::from(self.shown.path.clone());
             host.child(
                 h_flex()
                     .id("chat-details-folder")
                     .test_support()
                     .role(Role::Label)
-                    .aria_label(SharedString::from(format!("Folder: {}", self.shown.path)))
+                    .aria_label(SharedString::from(format!("Folder: {path}")))
+                    .tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
                     .gap(ui(8.))
                     .min_w_0()
-                    .child(glyph("/", &p))
+                    .child(mark(IconName::Folder, &p))
                     .child(
                         div()
                             .flex_1()
@@ -448,37 +490,35 @@ impl Card {
                             .whitespace_nowrap()
                             .text_ellipsis_start()
                             .text_color(p.chrome_ink_strong)
-                            .child(self.shown.path.clone()),
+                            .child(label),
                     ),
             )
         };
-        let git = self.repository(cx).map(|(status, summary)| {
+        let git = repository.map(|status| {
             let commit = action("chat-details-commit", "Commit…".into(), &p)
-                .child(row("\u{25cb}", "Commit…".into(), None, &p))
+                .child(row(
+                    IconName::GitCommitHorizontal,
+                    "Commit…".into(),
+                    None,
+                    &p,
+                ))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     git::start_commit(window, cx);
                     if narrow {
                         this.close(cx);
                     }
                 }));
-            let base = summary
-                .as_ref()
-                .map(|summary| summary.base_ref.clone().unwrap_or_default());
-            let changes = action(
-                "chat-details-changes",
-                match &base {
-                    Some(base) if !base.is_empty() => format!("Changes vs {base}"),
-                    _ => "Changes".into(),
-                },
+            let (uncommitted, uncommitted_failed) = self.summary(SummaryBase::Head, cx);
+            let (branch, branch_failed) = self.summary(SummaryBase::DefaultBranch, cx);
+            let uncommitted = changes_row(
+                Changes::Uncommitted,
+                uncommitted.as_deref(),
+                uncommitted_failed,
                 &p,
             )
-            .child(changes_row(base, summary.as_deref(), &p))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                git::show(Scope::Branch, window, cx);
-                if narrow {
-                    this.close(cx);
-                }
-            }));
+            .map(|row| self.opens(row, Scope::Uncommitted, narrow, cx));
+            let branch = changes_row(Changes::Branch, branch.as_deref(), branch_failed, &p)
+                .map(|row| self.opens(row, Scope::Branch, narrow, cx));
             group(true, &p)
                 .gap(ui(3.))
                 .child(self.branch_row(&status, &p, cx))
@@ -499,7 +539,8 @@ impl Card {
                     )
                 })
                 .child(commit)
-                .child(changes)
+                .children(uncommitted)
+                .children(branch)
         });
         let context = self.shown.usage.map(|usage| {
             group(true, &p).child(
@@ -638,17 +679,14 @@ fn group(ruled: bool, p: &Palette) -> gpui_kit::Div {
         })
 }
 
-/// `.gl`: the mark at the start of a row.
-fn glyph(mark: &'static str, p: &Palette) -> impl IntoElement {
+/// `.gl`: the icon at the start of a row.
+fn mark(name: IconName, p: &Palette) -> impl IntoElement {
     div()
         .flex_none()
         .w(ui(14.))
         .flex()
         .justify_center()
-        .font_family(fonts::MONO)
-        .text_size(ui(12.))
-        .text_color(p.chrome_faint)
-        .child(mark)
+        .child(icon(name, 14., p.chrome_faint))
 }
 
 /// `.x`: what trails a row.
@@ -663,7 +701,7 @@ fn extra(text: SharedString, p: &Palette) -> gpui_kit::Div {
 
 /// `.l`: a mark, the value, and what trails it.
 fn row(
-    mark: &'static str,
+    name: IconName,
     value: SharedString,
     trailing: Option<SharedString>,
     p: &Palette,
@@ -672,7 +710,7 @@ fn row(
         .w_full()
         .gap(ui(8.))
         .min_w_0()
-        .child(glyph(mark, p))
+        .child(mark(name, p))
         .child(
             div()
                 .flex_1()
@@ -684,41 +722,131 @@ fn row(
         .children(trailing.map(|text| extra(text, p)))
 }
 
-/// `Changes vs origin/main  +182 −41`. `base` is `None` until the summary is
-/// read, and empty when the repository has no default branch.
-fn changes_row(
-    base: Option<String>,
+/// The two changes rows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Changes {
+    /// Against HEAD.
+    Uncommitted,
+    /// Against the merge base with the default branch.
+    Branch,
+}
+
+/// What trails a changes row.
+#[derive(Debug, PartialEq, Eq)]
+enum Count {
+    /// Not read yet: `…`.
+    Reading,
+    /// Nothing changed: `none`, the row dim.
+    None,
+    Lines {
+        added: u64,
+        removed: u64,
+    },
+    /// The read failed; the Git panel says why.
+    Unknown,
+}
+
+/// What a changes row shows: its trailing count and the default branch it
+/// names (`origin/main`), or `None` when the row is left out.
+fn changes(
+    kind: Changes,
     summary: Option<&BranchSummary>,
+    failed: bool,
+) -> Option<(Count, Option<String>)> {
+    let Some(summary) = summary else {
+        return Some((
+            if failed {
+                Count::Unknown
+            } else {
+                Count::Reading
+            },
+            None,
+        ));
+    };
+    let base = summary.base_ref.clone();
+    // No default branch, or nothing on the branch: the second row is left out
+    // rather than drawn empty.
+    if kind == Changes::Branch && (base.is_none() || summary.total_file_count == 0) {
+        return None;
+    }
+    let count = if summary.total_file_count == 0 {
+        Count::None
+    } else {
+        Count::Lines {
+            added: summary.added,
+            removed: summary.removed,
+        }
+    };
+    Some((count, base.filter(|_| kind == Changes::Branch)))
+}
+
+/// `Uncommitted  +12 −3`, or `Branch vs main  +182 −41`. `None` when the row
+/// is left out.
+fn changes_row(
+    kind: Changes,
+    summary: Option<&BranchSummary>,
+    failed: bool,
     p: &Palette,
-) -> gpui_kit::Div {
-    let vs = match base.as_deref() {
-        Some("") => Some("no default branch".to_owned()),
-        // `origin/main` reads as `main`: the card has no room for both.
-        Some(base) => Some(format!(
+) -> Option<Button> {
+    let (count, base) = changes(kind, summary, failed)?;
+    // `origin/main` reads as `main`: the card has no room for both.
+    let vs = base.as_deref().map(|base| {
+        format!(
             "vs {}",
             base.split_once('/').map_or(base, |(_, branch)| branch)
-        )),
-        None => None,
+        )
+    });
+    let (id, word, tip) = match kind {
+        Changes::Uncommitted => (
+            "chat-details-uncommitted",
+            "Uncommitted",
+            "Staged, unstaged and untracked files against the last commit.".to_owned(),
+        ),
+        Changes::Branch => (
+            "chat-details-branch-changes",
+            "Branch",
+            format!(
+                "Everything on this branch since it split from {}, uncommitted and untracked \
+                 included.",
+                base.as_deref().unwrap_or("the default branch")
+            ),
+        ),
     };
-    let counts = summary
-        .filter(|summary| summary.base_ref.is_some())
-        .map(|summary| {
+    let count_text = match &count {
+        Count::Reading => "\u{2026}".to_owned(),
+        Count::None => "none".to_owned(),
+        Count::Lines { added, removed } => format!("+{added} \u{2212}{removed}"),
+        Count::Unknown => String::new(),
+    };
+    let name = [Some(word.to_owned()), vs.clone(), Some(count_text.clone())]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let dim = count == Count::None;
+    let trailing = match count {
+        Count::Lines { added, removed } => Some(
             h_flex()
                 .flex_none()
                 .gap(ui(4.))
                 .text_size(ui(12.))
-                .child(div().text_color(p.ok).child(format!("+{}", summary.added)))
+                .child(div().text_color(p.ok).child(format!("+{added}")))
                 .child(
                     div()
                         .text_color(p.danger)
-                        .child(format!("\u{2212}{}", summary.removed)),
+                        .child(format!("\u{2212}{removed}")),
                 )
-        });
-    h_flex()
+                .into_any_element(),
+        ),
+        Count::Unknown => None,
+        _ => Some(extra(count_text.into(), p).into_any_element()),
+    };
+    let row = h_flex()
         .w_full()
         .gap(ui(8.))
         .min_w_0()
-        .child(glyph("\u{b1}", p))
+        .child(mark(IconName::FileDiff, p))
         .child(
             h_flex()
                 .flex_1()
@@ -729,8 +857,12 @@ fn changes_row(
                 .child(
                     div()
                         .flex_none()
-                        .text_color(p.chrome_ink_strong)
-                        .child("Changes"),
+                        .text_color(if dim {
+                            p.chrome_faint
+                        } else {
+                            p.chrome_ink_strong
+                        })
+                        .child(word),
                 )
                 .children(vs.map(|vs| {
                     div()
@@ -740,7 +872,8 @@ fn changes_row(
                         .child(vs)
                 })),
         )
-        .children(counts)
+        .children(trailing);
+    Some(action(id, name, p).tooltip(tip).child(row))
 }
 
 /// A row that acts: Kit's quiet button, laid out as the card's rows are.
@@ -797,6 +930,19 @@ fn within(path: &str, root: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// The chat's folder as the card names it, never absolute where something
+/// shorter says it: inside the repository at `repo_root`, the repository's
+/// folder and the path within it (`muxflow/apps/host`); else relative to
+/// `home` (`~/notes`). A folder outside both stays as it is.
+fn folder_label(path: &str, home: Option<&str>, repo_root: Option<&str>) -> String {
+    if let Some(root) = repo_root.filter(|root| within(path, root)) {
+        let root = root.trim_end_matches('/');
+        let name = root.rsplit('/').next().unwrap_or(root);
+        return format!("{name}{}", &path[root.len()..]);
+    }
+    abbreviate_home(Some(path.to_owned()), home).unwrap_or_default()
+}
+
 /// The names that contain `filter`, ignoring case, in their order.
 fn filtered(names: &[String], filter: &str) -> Vec<String> {
     let filter = filter.trim().to_lowercase();
@@ -818,6 +964,94 @@ mod tests {
         assert!(!within("/w/repository", "/w/repo"));
         assert!(!within("/w", "/w/repo"));
         assert!(!within("/w/repo", ""));
+    }
+
+    #[test]
+    fn a_folder_is_named_from_its_repository_else_from_home() {
+        let home = Some("/home/operator");
+        let repo = Some("/home/operator/dev/muxflow");
+        // Home itself, below it, and outside it.
+        assert_eq!(folder_label("/home/operator", home, None), "~");
+        assert_eq!(
+            folder_label("/home/operator/notes/drafts", home, None),
+            "~/notes/drafts"
+        );
+        assert_eq!(folder_label("/srv/app", home, None), "/srv/app");
+        assert_eq!(folder_label("/srv/app", None, None), "/srv/app");
+        // The repository's root, and inside it.
+        assert_eq!(
+            folder_label("/home/operator/dev/muxflow", home, repo),
+            "muxflow"
+        );
+        assert_eq!(
+            folder_label("/home/operator/dev/muxflow/apps/desktop-gpui", home, repo),
+            "muxflow/apps/desktop-gpui"
+        );
+        // A worktree goes by its own folder.
+        assert_eq!(
+            folder_label(
+                "/home/operator/dev/muxflow-chat/apps",
+                home,
+                Some("/home/operator/dev/muxflow-chat/")
+            ),
+            "muxflow-chat/apps"
+        );
+        // A repository the folder is not in names nothing.
+        assert_eq!(
+            folder_label("/home/operator/dev/muxflow-old", home, repo),
+            "~/dev/muxflow-old"
+        );
+        assert_eq!(
+            folder_label("/srv/repo/src", home, Some("/srv/repo")),
+            "repo/src"
+        );
+    }
+
+    fn summary(base: Option<&str>, files: u64, added: u64, removed: u64) -> BranchSummary {
+        BranchSummary {
+            base_ref: base.map(str::to_owned),
+            total_file_count: files,
+            added,
+            removed,
+            ..BranchSummary::default()
+        }
+    }
+
+    #[test]
+    fn the_changes_rows_say_none_while_reading_and_drop_an_empty_branch() {
+        let lines = |added, removed| Count::Lines { added, removed };
+        let head = summary(Some("HEAD"), 2, 12, 3);
+        assert_eq!(
+            changes(Changes::Uncommitted, Some(&head), false),
+            Some((lines(12, 3), None))
+        );
+        let clean = summary(Some("HEAD"), 0, 0, 0);
+        assert_eq!(
+            changes(Changes::Uncommitted, Some(&clean), false),
+            Some((Count::None, None))
+        );
+        // A binary file changes no line but is still a change.
+        let binary = summary(Some("HEAD"), 1, 0, 0);
+        assert_eq!(
+            changes(Changes::Uncommitted, Some(&binary), false),
+            Some((lines(0, 0), None))
+        );
+        for kind in [Changes::Uncommitted, Changes::Branch] {
+            assert_eq!(changes(kind, None, false), Some((Count::Reading, None)));
+            assert_eq!(changes(kind, None, true), Some((Count::Unknown, None)));
+        }
+        let branch = summary(Some("origin/main"), 4, 182, 41);
+        assert_eq!(
+            changes(Changes::Branch, Some(&branch), false),
+            Some((lines(182, 41), Some("origin/main".into())))
+        );
+        // No default branch, or nothing on the branch: no row.
+        assert_eq!(
+            changes(Changes::Branch, Some(&summary(None, 0, 0, 0)), false),
+            None
+        );
+        let empty = summary(Some("origin/main"), 0, 0, 0);
+        assert_eq!(changes(Changes::Branch, Some(&empty), false), None);
     }
 
     #[test]

@@ -868,6 +868,63 @@ async fn options_are_asked_of_the_agent_and_shown_as_it_answers() {
     assert!(!replay.client.catalog.commands.is_empty());
 }
 
+/// Claude Code 2.1.326's `initialize` answer, as recorded: its fourteen
+/// models, the default first.
+const INITIALIZE: &str = include_str!("../fixtures/claude-initialize.json");
+
+#[tokio::test]
+async fn the_default_model_is_named_after_the_model_it_runs() {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    replay.done(Done::History(history::load(
+        Path::new("/nonexistent"),
+        SESSION,
+        "",
+    )));
+    replay.agent(INITIALIZE.trim());
+    let models = &replay.client.catalog.models;
+    assert_eq!(models.len(), 14);
+    let labels: Vec<(&str, &str)> = models
+        .iter()
+        .take(3)
+        .map(|model| (model.id.as_str(), model.label.as_str()))
+        .collect();
+    // Only the default's label changes; the entry it duplicates stays.
+    assert_eq!(
+        labels,
+        [
+            ("default", "Opus 5.5 (default)"),
+            ("opus", "Opus 5.5"),
+            ("fable", "Fable 5.2"),
+        ]
+    );
+}
+
+#[test]
+fn a_default_no_other_entry_names_is_named_from_its_description_or_its_model() {
+    let entry = |fields: Value| {
+        let mut entry = json!({"value": "default", "displayName": "Default (recommended)"});
+        entry
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        entry
+    };
+    let haiku = json!({"value": "haiku", "resolvedModel": "claude-haiku-5-5",
+                       "displayName": "Haiku 5.5"});
+    let described = entry(json!({"resolvedModel": "claude-opus-5-5",
+                                 "description": "Opus 5.5 · Best for everyday, complex tasks"}));
+    assert_eq!(
+        default_label(&described, &[described.clone(), haiku.clone()]),
+        "Opus 5.5 (default)"
+    );
+    let bare = entry(json!({"resolvedModel": "claude-opus-5-5",
+                            "description": "Best for everyday, complex tasks"}));
+    assert_eq!(default_label(&bare, &[haiku]), "claude-opus-5-5 (default)");
+    let unknown = entry(json!({}));
+    assert_eq!(default_label(&unknown, &[]), "Default (recommended)");
+}
+
 // --- the session's file -----------------------------------------------------
 
 #[tokio::test]
