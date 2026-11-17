@@ -127,6 +127,14 @@ impl<J> Out<J> {
         }
     }
 
+    /// Takes back an item published earlier that has nothing to show, behind
+    /// what came before it.
+    pub(super) fn withdraw(&mut self, item: v1::ChatItem) {
+        self.flush();
+        let title = self.sink.withdraw(item);
+        self.retitle(title);
+    }
+
     /// Replaces the timeline with the conversation as it was read.
     pub(super) fn reset(&mut self, items: Vec<v1::ChatItem>, complete: bool) {
         self.deltas.clear();

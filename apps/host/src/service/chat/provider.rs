@@ -197,6 +197,15 @@ impl ChatSink {
         panes.publish(&self.key, change)
     }
 
+    /// Takes back an item published earlier that turned out to have nothing
+    /// to show, such as thinking that ended with no text. Answers a new
+    /// title as [`Self::publish`] does.
+    pub(crate) fn withdraw(&self, item: v1::ChatItem) -> Option<String> {
+        let panes = self.panes.upgrade()?;
+        let mut panes = panes.lock().unwrap_or_else(PoisonError::into_inner);
+        panes.withdraw(&self.key, item)
+    }
+
     /// Replaces the pane's timeline with the conversation as the provider
     /// read it, oldest first. `complete` is false when the provider could not
     /// read all of it. The connections that opened the pane get a snapshot.

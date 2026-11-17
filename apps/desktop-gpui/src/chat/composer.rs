@@ -32,7 +32,6 @@ use crate::{
     context_menu::{Entry, Item, fill},
     fonts,
     theme::{Palette, metrics::ui},
-    ui::motion::WorkingIcon,
 };
 
 use super::{
@@ -115,7 +114,7 @@ impl ChatPane {
     }
 
     /// Whether Send is Stop: the agent works, and the host can be told.
-    fn stoppable(&self) -> bool {
+    pub(super) fn stoppable(&self) -> bool {
         self.turn() == ChatTurnState::Working && self.is_live()
     }
 
@@ -514,39 +513,6 @@ impl ChatPane {
             .into_any_element()
     }
 
-    /// `.stl` while Stop waits for the turn to end. It holds still: a pending
-    /// Stop is a state, not something moving.
-    fn stopping_line(&self, p: &Palette) -> Option<AnyElement> {
-        (self.stopping && self.stoppable()).then(|| {
-            h_flex()
-                .id("chat-stopping")
-                .test_support()
-                .role(Role::Status)
-                .aria_label("Stopping…")
-                .gap(ui(8.))
-                .px(ui(1.))
-                .pb(ui(8.))
-                .min_w_0()
-                .text_size(ui(12.5))
-                .child(
-                    // `.stl .mk`.
-                    h_flex()
-                        .flex_none()
-                        .w(ui(14.))
-                        .justify_center()
-                        .child(WorkingIcon::new(10., p.state_working)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(p.chrome_ink)
-                        .child("Stopping…"),
-                )
-                .into_any_element()
-        })
-    }
-
     /// `.pop`: the commands a typed `/word` or `$word` matches, in their
     /// sections, named with the sigil they were asked for with.
     fn slash_list(
@@ -809,7 +775,6 @@ impl ChatPane {
             .pl(left)
             .pr(right)
             .pb(ui(14.))
-            .children(self.stopping_line(p))
             .child(
                 div()
                     .id("chat-composer")

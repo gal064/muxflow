@@ -705,10 +705,30 @@ struct Shell {
     host: FakeHost,
     controller: Entity<ConnectionController>,
     visual: VisualTestContext,
+    /// Every chat pane made, oldest first.
+    panes: std::rc::Rc<std::cell::RefCell<Vec<gpui_kit::WeakEntity<super::ChatPane>>>>,
     _dir: tempfile::TempDir,
 }
 
 impl Shell {
+    /// The chat pane of [`PANE`], the first made.
+    fn pane(&self) -> Entity<super::ChatPane> {
+        self.panes.borrow()[0]
+            .upgrade()
+            .expect("the chat pane is there")
+    }
+
+    /// The working line's seconds.
+    fn seconds(&mut self) -> String {
+        self.label("chat-working-time")
+    }
+
+    /// Moves the clock on, as time passing does.
+    fn wait(&mut self, time: std::time::Duration) {
+        self.visual.executor().advance_clock(time);
+        self.settle();
+    }
+
     fn publish(&mut self, frames: Vec<Vec<u8>>) {
         let sink = self.host.state().sinks[0].clone();
         for frame in frames {
@@ -839,6 +859,15 @@ fn shell_with(cx: &mut TestAppContext, git: bool) -> Shell {
     let app_state = Arc::new(AppStateStore::load(state_path.clone()));
     let controller = cx.new(|cx| ConnectionController::new(backend, store, app_state, cx));
     cx.run_until_parked();
+    let chat_panes: std::rc::Rc<std::cell::RefCell<Vec<gpui_kit::WeakEntity<super::ChatPane>>>> =
+        std::rc::Rc::default();
+    cx.update(|cx| {
+        let made = std::rc::Rc::clone(&chat_panes);
+        cx.observe_new(move |_: &mut super::ChatPane, _, cx| {
+            made.borrow_mut().push(cx.weak_entity());
+        })
+        .detach();
+    });
     let window = cx.update(|cx| {
         gpui_kit::init(cx);
         app::init(Core::at(Path::new(&state_path)), cx);
@@ -855,6 +884,7 @@ fn shell_with(cx: &mut TestAppContext, git: bool) -> Shell {
         host,
         controller,
         visual,
+        panes: chat_panes,
         _dir: dir,
     };
     shell.publish(vec![
@@ -1779,8 +1809,11 @@ fn a_press_on_the_conversation_leaves_the_keyboard_with_the_composer(cx: &mut Te
 #[gpui_kit::test]
 fn the_keyboard_leaves_the_composer_for_the_controls_and_presses_them(cx: &mut TestAppContext) {
     let mut shell = open(cx);
-    // Back from the composer: the earlier message's Edit.
-    shell.press("shift-tab");
+    // Back from the composer: the reply's Fork and Copy, then the earlier
+    // message's Edit.
+    for _ in 0..3 {
+        shell.press("shift-tab");
+    }
     shell.press("enter");
     assert!(shell.named("Editing an earlier message"));
     shell.click("chat-edit-cancel");
@@ -1864,7 +1897,12 @@ fn a_right_click_copies_what_cannot_be_selected(cx: &mut TestAppContext) {
         shell.visual.update(|window, cx| window.right_click(id, cx));
         shell.settle();
         shell.visual.update(|window, cx| {
-            let found = window.find_by_label(entry);
+            // The menu's entry, not a message's button of the same name.
+            let found = window
+                .find_all_by_role(gpui_kit::Role::MenuItem)
+                .into_iter()
+                .find(|item| item.label() == Some(entry))
+                .expect("a menu item");
             let item = found.path().last().cloned().expect("a menu item");
             window.click(item, cx);
         });
@@ -2574,18 +2612,22 @@ fn a_pill_shows_a_choice_at_once_and_snaps_back_when_refused(cx: &mut TestAppCon
 fn stop_shows_at_once_until_the_turn_ends(cx: &mut TestAppContext) {
     let mut shell = open(cx);
     shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
-    assert!(!shell.shows("chat-stopping"));
+    assert_eq!(shell.label("chat-working"), "Working…");
     shell.host.hold_next();
     shell.click("chat-send");
-    assert_eq!(shell.label("chat-stopping"), "Stopping…");
+    assert_eq!(shell.label("chat-working"), "Stopping…");
     // Off while it stops: a second press sends nothing.
     shell.click("chat-send");
     assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
     shell.host.release();
     shell.settle();
-    assert!(shell.shows("chat-stopping"), "answered, still working");
+    assert_eq!(
+        shell.label("chat-working"),
+        "Stopping…",
+        "answered, still working"
+    );
     shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
-    assert!(!shell.shows("chat-stopping"));
+    assert!(!shell.shows("chat-working"));
     assert!(shell.named("Send"));
 }
 
@@ -2597,7 +2639,7 @@ fn a_refused_or_unanswered_stop_is_stop_again(cx: &mut TestAppContext) {
         .host
         .refuse_next("chat_agent_gone: The agent has exited.");
     shell.click("chat-send");
-    assert!(!shell.shows("chat-stopping"));
+    assert_eq!(shell.label("chat-working"), "Working…");
     assert_eq!(shell.label("chat-notice"), "The agent has exited.");
     assert!(shell.named("Stop"));
 
@@ -2605,13 +2647,356 @@ fn a_refused_or_unanswered_stop_is_stop_again(cx: &mut TestAppContext) {
     shell.host.hold_next();
     shell.click("chat-send");
     assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
-    assert!(shell.shows("chat-stopping"));
+    assert_eq!(shell.label("chat-working"), "Stopping…");
     shell
         .visual
         .executor()
         .advance_clock(std::time::Duration::from_secs(10));
     shell.settle();
-    assert!(!shell.shows("chat-stopping"));
+    assert_eq!(shell.label("chat-working"), "Working…");
     shell.click("chat-send");
     assert_eq!(shell.host.count(ChatAction::Interrupt), 3);
+}
+
+// The timeline: groups of steps, the working line, thinking, message buttons.
+
+fn with_status(mut item: ChatItem, status: ChatToolStatus) -> ChatItem {
+    item.tool.as_mut().unwrap().status = status.into();
+    item
+}
+
+fn edited(id: &str, path: &str, added: u32, removed: u32) -> ChatItem {
+    let mut item = tool(id, ChatToolKind::Edit, "edit", path);
+    let edit = item.tool.as_mut().unwrap();
+    edit.path = path.into();
+    edit.added = added;
+    edit.removed = removed;
+    item
+}
+
+fn clipboard(shell: &mut Shell) -> Option<String> {
+    shell
+        .visual
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+}
+
+fn ticking(shell: &mut Shell) -> bool {
+    let pane = shell.pane();
+    shell.visual.update(|_, cx| pane.read(cx).is_ticking())
+}
+
+#[gpui_kit::test]
+fn a_run_of_three_steps_folds_into_one_line_that_stays_open_as_it_grows(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Group the tool rows."),
+            item("a1", ChatItemKind::Assistant, "I'll start with the view."),
+            tool("r1", ChatToolKind::Read, "read", "src/chat/view.rs"),
+            tool("r2", ChatToolKind::Read, "read", "src/chat/pane.rs"),
+        ],
+        "",
+    ));
+    // Two steps stay rows.
+    assert!(shell.shows("chat-tool-r1"));
+    assert!(!shell.shows("chat-group-r1"));
+
+    // A third folds them into one closed line.
+    let check = tool("c1", ChatToolKind::Command, "run", "cargo check");
+    shell.chat(event(11, ChatChange::Item(check)));
+    assert!(!shell.shows("chat-tool-r1"));
+    assert_eq!(shell.label("chat-group-r1"), "3 steps, read 2 · ran 1");
+    shell.click("chat-group-r1");
+    assert!(shell.shows("chat-tool-r1") && shell.shows("chat-tool-c1"));
+
+    // It stays open as steps and the agent's text come after it.
+    let search = tool("s1", ChatToolKind::Search, "search", "fn render_row");
+    shell.chat(event(12, ChatChange::Item(search)));
+    shell.chat(event(
+        13,
+        ChatChange::Item(item("a2", ChatItemKind::Assistant, "Done.")),
+    ));
+    assert!(shell.shows("chat-tool-s1"));
+    assert_eq!(
+        shell.label("chat-group-r1"),
+        "4 steps, read 2 · ran 1 · searched 1"
+    );
+    shell.click("chat-group-r1");
+    assert!(!shell.shows("chat-tool-r1"));
+
+    // A rewind into it leaves two steps: rows again.
+    shell.chat(event(
+        14,
+        ChatChange::Truncate(ChatTruncate {
+            after_item_id: "r2".into(),
+        }),
+    ));
+    assert!(!shell.shows("chat-group-r1"));
+    assert!(shell.shows("chat-tool-r1") && shell.shows("chat-tool-r2"));
+}
+
+#[gpui_kit::test]
+fn a_page_that_continues_a_run_joins_its_group(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(page(
+        10,
+        vec![
+            item("u0", ChatItemKind::User, "Go."),
+            tool("r1", ChatToolKind::Read, "read", "a.rs"),
+        ],
+        "",
+    )));
+    shell.chat(snapshot(
+        10,
+        vec![
+            tool("r2", ChatToolKind::Read, "read", "b.rs"),
+            tool("r3", ChatToolKind::Read, "read", "c.rs"),
+            item("a1", ChatItemKind::Assistant, "Read them."),
+        ],
+        "older-1",
+    ));
+    assert!(shell.shows("chat-item-u0"), "the page arrived");
+    assert_eq!(shell.label("chat-group-r1"), "3 steps, read 3");
+    assert!(!shell.shows("chat-tool-r2"));
+}
+
+#[gpui_kit::test]
+fn the_run_a_turn_adds_to_is_one_closed_line_and_the_working_line_says_what_runs(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let test = with_status(
+        tool(
+            "c2",
+            ChatToolKind::Command,
+            "run",
+            "cargo test -p muxflow-gpui chat",
+        ),
+        ChatToolStatus::Running,
+    );
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![
+            item("u1", ChatItemKind::User, "Run the chat tests."),
+            item("a1", ChatItemKind::Assistant, "The view compiles."),
+            tool("r1", ChatToolKind::Read, "read", "src/chat/view.rs"),
+            edited("e1", "src/chat/view.rs", 84, 9),
+            tool("c1", ChatToolKind::Command, "run", "cargo check"),
+            test.clone(),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-group-r1"), "4 steps so far");
+    assert!(!shell.shows("chat-tool-c2"), "closed: no row under it");
+    // The edits stay in sight.
+    assert_eq!(shell.label("chat-group-file-r1-0"), "view.rs");
+    assert_eq!(
+        shell.label("chat-working"),
+        "Running cargo test -p muxflow-gpui chat…"
+    );
+    // Opened, every row is there and the chips are not needed.
+    shell.click("chat-group-r1");
+    assert!(shell.shows("chat-tool-c2"));
+    assert!(!shell.shows("chat-group-file-r1-0"));
+
+    // A failed step, and the turn's end: the line goes and nothing is left.
+    let failed = with_status(test, ChatToolStatus::Failed);
+    shell.chat(event(11, ChatChange::Updated(failed)));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert_eq!(
+        shell.label("chat-group-r1"),
+        "4 steps, 1 failed, read 1 · ran 2 · edited 1 file"
+    );
+    assert!(shell.shows("chat-tool-c2"), "still open");
+}
+
+#[gpui_kit::test]
+fn more_than_three_edited_files_are_two_chips_and_a_count_that_opens_the_group(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Fix them."),
+            edited("e1", "src/view.rs", 1, 0),
+            edited("e2", "src/pane.rs", 2, 1),
+            edited("e3", "src/model.rs", 3, 0),
+            edited("e4", "src/tests.rs", 4, 2),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-group-e1"), "4 steps, edited 4 files");
+    assert_eq!(shell.label("chat-group-file-e1-0"), "view.rs");
+    assert_eq!(shell.label("chat-group-file-e1-1"), "pane.rs");
+    assert!(!shell.shows("chat-group-file-e1-2"));
+    assert_eq!(shell.label("chat-group-more-e1"), "+2");
+    shell.click("chat-group-more-e1");
+    assert!(shell.shows("chat-tool-e4"), "the count opens the group");
+}
+
+#[gpui_kit::test]
+fn the_working_line_ticks_once_a_second_and_only_while_on_screen(cx: &mut TestAppContext) {
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    let mut shell = kept(cx);
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.seconds(), "0s");
+    assert!(ticking(&mut shell));
+    shell.wait(Duration::from_secs(2));
+    assert_eq!(shell.seconds(), "2s");
+
+    // Kept off screen: no timer, and the pane draws nothing.
+    shell.show_window("@2");
+    assert!(!ticking(&mut shell));
+    let pane = shell.pane();
+    let notified = Rc::new(Cell::new(0));
+    let counted = notified.clone();
+    let _counting = shell
+        .visual
+        .update(|_, cx| cx.observe(&pane, move |_, _| counted.set(counted.get() + 1)));
+    shell.wait(Duration::from_secs(5));
+    assert_eq!(notified.get(), 0);
+    shell.show_window("@1");
+    assert!(ticking(&mut shell));
+    assert_eq!(shell.seconds(), "7s");
+
+    // Waiting on the user: the card is the status, and there is no line.
+    shell.chat(event(12, ChatChange::State(permission("r1"))));
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+    // The same turn goes on.
+    shell.chat(event(13, ChatChange::State(state(ChatTurnState::Working))));
+    assert_eq!(shell.seconds(), "7s");
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+}
+
+#[gpui_kit::test]
+fn thinking_is_said_while_it_streams_and_is_a_thought_row_once_it_ends(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![item("u1", ChatItemKind::User, "Fold thinking in too.")],
+        "",
+    ));
+    // The agent says that it thinks, before any of it is text.
+    let mut thinking = item("t1", ChatItemKind::Reasoning, "");
+    thinking.streaming = true;
+    shell.chat(event(11, ChatChange::Item(thinking.clone())));
+    assert_eq!(shell.label("chat-working"), "Thinking…");
+    assert!(!shell.shows("chat-working-preview"));
+    assert!(!shell.shows("chat-thought-t1"));
+    shell.chat(delta(
+        12,
+        "t1",
+        "A group ends where text starts. So the row",
+    ));
+    assert_eq!(
+        shell.label("chat-working-preview"),
+        "A group ends where text starts."
+    );
+    assert!(
+        !shell.shows("chat-thought-t1"),
+        "said by the line, not a row"
+    );
+
+    shell.wait(std::time::Duration::from_secs(8));
+    thinking.text = "A group ends where text starts. So the row index is not enough.".into();
+    thinking.streaming = false;
+    shell.chat(event(13, ChatChange::Updated(thinking.clone())));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.label("chat-thought-open-t1"), "Thought for 8s");
+    assert!(!shell.shows("chat-thought-text-t1"));
+    shell.click("chat-thought-open-t1");
+    assert!(shell.shows("chat-thought-text-t1"));
+
+    // One this pane did not watch says only that it thought.
+    shell.chat(snapshot(
+        20,
+        vec![item("u1", ChatItemKind::User, "Again."), thinking],
+        "",
+    ));
+    assert_eq!(shell.label("chat-thought-open-t1"), "Thought");
+}
+
+/// The conversation the message buttons are tried on: a reply that cannot
+/// be rewound to, and one of two texts with a step between them.
+fn replies(cx: &mut TestAppContext) -> Shell {
+    let mut shell = shell(cx);
+    let mut sealed = item("u0", ChatItemKind::User, "Hello.");
+    sealed.rewindable = false;
+    shell.chat(snapshot(
+        10,
+        vec![
+            sealed,
+            item("a0", ChatItemKind::Assistant, "Hi."),
+            item("u1", ChatItemKind::User, "Group the tool rows."),
+            item("a1", ChatItemKind::Assistant, "I'll start with the view."),
+            tool("r1", ChatToolKind::Read, "read", "src/view.rs"),
+            item("a2", ChatItemKind::Assistant, "Runs now fold."),
+        ],
+        "",
+    ));
+    shell
+}
+
+#[gpui_kit::test]
+fn a_message_has_its_buttons_and_a_reply_only_under_its_last_text(cx: &mut TestAppContext) {
+    let mut shell = replies(cx);
+    // The user's: Copy, and Edit where it can be rewound to.
+    assert_eq!(shell.label("chat-copy-u1"), "Copy");
+    assert_eq!(shell.label("chat-edit-u1"), "Edit and resend");
+    assert!(shell.shows("chat-copy-u0"));
+    assert!(!shell.shows("chat-edit-u0"));
+    // The agent's: Copy and Fork under the last text of each reply.
+    assert!(shell.shows("chat-copy-a0") && shell.shows("chat-fork-a0"));
+    assert!(!shell.shows("chat-copy-a1") && !shell.shows("chat-fork-a1"));
+    assert_eq!(shell.label("chat-copy-a2"), "Copy");
+    assert_eq!(shell.label("chat-fork-a2"), "Fork from here");
+    // The reply a turn is still writing has none yet.
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(!shell.shows("chat-copy-a2"));
+    assert!(shell.shows("chat-copy-a0"));
+    // The pencil edits.
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    assert!(shell.named("Editing an earlier message"));
+}
+
+#[gpui_kit::test]
+fn copy_takes_the_message_or_its_whole_reply_and_shows_a_check_for_a_second(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = replies(cx);
+    shell.hover("chat-item-u1");
+    shell.click("chat-copy-u1");
+    assert_eq!(
+        clipboard(&mut shell).as_deref(),
+        Some("Group the tool rows.")
+    );
+    assert_eq!(shell.label("chat-copy-u1"), "Copied");
+    shell.wait(std::time::Duration::from_secs(1));
+    assert_eq!(shell.label("chat-copy-u1"), "Copy");
+    // A reply's: every text of it, as Markdown.
+    shell.hover("chat-item-a2");
+    shell.click("chat-copy-a2");
+    assert_eq!(
+        clipboard(&mut shell).as_deref(),
+        Some("I'll start with the view.\n\nRuns now fold.")
+    );
+    assert_eq!(shell.label("chat-copy-a2"), "Copied");
+    // Fork from here asks nothing of the host until the host can fork.
+    shell.click("chat-fork-a2");
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
 }
