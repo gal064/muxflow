@@ -14,10 +14,13 @@
   --accent: #7aa6da;
   --accent-ink: #282c34;
   --accent-wash: #7aa6da1f;
+  --link-ink: #7aa6da;
   --danger: #cc6566;
   --danger-ink: #e79596;
   --danger-wash: #cc656622;
   --ok: #28c840;
+  --ok-ink: #28c840;
+  --working-ink: #f0c674;
   --warn: #febc2e;
   --shadow: #000000;
   --term-bg: #282c34;
@@ -62,10 +65,13 @@
   --accent: #2f6fe0;
   --accent-ink: #ffffff;
   --accent-wash: #2f6fe01f;
+  --link-ink: #2563eb;
   --danger: #dc2626;
   --danger-ink: #b91c1c;
   --danger-wash: #dc262622;
   --ok: #16a34a;
+  --ok-ink: #15803d;
+  --working-ink: #b45309;
   --warn: #b45309;
   --shadow: #18181b40;
   --term-bg: #fcfcfc;

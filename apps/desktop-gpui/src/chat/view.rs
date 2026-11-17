@@ -82,7 +82,7 @@ fn markdown_style(p: &Palette, dark: bool) -> TextViewStyle {
     TextViewStyle::default()
         .with_foreground(p.chrome_ink.into())
         .with_muted_foreground(p.chrome_dim.into())
-        .with_link(p.accent.into())
+        .with_link(p.link_ink.into())
         .with_selection(p.accent_wash.into())
         .with_code_background(p.chrome_raised.into())
         .with_border(p.chrome_border.into())
@@ -207,15 +207,16 @@ fn message_buttons(buttons: Vec<AnyElement>) -> Div {
     h_flex().h(ui(24.)).gap(ui(2.)).children(buttons)
 }
 
-/// `+120 −14`: what edits added and removed.
+/// `+120 −14`: what edits added and removed, in the text inks of green and
+/// red (S8, C1): the fills are too light or too dark to read this small.
 fn line_counts(added: u32, removed: u32, palette: &Palette) -> Div {
     h_flex()
         .flex_none()
         .gap(ui(5.))
-        .child(div().text_color(palette.ok).child(format!("+{added}")))
+        .child(div().text_color(palette.ok_ink).child(format!("+{added}")))
         .child(
             div()
-                .text_color(palette.danger)
+                .text_color(palette.danger_ink)
                 // A minus sign, as wide as the plus.
                 .child(format!("\u{2212}{removed}")),
         )
@@ -275,10 +276,11 @@ fn outcome(tool: &ChatTool, palette: &Palette) -> AnyElement {
         // The still working mark: what runs is said by the working line.
         return WorkingIcon::new(10., palette.state_working).into_any_element();
     }
+    // The marks keep the state colours; words take their text inks (S8, C1).
     let (fallback, color) = match status {
-        ChatToolStatus::Running => ("running", palette.state_working),
-        ChatToolStatus::Failed => ("failed", palette.danger),
-        ChatToolStatus::Ok | ChatToolStatus::Unspecified => ("done", palette.ok),
+        ChatToolStatus::Running => ("running", palette.working_ink),
+        ChatToolStatus::Failed => ("failed", palette.danger_ink),
+        ChatToolStatus::Ok | ChatToolStatus::Unspecified => ("done", palette.ok_ink),
     };
     let text: SharedString = if tool.result_summary.is_empty() {
         fallback.into()
@@ -336,12 +338,13 @@ impl ChatPane {
     /// What is above the oldest item held: more to load, or that there was
     /// more and it is gone.
     fn header_row(&mut self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        // These notes are read, not decoration: the dim ink (S8, C1).
         let note = |text: &'static str| {
             div()
                 .w_full()
                 .text_center()
                 .text_size(ui(12.5))
-                .text_color(palette.chrome_faint)
+                .text_color(palette.chrome_dim)
                 .child(text)
         };
         if !self.chat.is_held() {
@@ -374,7 +377,7 @@ impl ChatPane {
                         .rounded(ui(4.))
                         .focus_visible(move |style| style.bg(wash))
                         .text_size(ui(12.5))
-                        .text_color(palette.accent)
+                        .text_color(palette.link_ink)
                         .child("Load earlier messages")
                         .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
                 )
@@ -413,7 +416,7 @@ impl ChatPane {
                     .justify_center()
                     .gap(ui(6.))
                     .text_size(ui(12.5))
-                    .text_color(palette.chrome_faint)
+                    .text_color(palette.chrome_dim)
                     .when(compacted, |notice| {
                         notice.child(icon(IconName::Shrink, 12., palette.chrome_faint))
                     })
@@ -589,7 +592,7 @@ impl ChatPane {
             copies.push(("Copy output", tool.output_preview.clone().into()));
         }
         // A subagent's row says who it was and what it was asked, in prose,
-        // with its figures faint after it (S9).
+        // with its figures quieter after it (S9), in the dim ink (S8, C1).
         let what = if subagent {
             let (kind, asked) = timeline::subagent_name(&tool);
             let figures = timeline::figures(&tool);
@@ -608,7 +611,7 @@ impl ChatPane {
                     what.child(
                         div()
                             .flex_none()
-                            .text_color(palette.chrome_faint)
+                            .text_color(palette.chrome_dim)
                             .child(SharedString::from(format!(" · {figures}"))),
                     )
                 })
@@ -637,7 +640,7 @@ impl ChatPane {
                         .flex_none()
                         .font_family(fonts::MONO)
                         .text_size(ui(12.))
-                        .text_color(palette.chrome_faint)
+                        .text_color(palette.chrome_dim)
                         .child(verb),
                 )
             })
@@ -724,7 +727,7 @@ impl ChatPane {
                             .px(ui(10.))
                             .pb(ui(6.))
                             .text_size(ui(12.))
-                            .text_color(palette.chrome_faint)
+                            .text_color(palette.chrome_dim)
                             .child("The rest of the output is not shown."),
                     )
                 })
@@ -944,7 +947,7 @@ impl ChatPane {
             .children(failed.map(|failed| {
                 div()
                     .flex_none()
-                    .text_color(palette.danger)
+                    .text_color(palette.danger_ink)
                     .font_weight(FontWeight::MEDIUM)
                     .child(failed)
             }))
@@ -954,7 +957,7 @@ impl ChatPane {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_color(palette.chrome_faint)
+                    .text_color(palette.chrome_dim)
                     .child(counts),
             )
             .children(chips.into_iter().flatten())
@@ -1049,8 +1052,10 @@ impl ChatPane {
                         )
                     }),
             )
+            // The seconds and "Esc to stop" are decoration and stay faint; the
+            // thinking's sentence is read, so it is dim (S8, C1).
             .children(doing.preview.map(|preview| {
-                // `.prev`: the latest sentence of the thinking, one faint line.
+                // `.prev`: the latest sentence of the thinking, one quiet line.
                 div()
                     .id("chat-working-preview")
                     .test_support()
@@ -1059,7 +1064,7 @@ impl ChatPane {
                     .min_w_0()
                     .truncate()
                     .text_size(ui(13.))
-                    .text_color(palette.chrome_faint)
+                    .text_color(palette.chrome_dim)
                     .child(preview)
             }))
             .children(self.subagent_rows(palette))
@@ -1185,7 +1190,7 @@ impl ChatPane {
                 .pt(ui(8.))
                 .text_center()
                 .text_size(ui(12.5))
-                .text_color(palette.chrome_faint)
+                .text_color(palette.chrome_dim)
                 .child("Updating…")
                 .into_any_element()
         })
@@ -1228,28 +1233,29 @@ impl ChatPane {
 
     /// What fills the pane before there is a conversation to show.
     fn opening(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
-        let body = match self.open_error.clone() {
-            Some(error) => v_flex()
-                .items_center()
-                .gap(ui(10.))
-                .child(
-                    div()
-                        .id("chat-open-error")
-                        .test_support()
-                        .role(Role::Alert)
-                        .aria_label(error.clone())
-                        .text_color(palette.chrome_ink)
-                        .child(error),
-                )
-                .child(self.retry_button(palette, cx)),
-            None => v_flex().child(div().text_color(palette.chrome_faint).child(
-                if self.is_live() {
-                    "Opening the chat…"
-                } else {
-                    "Waiting for the host to reconnect…"
-                },
-            )),
-        };
+        let body =
+            match self.open_error.clone() {
+                Some(error) => v_flex()
+                    .items_center()
+                    .gap(ui(10.))
+                    .child(
+                        div()
+                            .id("chat-open-error")
+                            .test_support()
+                            .role(Role::Alert)
+                            .aria_label(error.clone())
+                            .text_color(palette.chrome_ink)
+                            .child(error),
+                    )
+                    .child(self.retry_button(palette, cx)),
+                None => v_flex().child(div().text_color(palette.chrome_dim).child(
+                    if self.is_live() {
+                        "Opening the chat…"
+                    } else {
+                        "Waiting for the host to reconnect…"
+                    },
+                )),
+            };
         div()
             .flex_1()
             .min_h_0()
@@ -1412,6 +1418,8 @@ impl Render for ChatPane {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::Rgba;
+
     use super::*;
 
     #[test]
@@ -1435,5 +1443,184 @@ mod tests {
     #[test]
     fn the_column_follows_the_ui_scale() {
         assert_eq!(column(px(1200.), false, px(20.)), (px(200.), px(200.)));
+    }
+
+    /// One of the chat's small texts: the ink it is drawn in, on the surface
+    /// under it.
+    struct Text {
+        role: &'static str,
+        ink: fn(&Palette) -> Rgba,
+        ground: fn(&Palette) -> Rgba,
+    }
+
+    const fn text(
+        role: &'static str,
+        ink: fn(&Palette) -> Rgba,
+        ground: fn(&Palette) -> Rgba,
+    ) -> Text {
+        Text { role, ink, ground }
+    }
+
+    fn pane(p: &Palette) -> Rgba {
+        p.chrome_bg
+    }
+
+    fn raised(p: &Palette) -> Rgba {
+        p.chrome_raised
+    }
+
+    /// The permission card's head and a failed chip: the red wash over the pane.
+    fn danger_wash(p: &Palette) -> Rgba {
+        over(p.danger_wash, p.chrome_bg)
+    }
+
+    /// A picked option in a question card: the accent wash over the pane.
+    fn accent_wash(p: &Palette) -> Rgba {
+        over(p.accent_wash, p.chrome_bg)
+    }
+
+    fn dim(p: &Palette) -> Rgba {
+        p.chrome_dim
+    }
+
+    fn faint(p: &Palette) -> Rgba {
+        p.chrome_faint
+    }
+
+    /// A translucent `top` flattened onto `ground`, as CSS composites it.
+    fn over(top: Rgba, ground: Rgba) -> Rgba {
+        let mix = |a: f32, b: f32| a * top.a + b * (1. - top.a);
+        Rgba {
+            r: mix(top.r, ground.r),
+            g: mix(top.g, ground.g),
+            b: mix(top.b, ground.b),
+            a: 1.,
+        }
+    }
+
+    /// WCAG 2's contrast ratio between two opaque colours.
+    fn contrast(a: Rgba, b: Rgba) -> f64 {
+        let luminance = |color: Rgba| {
+            let channel = |value: f32| {
+                let value = f64::from(value);
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// S8, C1: in the chat, text that has to be read is in an ink that reads
+    /// at 4.5:1 on what it sits on, in both themes. Hover and focus fills are
+    /// left out: they last while the pointer is there.
+    const READ: &[Text] = &[
+        text("tool verb", dim, pane),
+        text("tool outcome, done", |p| p.ok_ink, pane),
+        text("tool outcome, running", |p| p.working_ink, pane),
+        text("tool outcome, failed", |p| p.danger_ink, pane),
+        text("lines added", |p| p.ok_ink, pane),
+        text("lines removed", |p| p.danger_ink, pane),
+        text("finished subagent's figures", dim, pane),
+        text("running subagent's figures", dim, pane),
+        text("steps line's summary", dim, pane),
+        text("steps line's failed count", |p| p.danger_ink, pane),
+        text("notice: Interrupted, Context compacted", dim, pane),
+        text("Loading earlier messages, not available", dim, pane),
+        text("Load earlier messages", |p| p.link_ink, pane),
+        text("link in the agent's text", |p| p.link_ink, pane),
+        text("thinking's sentence on the working line", dim, pane),
+        text("Updating", dim, pane),
+        text("Opening the chat, waiting for the host", dim, pane),
+        text("conversation out of date", |p| p.danger_ink, pane),
+        text("composer notice", |p| p.danger_ink, pane),
+        text("agent status", dim, pane),
+        text("context meter", dim, pane),
+        text("sent attachment's size", dim, pane),
+        text("Upload failed", |p| p.danger_ink, danger_wash),
+        text("Drop to attach", |p| p.link_ink, pane),
+        text("question card's 1 of 3", dim, pane),
+        text("details: trailing figures and none", dim, pane),
+        text("details: Context", dim, pane),
+        text("details: vs main", dim, pane),
+        text("details: a changes row with none", dim, pane),
+        text("details: lines added", |p| p.ok_ink, pane),
+        text("details: lines removed", |p| p.danger_ink, pane),
+        text("details: why the switch failed", |p| p.danger_ink, pane),
+        text("details: Details, open", |p| p.link_ink, pane),
+    ];
+
+    /// Read, in the ink C1 gives them, and still under 4.5:1 in the light
+    /// theme: the dim ink is 4.4 on a raised surface and under 4 on either
+    /// wash. C1 changes no surface and no shared ink, so these are held where
+    /// they measure, and pass in the dark theme. Remove and the last three
+    /// were dim before C1.
+    const SHORT_IN_LIGHT: &[(Text, f64)] = &[
+        (
+            text("the rest of the output is not shown", dim, raised),
+            4.39,
+        ),
+        (text("composer attachment's size", dim, raised), 4.39),
+        (text("command's argument hint", dim, raised), 4.39),
+        (text("details: branch menu notes", dim, raised), 4.39),
+        (
+            text("permission card's waiting for you", dim, danger_wash),
+            3.76,
+        ),
+        (
+            text("failed attachment's Retry", |p| p.link_ink, danger_wash),
+            4.03,
+        ),
+        (text("failed attachment's Remove", dim, danger_wash), 3.76),
+        (text("a thought's text", dim, raised), 4.39),
+        (text("command's description", dim, raised), 4.39),
+        (text("picked option's description", dim, accent_wash), 3.94),
+    ];
+
+    /// Decoration, which C1 leaves faint: it says nothing that is not said
+    /// elsewhere. Faint still reads at 3:1, the floor for large text.
+    const DECORATION: &[Text] = &[
+        text("working line's seconds", faint, pane),
+        text("Esc to stop", faint, pane),
+        text("background task's time", faint, raised),
+        text("command list's section heading", faint, raised),
+    ];
+
+    #[test]
+    fn the_chats_text_that_must_be_read_reaches_4_5_to_1() {
+        for (theme, p) in [("dark", theme::dark()), ("light", theme::light())] {
+            for text in READ {
+                let ratio = contrast((text.ink)(&p), (text.ground)(&p));
+                assert!(ratio >= 4.5, "{theme}: {} is {ratio:.2}:1", text.role);
+            }
+            for (text, light) in SHORT_IN_LIGHT {
+                let ratio = contrast((text.ink)(&p), (text.ground)(&p));
+                let floor = if theme == "dark" { 4.5 } else { *light };
+                assert!(ratio >= floor, "{theme}: {} is {ratio:.2}:1", text.role);
+            }
+            for text in DECORATION {
+                let ratio = contrast((text.ink)(&p), (text.ground)(&p));
+                assert!(ratio >= 3., "{theme}: {} is {ratio:.2}:1", text.role);
+            }
+        }
+    }
+
+    /// The values S8 measured, so a change to the palette is seen here.
+    #[test]
+    fn the_text_inks_read_as_s8_measured_them() {
+        let (dark, light) = (theme::dark(), theme::light());
+        let on_pane = |p: &Palette, ink: Rgba| (contrast(ink, p.chrome_bg) * 100.).round() / 100.;
+        assert_eq!(on_pane(&dark, dark.chrome_faint), 3.86);
+        assert_eq!(on_pane(&light, light.chrome_faint), 3.50);
+        assert_eq!(on_pane(&dark, dark.danger_ink), 6.09);
+        assert_eq!(on_pane(&light, light.ok_ink), 4.81);
+        assert_eq!(on_pane(&light, light.working_ink), 4.81);
+        assert_eq!(on_pane(&light, light.link_ink), 4.95);
+        // Light's accent as text was 4.49999:1, a hair short.
+        assert!(contrast(light.accent, light.chrome_bg) < 4.5);
     }
 }

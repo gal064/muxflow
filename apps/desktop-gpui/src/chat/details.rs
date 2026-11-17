@@ -389,7 +389,7 @@ impl Card {
                 .px(ui(6.))
                 .py(ui(4.))
                 .text_size(ui(13.))
-                .text_color(p.chrome_faint)
+                .text_color(p.chrome_dim)
                 .child(text)
                 .into_any_element()
         };
@@ -532,7 +532,7 @@ impl Card {
                             .pl(ui(26.))
                             .pr(ui(4.))
                             .text_size(ui(12.5))
-                            .text_color(p.danger)
+                            .text_color(p.danger_ink)
                             .line_clamp(3)
                             .text_ellipsis()
                             .child(error),
@@ -557,7 +557,7 @@ impl Card {
                         div()
                             .flex_none()
                             .text_size(ui(12.))
-                            .text_color(p.chrome_faint)
+                            .text_color(p.chrome_dim)
                             .child("Context"),
                     )
                     .child(
@@ -630,7 +630,7 @@ impl Render for Card {
                         .border_color(p.accent)
                         // Opaque: it may lie over the conversation.
                         .bg(p.chrome_bg)
-                        .text_color(p.accent)
+                        .text_color(p.link_ink)
                 } else {
                     button
                         .ghost()
@@ -689,13 +689,13 @@ fn mark(name: IconName, p: &Palette) -> impl IntoElement {
         .child(icon(name, 14., p.chrome_faint))
 }
 
-/// `.x`: what trails a row.
+/// `.x`: what trails a row. Read, so in the dim ink, not the faint (S8, C1).
 fn extra(text: SharedString, p: &Palette) -> gpui_kit::Div {
     div()
         .flex_none()
         .whitespace_nowrap()
         .text_size(ui(12.))
-        .text_color(p.chrome_faint)
+        .text_color(p.chrome_dim)
         .child(text)
 }
 
@@ -831,10 +831,10 @@ fn changes_row(
                 .flex_none()
                 .gap(ui(4.))
                 .text_size(ui(12.))
-                .child(div().text_color(p.ok).child(format!("+{added}")))
+                .child(div().text_color(p.ok_ink).child(format!("+{added}")))
                 .child(
                     div()
-                        .text_color(p.danger)
+                        .text_color(p.danger_ink)
                         .child(format!("\u{2212}{removed}")),
                 )
                 .into_any_element(),
@@ -854,11 +854,13 @@ fn changes_row(
                 .gap(ui(4.))
                 .overflow_hidden()
                 .whitespace_nowrap()
+                // A row with nothing to show is a step quieter, still in an
+                // ink that reads (S8, C1).
                 .child(
                     div()
                         .flex_none()
                         .text_color(if dim {
-                            p.chrome_faint
+                            p.chrome_dim
                         } else {
                             p.chrome_ink_strong
                         })
@@ -868,7 +870,7 @@ fn changes_row(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_color(p.chrome_faint)
+                        .text_color(p.chrome_dim)
                         .child(vs)
                 })),
         )
