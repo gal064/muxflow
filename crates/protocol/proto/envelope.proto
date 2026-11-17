@@ -860,6 +860,14 @@ enum GitDiffTarget {
   GIT_DIFF_TARGET_BASE = 3;
 }
 
+// What OPERATION_GIT_BRANCH_SUMMARY compares the working tree with.
+enum GitSummaryBase {
+  // The merge base of HEAD and the default branch, as GIT_DIFF_TARGET_BASE.
+  GIT_SUMMARY_BASE_UNSPECIFIED = 0;
+  // HEAD: only what is not committed.
+  GIT_SUMMARY_BASE_HEAD = 1;
+}
+
 enum GitMutationKind {
   GIT_MUTATION_KIND_UNSPECIFIED = 0;
   GIT_MUTATION_KIND_STAGE_FILE = 1;
@@ -1042,6 +1050,8 @@ message GitRequest {
   GitDiffContentRequest content = 17;
   // OPERATION_GIT_CHECKOUT: the local branch, without `refs/heads/`.
   string branch = 18;
+  // OPERATION_GIT_BRANCH_SUMMARY.
+  GitSummaryBase summary_base = 19;
 }
 
 // One file of a branch summary. Renames are not detected: a renamed file is
@@ -1056,7 +1066,8 @@ message GitBranchFile {
   bool binary = 5;
 }
 
-// The working tree against the merge base of HEAD and the default branch.
+// The working tree against the merge base of HEAD and the default branch, or
+// against HEAD, as `GitRequest.summary_base` asks.
 message GitBranchSummary {
   // What the summary compares with, as Git names it (`origin/main`). Empty
   // when the repository has no default branch to compare with; then nothing

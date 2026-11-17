@@ -25,7 +25,7 @@ enum ChatAction {
   CHAT_ACTION_OPEN = 1;
   // Ends this connection's subscription to `pane_id`. The chat keeps running.
   CHAT_ACTION_CLOSE = 2;
-  // Sends `text` as a user message.
+  // Sends `text`, with any `attachments`, as a user message.
   CHAT_ACTION_SEND = 3;
   // Stops the running turn.
   CHAT_ACTION_INTERRUPT = 4;
@@ -41,6 +41,11 @@ enum ChatAction {
   CHAT_ACTION_SIDE_FORK = 9;
   // Writes the host's agent mode from `mode`. Names no pane.
   CHAT_ACTION_SET_MODE = 10;
+  // Forks the conversation into a new chat through the end of the turn that
+  // holds `item_id`.
+  CHAT_ACTION_FORK = 11;
+  // Stops the background task `task_id`, one of `ChatState.background`.
+  CHAT_ACTION_STOP_TASK = 12;
 }
 
 enum ChatPermissionMode {
@@ -124,6 +129,14 @@ enum ChatCommandKind {
   CHAT_COMMAND_KIND_MUXFLOW = 3;
 }
 
+enum ChatTaskKind {
+  CHAT_TASK_KIND_UNSPECIFIED = 0;
+  // A shell command.
+  CHAT_TASK_KIND_COMMAND = 1;
+  CHAT_TASK_KIND_SUBAGENT = 2;
+  CHAT_TASK_KIND_OTHER = 3;
+}
+
 // What the composer's pills select. In `ChatRequest.options` an empty string
 // or an unspecified enum keeps the current value.
 message ChatOptions {
@@ -154,6 +167,37 @@ message ChatTool {
   string output_preview = 9;
   // The output was longer than `output_preview`.
   bool output_truncated = 10;
+  // SUBAGENT: the kind of agent, as the provider names it: "Explore".
+  string agent_type = 11;
+  // SUBAGENT: what it is doing now: "Running ls -la".
+  string activity = 12;
+  // SUBAGENT: the tool calls it has made and the tokens it has used.
+  uint32 tool_uses = 13;
+  uint64 tokens = 14;
+  // SUBAGENT: it runs in the background, apart from the turn.
+  bool background = 15;
+}
+
+// A file sent with a user message, already on the host.
+message ChatAttachment {
+  // Absolute, on the host.
+  string path = 1;
+  // The name to show.
+  string name = 2;
+  // Such as "image/png". Empty when not known.
+  string media_type = 3;
+  uint64 size_bytes = 4;
+}
+
+// Work the agent runs outside the turn, such as a background command.
+message ChatBackgroundTask {
+  // The provider's id for the task: STOP_TASK takes it.
+  string id = 1;
+  ChatTaskKind kind = 2;
+  string description = 3;
+  int64 started_at_unix_millis = 4;
+  // STOP_TASK accepts this task.
+  bool stoppable = 5;
 }
 
 // One entry of the timeline. An item is sent whole when it appears and again
@@ -171,6 +215,8 @@ message ChatItem {
   int64 at_unix_millis = 6;
   // USER only: REWIND accepts this item.
   bool rewindable = 7;
+  // USER only: the files sent with the message.
+  repeated ChatAttachment attachments = 8;
 }
 
 message ChatOption {
@@ -275,6 +321,10 @@ message ChatState {
   // False when messages older than the oldest the host can serve existed and
   // are not available.
   bool history_complete = 10;
+  // What the agent runs outside the turn, whatever `turn` says.
+  repeated ChatBackgroundTask background = 11;
+  // The agent is compacting the conversation's context.
+  bool compacting = 12;
 }
 
 // Everything a client needs to draw a chat it has just opened. It replaces
@@ -308,7 +358,8 @@ message ChatRequest {
   // ANSWER: `ChatPendingRequest.request_id`.
   string request_id = 6;
   ChatAnswer answer = 7;
-  // REWIND: a `rewindable` USER item.
+  // REWIND: a `rewindable` USER item. FORK: any item of the turn to fork
+  // through.
   string item_id = 8;
   // LOAD_OLDER: the `older_cursor` of the snapshot or the previous page.
   string older_cursor = 9;
@@ -319,6 +370,10 @@ message ChatRequest {
   // SET_MODE: write only when this host has no saved settings yet.
   // The response always returns the effective host mode.
   bool initialize_if_unset = 12;
+  // SEND: files on the host to send with `text`.
+  repeated ChatAttachment attachments = 13;
+  // STOP_TASK: a `ChatBackgroundTask.id`.
+  string task_id = 14;
 }
 
 message ChatResponse {
@@ -326,7 +381,7 @@ message ChatResponse {
   repeated ChatItem older = 1;
   // LOAD_OLDER: the cursor for the page before `older`. Empty at the start.
   string older_cursor = 2;
-  // SIDE_FORK: the pane the fork opened in.
+  // SIDE_FORK and FORK: the pane the fork opened in.
   string forked_pane_id = 3;
   // SET_MODE: the mode now stored.
   ChatAgentMode mode = 4;

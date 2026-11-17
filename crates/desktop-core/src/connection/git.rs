@@ -46,6 +46,8 @@ pub struct GitCommand {
     pub watch_id: String,
     #[serde(default)]
     pub branch: String,
+    #[serde(default)]
+    pub summary_base: String,
 }
 
 /// Async so the host round trip never runs on the WebView's main thread. Git
@@ -96,6 +98,7 @@ pub async fn git_request(
         commit_message: command.commit_message,
         watch_id: command.watch_id,
         branch: command.branch,
+        summary_base: summary_base_from_name(&command.summary_base)?.into(),
         // Deferred diff bodies never travel on the control lane.
         content: None,
     };
@@ -162,6 +165,14 @@ fn diff_target_from_name(value: &str) -> Result<v1::GitDiffTarget, String> {
         "staged" => Ok(v1::GitDiffTarget::Staged),
         "base" => Ok(v1::GitDiffTarget::Base),
         _ => Err(format!("unsupported Git diff target {value}")),
+    }
+}
+
+fn summary_base_from_name(value: &str) -> Result<v1::GitSummaryBase, String> {
+    match value {
+        "" => Ok(v1::GitSummaryBase::Unspecified),
+        "head" => Ok(v1::GitSummaryBase::Head),
+        _ => Err(format!("unsupported Git summary base {value}")),
     }
 }
 
@@ -433,6 +444,10 @@ mod tests {
         assert_eq!(
             diff_target_from_name("base").unwrap(),
             v1::GitDiffTarget::Base
+        );
+        assert_eq!(
+            summary_base_from_name("head").unwrap(),
+            v1::GitSummaryBase::Head
         );
         let value = git_response_json(&v1::GitResponse {
             diff: Some(v1::GitDiff {

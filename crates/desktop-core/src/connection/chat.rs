@@ -17,12 +17,12 @@ use prost::Message as _;
 use tmux_agent_protocol::v1;
 
 pub use tmux_agent_protocol::v1::{
-    ChatAction, ChatAgentMode, ChatAnswer, ChatCapabilities, ChatCatalog, ChatCommand,
-    ChatCommandKind, ChatConnection, ChatEvent, ChatItem, ChatItemDelta, ChatItemKind, ChatModel,
-    ChatOption, ChatOptions, ChatPendingRequest, ChatPermissionMode, ChatQuestion,
-    ChatQuestionAnswer, ChatRequest, ChatRequestKind, ChatResponse, ChatSnapshot, ChatSpeed,
-    ChatState, ChatTool, ChatToolKind, ChatToolStatus, ChatTruncate, ChatTurnState, ChatUsage,
-    chat_event::Change as ChatChange,
+    ChatAction, ChatAgentMode, ChatAnswer, ChatAttachment, ChatBackgroundTask, ChatCapabilities,
+    ChatCatalog, ChatCommand, ChatCommandKind, ChatConnection, ChatEvent, ChatItem, ChatItemDelta,
+    ChatItemKind, ChatModel, ChatOption, ChatOptions, ChatPendingRequest, ChatPermissionMode,
+    ChatQuestion, ChatQuestionAnswer, ChatRequest, ChatRequestKind, ChatResponse, ChatSnapshot,
+    ChatSpeed, ChatState, ChatTaskKind, ChatTool, ChatToolKind, ChatToolStatus, ChatTruncate,
+    ChatTurnState, ChatUsage, chat_event::Change as ChatChange,
 };
 
 use super::{TerminalClients, get_client};
