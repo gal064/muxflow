@@ -314,15 +314,48 @@ fn read_chain(entries: &BTreeMap<String, Entry>, leaf: &str, rewound: &str) -> H
     }
 }
 
-/// The entry before `uuid` in its conversation: where a rewind of that
-/// message goes back to. `Some(None)` when it is the conversation's first
-/// entry, `None` when the session's file does not hold it.
-pub(in crate::service::chat) fn parent_of(
+/// The most entries that are not messages a cut is walked back past: a
+/// hook's summary, a turn's duration, files the agent attached.
+const MAX_SKIPPED: usize = 64;
+
+/// The message before `uuid` in its conversation, the user's or the
+/// agent's: where a rewind of that message goes back to, and where a copy
+/// that ends before it is cut. The agent cuts a session only at a message
+/// (`--resume-session-at`), and between two messages it may record entries
+/// that are not one, such as a Stop hook's summary. `Some(None)` when no
+/// message comes before it, `None` when the session's file does not hold
+/// it or what came before it.
+pub(in crate::service::chat) fn message_before(
     configuration: &Path,
     session: &str,
     uuid: &str,
 ) -> Option<Option<String>> {
-    let file = std::fs::File::open(session_file(configuration, session).ok()??).ok()?;
+    let file = session_file(configuration, session).ok()??;
+    let mut parent = recorded(&file, uuid)?.parent;
+    for _ in 0..MAX_SKIPPED {
+        let Some(id) = parent else {
+            return Some(None);
+        };
+        let entry = recorded(&file, &id)?;
+        if entry.message {
+            return Some(Some(id));
+        }
+        parent = entry.parent;
+    }
+    None
+}
+
+/// What the session's file says of one entry of its conversation.
+struct Recorded {
+    parent: Option<String>,
+    /// It is a message, the user's or the agent's.
+    message: bool,
+}
+
+/// The entry `uuid` as the session's file last records it, `None` when it
+/// does not.
+fn recorded(file: &Path, uuid: &str) -> Option<Recorded> {
+    let file = std::fs::File::open(file).ok()?;
     let mut found = None;
     for line in std::io::BufReader::new(file).split(b'\n') {
         let line = line.ok()?;
@@ -338,7 +371,10 @@ pub(in crate::service::chat) fn parent_of(
         };
         if string(&value, "uuid") == uuid && value["isSidechain"].as_bool() != Some(true) {
             // The last record of it is the one that counts.
-            found = Some(value["parentUuid"].as_str().map(str::to_owned));
+            found = Some(Recorded {
+                parent: value["parentUuid"].as_str().map(str::to_owned),
+                message: matches!(string(&value, "type"), "user" | "assistant"),
+            });
         }
     }
     found
