@@ -819,7 +819,8 @@ impl Claude {
         if response["models"].is_array() {
             self.models.clear();
             self.listed_models.clear();
-            for model in list("models") {
+            let models = list("models");
+            for model in models {
                 let id = string(model, "value");
                 if id.is_empty() {
                     continue;
@@ -830,7 +831,11 @@ impl Claude {
                 });
                 self.listed_models.push(v1::ChatModel {
                     id: id.to_owned(),
-                    label: string(model, "displayName").to_owned(),
+                    label: if id == DEFAULT_MODEL {
+                        default_label(model, models)
+                    } else {
+                        string(model, "displayName").to_owned()
+                    },
                     efforts: model["supportedEffortLevels"]
                         .as_array()
                         .map_or(&[][..], Vec::as_slice)
@@ -1283,6 +1288,37 @@ fn permission(mode: &str) -> Permission {
         Permission::Full
     } else {
         Permission::Auto
+    }
+}
+
+/// The `value` of the entry Claude Code runs when no model is chosen.
+const DEFAULT_MODEL: &str = "default";
+
+/// The default entry named after the model it runs: "Opus 5.5 (default)".
+/// Claude Code calls it "Default (recommended)", which hides that model. The
+/// name is another entry's for the same model, else the start of the entry's
+/// description ("Opus 5.5 · Best for everyday, complex tasks"), else the
+/// model's id; with none of them, Claude Code's own name stays.
+fn default_label(entry: &Value, models: &[Value]) -> String {
+    let resolved = string(entry, "resolvedModel");
+    let named = models
+        .iter()
+        .filter(|model| string(model, "value") != DEFAULT_MODEL)
+        .find(|model| !resolved.is_empty() && string(model, "resolvedModel") == resolved)
+        .map(|model| string(model, "displayName"))
+        .filter(|name| !name.is_empty());
+    let described = || {
+        string(entry, "description")
+            .split_once(" \u{b7} ")
+            .map(|(name, _)| name.trim())
+            .filter(|name| !name.is_empty())
+    };
+    match named
+        .or_else(described)
+        .or(Some(resolved).filter(|id| !id.is_empty()))
+    {
+        Some(name) => format!("{name} (default)"),
+        None => string(entry, "displayName").to_owned(),
     }
 }
 

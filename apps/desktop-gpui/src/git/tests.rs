@@ -1764,7 +1764,9 @@ fn lists_the_default_branch_changes_only_while_that_scope_is_shown(cx: &mut Test
     });
     cx.run_until_parked();
     assert_eq!(panel.fake.count("branchSummary"), 1);
-    let summary = panel.panel.read_with(cx, |panel, _| panel.branch_summary());
+    let summary = panel
+        .panel
+        .read_with(cx, |panel, _| panel.summary(SummaryBase::DefaultBranch));
     assert_eq!(summary.unwrap().files[0].display_path, "a.txt");
 
     // A status that moved reads it again; one that did not, does not.
@@ -1779,39 +1781,95 @@ fn lists_the_default_branch_changes_only_while_that_scope_is_shown(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn reads_the_default_branch_changes_while_a_reader_wants_them(cx: &mut TestAppContext) {
+fn reads_both_summaries_while_a_reader_wants_them(cx: &mut TestAppContext) {
     let panel = Panel::new(cx, |command| {
         Some(Ok(match command.operation.as_str() {
+            "branchSummary" if command.summary_base == "head" => {
+                json!({ "branchSummary": { "baseRef": "HEAD",
+                "totalFileCount": "1", "added": "1", "removed": "0" } })
+            }
             "branchSummary" => json!({ "branchSummary": { "baseRef": "origin/main",
                 "totalFileCount": "0", "added": "3", "removed": "1" } }),
             _ => json!({ "status": status(1) }),
         }))
     });
+    let bases = || -> Vec<String> {
+        panel
+            .fake
+            .requests
+            .borrow()
+            .iter()
+            .filter(|command| command.operation == "branchSummary")
+            .map(|command| command.summary_base.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
     panel.point_at("t", 1, cx);
     panel
         .panel
-        .update(cx, |panel, cx| panel.read_branch_summary(true, cx));
+        .update(cx, |panel, cx| panel.read_summaries(true, cx));
     cx.run_until_parked();
     // Read once the status has rested.
-    assert_eq!(panel.fake.count("branchSummary"), 0);
+    assert!(bases().is_empty());
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(1100));
     cx.run_until_parked();
-    assert_eq!(panel.fake.count("branchSummary"), 1);
-    let summary = panel.panel.read_with(cx, |panel, _| panel.branch_summary());
-    assert_eq!(summary.unwrap().added, 3);
+    assert_eq!(bases(), ["", "head"]);
+    let summary = |base| panel.panel.read_with(cx, |panel, _| panel.summary(base));
+    assert_eq!(summary(SummaryBase::DefaultBranch).unwrap().added, 3);
+    let uncommitted = summary(SummaryBase::Head).unwrap();
+    assert_eq!(uncommitted.base_ref.as_deref(), Some("HEAD"));
+    assert_eq!(uncommitted.added, 1);
 
     // With no reader left and the uncommitted list shown, a moved status
     // reads nothing.
     panel
         .panel
-        .update(cx, |panel, cx| panel.read_branch_summary(false, cx));
+        .update(cx, |panel, cx| panel.read_summaries(false, cx));
     let watch_id = panel.fake.requests.borrow()[0].watch_id.clone();
     panel.store.update(cx, |store, cx| {
         store.handle_event(watch_event(&watch_id, "t", 2), cx)
     });
     cx.run_until_parked();
-    assert_eq!(panel.fake.count("branchSummary"), 1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(1100));
+    cx.run_until_parked();
+    assert_eq!(panel.fake.count("branchSummary"), 2);
+}
+
+#[gpui_kit::test]
+fn the_branch_scope_alone_reads_only_the_default_branch_summary(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        Some(Ok(match command.operation.as_str() {
+            "branchSummary" => json!({ "branchSummary": { "baseRef": "origin/main",
+                "totalFileCount": "0", "added": "0", "removed": "0" } }),
+            _ => json!({ "status": status(1) }),
+        }))
+    });
+    panel.point_at("t", 1, cx);
+    panel.panel.update(cx, |panel, cx| {
+        panel.set_scope(super::panel::Scope::Branch, cx)
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(1100));
+    cx.run_until_parked();
+    let asked: Vec<String> = panel
+        .fake
+        .requests
+        .borrow()
+        .iter()
+        .filter(|command| command.operation == "branchSummary")
+        .map(|command| command.summary_base.clone())
+        .collect();
+    assert_eq!(asked, [""]);
+    assert!(
+        panel
+            .panel
+            .read_with(cx, |panel, _| panel.summary(SummaryBase::Head))
+            .is_none()
+    );
 }
 
 #[gpui_kit::test]

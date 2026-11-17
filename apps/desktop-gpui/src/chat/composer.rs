@@ -35,6 +35,7 @@ use crate::{
 };
 
 use super::{
+    icon::{IconName, icon},
     pane::ChatPane,
     slash::{self, Section},
 };
@@ -78,7 +79,9 @@ fn pill(
     p: &Palette,
 ) -> Button {
     let pill = Button::new(id)
-        .label(format!("{label} \u{25be}"))
+        .label(label)
+        // `.pill .ic`: tucked in towards the pill's edge.
+        .child(icon(IconName::ChevronDown, 12., p.chrome_dim).mr(ui(-3.)))
         .accessibility_label(name)
         .xsmall()
         .h_auto()
@@ -438,10 +441,21 @@ impl ChatPane {
         let stop = self.stoppable();
         let off = !stop && self.send_refusal().is_some();
         let ring = p.chrome_ink_strong;
-        let (label, glyph, ground) = if stop {
-            ("Stop", "\u{25a0}", p.danger)
+        let (label, ground) = if stop {
+            ("Stop", p.danger)
         } else {
-            ("Send", "\u{2191}", p.accent)
+            ("Send", p.accent)
+        };
+        let mark = if stop {
+            // Lucide's `square` filled, as `.send .ic.sq` draws it; an SVG
+            // here would draw only its outline.
+            div()
+                .size(ui(10.))
+                .rounded(ui(2.))
+                .bg(p.chrome_bg)
+                .into_any_element()
+        } else {
+            icon(IconName::ArrowUp, 15., p.chrome_bg).into_any_element()
         };
         div()
             .id("chat-send")
@@ -452,13 +466,10 @@ impl ChatPane {
             .size(ui(26.))
             .rounded(ui(7.))
             .bg(ground)
-            .text_color(p.chrome_bg)
-            .text_size(ui(14.))
-            .font_weight(FontWeight::SEMIBOLD)
             .flex()
             .items_center()
             .justify_center()
-            .child(glyph)
+            .child(mark)
             .map(|button| {
                 if off {
                     button.opacity(0.42)

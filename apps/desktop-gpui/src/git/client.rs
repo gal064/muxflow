@@ -20,7 +20,7 @@ use crate::connection_ui::{backend::TerminalBackend, bridge_events::ChannelSink}
 
 use super::model::{
     self, BranchSummary, Branches, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope,
-    Mutation, StatusSnapshot, path_bytes, target_name,
+    Mutation, StatusSnapshot, SummaryBase, path_bytes, target_name,
 };
 
 /// How Git reaches a host's helper.
@@ -206,14 +206,16 @@ pub async fn diff(
     Ok((diff, status))
 }
 
-/// What the working tree changes against the default branch.
+/// What the working tree changes against `base`.
 pub async fn branch_summary(
     transport: Transport,
     scope: GitScope,
     repository_id: String,
+    base: SummaryBase,
 ) -> Result<BranchSummary, String> {
     let wire = GitCommand {
         repository_id,
+        summary_base: base.wire().to_owned(),
         ..command(&scope, "branchSummary")
     };
     let answer = read(&transport, &scope, wire).await?;

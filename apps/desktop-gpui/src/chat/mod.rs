@@ -19,6 +19,7 @@
 mod cards;
 mod composer;
 mod details;
+mod icon;
 mod links;
 pub mod model;
 mod open;

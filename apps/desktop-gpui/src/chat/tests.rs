@@ -390,6 +390,9 @@ struct HostState {
     /// The paths asked about, and whether each is there.
     files: Vec<String>,
     existing: Vec<String>,
+    /// Git's answer to a summary, by `summary_base`; one not given is never
+    /// answered.
+    summaries: std::collections::HashMap<String, Value>,
 }
 
 #[derive(Clone, Default)]
@@ -547,6 +550,31 @@ impl TerminalBackend for FakeHost {
             answer
         }
         .boxed()
+    }
+
+    /// The repository at `/work/repo`, clean, and the summaries asked for.
+    fn git_request(
+        &self,
+        _: String,
+        command: desktop_core::connection::git::GitCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let status = json!({ "status": {
+            "repository": { "repositoryId": "repo", "worktreeRoot": "/work/repo",
+                            "headName": "gpui/chat" },
+            "generation": "1", "sourceGeneration": "source-1", "entries": [],
+            "authoritative": true,
+        }});
+        match command.operation.as_str() {
+            "watch" | "status" => async move { Ok(status) }.boxed(),
+            "branchSummary" => match self.state().summaries.get(&command.summary_base) {
+                Some(summary) => {
+                    let answer = json!({ "branchSummary": summary });
+                    async move { Ok(answer) }.boxed()
+                }
+                None => futures::future::pending().boxed(),
+            },
+            _ => async { Err("not asked here".to_owned()) }.boxed(),
+        }
     }
 
     fn file_request(&self, _: String, command: Value) -> BoxFuture<'static, Result<Value, String>> {
@@ -747,6 +775,16 @@ impl Shell {
 /// The app's window on a connected local host whose one window holds a chat
 /// pane and a shell, the chat not yet answered.
 fn shell(cx: &mut TestAppContext) -> Shell {
+    shell_with(cx, false)
+}
+
+/// [`shell`], with Source Control running: the chat's folder is the
+/// repository at `/work/repo`.
+fn shell_in_repository(cx: &mut TestAppContext) -> Shell {
+    shell_with(cx, true)
+}
+
+fn shell_with(cx: &mut TestAppContext, git: bool) -> Shell {
     let dir = tempfile::tempdir().unwrap();
     let profiles = dir.path().join("profiles.json");
     let saved = json!({
@@ -776,6 +814,9 @@ fn shell(cx: &mut TestAppContext) -> Shell {
         app::init(Core::at(Path::new(&state_path)), cx);
         cx.set_global(ConnectionUi(controller.clone()));
         super::start(controller.clone(), Arc::new(host.clone()), cx);
+        if git {
+            crate::git::start(controller.clone(), Arc::new(host.clone()), cx);
+        }
         app::open_main_window(cx).unwrap()
     });
     let visual = VisualTestContext::from_window(window, cx);
@@ -1824,6 +1865,118 @@ fn a_narrow_chat_shows_its_details_only_from_the_details_button(cx: &mut TestApp
     assert!(!shell.shows("chat-details-branch"));
     shell.click("chat-details-toggle");
     assert!(!shell.shows("chat-details-card"));
+}
+
+/// The window wide enough for the card to sit beside the chat, the chat open
+/// in the repository at `/work/repo`, whose host answers `summaries`, by
+/// `summary_base`, once the status has rested.
+fn wide_in_repository(cx: &mut TestAppContext, summaries: &[(&str, Value)]) -> Shell {
+    let mut shell = shell_in_repository(cx);
+    shell.host.state().summaries = summaries
+        .iter()
+        .map(|(base, summary)| ((*base).to_owned(), summary.clone()))
+        .collect();
+    shell.visual.update(|_, cx| {
+        cx.set_global(crate::agents::view::ActiveRoot {
+            path: "/work/repo".into(),
+            token: "t".into(),
+            git_worktree: true,
+        })
+    });
+    shell.chat(snapshot(
+        10,
+        vec![item("u1", ChatItemKind::User, "Hi.")],
+        "",
+    ));
+    shell.visual.simulate_resize(size(px(3000.), px(800.)));
+    shell.settle();
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(1100));
+    shell.settle();
+    shell
+}
+
+fn source_control_scope(shell: &mut Shell) -> crate::git::panel::Scope {
+    shell
+        .visual
+        .update(|_, cx| crate::git::panel(cx).unwrap().read(cx).scope())
+}
+
+#[gpui_kit::test]
+fn the_card_counts_uncommitted_work_beside_the_branch_s_and_opens_each(cx: &mut TestAppContext) {
+    use crate::git::panel::Scope;
+
+    let mut shell = wide_in_repository(
+        cx,
+        &[
+            (
+                "head",
+                json!({ "baseRef": "HEAD", "totalFileCount": "2", "added": "12",
+                        "removed": "3" }),
+            ),
+            (
+                "",
+                json!({ "baseRef": "origin/main", "totalFileCount": "9", "added": "182",
+                        "removed": "41" }),
+            ),
+        ],
+    );
+    // The absolute path stays for the tooltip and the label.
+    assert_eq!(shell.label("chat-details-folder"), "Folder: /work/repo");
+    assert!(shell.shows("chat-details-branch"));
+    assert_eq!(
+        shell.label("chat-details-uncommitted"),
+        "Uncommitted +12 \u{2212}3"
+    );
+    assert_eq!(
+        shell.label("chat-details-branch-changes"),
+        "Branch vs main +182 \u{2212}41"
+    );
+
+    assert_eq!(source_control_scope(&mut shell), Scope::Uncommitted);
+    shell.click("chat-details-branch-changes");
+    assert_eq!(source_control_scope(&mut shell), Scope::Branch);
+    shell.click("chat-details-uncommitted");
+    assert_eq!(source_control_scope(&mut shell), Scope::Uncommitted);
+}
+
+#[gpui_kit::test]
+fn both_changes_rows_show_while_the_host_counts(cx: &mut TestAppContext) {
+    let mut shell = wide_in_repository(cx, &[]);
+    assert_eq!(
+        shell.label("chat-details-uncommitted"),
+        "Uncommitted \u{2026}"
+    );
+    assert_eq!(
+        shell.label("chat-details-branch-changes"),
+        "Branch \u{2026}"
+    );
+    // They already open the Git panel.
+    shell.click("chat-details-branch-changes");
+    assert_eq!(
+        source_control_scope(&mut shell),
+        crate::git::panel::Scope::Branch
+    );
+}
+
+#[gpui_kit::test]
+fn a_clean_tree_reads_none_and_no_default_branch_drops_the_branch_row(cx: &mut TestAppContext) {
+    let mut shell = wide_in_repository(
+        cx,
+        &[
+            (
+                "head",
+                json!({ "baseRef": "HEAD", "totalFileCount": "0", "added": "0",
+                        "removed": "0" }),
+            ),
+            // No default branch: nothing else is set.
+            ("", json!({})),
+        ],
+    );
+    assert_eq!(shell.label("chat-details-uncommitted"), "Uncommitted none");
+    assert!(!shell.shows("chat-details-branch-changes"));
 }
 
 #[gpui_kit::test]

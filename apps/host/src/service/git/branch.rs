@@ -1,5 +1,6 @@
 //! The branch view of a repository: what the working tree changes against the
-//! default branch, the local branches, and switching between them.
+//! default branch or against HEAD, the local branches, and switching between
+//! them.
 //!
 //! "The default branch" is the remote's: `origin/HEAD` when the clone recorded
 //! it, else `origin/main` or `origin/master`. A repository with none of them
@@ -159,14 +160,49 @@ fn untracked_lines(root: &WorktreeRoot, path: &[u8], budget: &mut usize) -> (u32
     (lines.try_into().unwrap_or(u32::MAX), false)
 }
 
-/// What the working tree changes against the merge base with the default
-/// branch, untracked files included.
+/// The last commit, for a summary of what is not committed: its oid, and the
+/// tree to diff against, which is the empty tree while HEAD has no commit yet.
+fn head_base(root: &str, cancellation: Option<&AtomicBool>) -> anyhow::Result<(String, String)> {
+    let head = git(
+        root,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        cancellation,
+    )?;
+    if let Some(oid) = stdout_line(&head) {
+        return Ok((oid.clone(), oid));
+    }
+    // Asked of Git, since the empty tree's id depends on the object format.
+    let empty = git(
+        root,
+        &["hash-object", "-t", "tree", "/dev/null"],
+        cancellation,
+    )?;
+    let Some(tree) = stdout_line(&empty) else {
+        bail!("Git could not name the empty tree");
+    };
+    Ok((String::new(), tree))
+}
+
+/// What the working tree changes against `base`, untracked files included:
+/// the merge base with the default branch, or HEAD, where staged and unstaged
+/// changes count alike.
 pub(super) fn read_branch_summary(
     root: &str,
+    base: v1::GitSummaryBase,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<v1::GitBranchSummary> {
-    let Some(base) = resolve_base(root, cancellation)? else {
-        return Ok(v1::GitBranchSummary::default());
+    let (name, oid, against, action) = match base {
+        v1::GitSummaryBase::Head => {
+            let (oid, against) = head_base(root, cancellation)?;
+            ("HEAD".to_owned(), oid, against, "HEAD")
+        }
+        v1::GitSummaryBase::Unspecified => {
+            let Some(base) = resolve_base(root, cancellation)? else {
+                return Ok(v1::GitBranchSummary::default());
+            };
+            let against = base.merge_base.clone();
+            (base.name, base.merge_base, against, "the default branch")
+        }
     };
     let diff = |format: &str| -> anyhow::Result<Vec<u8>> {
         let output = git(
@@ -178,14 +214,14 @@ pub(super) fn read_branch_summary(
                 "--no-renames",
                 format,
                 "-z",
-                &base.merge_base,
+                &against,
                 "--",
             ],
             cancellation,
         )?;
-        ensure_success(&output, "git diff against the default branch")?;
+        ensure_success(&output, &format!("git diff against {action}"))?;
         if output.stdout_truncated {
-            bail!("the changes against the default branch exceed the bounded listing");
+            bail!("the changes against {action} exceed the bounded listing");
         }
         Ok(output.output.stdout)
     };
@@ -239,8 +275,8 @@ pub(super) fn read_branch_summary(
     let total_file_count = files.len() as u64;
     files.truncate(MAX_SUMMARY_FILES);
     Ok(v1::GitBranchSummary {
-        base_ref: base.name,
-        merge_base_oid: base.merge_base,
+        base_ref: name,
+        merge_base_oid: oid,
         files,
         total_file_count,
         added,
@@ -333,9 +369,10 @@ impl GitService {
     ) -> anyhow::Result<v1::GitBranchSummary> {
         let (_, capabilities) = self.repository(request, cancellation.clone()).await?;
         require_matching_repository(request, &capabilities.identity.repository_id)?;
+        let base = request.summary_base();
         tokio::task::spawn_blocking(move || {
             let _guard = capabilities.metadata.install();
-            read_branch_summary(&capabilities.stable_root(), cancellation.as_deref())
+            read_branch_summary(&capabilities.stable_root(), base, cancellation.as_deref())
         })
         .await
         .map_err(|error| anyhow::anyhow!("Git branch summary task failed: {error}"))?

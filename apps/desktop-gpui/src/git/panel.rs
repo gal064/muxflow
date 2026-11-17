@@ -46,13 +46,13 @@ use super::{
     client,
     model::{
         self, BranchFile, BranchSummary, ChangeKind, CommandResult, GitScope, Live, Mutation,
-        MutationKind, Outcome, RootInfo, StatusEntry, StatusSnapshot, Target, Verb,
+        MutationKind, Outcome, RootInfo, StatusEntry, StatusSnapshot, SummaryBase, Target, Verb,
     },
     store::{GitRepositories, RepositoryState},
 };
 
-/// How long the status must rest before the default-branch summary is read
-/// for a reader while the panel lists another scope.
+/// How long the status must rest before a summary is read for a reader while
+/// the panel does not list it.
 const SUMMARY_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Key context around the commit message box.
@@ -116,7 +116,8 @@ pub enum Scope {
     Branch,
 }
 
-/// The default-branch list, read for one repository and status generation.
+/// A summary of the changes against one base, read for one repository and
+/// status generation.
 #[derive(Default)]
 struct BranchList {
     /// The repository key and status generation it was asked for.
@@ -191,9 +192,13 @@ pub struct GitPanel {
     limits: HashMap<&'static str, usize>,
     form: CommitForm,
     scope: Scope,
+    /// Against the default branch: the Branch scope's list.
     branch: BranchList,
-    /// How many others need the default-branch summary kept read while the
-    /// panel lists another scope: the chat details cards on screen.
+    /// Against HEAD: what is not committed, counted in lines, which the
+    /// status does not carry. Read only for readers.
+    uncommitted: BranchList,
+    /// How many others need both summaries kept read whatever the panel
+    /// lists: the chat details cards on screen.
     summary_readers: usize,
     /// `workflow.git.panelPaint`: from showing or observing a repository to
     /// drawing its first status. None unless the perf probe is on.
@@ -230,6 +235,7 @@ impl GitPanel {
             form: CommitForm::default(),
             scope: Scope::default(),
             branch: BranchList::default(),
+            uncommitted: BranchList::default(),
             summary_readers: 0,
             panel_paint: None,
             _store: observed,
@@ -342,14 +348,34 @@ impl GitPanel {
         }
     }
 
-    /// What the working tree changes against the default branch, as last read.
-    pub fn branch_summary(&self) -> Option<Rc<BranchSummary>> {
-        self.branch.summary.clone()
+    fn summary_list(&self, base: SummaryBase) -> &BranchList {
+        match base {
+            SummaryBase::DefaultBranch => &self.branch,
+            SummaryBase::Head => &self.uncommitted,
+        }
     }
 
-    /// Keeps the default-branch summary read whatever scope is listed, for as
-    /// long as each `true` is not yet matched by a `false`.
-    pub fn read_branch_summary(&mut self, reading: bool, cx: &mut Context<Self>) {
+    fn summary_list_mut(&mut self, base: SummaryBase) -> &mut BranchList {
+        match base {
+            SummaryBase::DefaultBranch => &mut self.branch,
+            SummaryBase::Head => &mut self.uncommitted,
+        }
+    }
+
+    /// What the working tree changes against `base`, as last read.
+    pub fn summary(&self, base: SummaryBase) -> Option<Rc<BranchSummary>> {
+        self.summary_list(base).summary.clone()
+    }
+
+    /// Whether the last read against `base` failed. The panel's Branch scope
+    /// says why.
+    pub fn summary_failed(&self, base: SummaryBase) -> bool {
+        self.summary_list(base).error.is_some()
+    }
+
+    /// Keeps both summaries read whatever scope is listed, for as long as
+    /// each `true` is not yet matched by a `false`.
+    pub fn read_summaries(&mut self, reading: bool, cx: &mut Context<Self>) {
         if reading {
             self.summary_readers += 1;
         } else {
@@ -416,59 +442,75 @@ impl GitPanel {
         }))
     }
 
-    /// Keeps the default-branch list in step with the repository: read again
-    /// whenever the observed status moves, since an edit, a commit or a switch
-    /// all move it. Only while that list is shown or a reader wants it.
+    /// Keeps the summaries in step with the repository: read again whenever
+    /// the observed status moves, since an edit, a commit or a switch all
+    /// move it. The default-branch one while its scope is listed or a reader
+    /// wants it; the one against HEAD only for a reader.
     fn follow_branch(&mut self, cx: &mut Context<Self>) {
-        // Another repository's list goes at once, before its status arrives.
+        let listed = self.scope == Scope::Branch;
+        let read = self.summary_readers > 0;
+        self.follow_summary(SummaryBase::DefaultBranch, listed || read, !listed, cx);
+        self.follow_summary(SummaryBase::Head, read, true, cx);
+    }
+
+    /// One summary, while `wanted`. `settle` waits for a status that keeps
+    /// moving (an agent editing) to rest, rather than reading every save.
+    fn follow_summary(
+        &mut self,
+        base: SummaryBase,
+        wanted: bool,
+        settle: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // Another repository's summary goes at once, before its status arrives.
         if self
-            .branch
+            .summary_list(base)
             .asked
             .as_ref()
             .is_some_and(|(asked, _)| Some(asked) != self.key.as_ref())
         {
-            self.branch = BranchList::default();
+            *self.summary_list_mut(base) = BranchList::default();
         }
         let state = self.state(cx);
         let wanted = self
             .key
             .clone()
             .zip(state.status.as_ref().map(|status| status.generation))
-            .filter(|_| self.scope == Scope::Branch || self.summary_readers > 0);
+            .filter(|_| wanted);
         let Some((key, generation)) = wanted else {
             return;
         };
-        if self.branch.asked == Some((key.clone(), generation)) {
+        if self.summary_list(base).asked == Some((key.clone(), generation)) {
             return;
         }
         let (Some(scope), Some(status)) = (self.context.scope.clone(), state.status) else {
             return;
         };
-        self.branch.asked = Some((key, generation));
         let transport = self.store.read(cx).transport();
         let repository_id = status.repository.id.clone();
-        // For a reader alone, a status that keeps moving (an agent editing)
-        // is read once it rests, not for every save.
-        let settle =
-            (self.scope != Scope::Branch).then(|| cx.background_executor().timer(SUMMARY_SETTLE));
-        self.branch.task = Some(cx.spawn(async move |this, cx| {
+        let settle = settle.then(|| cx.background_executor().timer(SUMMARY_SETTLE));
+        let task = cx.spawn(async move |this, cx| {
             if let Some(settle) = settle {
                 settle.await;
             }
-            let answer = client::branch_summary(transport, scope, repository_id).await;
+            let answer = client::branch_summary(transport, scope, repository_id, base).await;
             this.update(cx, |this, cx| {
-                this.branch.task = None;
+                let list = this.summary_list_mut(base);
+                list.task = None;
                 match answer {
                     Ok(summary) => {
-                        this.branch.summary = Some(Rc::new(summary));
-                        this.branch.error = None;
+                        list.summary = Some(Rc::new(summary));
+                        list.error = None;
                     }
-                    Err(error) => this.branch.error = Some(error),
+                    Err(error) => list.error = Some(error),
                 }
                 cx.notify();
             })
             .ok();
-        }));
+        });
+        let list = self.summary_list_mut(base);
+        list.asked = Some((key, generation));
+        list.task = Some(task);
     }
 
     /// Re-reads the default-branch list even if the status has not moved: the
