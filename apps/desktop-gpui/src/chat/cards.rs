@@ -76,11 +76,12 @@ fn head(title: SharedString, note: SharedString, p: &Palette) -> impl IntoElemen
         .text_size(ui(13.5))
         .text_color(p.chrome_ink_strong)
         .child(div().flex_1().min_w_0().child(title))
+        // "1 of 3" and "waiting for you" are read: the dim ink (S8, C1).
         .child(
             div()
                 .flex_none()
                 .text_size(ui(12.))
-                .text_color(p.chrome_faint)
+                .text_color(p.chrome_dim)
                 .child(note),
         )
 }

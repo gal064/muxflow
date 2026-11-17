@@ -504,7 +504,8 @@ impl ChatPane {
         )
     }
 
-    /// `.ctx`: how much of the context window is used.
+    /// `.ctx`: how much of the context window is used. The figures are read,
+    /// so they are in the dim ink (S8, C1).
     fn meter(usage: &ChatUsage, p: &Palette) -> AnyElement {
         let share = if usage.window_tokens == 0 {
             0.
@@ -524,7 +525,7 @@ impl ChatPane {
             .flex_none()
             .gap(ui(6.))
             .text_size(ui(12.))
-            .text_color(p.chrome_faint)
+            .text_color(p.chrome_dim)
             .child(
                 div()
                     .w(ui(54.))
@@ -666,12 +667,14 @@ impl ChatPane {
                             .text_color(p.chrome_dim)
                             .child(SharedString::from(command.description.clone())),
                     )
+                    // What to type after the command is read; the section
+                    // heading over it is a label, and stays faint (S8, C1).
                     .when(!command.argument_hint.is_empty(), |row| {
                         row.child(
                             div()
                                 .flex_none()
                                 .text_size(ui(11.5))
-                                .text_color(p.chrome_faint)
+                                .text_color(p.chrome_dim)
                                 .child(SharedString::from(command.argument_hint.clone())),
                         )
                     })

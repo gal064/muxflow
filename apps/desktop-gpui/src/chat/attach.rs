@@ -670,7 +670,9 @@ impl ChatPane {
         };
         let progress = self.progress(attachment, cx).filter(|_| !local);
         let just_uploaded = self.uploaded.contains_key(&id);
-        let (accent, danger, faint, dim) = (p.accent, p.danger, p.chrome_faint, p.chrome_dim);
+        // The chip's words are read: red and the link in their text inks, the
+        // size in the dim ink (S8, C1).
+        let (accent, link_ink, danger, dim) = (p.accent, p.link_ink, p.danger_ink, p.chrome_dim);
         let link = |key: &str, label: &'static str, ink| {
             div()
                 .id(SharedString::from(format!("chat-attachment-{key}-{id}")))
@@ -688,7 +690,7 @@ impl ChatPane {
                 Some(_) => h_flex()
                     .text_color(danger)
                     .child("Upload failed")
-                    .child(link("retry", "Retry", accent).on_click(cx.listener(
+                    .child(link("retry", "Retry", link_ink).on_click(cx.listener(
                         move |this, _, window, cx| this.retry_attachment(id, window, cx),
                     )))
                     .child(link("remove", "Remove", dim).on_click(
@@ -760,7 +762,7 @@ impl ChatPane {
             p,
         )
         .when(failed.is_some(), |chip| chip.max_w(ui(260.)))
-        .text_color(faint)
+        .text_color(dim)
         .children(remove)
         .children(bar)
         .test_support()
@@ -820,7 +822,7 @@ impl ChatPane {
                 p,
             )
             .bg(p.chrome_bg)
-            .text_color(p.chrome_faint)
+            .text_color(p.chrome_dim)
             .when(!path.is_empty(), |chip| {
                 chip.cursor_pointer().on_click(move |_, _, cx: &mut App| {
                     crate::editor::open_terminal_path(&pane_id, &path, None, cx);
@@ -960,7 +962,8 @@ pub(super) fn drop_hint(p: &Palette) -> AnyElement {
                 .shadow_lg()
                 .text_size(ui(13.5))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(p.accent)
+                // The accent as text, in its text ink (S8, C1).
+                .text_color(p.link_ink)
                 .child(icon(IconName::Paperclip, 16., p.accent))
                 .child("Drop to attach"),
         )
