@@ -57,8 +57,6 @@ fn dispatch(
         Action::Unspecified => return Err(invalid("Unknown chat action.")),
         // Not handled yet: package E of chat-polish-plan.md adds FORK.
         Action::Fork => return Err(invalid("Unknown chat action.")),
-        // Not handled yet: package G of chat-polish-plan.md adds STOP_TASK.
-        Action::StopTask => return Err(invalid("Unknown chat action.")),
         Action::SetMode => {
             let mode = v1::ChatAgentMode::try_from(request.mode).unwrap_or_default();
             let mode = if request.initialize_if_unset {
@@ -167,6 +165,10 @@ fn dispatch(
                 || invalid("Changing options needs the options."),
             )?))
         }
+        // The runtime checks that the state lists it as one that can be stopped.
+        Action::StopTask => command(SessionCommand::StopTask {
+            task_id: request.task_id,
+        }),
         Action::LoadOlder => runtime.load_older(&key, &adapter_id, &request.older_cursor),
         Action::SideFork => {
             let forked_pane_id = side_fork(runtime, &key, &adapter_id, &request.text, &title)?;
@@ -177,7 +179,7 @@ fn dispatch(
                 ..Default::default()
             })
         }
-        Action::Unspecified | Action::SetMode | Action::Close | Action::Fork | Action::StopTask => {
+        Action::Unspecified | Action::SetMode | Action::Close | Action::Fork => {
             unreachable!("answered above")
         }
     }

@@ -142,7 +142,11 @@ impl ChatProvider for ScriptedProvider {
                      - The fixture is `tests/fixtures/boxed.txt`.\n"
                 ),
             ),
-            text(id("notice"), Kind::Notice, "Conversation compacted."),
+            text(
+                id("notice"),
+                Kind::Notice,
+                "Context compacted, was 182k tokens",
+            ),
         ]);
         for (index, item) in items.iter_mut().enumerate() {
             item.at_unix_millis = HISTORY_START_UNIX_MILLIS + 60_000 * index as i64;
@@ -373,6 +377,8 @@ impl Script {
                 self.state.options = Some(options);
                 self.publish_state();
             }
+            // It lists no background tasks, so the runtime lets none through.
+            SessionCommand::StopTask { .. } => return Err(super::cannot_stop()),
         }
         Ok(())
     }

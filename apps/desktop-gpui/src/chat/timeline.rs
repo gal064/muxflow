@@ -91,12 +91,32 @@ fn is_step(item: &ChatItem) -> bool {
     matches!(kind(item), ChatItemKind::Tool | ChatItemKind::Reasoning)
 }
 
-/// Whether `item` is drawn at all. Thinking that streams while the turn is in
-/// progress is said by the working line instead, and thinking with no text
-/// has nothing to show.
-pub(super) fn is_drawn(item: &ChatItem, busy: bool) -> bool {
-    kind(item) != ChatItemKind::Reasoning
-        || (!item.text.trim().is_empty() && !(busy && item.streaming))
+/// A subagent that still runs: while the turn works, a row of its own under
+/// the working line (D16) and none in the timeline.
+pub(super) fn is_running_subagent(item: &ChatItem) -> bool {
+    item.tool.as_ref().is_some_and(|tool| {
+        tool_kind(tool) == ChatToolKind::Subagent && status(tool) == ChatToolStatus::Running
+    })
+}
+
+/// The subagents that still run, in the order they started: the rows under
+/// the working line.
+pub(super) fn running_subagents(items: &[ChatItem]) -> impl Iterator<Item = &ChatItem> {
+    items.iter().filter(|item| is_running_subagent(item))
+}
+
+/// Whether `item` is drawn in the timeline while the turn is `turn`.
+/// Thinking that streams while the turn is in progress is said by the
+/// working line instead, and thinking with no text has nothing to show. A
+/// subagent that runs while the turn works is drawn under the working line.
+pub(super) fn is_drawn(item: &ChatItem, turn: ChatTurnState) -> bool {
+    match kind(item) {
+        ChatItemKind::Reasoning => {
+            !item.text.trim().is_empty() && !(is_busy(turn) && item.streaming)
+        }
+        ChatItemKind::Tool => !(turn == ChatTurnState::Working && is_running_subagent(item)),
+        _ => true,
+    }
 }
 
 /// The timeline's entries for `items` while the turn is `turn`. A run of
@@ -113,11 +133,11 @@ pub(super) fn layout(items: &[ChatItem], turn: ChatTurnState) -> Vec<Entry> {
     for (index, item) in items.iter().enumerate() {
         if is_step(item) {
             run.get_or_insert(index);
-            steps += usize::from(is_drawn(item, busy));
+            steps += usize::from(is_drawn(item, turn));
             continue;
         }
         if let Some(first) = run.take() {
-            close(&mut entries, items, first..index, steps, false, busy);
+            close(&mut entries, items, first..index, steps, false, turn);
             steps = 0;
         }
         match kind(item) {
@@ -132,7 +152,7 @@ pub(super) fn layout(items: &[ChatItem], turn: ChatTurnState) -> Vec<Entry> {
         });
     }
     if let Some(first) = run {
-        close(&mut entries, items, first..items.len(), steps, busy, busy);
+        close(&mut entries, items, first..items.len(), steps, busy, turn);
     }
     // The reply a turn is still adding to has no buttons yet.
     if !busy {
@@ -147,7 +167,7 @@ fn close(
     run: std::ops::Range<usize>,
     steps: usize,
     live: bool,
-    busy: bool,
+    turn: ChatTurnState,
 ) {
     if steps >= GROUP_FROM {
         entries.push(Entry::Group {
@@ -159,7 +179,7 @@ fn close(
         return;
     }
     entries.extend(
-        run.filter(|index| is_drawn(&items[*index], busy))
+        run.filter(|index| is_drawn(&items[*index], turn))
             .map(|index| Entry::Item {
                 index,
                 reply_end: false,
@@ -315,17 +335,23 @@ pub(super) struct Doing {
 }
 
 /// What the working line says, from the newest steps: thinking that
-/// streams, else a tool that runs, else that the agent works.
+/// streams, else a tool that runs, else the subagents it waits on, else that
+/// the agent works.
 pub(super) fn doing(items: &[ChatItem]) -> Doing {
     let run = items
         .iter()
         .rposition(|item| !is_step(item))
         .map_or(0, |at| at + 1);
-    let run = &items[run..];
-    let active = run.iter().rev().find(|item| match item.tool.as_ref() {
-        Some(tool) => status(tool) == ChatToolStatus::Running,
-        None => item.streaming,
-    });
+    let active = items[run..]
+        .iter()
+        .rev()
+        .find(|item| match item.tool.as_ref() {
+            // A subagent has its own row, which says what it does.
+            Some(tool) => {
+                status(tool) == ChatToolStatus::Running && tool_kind(tool) != ChatToolKind::Subagent
+            }
+            None => item.streaming,
+        });
     let label = match active.map(|item| (item, item.tool.as_ref())) {
         Some((item, None)) => {
             return Doing {
@@ -333,28 +359,92 @@ pub(super) fn doing(items: &[ChatItem]) -> Doing {
                 preview: latest_sentence(&item.text),
             };
         }
-        Some((_, Some(tool))) if tool_kind(tool) == ChatToolKind::Subagent => {
-            let running = run
-                .iter()
-                .filter_map(|item| item.tool.as_ref())
-                .filter(|tool| {
-                    tool_kind(tool) == ChatToolKind::Subagent
-                        && status(tool) == ChatToolStatus::Running
-                })
-                .count();
-            let noun = if running == 1 {
-                "subagent"
-            } else {
-                "subagents"
-            };
-            format!("Waiting on {running} {noun}…")
-        }
         Some((_, Some(tool))) => running(tool),
-        None => "Working…".to_owned(),
+        None => match running_subagents(items).count() {
+            0 => "Working…".to_owned(),
+            1 => "Waiting on 1 subagent…".to_owned(),
+            count => format!("Waiting on {count} subagents…"),
+        },
     };
     Doing {
         label,
         preview: None,
+    }
+}
+
+/// What a subagent's row is named by: its type, and what it was asked to
+/// do, on one line. Codex names no type: "Agent", as S9 draws it.
+pub(super) fn subagent_name(tool: &ChatTool) -> (&str, &str) {
+    let kind = if tool.agent_type.is_empty() {
+        "Agent"
+    } else {
+        tool.agent_type.as_str()
+    };
+    let asked = tool.detail.lines().next().unwrap_or_default().trim();
+    (kind, asked)
+}
+
+/// A subagent's figures: "12 tools · 61k tokens". Empty when the provider
+/// counts none.
+pub(super) fn figures(tool: &ChatTool) -> String {
+    let mut parts = Vec::new();
+    match tool.tool_uses {
+        0 => {}
+        1 => parts.push("1 tool".to_owned()),
+        uses => parts.push(format!("{uses} tools")),
+    }
+    if tool.tokens > 0 {
+        parts.push(format!("{} tokens", tokens(tool.tokens)));
+    }
+    parts.join(" · ")
+}
+
+/// The line under a running subagent: what it does now, its figures and how
+/// long it has run (`elapsed`, when known). A subagent that has a type is
+/// Claude Code's, which reports all of it; Codex reports only its state, and
+/// that is the whole line, as S9 draws it.
+pub(super) fn subagent_line(tool: &ChatTool, elapsed: Option<Duration>) -> String {
+    if tool.agent_type.is_empty() {
+        return if tool.activity.is_empty() {
+            "running".to_owned()
+        } else {
+            tool.activity.clone()
+        };
+    }
+    let figures = figures(tool);
+    let time = elapsed.map(self::elapsed);
+    [Some(tool.activity.clone()), Some(figures), time]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// `24.1k`, `61k`, `182k`: a count of tokens as a subagent's line says it.
+pub(super) fn tokens(count: u64) -> String {
+    // One decimal, rounded half up, and none when it is zero.
+    let tenths = |unit_size: u64, unit: &str| {
+        let tenths = (count + unit_size / 20) / (unit_size / 10);
+        match tenths % 10 {
+            0 => format!("{}{unit}", tenths / 10),
+            tenth => format!("{}.{tenth}{unit}", tenths / 10),
+        }
+    };
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..99_950 => tenths(1_000, "k"),
+        99_950..999_500 => format!("{}k", (count + 500) / 1_000),
+        _ => tenths(1_000_000, "M"),
+    }
+}
+
+/// "2 background tasks": the chip on the composer's top edge.
+pub(super) fn background_label(count: usize) -> String {
+    if count == 1 {
+        "1 background task".to_owned()
+    } else {
+        format!("{count} background tasks")
     }
 }
 
@@ -759,6 +849,114 @@ mod tests {
         assert_eq!(doing(&[reading]).label, "Reading src/view.rs…");
         let other = running(tool("o", ChatToolKind::Other, "Update the task list"));
         assert_eq!(doing(&[other]).label, "Update the task list…");
+    }
+
+    fn subagent(id: &str, kind: &str) -> ChatItem {
+        let mut item = running(tool(
+            id,
+            ChatToolKind::Subagent,
+            "Find where uploads are staged",
+        ));
+        item.tool.as_mut().unwrap().agent_type = kind.into();
+        item
+    }
+
+    #[test]
+    fn a_running_subagent_is_out_of_its_run_while_the_turn_works_and_folds_once_it_ends() {
+        let items = [
+            user("u"),
+            read("r1"),
+            subagent("g", "Explore"),
+            read("r2"),
+            read("r3"),
+        ];
+        // Three steps drawn, the subagent under the working line instead.
+        assert_eq!(layout(&items, WORKING), [plain(0), group(1, 5, 3, true)]);
+        let two = [user("u"), read("r1"), subagent("g", "Explore")];
+        assert_eq!(layout(&two, WORKING), [plain(0), plain(1)]);
+        // Waiting on the user there is no working line: it stays a step.
+        assert_eq!(
+            layout(&two, ChatTurnState::Waiting),
+            [plain(0), plain(1), plain(2)]
+        );
+        // Ended, it is a step like any other.
+        let mut done = items.to_vec();
+        done[2].tool.as_mut().unwrap().status = ChatToolStatus::Ok.into();
+        assert_eq!(layout(&done, WORKING), [plain(0), group(1, 5, 4, true)]);
+        assert_eq!(
+            running_subagents(&items)
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["g"]
+        );
+    }
+
+    #[test]
+    fn the_working_line_waits_on_subagents_only_while_nothing_else_runs() {
+        let agents = [user("u"), subagent("g1", "Explore"), subagent("g2", "Plan")];
+        assert_eq!(doing(&agents).label, "Waiting on 2 subagents…");
+        // A command the turn runs meanwhile is what the line says.
+        let mut busy = agents.to_vec();
+        busy.push(running(tool("c", ChatToolKind::Command, "cargo check")));
+        assert_eq!(doing(&busy).label, "Running cargo check…");
+        // Subagents an earlier run started are still waited on.
+        let later = [subagent("g1", "Explore"), says("a"), read("r")];
+        assert_eq!(doing(&later).label, "Waiting on 1 subagent…");
+    }
+
+    #[test]
+    fn a_subagents_line_reads_as_drawn() {
+        let mut explore = subagent("g", "Explore");
+        let tool = explore.tool.as_mut().unwrap();
+        tool.activity = "Reading terminal_upload.rs".into();
+        tool.tool_uses = 7;
+        tool.tokens = 24_100;
+        let tool = explore.tool.as_ref().unwrap();
+        assert_eq!(
+            subagent_name(tool),
+            ("Explore", "Find where uploads are staged")
+        );
+        assert_eq!(
+            subagent_line(tool, Some(Duration::from_secs(41))),
+            "Reading terminal_upload.rs · 7 tools · 24.1k tokens · 41s"
+        );
+        assert_eq!(figures(tool), "7 tools · 24.1k tokens");
+        // Before its first figures: only the time.
+        let fresh = subagent("f", "Plan");
+        let fresh = fresh.tool.as_ref().unwrap();
+        assert_eq!(subagent_line(fresh, Some(Duration::from_secs(3))), "3s");
+        assert_eq!(figures(fresh), "");
+        // Codex: "Agent", the first line of the prompt, and its state.
+        let mut codex = running(tool_item_with_prompt());
+        codex.tool.as_mut().unwrap().activity = "running".into();
+        let codex = codex.tool.as_ref().unwrap();
+        assert_eq!(
+            subagent_name(codex),
+            ("Agent", "Find where uploads are staged")
+        );
+        assert_eq!(
+            subagent_line(codex, Some(Duration::from_secs(48))),
+            "running"
+        );
+    }
+
+    fn tool_item_with_prompt() -> ChatItem {
+        tool(
+            "x",
+            ChatToolKind::Subagent,
+            "Find where uploads are staged\nand list each caller",
+        )
+    }
+
+    #[test]
+    fn tokens_and_the_chip_read_as_s9_says_them() {
+        assert_eq!(tokens(950), "950");
+        assert_eq!(tokens(19_714), "19.7k");
+        assert_eq!(tokens(61_000), "61k");
+        assert_eq!(tokens(182_000), "182k");
+        assert_eq!(tokens(1_250_000), "1.3M");
+        assert_eq!(background_label(1), "1 background task");
+        assert_eq!(background_label(2), "2 background tasks");
     }
 
     #[test]

@@ -44,6 +44,12 @@ const MAX_HELD: usize = 32;
 const MAX_SENT: usize = 256;
 /// What the agent writes as a user message when a turn is stopped.
 const INTERRUPTED: &str = "[Request interrupted by user";
+/// How the summary the agent writes after compacting starts. It comes as a
+/// user message, and is not one.
+const COMPACT_SUMMARY: &str = "This session is being continued from a previous conversation";
+/// Tasks the agent has said started and not yet said ended, remembered for
+/// when they started and which row they belong to.
+const MAX_TASKS: usize = 256;
 
 pub(super) struct ClaudeProvider;
 
@@ -334,6 +340,8 @@ enum Asked {
     Initialize,
     Settings,
     Usage,
+    /// `stop_task`: a refusal is said in the chat.
+    StopTask,
     /// Answered with nothing the chat needs.
     Other,
 }
@@ -594,6 +602,9 @@ pub(super) fn said(entry: &Value) -> Said {
     if text.starts_with(INTERRUPTED) {
         return Said::Interrupted;
     }
+    if text.starts_with(COMPACT_SUMMARY) {
+        return Said::Nothing;
+    }
     // A slash command is recorded as markup naming it.
     if let Some(name) = between(text, "<command-name>", "</command-name>") {
         let arguments = between(text, "<command-args>", "</command-args>").unwrap_or_default();
@@ -671,7 +682,14 @@ fn tool_item(id: &str, name: &str, input: &Value) -> v1::ChatItem {
         }
         "WebFetch" => items::tool(id, ToolKind::Web, "fetch", field("url")),
         "WebSearch" => items::tool(id, ToolKind::Web, "search", field("query")),
-        "Task" | "Agent" => items::tool(id, ToolKind::Subagent, "agent", field("description")),
+        "Task" | "Agent" => {
+            let mut item = items::tool(id, ToolKind::Subagent, "agent", field("description"));
+            if let Some(tool) = &mut item.tool {
+                field("subagent_type").clone_into(&mut tool.agent_type);
+                tool.background = input["run_in_background"].as_bool() == Some(true);
+            }
+            item
+        }
         "AskUserQuestion" => {
             let question = string(&input["questions"][0], "question");
             items::tool(id, ToolKind::Other, "ask", question)
@@ -760,6 +778,9 @@ pub(super) struct Claude {
     notices: u64,
     /// Final assistant text already displayed in the current turn.
     turn_text: BTreeSet<String>,
+    /// When each task the agent has said started, and not yet said ended,
+    /// was first heard of, by its id for it: a command, a subagent.
+    tasks: BTreeMap<String, i64>,
 }
 
 type Output = Out<Job>;
@@ -1233,9 +1254,19 @@ impl Claude {
                 let mode = string(message, "permissionMode");
                 if !mode.is_empty() {
                     self.state.options.get_or_insert_default().permission = permission(mode).into();
-                    self.publish_state(out);
                 }
+                // `status: null` ends a compaction: every status line says
+                // what the agent does now.
+                self.state.compacting = string(message, "status") == "compacting";
+                self.publish_state(out);
             }
+            "task_started" => self.task_started(message, out),
+            "task_progress" => self.task_figures(message, out),
+            "task_notification" => {
+                self.task_figures(message, out);
+                self.tasks.remove(string(message, "task_id"));
+            }
+            "background_tasks_changed" => self.background_changed(message, out),
             // Sent while the model thinks, also when it streams no thinking.
             "thinking_tokens" => self.thinking(out),
             "commands_changed" => {
@@ -1247,10 +1278,12 @@ impl Claude {
             "compact_boundary" => {
                 let uuid = string(message, "uuid");
                 if !uuid.is_empty() {
-                    let mut item = items::text(uuid, Kind::Notice, "Conversation compacted.");
+                    let text = compacted(&message["compact_metadata"]);
+                    let mut item = items::text(uuid, Kind::Notice, text);
                     item.at_unix_millis = super::now_unix_millis();
                     out.publish(Change::Item(item));
                 }
+                self.set_compacting(false, out);
             }
             _ => {}
         }
@@ -1258,6 +1291,8 @@ impl Claude {
 
     fn result(&mut self, message: &Value, out: &mut Output) {
         self.busy = false;
+        // A compaction is over with its turn, however it ended.
+        self.state.compacting = false;
         // A turn has ended, and with it every message but the ones the agent
         // said it is keeping for the next.
         self.outstanding.retain(|_, queued| *queued);
@@ -1312,8 +1347,17 @@ impl Claude {
         if string(response, "subtype") != "success" {
             // An answer the agent could not give leaves things as they were;
             // `initialize` must still let the chat go on.
-            if matches!(asked, Asked::Initialize) && !self.ready {
-                self.initialized(&Value::Null, out);
+            match asked {
+                Asked::Initialize if !self.ready => self.initialized(&Value::Null, out),
+                // The task stays in the list, and the chat says why.
+                Asked::StopTask => {
+                    let text = match string(response, "error") {
+                        "" => "The task could not be stopped.".to_owned(),
+                        error => format!("The task could not be stopped: {error}"),
+                    };
+                    self.notice(&text, out);
+                }
+                _ => {}
             }
             return;
         }
@@ -1346,8 +1390,168 @@ impl Claude {
                 });
                 self.publish_state(out);
             }
-            Asked::Other => {}
+            Asked::StopTask | Asked::Other => {}
         }
+    }
+
+    /// The tool row a task runs for, while it is still open: a subagent's.
+    fn subagent_row(&mut self, tool_use_id: &str) -> Option<&mut v1::ChatItem> {
+        self.reader.open.get_mut(tool_use_id).filter(|item| {
+            item.tool
+                .as_ref()
+                .is_some_and(|tool| tool.kind == i32::from(ToolKind::Subagent))
+        })
+    }
+
+    /// `task_started`: when it started, and for a subagent its type on its
+    /// row. A command run in the foreground starts a task too; its row is
+    /// left as it is.
+    fn task_started(&mut self, message: &Value, out: &mut Output) {
+        self.started_at(string(message, "task_id"));
+        let kind = string(message, "subagent_type").to_owned();
+        let backgrounded = message["is_backgrounded"].as_bool() == Some(true);
+        if let Some(row) = self.subagent_row(string(message, "tool_use_id")) {
+            let tool = row.tool.get_or_insert_default();
+            if !kind.is_empty() {
+                tool.agent_type = kind;
+            }
+            tool.background |= backgrounded;
+            let row = row.clone();
+            out.publish(Change::Item(row));
+        }
+    }
+
+    /// `task_progress` and `task_notification`: a subagent's figures as it
+    /// works, and its last ones. What it does now is the agent's own words
+    /// for it, else the tool it last used.
+    fn task_figures(&mut self, message: &Value, out: &mut Output) {
+        let usage = &message["usage"];
+        let activity = match string(message, "description") {
+            "" => string(message, "last_tool_name"),
+            description => description,
+        };
+        let activity = activity.to_owned();
+        let progress = string(message, "subtype") == "task_progress";
+        let Some(row) = self.subagent_row(string(message, "tool_use_id")) else {
+            return;
+        };
+        let tool = row.tool.get_or_insert_default();
+        // A notification's description is the task's, not what it does now.
+        if progress && !activity.is_empty() {
+            tool.activity = activity;
+        }
+        if let Some(uses) = usage["tool_uses"].as_u64() {
+            tool.tool_uses = u32::try_from(uses).unwrap_or(u32::MAX);
+        }
+        if let Some(tokens) = usage["total_tokens"].as_u64() {
+            tool.tokens = tokens;
+        }
+        let row = row.clone();
+        out.publish(Change::Item(row));
+    }
+
+    /// `background_tasks_changed`: the whole list of what runs outside the
+    /// turn, each with when it started as far as this chat knows.
+    fn background_changed(&mut self, message: &Value, out: &mut Output) {
+        let tasks = message["tasks"].as_array().map_or(&[][..], Vec::as_slice);
+        let background = tasks
+            .iter()
+            .filter(|task| !string(task, "task_id").is_empty())
+            .map(|task| {
+                let id = string(task, "task_id");
+                v1::ChatBackgroundTask {
+                    id: id.to_owned(),
+                    kind: task_kind(string(task, "task_type")).into(),
+                    description: string(task, "description").to_owned(),
+                    started_at_unix_millis: self.started_at(id),
+                    // Claude Code stops any task it lists (`stop_task`).
+                    stoppable: true,
+                }
+            })
+            .collect();
+        self.state.background = background;
+        self.publish_state(out);
+    }
+
+    /// When task `id` started: when it was first heard of, which may be
+    /// its `task_started` or the list it first showed in, whichever came
+    /// first. Neither line says.
+    fn started_at(&mut self, id: &str) -> i64 {
+        if id.is_empty() {
+            return super::now_unix_millis();
+        }
+        if self.tasks.len() >= MAX_TASKS && !self.tasks.contains_key(id) {
+            // So many are left only by tasks whose end went unsaid.
+            self.tasks.pop_first();
+        }
+        *self
+            .tasks
+            .entry(id.to_owned())
+            .or_insert_with(super::now_unix_millis)
+    }
+
+    /// The agent process is gone: nothing it ran runs any more. Published
+    /// with the next state.
+    fn forget_tasks(&mut self) {
+        self.tasks.clear();
+        self.state.background.clear();
+        self.state.compacting = false;
+    }
+
+    fn set_compacting(&mut self, compacting: bool, out: &mut Output) {
+        if self.state.compacting != compacting {
+            self.state.compacting = compacting;
+            self.publish_state(out);
+        }
+    }
+
+    /// The agent has started a turn of its own, with no message of the
+    /// user's: what it does once a background task has ended.
+    fn turn_begun(&mut self, out: &mut Output) {
+        if !self.busy {
+            self.busy = true;
+            self.publish_state(out);
+        }
+    }
+}
+
+/// What kind of task Claude Code's `task_type` names.
+fn task_kind(task_type: &str) -> v1::ChatTaskKind {
+    match task_type {
+        "local_bash" => v1::ChatTaskKind::Command,
+        "local_agent" | "remote_agent" => v1::ChatTaskKind::Subagent,
+        _ => v1::ChatTaskKind::Other,
+    }
+}
+
+/// `182k`, `24.1k`: a token count as the chat says it.
+pub(super) fn tokens(count: u64) -> String {
+    // One decimal, rounded half up, and none when it is zero.
+    let tenths = |unit_size: u64, unit: &str| {
+        let tenths = (count + unit_size / 20) / (unit_size / 10);
+        match tenths % 10 {
+            0 => format!("{}{unit}", tenths / 10),
+            tenth => format!("{}.{tenth}{unit}", tenths / 10),
+        }
+    };
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..99_950 => tenths(1_000, "k"),
+        99_950..999_500 => format!("{}k", (count + 500) / 1_000),
+        _ => tenths(1_000_000, "M"),
+    }
+}
+
+/// The notice a compaction leaves: with the size before it, when the agent
+/// says what that was.
+pub(super) fn compacted(metadata: &Value) -> String {
+    let before = metadata["pre_tokens"]
+        .as_u64()
+        .or_else(|| metadata["preTokens"].as_u64())
+        .filter(|before| *before > 0);
+    match before {
+        Some(before) => format!("Context compacted, was {} tokens", tokens(before)),
+        None => "Context compacted".to_owned(),
     }
 }
 
@@ -1559,6 +1763,8 @@ impl Dialect for Claude {
                         self.unconfirmed
                             .retain(|item| held.iter().any(|held| held.item_id == item.id));
                         self.outstanding.clear();
+                        // The agent was replaced, and its tasks with it.
+                        self.forget_tasks();
                         out.publish(Change::Truncate(v1::ChatTruncate {
                             after_item_id: rewind.after_item_id,
                         }));
@@ -1631,6 +1837,12 @@ impl Dialect for Claude {
         let nested = !message["parent_tool_use_id"].is_null();
         if !nested {
             self.learn_session(string(&message, "session_id"), out);
+        }
+        // The agent speaks only in a turn. One it starts by itself, as it does
+        // when a background task ends, has no message of the user's to say
+        // so.
+        if !nested && matches!(string(&message, "type"), "stream_event" | "assistant") {
+            self.turn_begun(out);
         }
         match string(&message, "type") {
             "stream_event" if !nested => self.stream_event(&message, out),
@@ -1782,6 +1994,14 @@ impl Dialect for Claude {
                 self.set_options(&options, out);
                 Ok(())
             }
+            SessionCommand::StopTask { task_id } => {
+                if !self.ready {
+                    return Err(not_ready());
+                }
+                let request = json!({"subtype": "stop_task", "task_id": task_id});
+                self.request(request, Asked::StopTask, out);
+                Ok(())
+            }
         }
     }
 
@@ -1803,6 +2023,8 @@ impl Dialect for Claude {
             out.publish(Change::Item(item));
         }
         self.withdraw_silent(out);
+        // Its tasks went with it.
+        self.forget_tasks();
         self.state.connection = if failure.is_empty() {
             Connection::Ended
         } else {

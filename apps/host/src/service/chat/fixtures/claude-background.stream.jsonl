@@ -1,0 +1,30 @@
+{"type":"user","isReplay":true,"uuid":"11111111-1111-4111-8111-111111111111","session_id":"5e551011-0000-4000-8000-000000000001","parent_tool_use_id":null,"message":{"role":"user","content":"Start the dev server and leave it running."}}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_b1"}},"parent_tool_use_id":null,"api_message_id":"msg_b1","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_b1","name":"Bash","input":{}}},"parent_tool_use_id":null,"api_message_id":"msg_b1","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"assistant","message":{"id":"msg_b1","role":"assistant","content":[{"type":"tool_use","id":"toolu_b1","name":"Bash","input":{"command":"pnpm dev","description":"Run the dev server","run_in_background":true}}]},"parent_tool_use_id":null,"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bdev1","task_type":"local_bash","description":"Run the dev server"}],"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"task_started","task_id":"bdev1","tool_use_id":"toolu_b1","description":"Run the dev server","is_backgrounded":true,"task_type":"local_bash","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_b1","type":"tool_result","content":"Command running in background with ID: bdev1.","is_error":false}]},"parent_tool_use_id":null,"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_b2"}},"parent_tool_use_id":null,"api_message_id":"msg_b2","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null,"api_message_id":"msg_b2","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The dev server is running on port 5173."}},"parent_tool_use_id":null,"api_message_id":"msg_b2","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"assistant","message":{"id":"msg_b2","role":"assistant","content":[{"type":"text","text":"The dev server is running on port 5173."}]},"parent_tool_use_id":null,"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null,"api_message_id":"msg_b2","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"result","subtype":"success","is_error":false,"result":"","stop_reason":"end_turn","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"task_updated","task_id":"bdev1","patch":{"status":"killed","end_time":1794898100000},"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"task_notification","task_id":"bdev1","tool_use_id":"toolu_b1","status":"stopped","summary":"Background command \"Run the dev server\" was stopped","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"control_response","response":{"subtype":"success","request_id":"@stop_task","response":{}}}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_b3"}},"parent_tool_use_id":null,"api_message_id":"msg_b3","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"parent_tool_use_id":null,"api_message_id":"msg_b3","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The dev server was stopped."}},"parent_tool_use_id":null,"api_message_id":"msg_b3","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"assistant","message":{"id":"msg_b3","role":"assistant","content":[{"type":"text","text":"The dev server was stopped."}]},"parent_tool_use_id":null,"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null,"api_message_id":"msg_b3","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"result","subtype":"success","is_error":false,"result":"","stop_reason":"end_turn","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"user","isReplay":true,"uuid":"22222222-2222-4222-8222-222222222222","session_id":"5e551011-0000-4000-8000-000000000001","parent_tool_use_id":null,"message":{"role":"user","content":"/compact"}}
+{"type":"system","subtype":"status","status":"compacting","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"system","subtype":"compact_boundary","uuid":"compact-1","compact_metadata":{"trigger":"manual","pre_tokens":182000,"post_tokens":7856,"duration_ms":2891},"session_id":"5e551011-0000-4000-8000-000000000001"}
+{"type":"user","isReplay":true,"uuid":"summary-1","session_id":"5e551011-0000-4000-8000-000000000001","parent_tool_use_id":null,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nThe user asked to start the dev server."}}
+{"type":"user","isReplay":true,"uuid":"stdout-1","session_id":"5e551011-0000-4000-8000-000000000001","parent_tool_use_id":null,"message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"}}
+{"type":"result","subtype":"success","is_error":false,"result":"","stop_reason":"end_turn","session_id":"5e551011-0000-4000-8000-000000000001"}

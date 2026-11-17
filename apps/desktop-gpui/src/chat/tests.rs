@@ -12,11 +12,12 @@ use desktop_core::{
     connection::{
         ConnectionSpec, ProfileStore,
         chat::{
-            ChatAction, ChatAgentMode, ChatCapabilities, ChatCatalog, ChatChange, ChatCommand,
-            ChatCommandKind, ChatConnection, ChatEvent, ChatItem, ChatItemDelta, ChatItemKind,
-            ChatModel, ChatOption, ChatOptions, ChatPendingRequest, ChatPermissionMode,
-            ChatQuestion, ChatRequest, ChatRequestKind, ChatResponse, ChatSnapshot, ChatState,
-            ChatTool, ChatToolKind, ChatToolStatus, ChatTruncate, ChatTurnState, ChatUsage,
+            ChatAction, ChatAgentMode, ChatBackgroundTask, ChatCapabilities, ChatCatalog,
+            ChatChange, ChatCommand, ChatCommandKind, ChatConnection, ChatEvent, ChatItem,
+            ChatItemDelta, ChatItemKind, ChatModel, ChatOption, ChatOptions, ChatPendingRequest,
+            ChatPermissionMode, ChatQuestion, ChatRequest, ChatRequestKind, ChatResponse,
+            ChatSnapshot, ChatState, ChatTaskKind, ChatTool, ChatToolKind, ChatToolStatus,
+            ChatTruncate, ChatTurnState, ChatUsage,
         },
         helper::HelperInstallReport,
     },
@@ -2999,4 +3000,234 @@ fn copy_takes_the_message_or_its_whole_reply_and_shows_a_check_for_a_second(
     // Fork from here asks nothing of the host until the host can fork.
     shell.click("chat-fork-a2");
     assert_eq!(shell.host.actions(), [ChatAction::Open]);
+}
+
+// Background tasks, subagents, compacting (S9).
+
+fn task(id: &str, kind: ChatTaskKind, description: &str, stoppable: bool) -> ChatBackgroundTask {
+    ChatBackgroundTask {
+        id: id.into(),
+        kind: kind.into(),
+        description: description.into(),
+        started_at_unix_millis: 0,
+        stoppable,
+    }
+}
+
+fn with_tasks(turn: ChatTurnState, tasks: Vec<ChatBackgroundTask>) -> ChatState {
+    ChatState {
+        background: tasks,
+        ..state(turn)
+    }
+}
+
+fn server() -> ChatBackgroundTask {
+    task("b1", ChatTaskKind::Command, "Run the dev server", true)
+}
+
+#[gpui_kit::test]
+fn the_chip_comes_and_goes_with_the_list_and_stays_while_the_chat_is_idle(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    assert!(!shell.shows("chat-tasks"));
+    shell.chat(event(
+        11,
+        ChatChange::State(with_tasks(ChatTurnState::Working, vec![server()])),
+    ));
+    assert!(shell.named("1 background task"));
+    // The turn ends; the command still runs.
+    shell.chat(event(
+        12,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, vec![server()])),
+    ));
+    assert!(shell.named("1 background task"));
+    assert!(!shell.shows("chat-working"));
+    let audit = task(
+        "b2",
+        ChatTaskKind::Subagent,
+        "Explore: audit the tests",
+        true,
+    );
+    shell.chat(event(
+        13,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, vec![server(), audit])),
+    ));
+    assert!(shell.named("2 background tasks"));
+    // The last one ends: the chip goes with it.
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-tasks"));
+}
+
+#[gpui_kit::test]
+fn the_chip_opens_the_list_and_stop_asks_the_host_and_holds_its_row(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let watched = task("b3", ChatTaskKind::Other, "Watch the logs", false);
+    let audit = task(
+        "b2",
+        ChatTaskKind::Subagent,
+        "Explore: audit the tests",
+        true,
+    );
+    let tasks = vec![server(), audit.clone(), watched];
+    shell.chat(event(
+        11,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, tasks.clone())),
+    ));
+    assert!(!shell.shows("chat-task-b1"));
+    assert!(!ticking(&mut shell));
+    shell.click("chat-tasks");
+    assert_eq!(shell.label("chat-task-b1"), "Run the dev server");
+    assert_eq!(shell.label("chat-task-b2"), "Explore: audit the tests");
+    // Its times tick while it is open, though no turn works.
+    assert!(ticking(&mut shell));
+    // A task the agent cannot stop has no button.
+    assert!(shell.shows("chat-task-stop-b1"));
+    assert!(!shell.shows("chat-task-stop-b3"));
+
+    // Stop: one request, and nothing more while the row waits to leave.
+    shell.click("chat-task-stop-b1");
+    assert_eq!(shell.host.last(ChatAction::StopTask).task_id, "b1");
+    shell.click("chat-task-stop-b1");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 1);
+    // The list changes for another reason: still being stopped.
+    shell.chat(event(
+        12,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, tasks.clone())),
+    ));
+    shell.click("chat-task-stop-b1");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 1);
+    // It leaves the list.
+    let left = vec![audit.clone(), tasks[2].clone()];
+    shell.chat(event(
+        13,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, left.clone())),
+    ));
+    assert!(!shell.shows("chat-task-b1"));
+    assert!(shell.named("2 background tasks"));
+
+    // A refusal says why, and the button can be pressed again.
+    shell
+        .host
+        .refuse_next("chat_task_not_found: That task is no longer running.");
+    shell.click("chat-task-stop-b2");
+    assert_eq!(
+        shell.label("chat-notice"),
+        "That task is no longer running."
+    );
+    shell.click("chat-task-stop-b2");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 3);
+    // An answer that never brings the list's change holds it ten seconds.
+    shell.wait(std::time::Duration::from_secs(10));
+    shell.click("chat-task-stop-b2");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 4);
+
+    // The list closes with its last task, and its timer stops.
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-task-b2"));
+    assert!(!ticking(&mut shell));
+}
+
+#[gpui_kit::test]
+fn a_running_subagent_is_a_row_under_the_working_line_and_a_step_once_it_ends(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let mut explore = with_status(
+        tool(
+            "g1",
+            ChatToolKind::Subagent,
+            "agent",
+            "Find where uploads are staged",
+        ),
+        ChatToolStatus::Running,
+    );
+    {
+        let agent = explore.tool.as_mut().unwrap();
+        agent.agent_type = "Explore".into();
+        agent.activity = "Reading terminal_upload.rs".into();
+        agent.tool_uses = 7;
+        agent.tokens = 24_100;
+    }
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![
+            item("u1", ChatItemKind::User, "Find where uploads are staged."),
+            tool("r1", ChatToolKind::Read, "read", "src/a.rs"),
+            tool("r2", ChatToolKind::Read, "read", "src/b.rs"),
+            explore.clone(),
+            tool("r3", ChatToolKind::Read, "read", "src/c.rs"),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-working"), "Waiting on 1 subagent…");
+    assert_eq!(
+        shell.label("chat-subagent-g1"),
+        "Explore Find where uploads are staged"
+    );
+    assert_eq!(
+        shell.label("chat-subagent-line-g1"),
+        "Reading terminal_upload.rs · 7 tools · 24.1k tokens"
+    );
+    // Not folded with the steps around it.
+    assert_eq!(shell.label("chat-group-r1"), "3 steps so far");
+    shell.click("chat-group-r1");
+    assert!(!shell.shows("chat-tool-g1"));
+
+    // It ends: a step of the group, with its figures.
+    let agent = explore.tool.as_mut().unwrap();
+    agent.status = ChatToolStatus::Ok.into();
+    agent.tool_uses = 12;
+    agent.tokens = 61_000;
+    shell.chat(event(11, ChatChange::Updated(explore)));
+    assert!(!shell.shows("chat-subagent-g1"));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(
+        shell.label("chat-tool-g1"),
+        "Explore: Find where uploads are staged · 12 tools · 61k tokens"
+    );
+    assert_eq!(shell.label("chat-group-r1"), "4 steps so far");
+}
+
+#[gpui_kit::test]
+fn the_working_line_says_compacting_whatever_the_turn_says(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    let mut shell = kept(cx);
+    let compacting = |turn| ChatState {
+        compacting: true,
+        ..state(turn)
+    };
+    shell.chat(event(
+        11,
+        ChatChange::State(compacting(ChatTurnState::Working)),
+    ));
+    assert_eq!(shell.label("chat-working"), "Compacting context…");
+    assert!(shell.shows("chat-working-escape"));
+    shell.wait(Duration::from_secs(12));
+    assert_eq!(shell.seconds(), "12s");
+    // The turn ends and the agent still compacts: no Esc to stop.
+    shell.chat(event(
+        12,
+        ChatChange::State(compacting(ChatTurnState::Idle)),
+    ));
+    assert_eq!(shell.label("chat-working"), "Compacting context…");
+    assert!(!shell.shows("chat-working-escape"));
+    assert!(ticking(&mut shell));
+    // Not off screen.
+    shell.show_window("@2");
+    assert!(!ticking(&mut shell));
+    shell.show_window("@1");
+    assert!(ticking(&mut shell));
+    // Done: the notice says so, with its mark, and the line goes.
+    shell.chat(event(
+        13,
+        ChatChange::Item(item(
+            "n1",
+            ChatItemKind::Notice,
+            "Context compacted, was 182k tokens",
+        )),
+    ));
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
 }

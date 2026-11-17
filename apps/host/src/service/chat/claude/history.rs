@@ -183,11 +183,9 @@ pub(in crate::service::chat) fn load(
                 items.push(item);
             }
             "system" if string(entry, "subtype") == "compact_boundary" => {
-                items.push(items::text(
-                    id.as_str(),
-                    Kind::Notice,
-                    "Conversation compacted.",
-                ));
+                // The session's record names its fields in camel case.
+                let text = super::compacted(&entry["compactMetadata"]);
+                items.push(items::text(id.as_str(), Kind::Notice, text));
             }
             _ => {}
         }

@@ -68,6 +68,8 @@ const MAX_QUESTION_OPTIONS: usize = 16;
 const MAX_MODELS: usize = 64;
 const MAX_MODEL_EFFORTS: usize = 16;
 const MAX_COMMANDS: usize = 256;
+/// The background tasks a state lists.
+const MAX_BACKGROUND_TASKS: usize = 64;
 /// The most an ANSWER's payload weighs.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// The most items a pane's timeline holds, and the most their text weighs; the
@@ -617,6 +619,14 @@ fn topology_changed() {
     });
 }
 
+/// A STOP_TASK for a task its agent cannot stop.
+fn cannot_stop() -> ChatError {
+    ChatError::new(
+        "chat_task_not_stoppable",
+        "This agent cannot stop that task.",
+    )
+}
+
 fn now_unix_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -970,6 +980,23 @@ impl Pane {
             }
             SessionCommand::SetOptions(options) => *options = self.merged_options(options)?,
             SessionCommand::Interrupt => {}
+            SessionCommand::StopTask { task_id } => {
+                let listed = self
+                    .state
+                    .background
+                    .iter()
+                    .find(|task| !task_id.is_empty() && task.id == *task_id);
+                match listed {
+                    None => {
+                        return Err(ChatError::new(
+                            "chat_task_not_found",
+                            "That task is no longer running.",
+                        ));
+                    }
+                    Some(task) if !task.stoppable => return Err(cannot_stop()),
+                    Some(_) => {}
+                }
+            }
         }
         Ok(())
     }
@@ -1110,7 +1137,12 @@ fn bound_item(item: &mut v1::ChatItem) -> bool {
     }
     cut(&mut item.text, MAX_ITEM_TEXT_BYTES);
     if let Some(tool) = &mut item.tool {
-        cut_labels([&mut tool.title, &mut tool.result_summary]);
+        cut_labels([
+            &mut tool.title,
+            &mut tool.result_summary,
+            &mut tool.agent_type,
+            &mut tool.activity,
+        ]);
         cut(&mut tool.detail, MAX_DETAIL_BYTES);
         cut(&mut tool.path, MAX_PATH_BYTES);
         tool.output_truncated |= cut(&mut tool.output_preview, MAX_OUTPUT_PREVIEW_BYTES);
@@ -1120,6 +1152,13 @@ fn bound_item(item: &mut v1::ChatItem) -> bool {
 
 fn bound_state(state: &mut v1::ChatState) {
     cut_labels([&mut state.native_session_id, &mut state.failure]);
+    state
+        .background
+        .retain(|task| task.id.len() <= MAX_ID_BYTES);
+    state.background.truncate(MAX_BACKGROUND_TASKS);
+    for task in &mut state.background {
+        cut(&mut task.description, MAX_LABEL_BYTES);
+    }
     if let Some(options) = &mut state.options {
         cut_labels([&mut options.model, &mut options.effort]);
     }
