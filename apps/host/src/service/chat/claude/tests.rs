@@ -615,7 +615,7 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     );
 
     // Going back to the third message: the agent is started again on the
-    // session, at the entry before that message.
+    // session, at the message before that one.
     let before = replay.client.items.len();
     replay
         .command(SessionCommand::Rewind {
@@ -628,7 +628,7 @@ async fn the_recorded_session_reads_as_the_conversation_it_was() {
     };
     assert_eq!((session.as_str(), uuid.as_str()), (SESSION, M3));
     assert!(matches!(
-        history::parent_of(home.path(), SESSION, M3),
+        history::message_before(home.path(), SESSION, M3),
         Some(Some(_))
     ));
     // Nothing changes until the agent has been started again, and a message
@@ -1175,14 +1175,17 @@ fn a_session_that_cannot_be_read_says_so_and_one_with_no_file_is_empty() {
     let unsafe_name = history::load(home.path(), "../../etc/passwd", "");
     assert!(unsafe_name.items.is_empty() && !unsafe_name.complete);
     assert!(!history::load(home.path(), "", "").complete);
-    assert_eq!(history::parent_of(home.path(), SESSION, M5), None);
-    assert_eq!(history::parent_of(home.path(), SESSION, M1), Some(None));
+    assert_eq!(history::message_before(home.path(), SESSION, M5), None);
+    assert_eq!(
+        history::message_before(home.path(), SESSION, M1),
+        Some(None)
+    );
 }
 
 #[test]
 fn a_rewound_session_ends_where_it_was_rewound_to_until_a_message_follows() {
     let home = home();
-    let kept = history::parent_of(home.path(), SESSION, M3)
+    let kept = history::message_before(home.path(), SESSION, M3)
         .unwrap()
         .unwrap();
     let rewound = history::load(home.path(), SESSION, M3);
@@ -1200,6 +1203,108 @@ fn a_rewound_session_ends_where_it_was_rewound_to_until_a_message_follows() {
     let grown = history::load(home.path(), SESSION, M3);
     let ids: Vec<&str> = grown.items.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(ids, [M1, "msg_01:0", M2, "toolu_01", "msg_03:0", M5]);
+}
+
+/// Between two messages the agent records entries that are not one: a Stop
+/// hook's summary, files it attached, a turn's duration. The agent cuts a
+/// session only at a message, so a rewind, an edit and a fork cut at the
+/// message before them (seen live on 2.1.326: a fork cut at a hook's summary
+/// failed with "No message found with message.uuid").
+#[test]
+fn a_cut_falls_on_the_message_before_whatever_else_the_agent_recorded() {
+    const OTHER: &str = "5e551011-0000-4000-8000-000000000002";
+    const FIRST_REPLY: &str = "a0000000-0000-4000-8000-0000000000a1";
+    const SECOND_REPLY: &str = "a0000000-0000-4000-8000-0000000000a2";
+    let entry = |kind: &str, subtype: &str, uuid: &str, parent: Option<&str>| {
+        let mut entry = json!({"type": kind, "uuid": uuid, "parentUuid": parent,
+                               "isSidechain": false, "timestamp": "2026-01-01T10:00:00.000Z"});
+        match kind {
+            "system" => entry["subtype"] = subtype.into(),
+            "user" => entry["message"] = json!({"role": "user", "content": "go on"}),
+            "assistant" => {
+                entry["message"] = json!({"id": format!("msg_{uuid}"), "role": "assistant",
+                                          "content": [{"type": "text", "text": "Done."}]});
+            }
+            _ => entry["attachment"] = json!({"type": "hook_success"}),
+        }
+        entry.to_string()
+    };
+    let hook = "b0000000-0000-4000-8000-0000000000b1";
+    let attached = "b0000000-0000-4000-8000-0000000000b2";
+    let second_hook = "b0000000-0000-4000-8000-0000000000b3";
+    let lines = [
+        // Only entries that are not messages come before the first.
+        entry(
+            "attachment",
+            "",
+            "b0000000-0000-4000-8000-0000000000b0",
+            None,
+        ),
+        entry(
+            "system",
+            "informational",
+            "b0000000-0000-4000-8000-0000000000b9",
+            Some("b0000000-0000-4000-8000-0000000000b0"),
+        ),
+        entry("user", "", M1, Some("b0000000-0000-4000-8000-0000000000b9")),
+        entry("assistant", "", FIRST_REPLY, Some(M1)),
+        entry("system", "stop_hook_summary", hook, Some(FIRST_REPLY)),
+        entry("user", "", M2, Some(hook)),
+        entry("assistant", "", SECOND_REPLY, Some(M2)),
+        entry("attachment", "", attached, Some(SECOND_REPLY)),
+        entry("system", "stop_hook_summary", second_hook, Some(attached)),
+        entry("user", "", M3, Some(second_hook)),
+        // Of what came before this one, the file holds nothing.
+        entry("user", "", M4, Some("b0000000-0000-4000-8000-0000000000bf")),
+    ];
+    let home = home();
+    std::fs::write(
+        home.path().join(format!("projects/-work/{OTHER}.jsonl")),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
+    let before = |uuid: &str| history::message_before(home.path(), OTHER, uuid);
+    assert_eq!(before(M2), Some(Some(FIRST_REPLY.to_owned())));
+    assert_eq!(before(M3), Some(Some(SECOND_REPLY.to_owned())));
+    assert_eq!(before(M1), Some(None));
+    assert_eq!(before(M4), None);
+    assert_eq!(before(M5), None);
+
+    // A fork of the first reply, and of the second.
+    let fork = |next: &str| fork_launch(home.path(), OTHER, None, Some(next), Launch::default());
+    let copy = |resume_at: &str| Launch {
+        resume: Resume::Session {
+            id: OTHER.into(),
+            fork: true,
+        },
+        resume_at: resume_at.into(),
+        ..Launch::default()
+    };
+    assert_eq!(fork(M2).unwrap(), copy(FIRST_REPLY));
+    assert_eq!(fork(M3).unwrap(), copy(SECOND_REPLY));
+    assert_eq!(fork(M1).unwrap_err().code, "chat_fork_unavailable");
+
+    // A rewind, and an edit, which is one.
+    let rewind = |uuid: &str| {
+        let mut launch = Launch::default();
+        rewind_launch(home.path(), OTHER, uuid, &mut launch).map(|dropped| (launch, dropped))
+    };
+    let resumed = |resume_at: &str| Launch {
+        resume: Resume::Session {
+            id: OTHER.into(),
+            fork: false,
+        },
+        resume_at: resume_at.into(),
+        ..Launch::default()
+    };
+    assert_eq!(rewind(M2).unwrap(), (resumed(FIRST_REPLY), M2.to_owned()));
+    assert_eq!(rewind(M3).unwrap(), (resumed(SECOND_REPLY), M3.to_owned()));
+    // Nothing that is a message came before the first: it starts over.
+    let (fresh, dropped) = rewind(M1).unwrap();
+    assert_eq!(
+        (fresh.resume, fresh.resume_at, dropped),
+        (Resume::Fresh, String::new(), String::new())
+    );
 }
 
 // --- a fork from a reply ----------------------------------------------------
@@ -1336,7 +1441,7 @@ fn a_fork_with_nothing_said_in_it_is_rewound_and_forked_from_its_source() {
         name: "Fix tests (fork)".into(),
         ..Default::default()
     };
-    let before_m2 = history::parent_of(home.path(), SESSION, M2)
+    let before_m2 = history::message_before(home.path(), SESSION, M2)
         .unwrap()
         .unwrap();
     let from_source = |resume_at: &str| Launch {
@@ -1580,6 +1685,11 @@ const TASKS: &str = include_str!("../fixtures/claude-tasks.stream.jsonl");
 /// command left running when the turn ends, stopped from the chat, the turn
 /// the agent then starts by itself, and a manual `/compact`.
 const BACKGROUND: &str = include_str!("../fixtures/claude-background.stream.jsonl");
+/// One recorded headless chat (2.1.326): an `Explore` subagent run in the
+/// background, which goes on after its turn ends, hands its report back as
+/// a user message, and the turn the agent then starts by itself. Trimmed
+/// (no stream deltas, shorter texts), with its paths and ids replaced.
+const BACKGROUND_AGENT: &str = include_str!("../fixtures/claude-background-agent.stream.jsonl");
 
 /// A chat whose agent has answered `initialize`, so it takes commands.
 fn ready() -> Replay<Claude> {
@@ -1689,6 +1799,199 @@ async fn background_work_is_listed_and_a_subagents_row_has_its_figures() {
     assert_eq!(tool_of(&replay, waiting), &before);
     replay.play(&mut lines, "\"type\":\"result\"");
     replay.client.assert_settled();
+}
+
+#[tokio::test]
+async fn a_background_subagent_runs_on_with_its_figures_and_its_report_is_no_users_message() {
+    let mut lines = BACKGROUND_AGENT.lines().peekable();
+    let mut replay = ready();
+    replay.send(
+        M1,
+        "Use the Explore subagent, running in the background, to find which file contains the \
+         word 'needle'. Then tell me the file name.",
+    );
+    let agent = "toolu_01QdB1q9UGBzrasx4dcWr64c";
+    let running = i32::from(Status::Running);
+    let task = (
+        "a88635c133db0bb45".to_owned(),
+        v1::ChatTaskKind::Subagent,
+        "Find file containing needle".to_owned(),
+        true,
+    );
+
+    // Its tool call returns at once, saying only that it started it: the
+    // subagent runs on, and is listed.
+    replay.play(&mut lines, "Async agent launched");
+    let tool = tool_of(&replay, agent);
+    assert_eq!(
+        (
+            tool.status,
+            tool.agent_type.as_str(),
+            tool.background,
+            tool.output_preview.as_str()
+        ),
+        (running, "Explore", true, "")
+    );
+    assert_eq!(listed(&replay), std::slice::from_ref(&task));
+    // What it does and its figures, as it works.
+    replay.play(&mut lines, "\"task_progress\"");
+    let tool = tool_of(&replay, agent);
+    assert_eq!(
+        (
+            tool.status,
+            tool.activity.as_str(),
+            tool.tool_uses,
+            tool.tokens
+        ),
+        (
+            running,
+            "Running Recursively list files containing the word needle",
+            1,
+            12_368
+        )
+    );
+    // Its own conversation stays its own.
+    assert!(
+        replay
+            .client
+            .item("toolu_015gh4gV25mLwmaEP3Zv7Xbq")
+            .is_none()
+    );
+
+    // The turn ends; the subagent goes on, and its figures with it.
+    replay.play(&mut lines, "\"type\":\"result\"");
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Idle));
+    assert_eq!(tool_of(&replay, agent).status, running);
+    assert_eq!(listed(&replay), std::slice::from_ref(&task));
+    replay.play(&mut lines, "\"last_tool_name\":\"SubagentHandback\"");
+    assert_eq!(tool_of(&replay, agent).tokens, 16_428);
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Idle));
+
+    // It ends: its outcome, then its last figures and its report.
+    replay.play(&mut lines, "\"task_updated\"");
+    let tool = tool_of(&replay, agent);
+    assert_eq!(
+        (tool.status, tool.result_summary.as_str()),
+        (i32::from(Status::Ok), "done")
+    );
+    replay.play(&mut lines, "\"task_notification\"");
+    let finished = tool_of(&replay, agent).clone();
+    assert_eq!(
+        (
+            finished.status,
+            finished.result_summary.as_str(),
+            finished.tool_uses,
+            finished.tokens,
+            finished.output_preview.as_str()
+        ),
+        (i32::from(Status::Ok), "done", 1, 16_600, "haystack.txt")
+    );
+    replay.play(&mut lines, "\"tasks\":[]");
+    assert!(replay.client.state.background.is_empty());
+
+    // Its report comes as a message in the user's name, which the user did
+    // not write.
+    let report = "9976c633-9436-4771-8343-fa98ac72dc9b";
+    replay.play(&mut lines, report);
+    assert!(replay.client.item(report).is_none());
+
+    // The agent starts a turn of its own on it.
+    replay.play(&mut lines, "message_start");
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Working));
+    replay.play(&mut lines, "\"type\":\"result\"");
+    assert!(lines.next().is_none());
+    replay.client.assert_settled();
+    assert!(replay.client.state.background.is_empty());
+    assert_eq!(tool_of(&replay, agent), &finished);
+    let users: Vec<&str> = replay
+        .client
+        .items
+        .iter()
+        .filter(|item| item.kind == i32::from(Kind::User))
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(users, [M1]);
+    assert!(
+        replay
+            .client
+            .items
+            .last()
+            .unwrap()
+            .text
+            .starts_with("The file that contains \"needle\" is **`haystack.txt`**")
+    );
+}
+
+/// A background subagent whose end goes unsaid does not run for ever.
+#[tokio::test]
+async fn a_background_subagents_row_ends_when_its_task_or_its_agent_is_gone() {
+    let agent = "toolu_bg1";
+    let started = |replay: &mut Replay<Claude>| {
+        for line in [
+            json!({"type": "assistant", "parent_tool_use_id": null, "message": {
+                "id": "msg_bg1", "role": "assistant", "content": [{
+                    "type": "tool_use", "id": agent, "name": "Agent", "input": {
+                        "description": "Audit", "subagent_type": "Explore",
+                        "run_in_background": true}}]}}),
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+                {"task_id": "abg1", "task_type": "local_agent", "description": "Audit"}]}),
+            json!({"type": "system", "subtype": "task_started", "task_id": "abg1",
+                   "tool_use_id": agent, "subagent_type": "Explore",
+                   "is_backgrounded": true, "task_type": "local_agent"}),
+            json!({"type": "user", "parent_tool_use_id": null, "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": agent,
+                             "content": [{"type": "text", "text": "Async agent launched."}]}]}}),
+            json!({"type": "result", "subtype": "success", "is_error": false}),
+        ] {
+            replay.agent(&line.to_string());
+        }
+        assert_eq!(tool_of(replay, agent).status, i32::from(Status::Running));
+    };
+    let stopped = |replay: &Replay<Claude>| {
+        let tool = tool_of(replay, agent);
+        (tool.status, tool.result_summary.clone())
+    };
+    let stopped_row = (i32::from(Status::Failed), "stopped".to_owned());
+
+    // It leaves the list before its end is said: it is stopped, until the
+    // agent says how it ended.
+    let mut replay = ready();
+    started(&mut replay);
+    replay.agent(
+        &json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}).to_string(),
+    );
+    assert_eq!(stopped(&replay), stopped_row);
+    replay.agent(
+        &json!({"type": "system", "subtype": "task_notification", "task_id": "abg1",
+                "tool_use_id": agent, "status": "failed", "summary": "It broke.",
+                "usage": {"total_tokens": 900, "tool_uses": 2}})
+        .to_string(),
+    );
+    let tool = tool_of(&replay, agent);
+    assert_eq!(
+        (
+            tool.status,
+            tool.result_summary.as_str(),
+            tool.tool_uses,
+            tool.tokens,
+            tool.output_preview.as_str()
+        ),
+        (i32::from(Status::Failed), "failed", 2, 900, "It broke.")
+    );
+    replay.client.assert_settled();
+
+    // The agent ends.
+    let mut replay = ready();
+    started(&mut replay);
+    replay.end("");
+    assert_eq!(stopped(&replay), stopped_row);
+
+    // The link to it is lost and made again: its row is read again.
+    let mut replay = ready();
+    started(&mut replay);
+    replay.disconnect();
+    replay.connect(&tag(SESSION, ""));
+    assert_eq!(stopped(&replay), stopped_row);
 }
 
 #[tokio::test]

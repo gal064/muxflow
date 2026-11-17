@@ -657,7 +657,15 @@ fn said_in(entry: &Value, staging: Option<&std::path::Path>) -> Said {
     };
     // The record's order: what was named under the text, then the images.
     let attachments: Vec<v1::ChatAttachment> = named.into_iter().chain(attachments).collect();
-    let hidden = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"];
+    // What the agent wrote in the user's name. A background subagent's
+    // report comes so: `isSynthetic` on the stream, `isMeta` in the record
+    // (2.1.326).
+    let hidden = [
+        "isMeta",
+        "isSynthetic",
+        "isCompactSummary",
+        "isVisibleInTranscriptOnly",
+    ];
     if hidden
         .iter()
         .any(|flag| entry[flag].as_bool() == Some(true))
@@ -799,8 +807,8 @@ fn message_uuid(item_id: &str) -> String {
 
 /// The launch of a copy of `session` that ends where the reply before the
 /// message `next` ends, or with the newest message when there is none. The
-/// cut is the entry the agent gave `next` as its parent, the one a rewind
-/// of `next` goes back to.
+/// cut is the message before `next`, the one a rewind of `next` goes back
+/// to.
 ///
 /// A copy nothing has been said in has no record yet: what it shows is its
 /// source's up to the cut, so it is forked as a copy of that.
@@ -813,7 +821,7 @@ fn fork_launch(
 ) -> Result<Launch, ChatError> {
     let (session, cut) = recorded_in(configuration, session, copied);
     let through = match next {
-        Some(next) => match history::parent_of(configuration, &session, next) {
+        Some(next) => match history::message_before(configuration, &session, next) {
             Some(Some(entry)) => entry,
             // The agent has not taken the next message yet: it may still be
             // adding to the reply.
@@ -864,7 +872,7 @@ fn rewind_launch(
     launch: &mut Launch,
 ) -> Result<String, String> {
     let (record, cut) = recorded_in(configuration, session, copied(launch));
-    let kept = history::parent_of(configuration, &record, uuid)
+    let kept = history::message_before(configuration, &record, uuid)
         .ok_or("That message is not in the session's record yet.")?;
     let Some(kept) = kept else {
         // Nothing came before it: the conversation starts over, as a new
@@ -949,9 +957,24 @@ pub(super) struct Claude {
     notices: u64,
     /// Final assistant text already displayed in the current turn.
     turn_text: BTreeSet<String>,
-    /// When each task the agent has said started, and not yet said ended,
-    /// was first heard of, by its id for it: a command, a subagent.
-    tasks: BTreeMap<String, i64>,
+    /// The tasks the agent has said started, and not yet said ended, by its
+    /// id for each: a command, a subagent.
+    tasks: BTreeMap<String, Task>,
+    /// The rows of subagents that run on in the background after their tool
+    /// call returned, by its id, until their task says it has ended: their
+    /// task's lines go on changing them.
+    detached: BTreeMap<String, v1::ChatItem>,
+}
+
+/// A task the agent has said started, or listed as running.
+#[derive(Default)]
+struct Task {
+    /// When it was first heard of.
+    started_at: i64,
+    /// The tool call it runs for.
+    tool_use_id: String,
+    /// The list of what runs in the background has held it.
+    listed: bool,
 }
 
 type Output = Out<Job>;
@@ -1382,7 +1405,19 @@ impl Claude {
     }
 
     fn user(&mut self, message: &Value, out: &mut Output) {
-        for item in self.reader.results(message) {
+        for mut item in self.reader.results(message) {
+            if self.runs_on(&item) {
+                let tool = item.tool.get_or_insert_default();
+                tool.status = Status::Running.into();
+                tool.result_summary.clear();
+                // The tool says only that it started the subagent, in words
+                // for the model.
+                tool.output_preview.clear();
+                if self.detached.len() >= MAX_TASKS {
+                    self.detached.pop_first();
+                }
+                self.detached.insert(item.id.clone(), item.clone());
+            }
             out.publish(Change::Item(item));
         }
         let uuid = string(message, "uuid");
@@ -1460,8 +1495,10 @@ impl Claude {
             }
             "task_started" => self.task_started(message, out),
             "task_progress" => self.task_figures(message, out),
+            "task_updated" => self.task_updated(message, out),
             "task_notification" => {
                 self.task_figures(message, out);
+                self.task_ended(message, out);
                 self.tasks.remove(string(message, "task_id"));
             }
             "background_tasks_changed" => self.background_changed(message, out),
@@ -1594,20 +1631,34 @@ impl Claude {
         }
     }
 
-    /// The tool row a task runs for, while it is still open: a subagent's.
+    /// The tool row a task runs for, while it is still open: a subagent's,
+    /// also one that runs on after its tool call returned.
     fn subagent_row(&mut self, tool_use_id: &str) -> Option<&mut v1::ChatItem> {
-        self.reader.open.get_mut(tool_use_id).filter(|item| {
+        let open = self.reader.open.get_mut(tool_use_id).filter(|item| {
             item.tool
                 .as_ref()
                 .is_some_and(|tool| tool.kind == i32::from(ToolKind::Subagent))
-        })
+        });
+        open.or_else(|| self.detached.get_mut(tool_use_id))
+    }
+
+    /// `item`, whose tool call has just returned, is a subagent that runs on
+    /// in the background: its task has not said it ended. Its tool says only
+    /// that it was started (2.1.326).
+    fn runs_on(&self, item: &v1::ChatItem) -> bool {
+        item.tool
+            .as_ref()
+            .is_some_and(|tool| tool.kind == i32::from(ToolKind::Subagent) && tool.background)
+            && self.tasks.values().any(|task| task.tool_use_id == item.id)
     }
 
     /// `task_started`: when it started, and for a subagent its type on its
     /// row. A command run in the foreground starts a task too; its row is
     /// left as it is.
     fn task_started(&mut self, message: &Value, out: &mut Output) {
-        self.started_at(string(message, "task_id"));
+        if let Some(task) = self.task(string(message, "task_id")) {
+            string(message, "tool_use_id").clone_into(&mut task.tool_use_id);
+        }
         let kind = string(message, "subagent_type").to_owned();
         let backgrounded = message["is_backgrounded"].as_bool() == Some(true);
         if let Some(row) = self.subagent_row(string(message, "tool_use_id")) {
@@ -1650,49 +1701,119 @@ impl Claude {
         out.publish(Change::Item(row));
     }
 
+    /// `task_updated`: a task that has ended closes the row of a subagent
+    /// that ran on in the background. Its last figures come with its
+    /// `task_notification`.
+    fn task_updated(&mut self, message: &Value, out: &mut Output) {
+        let status = string(&message["patch"], "status");
+        if !matches!(status, "completed" | "failed" | "killed" | "stopped") {
+            return;
+        }
+        if let Some(task) = self.tasks.get(string(message, "task_id")) {
+            let row = task.tool_use_id.clone();
+            self.close_detached(&row, status, out);
+        }
+    }
+
+    /// `task_notification`, after its figures: a subagent that ran on in the
+    /// background is done with, and its row says how it ended and what it
+    /// reported.
+    fn task_ended(&mut self, message: &Value, out: &mut Output) {
+        let Some(mut row) = self.detached.remove(string(message, "tool_use_id")) else {
+            return;
+        };
+        let report = match string(&message["handback_report"], "text") {
+            "" => string(message, "summary"),
+            report => report,
+        };
+        if let Some(tool) = &mut row.tool {
+            report.clone_into(&mut tool.output_preview);
+        }
+        finish(&mut row, string(message, "status"));
+        out.publish(Change::Item(row));
+    }
+
+    /// Closes the row of the subagent that ran on after its tool call `id`
+    /// returned, if it still says it runs, as its task ended (`status`).
+    fn close_detached(&mut self, id: &str, status: &str, out: &mut Output) {
+        let Some(row) = self.detached.get_mut(id) else {
+            return;
+        };
+        if row
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.status == i32::from(Status::Running))
+        {
+            finish(row, status);
+            out.publish(Change::Item(row.clone()));
+        }
+    }
+
+    /// The agent, or the link to it, is gone: no subagent's row will hear of
+    /// its end.
+    fn stop_detached(&mut self, out: &mut Output) {
+        for mut row in std::mem::take(&mut self.detached).into_values() {
+            items::stop(&mut row);
+            out.publish(Change::Item(row));
+        }
+    }
+
     /// `background_tasks_changed`: the whole list of what runs outside the
-    /// turn, each with when it started as far as this chat knows.
+    /// turn, each with when it started as far as this chat knows. A subagent
+    /// that has left it runs no more, whether or not its end was said yet.
     fn background_changed(&mut self, message: &Value, out: &mut Output) {
         let tasks = message["tasks"].as_array().map_or(&[][..], Vec::as_slice);
-        let background = tasks
-            .iter()
-            .filter(|task| !string(task, "task_id").is_empty())
-            .map(|task| {
-                let id = string(task, "task_id");
-                v1::ChatBackgroundTask {
-                    id: id.to_owned(),
-                    kind: task_kind(string(task, "task_type")).into(),
-                    description: string(task, "description").to_owned(),
-                    started_at_unix_millis: self.started_at(id),
-                    // Claude Code stops any task it lists (`stop_task`).
-                    stoppable: true,
-                }
-            })
-            .collect();
+        let mut background = Vec::new();
+        for listed in tasks {
+            let id = string(listed, "task_id");
+            let Some(task) = self.task(id) else {
+                continue;
+            };
+            task.listed = true;
+            background.push(v1::ChatBackgroundTask {
+                id: id.to_owned(),
+                kind: task_kind(string(listed, "task_type")).into(),
+                description: string(listed, "description").to_owned(),
+                started_at_unix_millis: task.started_at,
+                // Claude Code stops any task it lists (`stop_task`).
+                stoppable: true,
+            });
+        }
+        let mut left = Vec::new();
+        for (id, task) in &mut self.tasks {
+            if task.listed && !background.iter().any(|listed| listed.id == *id) {
+                task.listed = false;
+                left.push(task.tool_use_id.clone());
+            }
+        }
+        for row in left {
+            self.close_detached(&row, "", out);
+        }
         self.state.background = background;
         self.publish_state(out);
     }
 
-    /// When task `id` started: when it was first heard of, which may be
-    /// its `task_started` or the list it first showed in, whichever came
-    /// first. Neither line says.
-    fn started_at(&mut self, id: &str) -> i64 {
+    /// Task `id`, first heard of now if it has not been: by its
+    /// `task_started` or the list it first showed in, whichever came first.
+    /// Neither line says when it started. `None` for no id.
+    fn task(&mut self, id: &str) -> Option<&mut Task> {
         if id.is_empty() {
-            return super::now_unix_millis();
+            return None;
         }
         if self.tasks.len() >= MAX_TASKS && !self.tasks.contains_key(id) {
             // So many are left only by tasks whose end went unsaid.
             self.tasks.pop_first();
         }
-        *self
-            .tasks
-            .entry(id.to_owned())
-            .or_insert_with(super::now_unix_millis)
+        Some(self.tasks.entry(id.to_owned()).or_insert_with(|| Task {
+            started_at: super::now_unix_millis(),
+            ..Task::default()
+        }))
     }
 
     /// The agent process is gone: nothing it ran runs any more. Published
     /// with the next state.
-    fn forget_tasks(&mut self) {
+    fn forget_tasks(&mut self, out: &mut Output) {
+        self.stop_detached(out);
         self.tasks.clear();
         self.state.background.clear();
         self.state.compacting = false;
@@ -1712,6 +1833,20 @@ impl Claude {
             self.busy = true;
             self.publish_state(out);
         }
+    }
+}
+
+/// Ends a subagent's row as its task ended: `completed`, `failed`, or
+/// stopped (`killed`, `stopped`, or not said).
+fn finish(row: &mut v1::ChatItem, status: &str) {
+    if let Some(tool) = &mut row.tool {
+        let (status, summary) = match status {
+            "completed" => (Status::Ok, "done"),
+            "failed" => (Status::Failed, "failed"),
+            _ => (Status::Failed, "stopped"),
+        };
+        tool.status = status.into();
+        summary.clone_into(&mut tool.result_summary);
     }
 }
 
@@ -1955,7 +2090,7 @@ impl Dialect for Claude {
                             .retain(|item| held.iter().any(|held| held.item_id == item.id));
                         self.outstanding.clear();
                         // The agent was replaced, and its tasks with it.
-                        self.forget_tasks();
+                        self.forget_tasks(out);
                         out.publish(Change::Truncate(v1::ChatTruncate {
                             after_item_id: rewind.after_item_id,
                         }));
@@ -2000,6 +2135,9 @@ impl Dialect for Claude {
             self.rewind = None;
         }
         self.reader = Reader::default();
+        // A subagent that ran on may have ended unheard: its row is read
+        // again with the rest.
+        self.stop_detached(out);
         self.turn_text.clear();
         // A session started under a name goes by it.
         out.name(&self.launch.name);
@@ -2204,7 +2342,7 @@ impl Dialect for Claude {
         }
     }
 
-    /// A copy of the session cut at the last entry before the user's next
+    /// A copy of the session cut at the last message before the user's next
     /// message, or at the newest message for the newest reply: where the
     /// agent itself would go on from (D6).
     fn fork(&mut self, at: &ForkAt, out: &mut Output) -> Result<ForkPlan, ChatError> {
@@ -2263,7 +2401,7 @@ impl Dialect for Claude {
         }
         self.withdraw_silent(out);
         // Its tasks went with it.
-        self.forget_tasks();
+        self.forget_tasks(out);
         self.state.connection = if failure.is_empty() {
             Connection::Ended
         } else {
