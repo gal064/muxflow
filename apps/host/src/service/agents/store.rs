@@ -594,6 +594,17 @@ pub(super) fn load(path: &Path) -> StoredState {
     state
 }
 
+/// Replaces the state file through a fresh temporary file and a rename, so a
+/// reader or a daemon that dies mid-write sees the old file or the new one,
+/// never a mix.
+///
+/// Not synced, on purpose. The page cache outlives the daemon, so a crash or
+/// kill loses nothing; only power loss or a kernel crash can, and after either
+/// the tmux server is gone and every route in this file names a dead server.
+/// `load` starts empty on a file it cannot read. Session history, which must
+/// outlive a reboot, is `sessions.json` and has its own writer. Two fsyncs on
+/// every hook stalled the whole daemon behind a busy disk
+/// (docs/design/host-disk-stall-plan.md).
 pub(super) fn persist(path: &Path, state: &StoredState) -> anyhow::Result<()> {
     let parent = path.parent().context("agent state has no parent")?;
     crate::paths::prepare_runtime_dir(parent)?;
@@ -605,9 +616,7 @@ pub(super) fn persist(path: &Path, state: &StoredState) -> anyhow::Result<()> {
             .mode(0o600)
             .open(&temporary)?;
         file.write_all(&serde_json::to_vec(state)?)?;
-        file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {

@@ -182,7 +182,7 @@ pub(crate) async fn handle_request(
         (Handler::History, Some(_)) => {
             // Synchronous like an agent operation, and for the same reason off
             // the runtime's workers: it runs tmux, writes the session record,
-            // and a snooze reads the agent state behind an ingest's fsyncs.
+            // and a snooze reads the agent state behind an ingest's write.
             let generation = Arc::clone(generation);
             let topology_baseline = Arc::clone(topology_baseline);
             let response = tokio::task::spawn_blocking(move || {
