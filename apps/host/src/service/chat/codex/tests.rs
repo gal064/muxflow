@@ -1202,6 +1202,81 @@ async fn a_subagent_is_its_spawns_row_and_the_calls_after_it_say_how_it_is() {
     assert_eq!(refused.code, "chat_task_not_found");
 }
 
+// --- commands put in the background ------------------------------------------
+//
+// Seen live on 0.169.0: such a command is still in progress when its turn
+// completes, with no `item/completed`; that comes once it ends, naming the
+// turn it started in.
+
+#[tokio::test]
+async fn a_command_put_in_the_background_runs_on_past_its_turn_until_its_own_end() {
+    let (mut replay, _lines) = opened(Launch::default());
+    let command = |id: &str, turn: &str, status: &str, exit: Value| {
+        json!({"method": if status == "inProgress" { "item/started" } else { "item/completed" },
+            "params": {"threadId": THREAD, "turnId": turn, "item": {
+                "type": "commandExecution", "id": id,
+                "command": "/usr/bin/bash -lc 'sleep 120'", "cwd": "/work",
+                "processId": "50638", "source": "unifiedExecStartup", "status": status,
+                "commandActions": [{"type": "unknown", "command": "sleep 120"}],
+                "aggregatedOutput": null, "exitCode": exit, "startedAtMs": 1794934273998_i64}}})
+        .to_string()
+    };
+    let completed = |turn: &str| {
+        json!({"method": "turn/completed", "params": {
+            "threadId": THREAD, "turn": {"id": turn, "status": "completed"}}})
+        .to_string()
+    };
+    let status = |replay: &Replay<Codex>, id: &str| {
+        replay
+            .client
+            .item(id)
+            .unwrap()
+            .tool
+            .as_ref()
+            .unwrap()
+            .status
+    };
+    let listed = |replay: &Replay<Codex>| -> Vec<(String, i32, bool)> {
+        let tasks = &replay.client.state.background;
+        tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.kind, task.stoppable))
+            .collect()
+    };
+    replay.send("m1", "start it and leave it running");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    // One that ends in its turn is no background one.
+    replay.agent(&command("exec-0", "t1", "inProgress", Value::Null));
+    replay.agent(&command("exec-0", "t1", "completed", json!(0)));
+    replay.agent(&command("exec-1", "t1", "inProgress", Value::Null));
+    replay.agent(&completed("t1"));
+    assert_eq!(replay.client.state.turn, i32::from(v1::ChatTurnState::Idle));
+    assert_eq!(status(&replay, "exec-0"), i32::from(Status::Ok));
+    assert_eq!(status(&replay, "exec-1"), i32::from(Status::Running));
+    let command_kind = i32::from(v1::ChatTaskKind::Command);
+    assert_eq!(
+        listed(&replay),
+        [("exec-1".to_owned(), command_kind, false)]
+    );
+
+    // Its end comes after its turn, and names it.
+    replay.agent(&command("exec-1", "t1", "failed", json!(-1)));
+    assert_eq!(status(&replay, "exec-1"), i32::from(Status::Failed));
+    assert!(listed(&replay).is_empty());
+    replay.client.assert_settled();
+
+    // A new link does not know that one still runs.
+    replay.send("m2", "and another");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t2"}}}).to_string());
+    replay.agent(&command("exec-2", "t2", "inProgress", Value::Null));
+    replay.agent(&completed("t2"));
+    assert_eq!(listed(&replay).len(), 1);
+    replay.disconnect();
+    replay.connect(&tag("", Launch::default()));
+    assert!(listed(&replay).is_empty());
+    assert_ne!(status(&replay, "exec-2"), i32::from(Status::Running));
+}
+
 // --- attachments ------------------------------------------------------------
 //
 // Composed from the 0.169.0 schema's `UserInput`: not tried live.
@@ -1236,6 +1311,12 @@ async fn an_image_goes_as_a_local_image_and_a_file_as_its_path_under_the_text() 
     let item = replay.client.item("m-files").unwrap();
     assert_eq!(item.text, "What broke?");
     assert_eq!(item.attachments.len(), 2);
+
+    // An image with blank space for its text goes alone: no blank text.
+    assert_eq!(
+        Codex::default().input_with(" \n ", &[file("shot.png", "image/png")]),
+        json!([{"type": "localImage", "path": format!("{staged}/shot.png")}])
+    );
 
     // The thread's record of it reads back as it was sent.
     let staging = attach::staging_directory().unwrap();

@@ -32,8 +32,11 @@ pub(crate) const MAX_ATTACHMENTS: usize = 10;
 /// one. A larger one goes as its path.
 const MAX_INLINE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// The most the inline images of one message weigh, encoded. Images past it
-/// go as their paths.
-const MAX_INLINE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+/// go as their paths. The message comes back whole on one line of the agent's
+/// (`session::MAX_MESSAGE_BYTES`) and lies whole in its record, whose reader
+/// starts from a window of its end (`claude::history`): with its text, a
+/// message stays well inside both.
+pub(in crate::service::chat) const MAX_INLINE_TOTAL_BYTES: usize = 6 * 1024 * 1024;
 /// The longest name kept for an attachment.
 const MAX_NAME_BYTES: usize = 255;
 
@@ -513,7 +516,9 @@ mod tests {
             .filter_map(|attached| attached.inline.as_ref().map(String::len))
             .sum();
         assert!(inline <= MAX_INLINE_TOTAL_BYTES);
-        assert_eq!(admitted.iter().filter(|a| a.inline.is_some()).count(), 5);
+        // 4 MiB encoded each: one fits the 6 MiB budget, the rest go by path.
+        assert_eq!(admitted.iter().filter(|a| a.inline.is_some()).count(), 1);
+        assert!(admitted[1..].iter().all(|a| a.inline.is_none()));
     }
 
     #[test]

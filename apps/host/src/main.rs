@@ -29,7 +29,20 @@ mod voice_cli;
 async fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("daemon") => {
-            daemon::run(argument_path("--socket").unwrap_or_else(paths::default_socket_path)).await
+            let outcome =
+                daemon::run(argument_path("--socket").unwrap_or_else(paths::default_socket_path))
+                    .await;
+            // Returning from here would drop the tokio runtime, and that drop
+            // waits for every blocking-pool task still running: an ingest
+            // finishing after a cooperative stop would then write `agents.json`
+            // or take mailbox files under the daemon that replaced this one.
+            // A stopped daemon leaves the process here instead.
+            if let Err(error) = &outcome {
+                // What returning `Err` from `main` would have printed.
+                eprintln!("Error: {error:?}");
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::process::exit(i32::from(outcome.is_err()));
         }
         Some("daemon-stop") => {
             let socket = argument_path("--socket").unwrap_or_else(paths::default_socket_path);

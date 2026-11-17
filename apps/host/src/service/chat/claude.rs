@@ -597,7 +597,8 @@ fn content(text: &str, attachments: &[Attached]) -> Value {
         .map(|attached| attached.path.as_str());
     let text = attach::with_paths(text, named);
     let mut blocks = Vec::new();
-    if !text.is_empty() {
+    // The agent refuses a text block of nothing but blank space.
+    if !text.trim().is_empty() {
         blocks.push(json!({"type": "text", "text": text}));
     }
     for attached in attachments {
@@ -614,6 +615,12 @@ fn content(text: &str, attachments: &[Attached]) -> Value {
 /// sent with: an image the record holds inline, which has kept no name, and
 /// the staged paths named under the text.
 pub(super) fn said(entry: &Value) -> Said {
+    said_in(entry, attach::staging_directory().as_deref())
+}
+
+/// [`said`], with the paths under the text read as attachments when they lie
+/// in `staging`.
+fn said_in(entry: &Value, staging: Option<&std::path::Path>) -> Said {
     let content = &entry["message"]["content"];
     let mut attachments = Vec::new();
     let text = match content {
@@ -644,7 +651,10 @@ pub(super) fn said(entry: &Value) -> Said {
         }
         _ => return Said::Nothing,
     };
-    let (text, named) = attach::split_paths(&text);
+    let (text, named) = match staging {
+        Some(staging) => attach::split_paths_in(&text, staging),
+        None => (text, Vec::new()),
+    };
     // The record's order: what was named under the text, then the images.
     let attachments: Vec<v1::ChatAttachment> = named.into_iter().chain(attachments).collect();
     let hidden = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"];
@@ -791,14 +801,19 @@ fn message_uuid(item_id: &str) -> String {
 /// message `next` ends, or with the newest message when there is none. The
 /// cut is the entry the agent gave `next` as its parent, the one a rewind
 /// of `next` goes back to.
+///
+/// A copy nothing has been said in has no record yet: what it shows is its
+/// source's up to the cut, so it is forked as a copy of that.
 fn fork_launch(
     configuration: &std::path::Path,
     session: &str,
+    copied: Option<(String, String)>,
     next: Option<&str>,
     mut launch: Launch,
 ) -> Result<Launch, ChatError> {
+    let (session, cut) = recorded_in(configuration, session, copied);
     let through = match next {
-        Some(next) => match history::parent_of(configuration, session, next) {
+        Some(next) => match history::parent_of(configuration, &session, next) {
             Some(Some(entry)) => entry,
             // The agent has not taken the next message yet: it may still be
             // adding to the reply.
@@ -810,14 +825,74 @@ fn fork_launch(
                 ));
             }
         },
-        None => history::last_message(configuration, session).ok_or_else(nothing_to_fork)?,
+        None => match cut {
+            Some(cut) => cut,
+            None => history::last_message(configuration, &session).ok_or_else(nothing_to_fork)?,
+        },
     };
     launch.resume = Resume::Session {
-        id: session.to_owned(),
+        id: session,
         fork: true,
     };
     launch.resume_at = through;
     Ok(launch)
+}
+
+/// The session whose record holds what `session` shows: its own, or for a
+/// copy with no record yet (`copied`), its source's, with the entry the copy
+/// was cut at.
+fn recorded_in(
+    configuration: &std::path::Path,
+    session: &str,
+    copied: Option<(String, String)>,
+) -> (String, Option<String>) {
+    match copied {
+        Some((source, cut)) if !history::has_record(configuration, session) => (source, Some(cut)),
+        _ => (session.to_owned(), None),
+    }
+}
+
+/// Sets `launch` to start the agent again for a rewind of the message `uuid`
+/// of `session`: on the session, cut before the message, or as a new
+/// conversation when nothing came before it. A copy with no record yet is
+/// cut from its source's record instead, as a new copy. Answers the message
+/// the record that goes on still holds, for its reader to leave out.
+fn rewind_launch(
+    configuration: &std::path::Path,
+    session: &str,
+    uuid: &str,
+    launch: &mut Launch,
+) -> Result<String, String> {
+    let (record, cut) = recorded_in(configuration, session, copied(launch));
+    let kept = history::parent_of(configuration, &record, uuid)
+        .ok_or("That message is not in the session's record yet.")?;
+    let Some(kept) = kept else {
+        // Nothing came before it: the conversation starts over, as a new
+        // session the message is not in.
+        launch.resume = Resume::Fresh;
+        launch.resume_at.clear();
+        return Ok(String::new());
+    };
+    launch.resume = Resume::Session {
+        id: record,
+        fork: cut.is_some(),
+    };
+    launch.resume_at = kept;
+    // A new copy holds nothing past its cut.
+    Ok(match cut {
+        Some(_) => String::new(),
+        None => uuid.to_owned(),
+    })
+}
+
+/// The session a launch copies and where it was cut, for a reply's fork.
+fn copied(launch: &Launch) -> Option<(String, String)> {
+    match &launch.resume {
+        Resume::Session { id, fork: true } if !launch.resume_at.is_empty() => {
+            Some((id.clone(), launch.resume_at.clone()))
+        }
+        _ => None,
+    }
 }
 
 fn nothing_to_fork() -> ChatError {
@@ -1189,12 +1264,7 @@ impl Claude {
     /// The session this chat's is a copy of and where it was cut, for a
     /// chat started as a reply's fork.
     fn copied(&self) -> Option<(String, String)> {
-        match &self.launch.resume {
-            Resume::Session { id, fork: true } if !self.launch.resume_at.is_empty() => {
-                Some((id.clone(), self.launch.resume_at.clone()))
-            }
-            _ => None,
-        }
+        copied(&self.launch)
     }
 
     fn start_rewind(&mut self, out: &mut Output) {
@@ -1345,6 +1415,8 @@ impl Claude {
     }
 
     fn system(&mut self, message: &Value, out: &mut Output) {
+        // A subagent compacts a conversation of its own, not this one.
+        let nested = !message["parent_tool_use_id"].is_null();
         match string(message, "subtype") {
             "init" => {
                 let names = |name: &str| -> BTreeSet<String> {
@@ -1377,9 +1449,13 @@ impl Claude {
                 if !mode.is_empty() {
                     self.state.options.get_or_insert_default().permission = permission(mode).into();
                 }
-                // `status: null` ends a compaction: every status line says
-                // what the agent does now.
-                self.state.compacting = string(message, "status") == "compacting";
+                // `status: null` ends a compaction. A status line without
+                // the key says nothing of it.
+                if let Some(status) = message.get("status")
+                    && !nested
+                {
+                    self.state.compacting = status.as_str() == Some("compacting");
+                }
                 self.publish_state(out);
             }
             "task_started" => self.task_started(message, out),
@@ -1405,7 +1481,9 @@ impl Claude {
                     item.at_unix_millis = super::now_unix_millis();
                     out.publish(Change::Item(item));
                 }
-                self.set_compacting(false, out);
+                if !nested {
+                    self.set_compacting(false, out);
+                }
             }
             _ => {}
         }
@@ -1832,26 +1910,9 @@ impl Dialect for Claude {
                 uuid,
                 mut launch,
             } => Done::Rewound((|| {
-                let kept = history::parent_of(&configuration(&pane_id), &session, &uuid)
-                    .ok_or("That message is not in the session's record yet.")?;
-                match &kept {
-                    Some(kept) => {
-                        launch.resume = Resume::Session {
-                            id: session,
-                            fork: false,
-                        };
-                        launch.resume_at.clone_from(kept);
-                    }
-                    // Nothing came before it: the conversation starts over.
-                    None => {
-                        launch.resume = Resume::Fresh;
-                        launch.resume_at.clear();
-                    }
-                }
-                // A conversation that starts over is a new session, which
-                // the message is not in.
-                let dropped = if kept.is_some() { uuid.as_str() } else { "" };
-                convert::restart_agent(&pane_id, &ClaudeProvider, &launch, dropped)
+                let dropped =
+                    rewind_launch(&configuration(&pane_id), &session, &uuid, &mut launch)?;
+                convert::restart_agent(&pane_id, &ClaudeProvider, &launch, &dropped)
                     .map_err(|error| format!("The agent could not be started again: {error}"))
             })()),
         }
@@ -1945,6 +2006,8 @@ impl Dialect for Claude {
         // A request the agent waited on is asked again when it answers:
         // losing the link is no word that the agent stopped waiting.
         self.reported_blocked = false;
+        // A compaction the link was lost in says its end to nobody.
+        self.state.compacting = false;
         self.state.connection = Connection::Connecting.into();
         self.state.history_complete = true;
         self.publish_state(out);
@@ -2169,8 +2232,15 @@ impl Dialect for Claude {
         let pane_id = out.pane_id().to_owned();
         let session = self.session.clone();
         let launch = self.launch_now();
+        let copied = self.copied();
         Ok(Box::new(move || {
-            fork_launch(&configuration(&pane_id), &session, next.as_deref(), launch)
+            fork_launch(
+                &configuration(&pane_id),
+                &session,
+                copied,
+                next.as_deref(),
+                launch,
+            )
         }))
     }
 
