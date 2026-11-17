@@ -28,6 +28,7 @@ use crate::{
     context_menu::{self, Entry, Item},
     fonts,
     markdown::is_click,
+    terminal::integration::agents::note_activity,
     theme::{self, Palette, metrics::ui},
     ui::dialog::{self, Action},
 };
@@ -680,6 +681,7 @@ impl Render for ChatPane {
         });
         let measured = self.width.clone();
         let press = self.pressed.clone();
+        let (profile_id, pane_id) = (self.profile_id.clone(), self.pane_id.clone());
         let timeline = if self.chat.is_held() {
             let this = cx.entity().downgrade();
             div()
@@ -715,6 +717,9 @@ impl Render for ChatPane {
             .role(Role::Group)
             .aria_label("Chat")
             .track_focus(&self.focus)
+            .key_context(super::CONTEXT)
+            // Escape that nothing inside the chat took.
+            .on_action(cx.listener(|this, _: &super::Escape, window, cx| this.escape(window, cx)))
             .relative()
             .size_full()
             .flex()
@@ -724,11 +729,13 @@ impl Render for ChatPane {
             .text_color(palette.chrome_ink)
             .text_size(ui(14.5))
             .line_height(relative(1.45))
-            // Captured: Kit's text view takes the press itself.
-            .capture_any_mouse_down(move |event, _, _| {
+            // Captured: Kit's text view takes the press itself. Any button,
+            // as in a terminal pane, says the agent's call has been seen.
+            .capture_any_mouse_down(move |event, _, cx| {
                 if event.button == MouseButton::Left {
                     *press.lock().expect("the press is never poisoned") = Some(event.position);
                 }
+                note_activity(&profile_id, &pane_id, cx);
             })
             .child(
                 canvas(

@@ -233,6 +233,14 @@ impl ChatPane {
         let list = cx.new(|cx| MessageScrollerState::new(1, cx));
         let focus = cx.focus_handle();
         let subscriptions = vec![
+            // Any key with the keyboard in the chat, as in a terminal pane,
+            // says the agent's call has been seen. Observed after the key's
+            // own work, so one an action takes counts too.
+            cx.observe_keystrokes(|this, event, window, cx| {
+                if !event.keystroke.is_modifier_key() && this.focus.contains_focused(window, cx) {
+                    note_activity(&this.profile_id, &this.pane_id, cx);
+                }
+            }),
             cx.observe(&controller, |this, _, cx| this.follow_link(cx)),
             cx.subscribe(&controller, |this, _, event, cx| match event {
                 ConnectionEvent::Chat { profile_id, event }
@@ -784,6 +792,9 @@ impl ChatPane {
     ) {
         match event {
             InputEvent::Change => {
+                // Typed, pasted or composed: the field sends no event for
+                // the text set here.
+                note_activity(&self.profile_id, &self.pane_id, cx);
                 self.slash_active = 0;
                 let text = self.composer.read(cx).value();
                 if self.slash_dismissed.as_deref() != Some(text.as_ref()) {

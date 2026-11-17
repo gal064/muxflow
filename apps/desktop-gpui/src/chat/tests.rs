@@ -985,6 +985,102 @@ fn stop_takes_sends_place_while_the_agent_works(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn escape_stops_the_agent_while_it_works(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    // From a control elsewhere in the chat too: the earlier message's Edit.
+    shell.press("shift-tab");
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+    assert!(!shell.named("Editing an earlier message"));
+
+    // A menu open in the chat has Escape to itself.
+    shell.click("chat-model");
+    assert!(shell.named("Fable 5.2"));
+    shell.press("escape");
+    assert!(!shell.named("Fable 5.2"));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_command_list_before_it_stops_anything(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell.input("/c");
+    assert!(shell.named("Commands"));
+    shell.press("escape");
+    assert!(!shell.named("Commands"));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 0);
+    // The next one is the agent's.
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+}
+
+#[gpui_kit::test]
+fn escape_cancels_an_edit_before_it_stops_anything(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    assert!(shell.named("Editing an earlier message"));
+    shell.press("escape");
+    assert!(!shell.named("Editing an earlier message"));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 0);
+    assert_eq!(shell.host.count(ChatAction::Rewind), 0);
+}
+
+#[gpui_kit::test]
+fn escape_stops_nothing_while_the_agent_is_idle_or_waits_for_an_answer(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.press("escape");
+    shell.chat(event(11, ChatChange::State(permission("r1"))));
+    assert!(shell.shows("chat-request"));
+    shell.press("escape");
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+}
+
+#[gpui_kit::test]
+fn typing_or_pressing_in_a_chat_says_its_agent_has_been_seen(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::terminal::integration::agents::PaneActivity;
+
+    let mut shell = open(cx);
+    shell.visual.update(|window, _| window.activate_window());
+    shell.settle();
+    let noted = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+    shell.visual.update(|_, cx| {
+        let noted = noted.clone();
+        cx.set_global(PaneActivity(Rc::new(move |host, pane, _| {
+            noted.borrow_mut().push((host.to_owned(), pane.to_owned()))
+        })));
+    });
+    let this_pane = ("local".to_owned(), PANE.to_owned());
+    let seen = |noted: &Rc<RefCell<Vec<(String, String)>>>| {
+        let mut noted = noted.borrow_mut();
+        let all = noted.iter().all(|note| *note == this_pane);
+        let any = !noted.is_empty();
+        noted.clear();
+        any && all
+    };
+
+    shell.input("Still");
+    assert!(seen(&noted), "typing in the composer");
+    // A key that types nothing, on a control that is not the composer.
+    shell.press("shift-tab");
+    assert!(seen(&noted), "a key elsewhere in the chat");
+    shell.click("chat-item-a1");
+    assert!(seen(&noted), "a press on the conversation");
+    shell
+        .visual
+        .update(|window, cx| window.right_click("chat-tool-t1", cx));
+    shell.settle();
+    assert!(seen(&noted), "any button");
+}
+
+#[gpui_kit::test]
 fn a_permission_request_is_answered_from_its_card(cx: &mut TestAppContext) {
     let mut shell = open(cx);
     let mut waiting = state(ChatTurnState::Waiting);
