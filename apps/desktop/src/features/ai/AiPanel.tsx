@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { renderSafeMarkdown } from "../files/markdown";
 import { automationsApi } from "../automations/api";
 import { portsApi } from "../ports/api";
@@ -18,13 +18,45 @@ import {
 } from "./tools";
 import type { AutomationListing } from "../automations/types";
 import type { DetectedPort } from "../ports/api";
-import type { AiChatMessage, AiEvent, AiToolCall } from "./types";
+import type { AiChatMessage, AiEvent, AiToolCall, AiTurn } from "./types";
 
 /** How much of the conversation the model is shown. */
 const HISTORY_TURNS = 12;
 
 /** The clock stamp under each bubble, in the user's locale and clock. */
 const TURN_TIME = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+
+/**
+ * One bubble, memoized on the turn object. The store replaces only the
+ * newest turn as deltas arrive, so an answered bubble never re-renders
+ * while a later one fills in. Without this, every delta re-rendered the
+ * whole transcript, and every bubble went through `renderSafeMarkdown`
+ * (marked, DOMPurify, a DOMParser round trip) per delta: an answer at
+ * streaming speed saturated the webview's main thread, and typing into
+ * the app or dragging its window queued behind it.
+ */
+const TurnBubble = memo(function TurnBubble(
+  { turn, thinking }: { turn: AiTurn; thinking: boolean },
+) {
+  return <li className={`ai-turn ai-turn-${turn.role}`}>
+    {turn.role === "user"
+      ? <span className="ai-question">{turn.text}</span>
+      : <>
+        {turn.actions?.map((action, actionIndex) => <span
+          className={`ai-action ai-action-${action.outcome}`}
+          key={actionIndex}
+        >{action.summary} — {action.outcome}</span>)}
+        {turn.text
+          ? <div className="ai-answer" dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(turn.text) }} />
+          : thinking
+            ? <span className="ai-thinking" role="status">Thinking…</span>
+            : !turn.actions?.length && <span className="ai-answer quiet-empty">(no answer)</span>}
+      </>}
+    {turn.createdAt > 0 && <time className="ai-turn-time" dateTime={new Date(turn.createdAt).toISOString()}>
+      {TURN_TIME.format(turn.createdAt)}
+    </time>}
+  </li>;
+});
 /** Tool rounds one question buys before the panel asks the user whether the
  * run is worth continuing; Continue spends another budget. A loop that
  * cannot answer is stopped by the user, not by a number. */
@@ -330,24 +362,11 @@ export function AiPanel(props: PanelExtensionProps) {
         ? "Nothing asked yet. The assistant is shown what the Session, Files, Git, Ports and Automations tabs hold, and this tab keeps its own thread."
         : "Open a tab — each tab of the strip keeps its own conversation."}</p>
       : <ol aria-label="Conversation" className="ai-turns" ref={list}>
-        {conversation.turns.map((turn, index) => <li className={`ai-turn ai-turn-${turn.role}`} key={index}>
-          {turn.role === "user"
-            ? <span className="ai-question">{turn.text}</span>
-            : <>
-              {turn.actions?.map((action, actionIndex) => <span
-                className={`ai-action ai-action-${action.outcome}`}
-                key={actionIndex}
-              >{action.summary} — {action.outcome}</span>)}
-              {turn.text
-                ? <div className="ai-answer" dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(turn.text) }} />
-                : streaming && index === conversation.turns.length - 1 && !conversation.pending.length
-                  ? <span className="ai-thinking" role="status">Thinking…</span>
-                  : !turn.actions?.length && <span className="ai-answer quiet-empty">(no answer)</span>}
-            </>}
-          {turn.createdAt > 0 && <time className="ai-turn-time" dateTime={new Date(turn.createdAt).toISOString()}>
-            {TURN_TIME.format(turn.createdAt)}
-          </time>}
-        </li>)}
+        {conversation.turns.map((turn, index) => <TurnBubble
+          key={index}
+          thinking={streaming && index === conversation.turns.length - 1 && conversation.pending.length === 0}
+          turn={turn}
+        />)}
       </ol>}
 
     {conversation.pending.map((approval) => <div className="ai-approval" key={approval.id}>

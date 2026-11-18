@@ -30,6 +30,20 @@ vi.mock("../ports/api", async (original) => ({
 }));
 vi.mock("../terminal/api", () => ({ sendInput: api.sendInput }));
 
+/** Every source the panel rendered as Markdown, so a test can see whether a
+ * settled bubble re-renders while a later answer streams. */
+const markdown = vi.hoisted(() => ({ renders: [] as string[] }));
+vi.mock("../files/markdown", async (original) => {
+  const actual = await original<typeof import("../files/markdown")>();
+  return {
+    ...actual,
+    renderSafeMarkdown: (source: string) => {
+      markdown.renders.push(source);
+      return actual.renderSafeMarkdown(source);
+    },
+  };
+});
+
 const devbox: PanelHost = {
   profileId: "devbox", label: "Devbox", clientId: "client-1", connected: true,
   serverIdentity: "tmux:a", hasPane: () => false,
@@ -234,6 +248,23 @@ describe("the AI panel", () => {
     // left-aligns the assistant's.
     expect(times[0].parent?.props.className).toBe("ai-turn ai-turn-user");
     expect(times[1].parent?.props.className).toBe("ai-turn ai-turn-assistant");
+  });
+
+  it("re-renders only the answering bubble while a stream fills in", async () => {
+    // The freeze this guards: every delta used to re-render the whole
+    // transcript through marked and DOMPurify, saturating the webview's
+    // main thread so typing and window dragging queued behind the stream.
+    const call = streamedCall();
+    const renderer = await render(<AiPanel {...props()} />);
+    await ask(renderer, "first question");
+    await act(async () => call.emit({ type: "delta", text: "the first answer" }));
+    await call.finish();
+    await ask(renderer, "second question");
+    markdown.renders.length = 0;
+    await act(async () => call.emit({ type: "delta", text: "the second an" }));
+    await act(async () => call.emit({ type: "delta", text: "swer." }));
+    expect(markdown.renders).toEqual(["the second an", "the second answer."]);
+    await call.finish();
   });
 
   it("leaves a turned-off tab out of the snapshot", async () => {
