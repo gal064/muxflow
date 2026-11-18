@@ -15,7 +15,8 @@ function children(node: ReactTestRendererJSON): Node[] {
 
 /**
  * Every string in the tree, in order: one text element's runs joined as it
- * draws them, separate elements with single spaces.
+ * draws them, separate elements with single spaces. What is not displayed
+ * (`display: "none"`) is not read.
  */
 export function textOf(tree: Node | Node[] | null): string {
   const out: string[] = [];
@@ -24,6 +25,7 @@ export function textOf(tree: Node | Node[] | null): string {
     if (node === null) return;
     if (Array.isArray(node)) return node.forEach(walk);
     if (typeof node === "string") return void out.push(node);
+    if (flatten(node.props.style).display === "none") return;
     if (node.type === "Text") return void out.push(inline(node));
     if (typeof node.props.placeholder === "string" && !node.props.value) out.push(node.props.placeholder);
     if (typeof node.props.value === "string") out.push(node.props.value);
@@ -103,6 +105,9 @@ function html(node: Node, inText: boolean): string {
       return `<div class="v" style="width:36px;height:20px;border-radius:10px;background:${node.props.value ? "#7aa6da" : "#3e4451"}"></div>`;
     case "ScrollView":
       return `<div class="v" style="${css(style)};overflow:hidden"><div class="v" style="${css(flatten(node.props.contentContainerStyle))}">${inner(false)}</div></div>`;
+    case "FlatList":
+      // An inverted list keeps its rows against its end.
+      return `<div class="v" style="${css(style)};overflow:hidden${node.props.inverted ? ";justify-content:flex-end" : ""}"><div class="v" style="${css(flatten(node.props.contentContainerStyle))}">${inner(false)}</div></div>`;
     case "Modal":
       return `<div class="v" style="position:absolute;inset:0;z-index:50">${inner(false)}</div>`;
     default:

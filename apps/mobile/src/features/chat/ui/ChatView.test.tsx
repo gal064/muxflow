@@ -3,9 +3,11 @@
 // set, every state is also drawn as an HTML page at phone width.
 
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { FlatList, Keyboard } from "react-native";
+import { act, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ChatConnection, ChatItemKind, ChatToolStatus, ChatTurnState, type ChatItem } from "../../../protocol/gen/chat_pb";
+import { ChatConnection, ChatItemKind, ChatToolKind, ChatToolStatus, ChatTurnState, type ChatItem } from "../../../protocol/gen/chat_pb";
 import { Operation } from "../../../protocol/gen/envelope_pb";
 import { textOf, writeRender } from "../../../testing/renderTree";
 import { allByLabel, byLabel, byText, isHost, longPress, press, render, rerender, type } from "../../../testing/render";
@@ -16,10 +18,12 @@ import { voiceStore } from "../../voice/voiceStore";
 import { newChatPane, slashMatches, withPickedCommand, type ChatPane } from "../chatModel";
 import {
   chatItems,
+  deltaEvent,
   itemEvent,
   paneFrom,
   PANE,
   permissionRequest,
+  questionRequest,
   questionTurnEvents,
   SERVER,
   snapshotEvent,
@@ -32,10 +36,10 @@ import { ChatView, type ChatViewProps } from "./ChatView";
 import { ChatReplyRow, ChatVoiceBar } from "./ChatVoiceParts";
 import type { PendingAnswer } from "./PendingCard";
 
-type Calls = { send: string[]; answers: PendingAnswer[]; stop: number; options: unknown[]; edits: string[]; voice: boolean[]; older: number; details: boolean[] };
+type Calls = { send: string[]; answers: PendingAnswer[]; stop: number; options: unknown[]; edits: string[]; voice: boolean[]; older: number; retryOlder: number; details: boolean[] };
 
 /** ChatView with the screen's own state (draft, edit, details) and every action recorded. */
-function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy = false }: { pane: ChatPane | undefined; calls: Calls; connected?: boolean; voiceMode?: boolean; voice?: ChatViewProps["voice"]; busy?: boolean }) {
+function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy = false, stopping = false, olderFailed = false }: { pane: ChatPane | undefined; calls: Calls; connected?: boolean; voiceMode?: boolean; voice?: ChatViewProps["voice"]; busy?: boolean; stopping?: boolean; olderFailed?: boolean }) {
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<ChatItem | undefined>(undefined);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -49,6 +53,7 @@ function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy
       editing={editing}
       folder="~/dev/muxflow"
       hostLabel="devbox"
+      olderFailed={olderFailed}
       onAnswer={(answer) => calls.answers.push(answer)}
       onBack={() => undefined}
       onCancelEdit={() => { setEditing(undefined); setDraft(""); }}
@@ -58,11 +63,13 @@ function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy
       onLoadOlder={() => { calls.older += 1; }}
       onPickCommand={(command) => setDraft((current) => withPickedCommand(current, command))}
       onRetry={() => undefined}
+      onRetryOlder={() => { calls.retryOlder += 1; }}
       onSend={() => { calls.send.push(draft); setDraft(""); }}
       onSetOptions={(options) => calls.options.push(options)}
       onStop={() => { calls.stop += 1; }}
       onVoiceMode={(on) => calls.voice.push(on)}
       pane={pane}
+      stopping={stopping}
       title="Wrapped link bug"
       voice={voice}
       voiceMode={voiceMode}
@@ -70,7 +77,68 @@ function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy
   );
 }
 
-const newCalls = (): Calls => ({ send: [], answers: [], stop: 0, options: [], edits: [], voice: [], older: 0, details: [] });
+const newCalls = (): Calls => ({ send: [], answers: [], stop: 0, options: [], edits: [], voice: [], older: 0, retryOlder: 0, details: [] });
+
+/** The conversation's list. */
+function listOf(view: ReactTestRenderer): ReactTestInstance {
+  return view.root.find((node) => isHost(node, "FlatList"));
+}
+
+/** The list reports itself `offset` dp from the newest message, with no finger on it. */
+function reportOffset(view: ReactTestRenderer, offset: number): void {
+  act(() => {
+    (listOf(view).props.onScroll as (event: unknown) => void)({ nativeEvent: { contentOffset: { x: 0, y: offset } } });
+  });
+}
+
+/** The reader drags the list to `offset` dp from the newest message and lets go. */
+function scrollTo(view: ReactTestRenderer, offset: number): void {
+  act(() => {
+    (listOf(view).props.onScrollBeginDrag as () => void)();
+  });
+  reportOffset(view, offset);
+  act(() => {
+    (listOf(view).props.onScrollEndDrag as (event: unknown) => void)({ nativeEvent: { contentOffset: { x: 0, y: offset }, velocity: { x: 0, y: 0 } } });
+  });
+}
+
+/** The top of the conversation came within reach. */
+function reachTop(view: ReactTestRenderer): void {
+  act(() => {
+    (listOf(view).props.onEndReached as (info: { distanceFromEnd: number }) => void)({ distanceFromEnd: 0 });
+  });
+}
+
+function focus(node: ReactTestInstance): void {
+  act(() => {
+    (node.props.onFocus as (() => void) | undefined)?.();
+  });
+}
+
+/** Whether `node` is drawn inside `container`. */
+function within(node: ReactTestInstance, container: ReactTestInstance): boolean {
+  for (let at: ReactTestInstance | null = node; at; at = at.parent) if (at === container) return true;
+  return false;
+}
+
+/** Whether `node` sits inside something that is not displayed. */
+function hidden(node: ReactTestInstance): boolean {
+  for (let at: ReactTestInstance | null = node; at; at = at.parent) {
+    const style = at.props.style as unknown;
+    const flat = Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean)) : style;
+    if (flat && typeof flat === "object" && (flat as { display?: string }).display === "none") return true;
+  }
+  return false;
+}
+
+// The status line's clock is a timer: it runs only when a test moves the time.
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("phone chat mocks", () => {
   it("Chat: your message, the agent's reply, a tool row, and the composer", () => {
@@ -164,7 +232,7 @@ describe("phone chat mocks", () => {
     const shown = textOf(view.toJSON());
     expect(shown).toContain("+3 −1");
     expect(shown).toContain("running");
-    expect(shown).toContain("Working…");
+    expect(shown).toContain("Running cargo test -p terminal-interactions links…");
     expect(shown).toContain("Send a follow-up while it works");
     press(byLabel(view, "Stop"));
     expect(calls.stop).toBe(1);
@@ -291,9 +359,6 @@ describe("phone chat mocks", () => {
     writeRender("failed", view.toJSON());
     rerender(view, <Harness calls={calls} pane={paneFrom([snapshotEvent(5n, chatItems(), { state: state({ historyComplete: false }) })])} />);
     expect(textOf(view.toJSON())).toContain("Earlier messages are not available.");
-    rerender(view, <Harness calls={calls} pane={paneFrom([snapshotEvent(5n, chatItems(), { olderCursor: "c1" })])} />);
-    press(byText(view, "Load earlier messages"));
-    expect(calls.older).toBe(1);
   });
 
   it("A message being sent shows at once, dimmed, until the host shows it back", () => {
@@ -349,7 +414,9 @@ describe("phone chat mocks", () => {
       const view = render(<Harness calls={calls} pane={pane} voice={voice} voiceMode />);
       const shown = textOf(view.toJSON());
       expect(shown).toContain("Hold to talk. Swipe left to lock, right to cancel.");
-      byLabel(view, "Reply read aloud");
+      // The reply's player is the conversation's last row.
+      const last = listOf(view).children.at(-1);
+      expect(typeof last === "object" && within(byLabel(view, "Reply read aloud"), last)).toBe(true);
       expect(shown).toContain("1.5×");
       expect(allByLabel(view, "Message")).toHaveLength(0);
       expect(byLabel(view, "Voice mode: read replies aloud").props.accessibilityState).toEqual({ checked: true });
@@ -368,5 +435,257 @@ describe("phone chat mocks", () => {
     const view = render(<Harness calls={calls} pane={paneFrom([snapshotEvent(5n, chatItems())])} />);
     press(byLabel(view, "Talk"));
     expect(calls.voice).toEqual([true]);
+  });
+});
+
+describe("the conversation as one anchored list (mobile-chat-mock.html, S1)", () => {
+  it("is an inverted list, newest row first, that holds the reader's place", () => {
+    const pane = paneFrom([snapshotEvent(5n, chatItems())]);
+    const view = render(<Harness calls={newCalls()} pane={{ ...pane, outgoing: [{ id: "m1", text: "On its way", acked: false }] }} />);
+    const list = listOf(view);
+    expect(list.props.inverted).toBe(true);
+    expect((view.root.findByType(FlatList).props.data as { key: string }[]).map((row) => row.key)).toEqual(["m1", "test", "read", "a1", "think", "q1"]);
+    // At the end the newest row is the anchor, and a row that arrives is followed.
+    expect(list.props.maintainVisibleContentPosition).toMatchObject({ minIndexForVisible: 0 });
+    expect((list.props.maintainVisibleContentPosition as { autoscrollToTopThreshold: number }).autoscrollToTopThreshold).toBeGreaterThan(0);
+    // Away from it the row after the newest is, so the newest row's text grows without moving what is read.
+    scrollTo(view, 600);
+    expect(listOf(view).props.maintainVisibleContentPosition).toMatchObject({ minIndexForVisible: 1 });
+    // On screen the conversation still reads oldest to newest.
+    const shown = textOf(view.toJSON());
+    expect(shown.indexOf("Find out why wrapped paths are missed.")).toBeLessThan(shown.indexOf("run cargo test links ok"));
+    expect(shown.indexOf("run cargo test links ok")).toBeLessThan(shown.indexOf("On its way"));
+  });
+
+  it("Latest: shows away from the end, gets its dot when something arrives, and goes back", () => {
+    const events = [snapshotEvent(5n, chatItems(), { olderCursor: "c1" }), itemEvent(6n, text("a9", ChatItemKind.ASSISTANT, "On it.", { streaming: true }))];
+    const calls = newCalls();
+    const view = render(<Harness calls={calls} pane={paneFrom(events)} />);
+    expect(allByLabel(view, "Jump to latest")).toHaveLength(0);
+    // Within reach of the end is still the end.
+    scrollTo(view, 60);
+    expect(allByLabel(view, "Jump to latest")).toHaveLength(0);
+    scrollTo(view, 400);
+    expect(textOf(view.toJSON())).toContain("Latest");
+    expect(byLabel(view, "Jump to latest").props.accessibilityHint).toBeUndefined();
+    // Earlier messages loading above is not something new below.
+    const older = { ...paneFrom(events), items: [text("q0", ChatItemKind.USER, "Earlier question"), ...paneFrom(events).items] };
+    rerender(view, <Harness calls={calls} pane={older} />);
+    expect(byLabel(view, "Jump to latest").props.accessibilityHint).toBeUndefined();
+    // Text that grows at the end is.
+    rerender(view, <Harness calls={calls} pane={paneFrom([...events, deltaEvent(7n, "a9", " Reading the detector.")])} />);
+    expect(byLabel(view, "Jump to latest").props.accessibilityHint).toBe("New messages below");
+    writeRender("latest", view.toJSON());
+    // Going back clears it; the pill leaves once the list is at the end.
+    press(byLabel(view, "Jump to latest"));
+    expect(allByLabel(view, "Jump to latest")).toHaveLength(0);
+    // A row that arrives while away brings the dot back.
+    scrollTo(view, 400);
+    expect(byLabel(view, "Jump to latest").props.accessibilityHint).toBeUndefined();
+    rerender(view, <Harness calls={calls} pane={paneFrom([...events, deltaEvent(7n, "a9", " Reading the detector."), itemEvent(8n, tool("t9", { title: "run", detail: "cargo test" }))])} />);
+    expect(byLabel(view, "Jump to latest").props.accessibilityHint).toBe("New messages below");
+    // Scrolling back to the end by hand clears it too.
+    scrollTo(view, 0);
+    scrollTo(view, 400);
+    expect(byLabel(view, "Jump to latest").props.accessibilityHint).toBeUndefined();
+  });
+
+  it("A row arriving at the end moves the list for a moment; that is not the reader leaving", () => {
+    const view = render(<Harness calls={newCalls()} pane={paneFrom([snapshotEvent(5n, chatItems())])} />);
+    // The list holds its place by the height of the row that arrived, then scrolls back.
+    reportOffset(view, 300);
+    expect(allByLabel(view, "Jump to latest")).toHaveLength(0);
+    expect(listOf(view).props.maintainVisibleContentPosition).toMatchObject({ minIndexForVisible: 0 });
+    reportOffset(view, 0);
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(allByLabel(view, "Jump to latest")).toHaveLength(0);
+    // Left there with no finger on it (a screen reader's scroll), it is away once that lasts.
+    reportOffset(view, 300);
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    byLabel(view, "Jump to latest");
+  });
+
+  it("Earlier messages load by themselves when the top comes within reach, once per reach", () => {
+    const calls = newCalls();
+    const pane = paneFrom([snapshotEvent(5n, chatItems(), { olderCursor: "c1" })]);
+    const view = render(<Harness calls={calls} pane={pane} />);
+    expect(textOf(view.toJSON())).not.toContain("earlier messages");
+    reachTop(view);
+    expect(calls.older).toBe(1);
+    // While the page is on its way the top says so, and reaching it again asks for nothing.
+    rerender(view, <Harness calls={calls} pane={{ ...pane, loadingOlder: true }} />);
+    expect(textOf(view.toJSON())).toContain("Loading earlier messages…");
+    reachTop(view);
+    expect(calls.older).toBe(1);
+    // The page arrived and there is more: the next reach asks again.
+    rerender(view, <Harness calls={calls} pane={{ ...pane, items: [text("q0", ChatItemKind.USER, "Earlier question"), ...pane.items], olderCursor: "c0" }} />);
+    expect(textOf(view.toJSON())).not.toContain("Loading earlier messages…");
+    reachTop(view);
+    expect(calls.older).toBe(2);
+    // Nothing older: nothing is asked for.
+    rerender(view, <Harness calls={calls} pane={paneFrom([snapshotEvent(5n, chatItems())])} />);
+    reachTop(view);
+    expect(calls.older).toBe(2);
+  });
+
+  it("A load that failed is said at the top with Retry, and is not tried again by itself", () => {
+    const calls = newCalls();
+    const pane = paneFrom([snapshotEvent(5n, chatItems(), { olderCursor: "c1" })]);
+    const view = render(<Harness calls={calls} olderFailed pane={pane} />);
+    expect(textOf(view.toJSON())).toContain("Couldn't load earlier messages. Retry");
+    reachTop(view);
+    expect(calls.older).toBe(0);
+    press(byText(view, "Retry"));
+    expect(calls.retryOlder).toBe(1);
+    writeRender("older-failed", view.toJSON());
+  });
+});
+
+describe("above the reply field (mobile-chat-mock.html, S3)", () => {
+  const user = (id: string, body: string, secondsAgo: number) => text(id, ChatItemKind.USER, body, { atUnixMillis: BigInt(Date.now() - secondsAgo * 1000) });
+  const workingOn = (items: ChatItem[], overrides: Parameters<typeof state>[0] = {}) =>
+    paneFrom([snapshotEvent(5n, items, { state: state({ turn: ChatTurnState.WORKING, ...overrides }) })]);
+  const statusOf = (view: ReactTestRenderer) => view.root.findAll((node) => isHost(node, "Text") && node.props.accessibilityLiveRegion === "polite");
+
+  it("The status line is outside the conversation and says what the agent does, for how long, and the steps so far", () => {
+    const calls = newCalls();
+    const view = render(<Harness calls={calls} pane={workingOn([user("q", "Add the fixture.", 6)])} />);
+    const label = statusOf(view);
+    expect(label).toHaveLength(1);
+    expect(label[0]!.children.join("")).toBe("Working…");
+    expect(within(label[0]!, listOf(view))).toBe(false);
+    expect(textOf(view.toJSON())).toContain("Working… 6s");
+    // The time is not announced each second: only the label is a live region.
+    expect(view.root.findAll((node) => typeof node.type === "string" && node.props.accessibilityLiveRegion !== undefined)).toHaveLength(1);
+
+    const running = [
+      user("q", "Add the fixture.", 6),
+      tool("read", { kind: ChatToolKind.READ, title: "read", detail: "links.rs", path: "src/links.rs" }),
+      tool("run", { title: "run", detail: "cargo test -p terminal-interactions links", status: ChatToolStatus.RUNNING }),
+    ];
+    rerender(view, <Harness calls={calls} pane={workingOn(running)} />);
+    expect(textOf(view.toJSON())).toContain("Running cargo test -p terminal-interactions links… 6s 2 steps so far");
+    // The label gives way to the time and the count on a narrow screen.
+    expect(statusOf(view)[0]!.props.numberOfLines).toBe(1);
+
+    const thinking = [...running.slice(0, 2), text("think", ChatItemKind.REASONING, "Boxed output is hard-wrapped", { streaming: true })];
+    rerender(view, <Harness calls={calls} pane={workingOn(thinking)} />);
+    expect(textOf(view.toJSON())).toContain("Thinking… 6s 2 steps so far");
+    writeRender("status", view.toJSON());
+
+    const agents = [user("q", "Check every caller.", 6), tool("agent", { kind: ChatToolKind.SUBAGENT, title: "agent", detail: "Find the other callers", status: ChatToolStatus.RUNNING })];
+    rerender(view, <Harness calls={calls} pane={workingOn(agents)} />);
+    expect(textOf(view.toJSON())).toContain("Waiting on 1 subagent… 6s 1 step so far");
+
+    rerender(view, <Harness calls={calls} pane={workingOn(running, { compacting: true })} />);
+    expect(statusOf(view)[0]!.children.join("")).toBe("Compacting context…");
+
+    // Stop pressed: said at once, alone, and Stop is off until the turn stops.
+    rerender(view, <Harness calls={calls} pane={workingOn(running)} stopping />);
+    expect(textOf(view.toJSON())).toContain("Stopping… Send a follow-up while it works");
+    expect(byLabel(view, "Stop").props.disabled).toBe(true);
+  });
+
+  it("The time counts from when the turn was seen to start, once a second", () => {
+    const calls = newCalls();
+    const idle = paneFrom([snapshotEvent(5n, [user("q0", "Earlier question", 600)])]);
+    const view = render(<Harness calls={calls} pane={idle} />);
+    expect(textOf(view.toJSON())).not.toContain("Working…");
+    const started = paneFrom([snapshotEvent(5n, [user("q0", "Earlier question", 600)]), stateEvent(6n, state({ turn: ChatTurnState.WORKING }))]);
+    rerender(view, <Harness calls={calls} pane={started} />);
+    expect(textOf(view.toJSON())).toContain("Working… 0s");
+    act(() => {
+      vi.advanceTimersByTime(12_000);
+    });
+    expect(textOf(view.toJSON())).toContain("Working… 12s");
+    act(() => {
+      vi.advanceTimersByTime(113_000);
+    });
+    expect(textOf(view.toJSON())).toContain("Working… 2m 05s");
+    // Waiting on the user, the request card is the status; the turn's time carries on after it.
+    rerender(view, <Harness calls={calls} pane={paneFrom([snapshotEvent(5n, [user("q0", "Earlier question", 600)]), stateEvent(6n, state({ turn: ChatTurnState.WAITING, pending: permissionRequest() }))])} />);
+    expect(textOf(view.toJSON())).not.toContain("Working…");
+    rerender(view, <Harness calls={calls} pane={started} />);
+    expect(textOf(view.toJSON())).toContain("Working… 2m 05s");
+    // The turn ended: no line, and no timer left running.
+    rerender(view, <Harness calls={calls} pane={idle} />);
+    expect(textOf(view.toJSON())).not.toContain("Working…");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("No status line while the chat cannot be followed", () => {
+    const view = render(<Harness calls={newCalls()} connected={false} pane={workingOn([user("q", "Add the fixture.", 6)])} />);
+    expect(textOf(view.toJSON())).not.toContain("Working…");
+  });
+
+  it("The request card is fixed above the reply field and folds to one line", () => {
+    const dismiss = vi.spyOn(Keyboard, "dismiss");
+    const calls = newCalls();
+    const pane = paneFrom([snapshotEvent(0n, chatItems()), ...questionTurnEvents(0n)]);
+    const view = render(<Harness calls={calls} pane={pane} />);
+    const option = () => byLabel(view, /^Boxed output only\./);
+    // Not a row of the conversation, so scrolling cannot hide it.
+    expect(within(option(), listOf(view))).toBe(false);
+    expect(hidden(option())).toBe(false);
+    expect(textOf(view.toJSON())).not.toContain("The agent asked a question");
+    press(option());
+
+    // Its arrow folds it to one line that still says the agent waits.
+    press(byLabel(view, "Collapse request"));
+    expect(hidden(option())).toBe(true);
+    let shown = textOf(view.toJSON());
+    expect(shown).toContain("The agent asked a question Answer");
+    expect(shown).not.toContain("Boxed output only");
+    writeRender("request-folded", view.toJSON());
+
+    // The line unfolds it and closes the keyboard; what was chosen is still chosen.
+    press(byText(view, "Answer"));
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(hidden(option())).toBe(false);
+    expect(option().props.accessibilityState).toEqual({ checked: true });
+    expect(textOf(view.toJSON())).not.toContain("The agent asked a question");
+
+    // Focusing the reply field folds it, for room to read and type.
+    focus(byLabel(view, "Message"));
+    expect(hidden(option())).toBe(true);
+    expect(textOf(view.toJSON())).toContain("The agent asked a question Answer");
+    press(byText(view, "Answer"));
+
+    // Typing in the card's own field never folds it.
+    press(byLabel(view, /^Other\./));
+    focus(byLabel(view, "Your answer"));
+    type(byLabel(view, "Your answer"), "Only the boxed case");
+    expect(hidden(byLabel(view, "Your answer"))).toBe(false);
+    expect(textOf(view.toJSON())).not.toContain("The agent asked a question");
+
+    // A new request arrives unfolded, even after this one was folded.
+    press(byLabel(view, "Collapse request"));
+    const next = paneFrom([snapshotEvent(0n, chatItems()), ...questionTurnEvents(0n), stateEvent(10n, state({ turn: ChatTurnState.WAITING, pending: permissionRequest() }))]);
+    rerender(view, <Harness calls={calls} pane={next} />);
+    expect(hidden(byText(view, "Allow"))).toBe(false);
+    expect(within(byText(view, "Allow"), listOf(view))).toBe(false);
+    press(byLabel(view, "Collapse request"));
+    expect(textOf(view.toJSON())).toContain("The agent is asking for permission Answer");
+    // Folded or not, it is the same request: answering still works once unfolded.
+    press(byText(view, "Answer"));
+    press(byText(view, "Allow"));
+    expect(calls.answers).toEqual([{ kind: "permission", allow: true }]);
+    dismiss.mockRestore();
+  });
+
+  it("A request with the same id is the same card: an update to it does not unfold or reset it", () => {
+    const calls = newCalls();
+    const events = [snapshotEvent(0n, chatItems()), ...questionTurnEvents(0n)];
+    const view = render(<Harness calls={calls} pane={paneFrom(events)} />);
+    press(byLabel(view, /^Boxed output only\./));
+    press(byLabel(view, "Collapse request"));
+    rerender(view, <Harness calls={calls} pane={paneFrom([...events, stateEvent(10n, state({ turn: ChatTurnState.WAITING, pending: questionRequest() }))])} />);
+    expect(textOf(view.toJSON())).toContain("The agent asked a question Answer");
+    press(byText(view, "Answer"));
+    expect(byLabel(view, /^Boxed output only\./).props.accessibilityState).toEqual({ checked: true });
   });
 });

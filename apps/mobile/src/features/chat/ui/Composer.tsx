@@ -26,13 +26,17 @@ export interface ComposerProps {
   onCancelEdit: () => void;
   onSend: () => void;
   onStop: () => void;
+  /** Stop was pressed and the turn has not stopped yet: it is off until then. */
+  stopping?: boolean;
+  /** The field took the focus. */
+  onFocus?: (() => void) | undefined;
   /** Turns voice mode on. Absent hides the button. */
   onMic?: (() => void) | undefined;
 }
 
 /** The reply field: text, the mic, and Send, which is Stop while the agent works. */
 export function Composer(props: ComposerProps) {
-  const { draft, onDraft, commands, onPickCommand, working, canSendMidTurn, waiting, sideQuestion, disabled, sending, editing, onCancelEdit, onSend, onStop, onMic } = props;
+  const { draft, onDraft, commands, onPickCommand, working, canSendMidTurn, waiting, sideQuestion, disabled, sending, editing, onCancelEdit, onSend, onStop, stopping = false, onFocus, onMic } = props;
   const hasText = draft.trim() !== "";
   const showSend = !working || ((canSendMidTurn || sideQuestion) && hasText) || editing;
   const blocked = waiting && !canSendMidTurn;
@@ -56,6 +60,7 @@ export function Composer(props: ComposerProps) {
             editable={!disabled}
             multiline
             onChangeText={onDraft}
+            onFocus={onFocus}
             placeholder={placeholder}
             placeholderTextColor={colors.chromeFaint}
             style={styles.input}
@@ -67,7 +72,15 @@ export function Composer(props: ComposerProps) {
             </Pressable>
           ) : null}
           {working && !editing ? (
-            <Pressable accessibilityLabel="Stop" accessibilityRole="button" hitSlop={6} onPress={onStop} style={({ pressed }) => [styles.send, styles.stop, pressed && styles.pressed]}>
+            <Pressable
+              accessibilityLabel="Stop"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: stopping }}
+              disabled={stopping}
+              hitSlop={6}
+              onPress={onStop}
+              style={({ pressed }) => [styles.send, styles.stop, stopping && styles.disabled, pressed && styles.pressed]}
+            >
               <View style={styles.stopGlyph} />
             </Pressable>
           ) : null}
