@@ -65,7 +65,7 @@ fn cli_discards_large_tool_results_for_every_adapter() {
     };
     let private_image = "private-image-data".repeat(32 * 1024);
 
-    for adapter in ["claude-code", "codex", "pi"] {
+    for adapter in ["claude-code", "codex", "pi", "opencode"] {
         let runtime = runtime_root.join(format!("large-hook-{adapter}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&runtime).unwrap();
         let payload = serde_json::to_vec(&serde_json::json!({
