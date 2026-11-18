@@ -65,8 +65,8 @@ interface World {
 const newWorld = (): World => ({ forks: [], answer: undefined, waited: [], opened: [], said: [], sent: [], left: 0 });
 
 /** The chat screen without its connection: ChatView with the screen's hooks for the reply field and the fork. */
-function Screen({ pane, world, paneId = PANE, server = SERVER, connected = true }: { pane: ChatPane; world: World; paneId?: string; server?: string; connected?: boolean }) {
-  const { draft, setDraft, editing, setEditing, edit, cancelEdit } = useReplyDraft(server, paneId);
+function Screen({ pane, world, paneId = PANE, server = SERVER, connected = true, focused, voiceReady = false }: { pane: ChatPane; world: World; paneId?: string; server?: string; connected?: boolean; focused?: boolean; voiceReady?: boolean }) {
+  const { draft, setDraft, editing, setEditing, edit, cancelEdit, sentEdit } = useReplyDraft(server, paneId);
   // As the screen does: a message that left the conversation cannot be edited.
   useEffect(() => {
     if (editing && !pane.items.some((item) => item.id === editing.id)) setEditing(undefined);
@@ -110,8 +110,8 @@ function Screen({ pane, world, paneId = PANE, server = SERVER, connected = true 
       // As the screen does once the host took the message.
       onSend={() => {
         world.sent.push({ text: draft, editing: editing?.id });
-        setEditing(undefined);
-        setDraft("");
+        if (editing) sentEdit();
+        else setDraft("");
       }}
       onSetOptions={() => undefined}
       onStop={() => undefined}
@@ -120,7 +120,9 @@ function Screen({ pane, world, paneId = PANE, server = SERVER, connected = true 
       pane={pane}
       stopping={false}
       title="Wrapped links"
-      voiceMode={false}
+      focused={focused}
+      voice={voiceReady ? { status: null, reply: null, bar: null, ready: true } : undefined}
+      voiceMode={voiceReady}
     />
   );
 }
@@ -638,6 +640,31 @@ describe("Edit and resend", () => {
     expect(pressHardwareBack()).toBe(false);
   });
 
+  it("under another screen, Back is that screen's: the edit stays", () => {
+    const world = newWorld();
+    const view = render(<Screen pane={idle(conversation())} world={world} />);
+    startEdit(view);
+    // A fork or a notification opened a screen over this one.
+    act(() => view.update(<Screen focused={false} pane={idle(conversation())} world={world} />));
+    expect(pressHardwareBack()).toBe(false);
+    expect(textOf(view.toJSON())).toContain("Editing an earlier message");
+    // In front again, Back cancels the edit first.
+    act(() => view.update(<Screen focused pane={idle(conversation())} world={world} />));
+    let taken = false;
+    act(() => {
+      taken = pressHardwareBack();
+    });
+    expect(taken).toBe(true);
+    expect(textOf(view.toJSON())).not.toContain("Editing an earlier message");
+  });
+
+  it("no edit is offered while the voice bar has the reply field's place", () => {
+    const view = render(<Screen pane={idle(conversation())} voiceReady world={newWorld()} />);
+    longPress(message(view, "Run the full suite"));
+    expect(sheetRows(view)).not.toContain("Edit and resend");
+    expect(sheetRows(view)).toContain("Copy message");
+  });
+
   it("the header's Back does the same", () => {
     const world = newWorld();
     const view = render(<Screen pane={idle(conversation())} world={world} />);
@@ -672,6 +699,17 @@ describe("Edit and resend", () => {
     expect(byLabel(view, "Message").props.value).toBe("");
     expect(textOf(view.toJSON())).not.toContain("Editing an earlier message");
     expect(pressHardwareBack()).toBe(false);
+  });
+
+  it("sending an edit brings back the draft from before it", () => {
+    const world = newWorld();
+    const view = render(<Screen pane={idle(conversation())} world={world} />);
+    type(byLabel(view, "Message"), "half a thought");
+    startEdit(view);
+    type(byLabel(view, "Message"), "Run the unit tests only");
+    press(byLabel(view, "Send"));
+    expect(world.sent).toEqual([{ text: "Run the unit tests only", editing: "u2" }]);
+    expect(byLabel(view, "Message").props.value).toBe("half a thought");
   });
 });
 

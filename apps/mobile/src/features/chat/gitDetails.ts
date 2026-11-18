@@ -142,15 +142,10 @@ function changesRow(read: GitRead<GitSummary>): ChangesRow | undefined {
   return row(`Changes vs ${defaultBranchName(summary.baseRef)}`, counted(summary));
 }
 
-/**
- * "Uncommitted". Left out when its read failed, and when the answer is not
- * against HEAD: a host that does not know `summary_base` answers with the
- * default-branch summary, which is not the uncommitted work.
- */
+/** "Uncommitted". Left out when its read failed. */
 function uncommittedRow(read: GitRead<GitSummary>): ChangesRow | undefined {
   if (read.status === "failed") return undefined;
   if (read.status === "reading") return row("Uncommitted", { kind: "reading" });
-  if (read.value.baseRef !== "HEAD") return undefined;
   return row("Uncommitted", counted(read.value));
 }
 

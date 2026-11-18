@@ -15,6 +15,8 @@ export interface ReplyDraft {
   edit: (item: ChatItem) => void;
   /** Leaves the edit, and puts back what the field held before it. */
   cancelEdit: () => void;
+  /** The edit was sent: the field goes back to the draft from before it. */
+  sentEdit: () => void;
 }
 
 /**
@@ -82,5 +84,14 @@ export function useReplyDraft(serverIdentity: string, paneId: string): ReplyDraf
     before.current = "";
   }, []);
 
-  return { draft, setDraft, editing, setEditing, edit, cancelEdit };
+  // The edited message may already have left the timeline, which ended the
+  // edit; the field still holds the sent text either way.
+  const sentEdit = useCallback(() => {
+    leftover.current = false;
+    setEditingState(undefined);
+    setDraftState(before.current);
+    before.current = "";
+  }, []);
+
+  return { draft, setDraft, editing, setEditing, edit, cancelEdit, sentEdit };
 }

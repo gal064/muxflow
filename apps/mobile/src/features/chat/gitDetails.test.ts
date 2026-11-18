@@ -116,12 +116,6 @@ describe("the Git rows", () => {
     expect(gitRows(details({ uncommitted: summary("HEAD", 0, 0, 0) })).uncommitted).toEqual({ title: "Uncommitted", count: { kind: "none" }, label: "Uncommitted: none" });
     expect(gitRows(details({ uncommitted: summary("HEAD", 1, 0, 0) })).uncommitted?.count).toEqual({ kind: "lines", added: "+0", removed: "−0", files: "1 file" });
   });
-
-  it("leave out Uncommitted unless its answer is against HEAD", () => {
-    // A host that does not know `summary_base` answers with the default-branch summary.
-    expect(gitRows(details({ uncommitted: summary("origin/main", 14, 412, 96) })).uncommitted).toBeUndefined();
-    expect(gitRows(details({ uncommitted: summary("", 0, 0, 0) })).uncommitted).toBeUndefined();
-  });
 });
 
 describe("what is kept between reads", () => {

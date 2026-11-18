@@ -1,5 +1,5 @@
 import type { MessageInitShape } from "@bufbuild/protobuf";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useIsFocused, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
@@ -68,7 +68,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const title = agent ? agentTitle({ windows, adapters }, agent) : windowName || "Chat";
 
   // The reply field: this chat's draft, kept while the app runs, or the message being edited.
-  const { draft, setDraft, editing, setEditing, edit, cancelEdit } = useReplyDraft(serverIdentity, paneId);
+  const { draft, setDraft, editing, setEditing, edit, cancelEdit, sentEdit } = useReplyDraft(serverIdentity, paneId);
   // The files on the reply field (S7). Leaving the chat stops their uploads.
   const files = useAttachments(paneId, attachDeps);
   const images = useMemo(() => chatImages(paneId), [paneId]);
@@ -90,6 +90,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const voice = useChatVoice({ paneId, sessionId, serverIdentity, pane, enabled: voiceMode, connected });
   const git = useGitDetails({ paneId, serverIdentity, folder, turn: turnOf(pane), open: detailsOpen, connected });
 
+  const focused = useIsFocused();
   const agentId = agent?.id;
   useFocusEffect(useCallback(() => (agentId ? notificationAttention.focusAgent(agentId) : undefined), [agentId]));
 
@@ -122,8 +123,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     void run(async () => {
       if (target) {
         await sendWithFiles(files, (attached) => chatClient.rewindAndSend(paneId, target.id, text, attached));
-        setEditing(undefined);
-        setDraft("");
+        sentEdit();
         return;
       }
       if (question !== undefined) {
@@ -258,6 +258,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
           title={title}
           voice={voice}
           voiceMode={voiceMode}
+          focused={focused}
         />
       </ChatImagesContext.Provider>
     </Animated.View>
