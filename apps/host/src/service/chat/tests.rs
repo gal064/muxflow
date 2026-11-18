@@ -486,6 +486,516 @@ async fn stopping_a_turn_mid_step_finishes_what_was_running_or_streaming() {
     }));
 }
 
+// --- the turns the scripted provider runs when asked for by name -----------
+
+/// A runtime whose script pauses between steps, so a test can act part-way
+/// through a turn: the script takes no step until the test waits again.
+fn paced_runtime(directory: &tempfile::TempDir) -> ChatRuntime {
+    ChatRuntime::new(
+        directory.path().join("settings.json"),
+        vec![Arc::new(ScriptedProvider::new(Duration::from_millis(5)))],
+    )
+}
+
+/// Sends `word` and answers the turn it starts, up to the state that ends it.
+async fn demo(
+    connection: &mut Connection,
+    runtime: &ChatRuntime,
+    word: &str,
+) -> Vec<v1::ChatEvent> {
+    send(runtime, "%1", word, "").unwrap();
+    connection.until(turn_is(v1::ChatTurnState::Idle)).await
+}
+
+fn items(events: &[v1::ChatEvent]) -> Vec<&v1::ChatItem> {
+    events
+        .iter()
+        .filter_map(|event| match event.change.as_ref().unwrap() {
+            Change::Item(item) | Change::Updated(item) => Some(item),
+            _ => None,
+        })
+        .collect()
+}
+
+fn states(events: &[v1::ChatEvent]) -> Vec<&v1::ChatState> {
+    events
+        .iter()
+        .filter_map(|event| match event.change.as_ref().unwrap() {
+            Change::State(state) => Some(state),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stop_task(runtime: &ChatRuntime, task_id: &str) -> Result<(), ChatError> {
+    let task_id = task_id.into();
+    command(runtime, "%1", SessionCommand::StopTask { task_id })
+}
+
+#[tokio::test]
+async fn the_scripted_markdown_demo_streams_every_block_a_client_draws() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+
+    // The word is matched trimmed and in any case.
+    let events = demo(&mut connection, &runtime, "  Demo Markdown\n").await;
+    let outline = outline(&events);
+    let deltas = outline.len() - 5;
+    assert!(deltas >= 3);
+    assert_eq!(outline[..3], ["user", "WORKING", "assistant:streaming"]);
+    assert!(outline[3..3 + deltas].iter().all(|word| word == "delta"));
+    assert_eq!(outline[3 + deltas..], ["assistant", "IDLE"]);
+
+    let reply = *items(&events).last().unwrap();
+    assert_eq!(reply.id, "demo-1-reply");
+    let streamed: String = events
+        .iter()
+        .filter_map(|event| match event.change.as_ref().unwrap() {
+            Change::Delta(delta) => Some(delta.text_append.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(streamed, reply.text);
+    for part in [
+        "## ",
+        "**joins**",
+        "*soft-wrapped*",
+        "`join_rows`",
+        "[wrapping notes](https://example.com/docs)",
+        "\n```rust\n",
+        "\n| --- | --- | --- |\n",
+        "\n1. ",
+        "\n2. ",
+        "\n> ",
+    ] {
+        assert!(reply.text.contains(part), "{part:?}");
+    }
+    let lines = |prefix: &str| {
+        let starts = |line: &&str| line.starts_with(prefix);
+        reply.text.lines().filter(starts).count()
+    };
+    // A header, its rule and three rows; two bullets under the first number.
+    assert_eq!((lines("|"), lines("   - ")), (5, 2));
+    let code: Vec<&str> = reply.text.split("```").nth(1).unwrap().lines().collect();
+    assert!((5..=8).contains(&(code.len() - 1)), "{}", code.len() - 1);
+    assert!(code.iter().any(|line| line.len() >= 120));
+}
+
+#[tokio::test]
+async fn the_scripted_long_demo_runs_rows_of_every_kind_and_can_be_interrupted() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+
+    let events = demo(&mut connection, &runtime, "demo long").await;
+    let items = items(&events);
+    let running = i32::from(v1::ChatToolStatus::Running);
+    let rows: Vec<&v1::ChatTool> = items.iter().filter_map(|item| item.tool.as_ref()).collect();
+    let (started, ended): (Vec<&v1::ChatTool>, Vec<&v1::ChatTool>) =
+        rows.iter().partition(|tool| tool.status == running);
+    assert_eq!((started.len(), ended.len()), (15, 15));
+    for kind in [
+        v1::ChatToolKind::Read,
+        v1::ChatToolKind::Search,
+        v1::ChatToolKind::Command,
+        v1::ChatToolKind::Edit,
+        v1::ChatToolKind::Web,
+    ] {
+        assert!(started.iter().any(|tool| tool.kind == i32::from(kind)));
+    }
+    let failed: Vec<_> = ended
+        .iter()
+        .filter(|tool| tool.status == i32::from(v1::ChatToolStatus::Failed))
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        (failed[0].kind, failed[0].result_summary.as_str()),
+        (i32::from(v1::ChatToolKind::Command), "exit 1")
+    );
+    let count = |kind: v1::ChatItemKind| {
+        let is = |item: &&&v1::ChatItem| item.kind == i32::from(kind);
+        items.iter().filter(is).count()
+    };
+    assert_eq!(count(v1::ChatItemKind::Reasoning), 1);
+    assert_eq!(count(v1::ChatItemKind::Assistant), 2);
+    assert_eq!(items[1].kind, i32::from(v1::ChatItemKind::Reasoning));
+    assert_eq!(items.last().unwrap().id, "demo-1-done");
+    // The text in the middle has rows before it and after it.
+    let progress = items.iter().position(|item| item.id == "demo-1-progress");
+    assert!((10..items.len() - 10).contains(&progress.unwrap()));
+    // Nothing is left running in the timeline.
+    let snapshot = connection.open(&runtime, "%1");
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .all(|item| { item.tool.as_ref().is_none_or(|tool| tool.status != running) })
+    );
+
+    // Interrupted while a row runs: the row fails, stopped, under a notice
+    // with the demo's id.
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = paced_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+    send(&runtime, "%1", "demo long", "").unwrap();
+    connection
+        .until(|change| matches!(change, Change::Item(item) if item.tool.is_some()))
+        .await;
+    command(&runtime, "%1", SessionCommand::Interrupt).unwrap();
+    let events = connection.until(turn_is(v1::ChatTurnState::Idle)).await;
+    assert_eq!(outline(&events), ["read:failed", "notice", "IDLE"]);
+    assert_eq!(self::items(&events)[1].id, "demo-1-stopped");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(connection.is_quiet());
+}
+
+#[tokio::test]
+async fn the_scripted_subagent_demo_updates_a_foreground_subagent_as_it_works() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+
+    let events = demo(&mut connection, &runtime, "demo subagent").await;
+    let outline = outline(&events);
+    assert_eq!(outline[..2], ["user", "WORKING"]);
+    assert_eq!(outline[2..27], [(); 25].map(|()| "agent:running"));
+    assert_eq!(outline[27..], ["agent:ok", "assistant", "IDLE"]);
+    // In the foreground: the state lists nothing in the background.
+    assert!(
+        states(&events)
+            .iter()
+            .all(|state| state.background.is_empty())
+    );
+
+    let items = items(&events);
+    let rows: Vec<&v1::ChatTool> = items.iter().filter_map(|item| item.tool.as_ref()).collect();
+    assert!(items[1..27].iter().all(|item| item.id == "demo-1-agent"));
+    for row in &rows {
+        assert_eq!(row.kind, i32::from(v1::ChatToolKind::Subagent));
+        assert_eq!(
+            (
+                row.title.as_str(),
+                row.detail.as_str(),
+                row.agent_type.as_str()
+            ),
+            ("agent", "Find the other callers", "Explore")
+        );
+        assert!(!row.background);
+    }
+    // Its figures rise with every update, and what it does changes with some.
+    for pair in rows.windows(2) {
+        assert!(pair[1].tool_uses > pair[0].tool_uses && pair[1].tokens > pair[0].tokens);
+    }
+    let mut activities: Vec<&str> = rows.iter().map(|row| row.activity.as_str()).collect();
+    activities.dedup();
+    assert_eq!(activities.len(), 5);
+    assert!(activities.contains(&"reading crates/terminal-interactions/src/wrap.rs"));
+    assert!(activities.contains(&"searching hard_wrap"));
+    assert_eq!(rows.last().unwrap().result_summary, "3 files");
+}
+
+#[tokio::test]
+async fn the_scripted_background_demo_lists_two_tasks_and_its_subagent_ends_by_itself() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+    let before = now_unix_millis();
+
+    let events = demo(&mut connection, &runtime, "demo background").await;
+    assert_eq!(
+        outline(&events),
+        [
+            "user",
+            "WORKING",
+            "run:running",
+            "run:ok",
+            "WORKING",
+            "agent:running",
+            "WORKING",
+            "assistant",
+            "IDLE"
+        ]
+    );
+    let rows = items(&events);
+    let (dev, agent) = (
+        rows[2].tool.as_ref().unwrap(),
+        rows[3].tool.as_ref().unwrap(),
+    );
+    assert_eq!((dev.detail.as_str(), dev.background), ("pnpm dev", false));
+    assert_eq!(dev.kind, i32::from(v1::ChatToolKind::Command));
+    assert_eq!(agent.kind, i32::from(v1::ChatToolKind::Subagent));
+    assert!(agent.background && agent.agent_type == "Explore");
+
+    // The turn is over with both tasks still listed.
+    let idle = *states(&events).last().unwrap();
+    let listed: Vec<_> = idle
+        .background
+        .iter()
+        .map(|task| (task.id.as_str(), task.kind, task.description.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "demo-1-dev",
+                i32::from(v1::ChatTaskKind::Command),
+                "pnpm dev"
+            ),
+            (
+                "demo-1-agent",
+                i32::from(v1::ChatTaskKind::Subagent),
+                "Find the other callers"
+            ),
+        ]
+    );
+    for task in &idle.background {
+        assert!(task.stoppable && task.started_at_unix_millis >= before);
+    }
+
+    // The subagent ends by itself: its row says so, with its figures, and
+    // only the command is left listed.
+    let events = connection
+        .until(|change| matches!(change, Change::State(state) if state.background.len() < 2))
+        .await;
+    assert_eq!(outline(&events), ["agent:ok", "IDLE"]);
+    let Some(Change::Updated(row)) = &events[0].change else {
+        panic!("the row is an update of the running one");
+    };
+    let ended = row.tool.as_ref().unwrap();
+    assert_eq!((row.id.as_str(), ended.background), ("demo-1-agent", true));
+    assert_eq!(ended.result_summary, "3 files");
+    assert!(ended.tool_uses > agent.tool_uses && ended.tokens > agent.tokens);
+    let left = &states(&events)[0].background;
+    assert_eq!((left.len(), left[0].id.as_str()), (1, "demo-1-dev"));
+
+    // The command runs until it is stopped, and then is no longer a task.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(connection.is_quiet());
+    stop_task(&runtime, "demo-1-dev").unwrap();
+    let events = connection
+        .until(|change| matches!(change, Change::State(_)))
+        .await;
+    assert_eq!(outline(&events), ["IDLE"]);
+    assert!(states(&events)[0].background.is_empty());
+    assert_eq!(
+        stop_task(&runtime, "demo-1-dev").unwrap_err().code,
+        "chat_task_not_found"
+    );
+}
+
+#[tokio::test]
+async fn the_scripted_background_tasks_outlive_turns_and_interrupts_until_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = paced_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+    demo(&mut connection, &runtime, "demo background").await;
+
+    // Interrupting the idle chat stops neither task.
+    command(&runtime, "%1", SessionCommand::Interrupt).unwrap();
+    assert!(connection.is_quiet());
+
+    // Nor does interrupting a later turn: only that turn's own row stops.
+    send(&runtime, "%1", "go", "").unwrap();
+    let run = |change: &Change| {
+        matches!(change, Change::Item(item)
+            if item.tool.as_ref().is_some_and(|tool| tool.title == "run"))
+    };
+    connection.until(run).await;
+    command(&runtime, "%1", SessionCommand::Interrupt).unwrap();
+    let events = connection.until(turn_is(v1::ChatTurnState::Idle)).await;
+    assert_eq!(outline(&events), ["run:failed", "notice", "IDLE"]);
+    assert_eq!(states(&events)[0].background.len(), 2);
+    // A demo does not count as a turn of the rotation.
+    assert_eq!(items(&events)[1].id, "turn-1-stopped");
+
+    // Stopped, the subagent's row fails and its task leaves the list.
+    stop_task(&runtime, "demo-1-agent").unwrap();
+    let events = connection
+        .until(|change| matches!(change, Change::State(_)))
+        .await;
+    assert_eq!(outline(&events), ["agent:failed", "IDLE"]);
+    let Some(Change::Updated(row)) = &events[0].change else {
+        panic!("the row is an update of the running one");
+    };
+    assert_eq!(row.id, "demo-1-agent");
+    assert_eq!(row.tool.as_ref().unwrap().result_summary, "stopped");
+    let left = &states(&events)[0].background;
+    assert_eq!((left.len(), left[0].id.as_str()), (1, "demo-1-dev"));
+
+    // It does not end a second time when it would have ended by itself.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(connection.is_quiet());
+    let snapshot = connection.open(&runtime, "%1");
+    let agent = snapshot.items.iter().find(|item| item.id == "demo-1-agent");
+    assert_eq!(
+        agent.unwrap().tool.as_ref().unwrap().status,
+        i32::from(v1::ChatToolStatus::Failed)
+    );
+    assert_eq!(snapshot.state.unwrap().background.len(), 1);
+}
+
+#[tokio::test]
+async fn the_scripted_session_cannot_stop_a_task_it_does_not_list() {
+    // Straight to the session: the runtime refuses an id the state does not
+    // list before the session hears of it.
+    let sink = provider::ChatSink {
+        panes: std::sync::Weak::new(),
+        key: pane("%1"),
+    };
+    let mut session = ScriptedProvider::new(Duration::ZERO).connect("%1", sink);
+    let stopped = session.command(SessionCommand::StopTask {
+        task_id: "demo-1-dev".into(),
+    });
+    assert_eq!(stopped.unwrap_err(), cannot_stop());
+
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    Connection::new().open(&runtime, "%1");
+    assert_eq!(
+        stop_task(&runtime, "demo-1-dev").unwrap_err().code,
+        "chat_task_not_found"
+    );
+}
+
+#[tokio::test]
+async fn the_scripted_compact_demo_compacts_for_a_while_and_frees_the_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+
+    let events = demo(&mut connection, &runtime, "demo compact").await;
+    assert_eq!(
+        outline(&events),
+        [
+            "user", "WORKING", "WORKING", "WORKING", "notice", "WORKING", "IDLE"
+        ]
+    );
+    let states = states(&events);
+    let seen: Vec<(bool, u64)> = states
+        .iter()
+        .map(|state| (state.compacting, state.usage.unwrap().used_tokens))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (false, 209_000),
+            (true, 209_000),
+            (false, 209_000),
+            (false, 40_000),
+            (false, 40_000)
+        ]
+    );
+    let notice = items(&events)[1];
+    assert_eq!(notice.kind, i32::from(v1::ChatItemKind::Notice));
+    assert_eq!(notice.text, "Context compacted, was 209k tokens");
+
+    // The notice says what the context was when the compaction started.
+    let events = demo(&mut connection, &runtime, "demo compact").await;
+    assert_eq!(items(&events)[1].text, "Context compacted, was 40k tokens");
+
+    // Interrupted part-way, it is no longer compacting.
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = paced_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+    send(&runtime, "%1", "demo compact", "").unwrap();
+    connection
+        .until(|change| matches!(change, Change::State(state) if state.compacting))
+        .await;
+    command(&runtime, "%1", SessionCommand::Interrupt).unwrap();
+    let events = connection.until(turn_is(v1::ChatTurnState::Idle)).await;
+    assert_eq!(outline(&events), ["notice", "IDLE"]);
+    let idle = self::states(&events)[0];
+    assert!(!idle.compacting && idle.usage.unwrap().used_tokens == 209_000);
+}
+
+#[tokio::test]
+async fn the_scripted_attachments_demo_shows_a_message_sent_with_an_image_and_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+
+    let events = demo(&mut connection, &runtime, "demo attachments").await;
+    assert_eq!(
+        outline(&events),
+        ["user", "WORKING", "user", "assistant", "IDLE"]
+    );
+    let items = items(&events);
+    assert!(items[0].attachments.is_empty());
+    let asked = items[1];
+    assert_eq!(asked.text, "Why is the header cut off here?");
+    assert!(asked.rewindable);
+    let attachment = |path: &str, name: &str, media_type: &str, size_bytes| v1::ChatAttachment {
+        path: path.into(),
+        name: name.into(),
+        media_type: media_type.into(),
+        size_bytes,
+    };
+    assert_eq!(
+        asked.attachments,
+        [
+            attachment("", "screenshot.png", "image/png", 248_113),
+            attachment("/tmp/layout.log", "layout.log", "text/plain", 18_432),
+        ]
+    );
+    assert!(!items[2].text.is_empty());
+}
+
+#[tokio::test]
+async fn the_scripted_rotation_is_not_moved_by_the_demos_between_its_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = scripted_runtime(&directory);
+    let mut connection = Connection::new();
+    connection.open(&runtime, "%1");
+    let answer = |request_id: String| SessionCommand::Answer {
+        request_id,
+        answer: v1::ChatAnswer {
+            skipped: true,
+            ..Default::default()
+        },
+    };
+
+    demo(&mut connection, &runtime, "demo attachments").await;
+    send(&runtime, "%1", "first", "").unwrap();
+    let events = connection.until(turn_is(v1::ChatTurnState::Waiting)).await;
+    let request = pending(&events);
+    assert_eq!(request.request_id, "turn-1-question");
+    assert_eq!(items(&events)[1].id, "turn-1-think");
+    // A demo's word sent while a turn runs is a message like any other.
+    send(&runtime, "%1", "demo long", "").unwrap();
+    let events = connection
+        .until(|change| matches!(change, Change::Item(_)))
+        .await;
+    assert_eq!(outline(&events), ["user"]);
+    assert!(connection.is_quiet());
+    command(&runtime, "%1", answer(request.request_id)).unwrap();
+    connection.until(turn_is(v1::ChatTurnState::Idle)).await;
+
+    demo(&mut connection, &runtime, "demo markdown").await;
+    // More than the word is not the word.
+    send(&runtime, "%1", "demo markdown please", "").unwrap();
+    let events = connection.until(turn_is(v1::ChatTurnState::Waiting)).await;
+    let request = pending(&events);
+    assert_eq!(request.request_id, "turn-2-permission");
+    command(&runtime, "%1", answer(request.request_id)).unwrap();
+    connection.until(turn_is(v1::ChatTurnState::Idle)).await;
+
+    let events = demo(&mut connection, &runtime, "demo compact").await;
+    assert_eq!(items(&events)[1].id, "demo-3-notice");
+    send(&runtime, "%1", "third", "").unwrap();
+    let events = connection.until(turn_is(v1::ChatTurnState::Waiting)).await;
+    assert_eq!(pending(&events).request_id, "turn-3-question");
+}
+
 #[tokio::test]
 async fn rewind_drops_the_message_and_what_followed_and_only_user_messages_rewind() {
     let directory = tempfile::tempdir().unwrap();

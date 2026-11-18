@@ -293,6 +293,8 @@ message ChatCapabilities {
   bool permission = 6;
   bool fork = 7;
   bool questions = 8;
+  // SEND takes `attachments`. A client offers no way to attach without it.
+  bool attachments = 9;
 }
 
 message ChatCatalog {

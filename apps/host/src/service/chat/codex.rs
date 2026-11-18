@@ -111,6 +111,7 @@ impl ChatProvider for CodexProvider {
             permission: true,
             fork: true,
             questions: true,
+            attachments: true,
         }
     }
 

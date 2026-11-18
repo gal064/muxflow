@@ -89,6 +89,7 @@ fn catalog() -> ChatCatalog {
             permission: true,
             fork: true,
             questions: true,
+            attachments: true,
         }),
         models: vec![
             ChatModel {
