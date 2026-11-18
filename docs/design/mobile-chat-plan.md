@@ -55,17 +55,18 @@ phone now catches up with.
 
 ## 2. Packages
 
-Built in this order; each is committed on its own.
+Built in this order. M2 and M5, and then M3 and M6's screens, were built side
+by side in the same files, so each pair shares a commit.
 
 | Pkg | Mock | Problems | What | State |
 | --- | --- | --- | --- | --- |
-| H1 | — | — | Scripted chat: demo turns for the states it could not show | |
-| M1 | S1, S3 | 1–5, 8–10 | The conversation as one anchored list; status line and request card above the reply field | |
-| M4 | S6 | 18 | Chat's own Markdown renderer | |
-| M2 | S2, S4 | 6, 7, 11, 12 | Steps grouped; subagent rows; background tasks | |
-| M3 | S5 | 13–17 | Message menu, copy, fork, edit, time, drafts | |
-| M5 | S8, S9 | 20–22 | Header, Details with Git rows, the smaller things | |
-| M6 | S7 | 19 | Attachments shown and sent | |
+| H1 | — | — | Scripted chat: demo turns for the states it could not show | bbaaf3d0 |
+| M1 | S1, S3 | 1–5, 8–10 | The conversation as one anchored list; status line and request card above the reply field | d49ff1b4 |
+| M4 | S6 | 18 | Chat's own Markdown renderer | b687b4f2 |
+| M2 | S2, S4 | 6, 7, 11, 12 | Steps grouped; subagent rows; background tasks | 138aab07 |
+| M3 | S5 | 13–17 | Message menu, copy, fork, edit, time, drafts | 776c5440 |
+| M5 | S8, S9 | 20–22 | Header, Details with Git rows, the smaller things | 138aab07 |
+| M6 | S7 | 19 | Attachments shown and sent | bf8790af, 776c5440 |
 
 ### H1 — scripted chat
 
@@ -174,6 +175,26 @@ attached; an image chip opens the image full screen. Sent: a plus button
 library, Take a photo, File; chips on the reply field with upload progress
 and a remove button; Send waits for uploads; a refused or failed upload says
 why on its chip. Facts in §3, the wire in §4.
+
+### Built differently
+
+- A reply's text is not selectable in place: a hold opens the message sheet,
+  and Select text there shows it selectable. Code blocks keep Copy.
+- Fork from a user's own message says the fork has the reply too, because the
+  host copies through the end of the turn.
+- The steps line reads title, counts, failed, line counts, as the mock draws
+  it; the desktop puts failed before the counts.
+- The newest reply's row is drawn in the reply's own cell, not as a list row.
+- Attachment chips sit inside the user's bubble, above the text. Every chip
+  on the reply field has its cross in a column of its own, so it is 44 dp.
+- A failed upload has no Retry: the chip is removed and the file picked again.
+- Editing a message brings its files back onto the reply field, as on the
+  desktop.
+- Git rows show only for a chat in its window's active pane: the host's
+  `RESOLVE_ACTIVE_ROOT` answers for no other. A chat in another split shows
+  its folder relative to home and no Git rows.
+- The workspace row keeps its state in the pill it had; the second line says
+  "Chat" and the agent's name.
 
 ## 3. Facts the packages rest on
 
