@@ -1446,6 +1446,9 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .ai-approval-actions { display: flex; gap: 8px; }
 .ai-approval-actions button { padding: 3px 12px; border: 1px solid var(--chrome-border); border-radius: 4px; background: transparent; color: var(--chrome-ink); font-size: 11px; }
 .ai-approval-actions button.primary { border-color: var(--accent); }
+/* The ellipsis that swaps the summary for the whole command. */
+.ai-approval-expand { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.ai-approval-expand:hover { text-decoration: underline; }
 /* The continuation card is not a risk prompt — it is a status question. */
 .ai-continuation { border-color: var(--chrome-border); background: var(--chrome-raised); }
 .ai-activity { padding: 0 12px 6px; color: var(--chrome-faint); font-size: var(--type-meta); overflow-wrap: anywhere; }

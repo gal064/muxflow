@@ -263,6 +263,28 @@ describe("the AI panel", () => {
     expect(text(renderer)).toContain("212 tok");
   });
 
+  it("reveals the whole command behind the ellipsis on a long approval", async () => {
+    const call = streamedCall();
+    const renderer = await render(<AiPanel {...props()} />);
+    const long = `echo ${"x".repeat(100)} tail end`;
+    await ask(renderer, "run it");
+    await act(async () => call.emit({
+      type: "toolCall", id: "t1", name: "send_to_pane",
+      arguments: JSON.stringify({ text: long }),
+    }));
+    await call.finish();
+    expect(text(renderer)).toContain("Type this into the terminal?");
+    // Collapsed: the summary is cut, and the end of the command is hidden.
+    expect(text(renderer)).not.toContain("tail end");
+    const expander = renderer.root.findByProps({ className: "ai-approval-expand" });
+    await act(async () => expander.props.onClick());
+    expect(text(renderer)).toContain("tail end");
+    expect(text(renderer)).toContain("show less");
+    await act(async () => expander.props.onClick());
+    expect(text(renderer)).not.toContain("show less");
+    expect(text(renderer)).not.toContain("tail end");
+  });
+
   it("re-renders only the answering bubble while a stream fills in", async () => {
     // The freeze this guards: every delta used to re-render the whole
     // transcript through marked and DOMPurify, saturating the webview's

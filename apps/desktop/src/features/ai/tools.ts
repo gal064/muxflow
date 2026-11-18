@@ -117,6 +117,18 @@ export function summarizeCall(call: AiToolCall): string {
   }
 }
 
+/** The command in full when the summary had to flatten or cut it, for the
+ * card's click-to-expand; undefined when the summary already says all. */
+export function callDetail(call: AiToolCall): string | undefined {
+  if (call.name !== "send_to_pane") return undefined;
+  const text = parseArguments(call).text;
+  if (typeof text !== "string") return undefined;
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  // The summary flattens whitespace and cuts at eighty characters; either
+  // loss means the full text is worth a click.
+  return text.trim() !== oneLine || oneLine.length > 80 ? text : undefined;
+}
+
 /** The approval card's question, naming the risk in its own words. */
 export function approvalTitle(name: string): string {
   return name === "run_automation" ? "Run this automation now?" : "Type this into the terminal?";

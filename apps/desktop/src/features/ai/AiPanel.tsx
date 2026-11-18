@@ -13,12 +13,12 @@ import {
   type AiContextInput, type AiSourceId,
 } from "./context";
 import {
-  AI_TOOLS, APPROVAL_TOOLS, approvalTitle, executeTool, summarizeCall,
+  AI_TOOLS, APPROVAL_TOOLS, approvalTitle, callDetail, executeTool, summarizeCall,
   type ToolContext,
 } from "./tools";
 import type { AutomationListing } from "../automations/types";
 import type { DetectedPort } from "../ports/api";
-import type { AiChatMessage, AiEvent, AiToolCall, AiTurn } from "./types";
+import type { AiApproval, AiChatMessage, AiEvent, AiToolCall, AiTurn } from "./types";
 
 /** How much of the conversation the model is shown. */
 const HISTORY_TURNS = 12;
@@ -60,6 +60,31 @@ const TurnBubble = memo(function TurnBubble(
     </span>}
   </li>;
 });
+
+/**
+ * One waiting tool call. The summary is one line; when it had to cut or
+ * flatten the command, the line ends in `…` and a click swaps in the whole
+ * thing. The expand state is the card's own: it exists only while the card
+ * does, and two waiting cards do not expand each other.
+ */
+function ApprovalCard({ approval, decide }: { approval: AiApproval; decide(approved: boolean): void }) {
+  const [expanded, setExpanded] = useState(false);
+  return <div className="ai-approval">
+    <strong>{approvalTitle(approval.name)}</strong>
+    <p className="ai-approval-detail">
+      {expanded && approval.detail ? approval.detail : approval.summary}
+      {approval.detail && <button
+        className="ai-approval-expand"
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >{expanded ? " show less" : " …"}</button>}
+    </p>
+    <span className="ai-approval-actions">
+      <button autoFocus className="primary" onClick={() => decide(true)} type="button">Allow</button>
+      <button onClick={() => decide(false)} type="button">Deny</button>
+    </span>
+  </div>;
+}
 /** Tool rounds one question buys before the panel asks the user whether the
  * run is worth continuing. Only rounds that ask to *do* something — type in
  * a pane, run an automation — spend it; a round that only reads the screen
@@ -290,7 +315,9 @@ export function AiPanel(props: PanelExtensionProps) {
           if (APPROVAL_TOOLS.has(toolCall.name)) {
             askedToAct = true;
             const approved = await new Promise<boolean>((resolve) => {
-              aiConversations.addApproval(key, { id: toolCall.id, name: toolCall.name, summary, decide: resolve });
+              aiConversations.addApproval(key, {
+                id: toolCall.id, name: toolCall.name, summary, detail: callDetail(toolCall), decide: resolve,
+              });
             });
             if (!approved) {
               result = "The user denied this.";
@@ -380,19 +407,11 @@ export function AiPanel(props: PanelExtensionProps) {
         />)}
       </ol>}
 
-    {conversation.pending.map((approval) => <div className="ai-approval" key={approval.id}>
-      <strong>{approvalTitle(approval.name)}</strong>
-      <p className="ai-approval-detail">{approval.summary}</p>
-      <span className="ai-approval-actions">
-        <button
-          autoFocus
-          className="primary"
-          onClick={() => key && aiConversations.resolveApproval(key, approval.id, true)}
-          type="button"
-        >Allow</button>
-        <button onClick={() => key && aiConversations.resolveApproval(key, approval.id, false)} type="button">Deny</button>
-      </span>
-    </div>)}
+    {conversation.pending.map((approval) => <ApprovalCard
+      key={approval.id}
+      approval={approval}
+      decide={(approved) => key && aiConversations.resolveApproval(key, approval.id, approved)}
+    />)}
 
     {conversation.continuation && key && <div className="ai-approval ai-continuation">
       <strong>This is taking a while</strong>

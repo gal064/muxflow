@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeTool, resolvePane, summarizeCall, type ToolContext } from "./tools";
+import { callDetail, executeTool, resolvePane, summarizeCall, type ToolContext } from "./tools";
 import type { PanelSessionContext } from "../shell/panelExtensions";
 
 const session = {
@@ -70,5 +70,17 @@ describe("the assistant's tools", () => {
   it("summarizes a read for the transcript chip", () => {
     expect(summarizeCall(call("read_pane"))).toBe("read the active pane's screen");
     expect(summarizeCall(call("read_pane", { pane: 2 }))).toBe("read pane 2");
+  });
+
+  it("offers the whole command only where the summary had to shorten it", () => {
+    // Short, one line: the summary is already the whole truth.
+    expect(callDetail(call("send_to_pane", { text: "git status" }))).toBeUndefined();
+    // Cut at eighty: the full text is a click away.
+    const long = `echo ${"x".repeat(100)} tail`;
+    expect(callDetail(call("send_to_pane", { text: long }))).toBe(long);
+    // Flattened newlines, even when short, are a loss worth revealing.
+    expect(callDetail(call("send_to_pane", { text: "echo one\necho two" }))).toBe("echo one\necho two");
+    // Reads have nothing to hide.
+    expect(callDetail(call("read_pane"))).toBeUndefined();
   });
 });

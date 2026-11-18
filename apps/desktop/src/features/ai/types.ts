@@ -64,6 +64,9 @@ export interface AiApproval {
   id: string;
   name: string;
   summary: string;
+  /** The command in full when the summary shortened it; the card's `…`
+   * reveals it, because approving a truncation is approving on faith. */
+  detail?: string;
   decide(approved: boolean): void;
 }
 

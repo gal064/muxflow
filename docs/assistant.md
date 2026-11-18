@@ -35,6 +35,8 @@ It acts on the current tab through four tools, and nothing else:
 - **send_to_pane** types text into a pane, optionally pressing Enter.
   **Every use waits for you**: the panel shows the exact text, the pane, and
   whether Enter will be pressed, and nothing is typed until you press Allow.
+  When the text is too long for one line the card ends in **…** — click it to
+  read the whole command before deciding.
 - **run_automation** starts a scheduled automation outside its schedule.
   This too waits for Allow.
 - **read_pane** reads a pane's screen as plain text — what the user actually
