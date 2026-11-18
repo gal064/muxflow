@@ -7,6 +7,21 @@
 //! two turns in rotation: the first stops on a question, the second on a
 //! permission request. One step runs every `step`, so a turn can be watched
 //! and interrupted.
+//!
+//! A message that is one of these words, sent while no turn runs, starts the
+//! turn it names instead, and leaves the rotation where it was:
+//!
+//! - `demo markdown`: a reply with a heading, inline styles, a code block
+//!   with a long line, a table, a nested list and a quote.
+//! - `demo long`: about 40 seconds of reading, searching, running, editing
+//!   and fetching, with one command that fails.
+//! - `demo subagent`: a subagent in the foreground, its activity and its
+//!   figures changing as it works.
+//! - `demo background`: a command and a subagent left running in the
+//!   background, listed and stoppable. The subagent ends by itself.
+//! - `demo compact`: the context compacting for about 3 seconds.
+//! - `demo attachments`: a message from another client with an image and a
+//!   file attached.
 
 use std::{
     collections::VecDeque,
@@ -34,6 +49,12 @@ const EARLIER_EXCHANGES: usize = 110;
 /// 2026-01-01T00:00:00Z. The transcript's items are a minute apart from here.
 const HISTORY_START_UNIX_MILLIS: i64 = 1_767_225_600_000;
 const FILE: &str = "crates/terminal-interactions/src/links.rs";
+/// How many steps the context compacts for: about 3 seconds.
+const COMPACTING_STEPS: usize = 25;
+/// How many steps a background subagent runs for before it ends by itself.
+const BACKGROUND_STEPS: u32 = 60;
+/// The pause after each row of the long turn, in steps.
+const LONG_PAUSE: usize = 13;
 
 pub(super) fn enabled(switch: Option<&OsStr>) -> bool {
     switch == Some(OsStr::new("1"))
@@ -175,8 +196,11 @@ impl ChatProvider for ScriptedProvider {
                 ..Default::default()
             },
             steps: VecDeque::new(),
+            ending: Vec::new(),
             open: Vec::new(),
             turns: 0,
+            demos: 0,
+            turn_id: String::new(),
         }));
         {
             let script = lock(&script);
@@ -248,6 +272,14 @@ enum Step {
     /// Stops the turn on a request until it is answered.
     Ask(v1::ChatPendingRequest),
     Idle,
+    /// Nothing, for as long as a step takes.
+    Wait,
+    Compacting(bool),
+    /// The context is this many tokens, where `Usage` adds to it.
+    Used(u64),
+    /// Lists a background task. One given a count of steps and its finished
+    /// row ends by itself that many steps later.
+    Start(v1::ChatBackgroundTask, Option<(u32, v1::ChatItem)>),
 }
 
 struct Script {
@@ -255,10 +287,18 @@ struct Script {
     state: v1::ChatState,
     /// What is left of the running turn.
     steps: VecDeque<Step>,
+    /// The background tasks that end by themselves: the steps each has left,
+    /// and its row as it ends. They count whatever the turn does.
+    ending: Vec<(u32, v1::ChatItem)>,
     /// Items published as streaming or running and not yet finished.
     open: Vec<v1::ChatItem>,
-    /// How many turns have started.
+    /// How many turns of the rotation have started.
     turns: u32,
+    /// How many turns asked for by name have started.
+    demos: u32,
+    /// What the ids of the running turn's items start with: `turn-3`,
+    /// `demo-1`.
+    turn_id: String,
 }
 
 impl Script {
@@ -289,13 +329,36 @@ impl Script {
         });
     }
 
-    /// Runs the turn's next step. False when there is none to run now.
+    /// Counts a step for each background task that ends by itself, and ends
+    /// those it was the last for: the row is finished and the task leaves the
+    /// list. False when none is counting.
+    fn end_tasks(&mut self) -> bool {
+        let counting = !self.ending.is_empty();
+        let mut ended = Vec::new();
+        self.ending.retain_mut(|(left, row)| {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                ended.push(row.clone());
+            }
+            *left > 0
+        });
+        for row in ended {
+            self.state.background.retain(|task| task.id != row.id);
+            self.publish_item(row);
+            self.publish_state();
+        }
+        counting
+    }
+
+    /// Runs the turn's next step, and counts it for the background tasks.
+    /// False when there was neither to do now.
     fn run_step(&mut self) -> bool {
+        let counted = self.end_tasks();
         if self.state.pending.is_some() {
-            return false;
+            return counted;
         }
         let Some(step) = self.steps.pop_front() else {
-            return false;
+            return counted;
         };
         match step {
             Step::Item(item) => self.publish_item(item),
@@ -314,15 +377,35 @@ impl Script {
             }
             Step::Ask(request) => self.set_turn(Turn::Waiting, Some(request)),
             Step::Idle => self.set_turn(Turn::Idle, None),
+            Step::Wait => {}
+            Step::Compacting(compacting) => {
+                self.state.compacting = compacting;
+                self.publish_state();
+            }
+            Step::Used(tokens) => {
+                self.state.usage.get_or_insert_default().used_tokens = tokens;
+                self.publish_state();
+            }
+            Step::Start(mut task, ends) => {
+                task.started_at_unix_millis = now_unix_millis();
+                self.state.background.push(task);
+                self.ending.extend(ends);
+                self.publish_state();
+            }
         }
         true
     }
 
-    /// Ends the running turn where it stands: nothing is left streaming or
-    /// running, and nothing is pending.
+    /// Ends the running turn where it stands: nothing of it is left streaming,
+    /// running or compacting, and nothing is pending. What runs in the
+    /// background is no part of it, and runs on.
     fn stop(&mut self, notice: Option<&str>) {
         self.steps.clear();
         for mut item in std::mem::take(&mut self.open) {
+            if self.state.background.iter().any(|task| task.id == item.id) {
+                self.open.push(item);
+                continue;
+            }
             item.streaming = false;
             if let Some(tool) = &mut item.tool {
                 tool.status = Status::Failed.into();
@@ -331,9 +414,10 @@ impl Script {
             self.sink.publish(Change::Updated(item));
         }
         if let Some(notice) = notice {
-            let id = format!("turn-{}-stopped", self.turns);
+            let id = format!("{}-stopped", self.turn_id);
             self.publish_item(text(id, Kind::Notice, notice));
         }
+        self.state.compacting = false;
         self.set_turn(Turn::Idle, None);
     }
 
@@ -349,11 +433,19 @@ impl Script {
                 self.publish_item(item);
                 // A message sent mid-turn joins the turn that is running.
                 if self.state.turn == i32::from(Turn::Idle) {
-                    self.turns += 1;
-                    self.steps = if self.turns % 2 == 1 {
-                        question_turn(self.turns)
+                    let used = self.state.usage.unwrap_or_default().used_tokens;
+                    self.steps = if let Some(steps) = demo(&message, self.demos + 1, used) {
+                        self.demos += 1;
+                        self.turn_id = format!("demo-{}", self.demos);
+                        steps
                     } else {
-                        permission_turn(self.turns)
+                        self.turns += 1;
+                        self.turn_id = format!("turn-{}", self.turns);
+                        if self.turns % 2 == 1 {
+                            question_turn(self.turns)
+                        } else {
+                            permission_turn(self.turns)
+                        }
                     };
                     self.set_turn(Turn::Working, None);
                 }
@@ -397,8 +489,21 @@ impl Script {
                 self.state.options = Some(options);
                 self.publish_state();
             }
-            // It lists no background tasks, so the runtime lets none through.
-            SessionCommand::StopTask { .. } => return Err(super::cannot_stop()),
+            // The runtime lets through only a task the state lists. Its row
+            // has the task's id.
+            SessionCommand::StopTask { task_id } => {
+                let listed = self.state.background.len();
+                self.state.background.retain(|task| task.id != task_id);
+                if self.state.background.len() == listed {
+                    return Err(super::cannot_stop());
+                }
+                self.ending.retain(|(_, row)| row.id != task_id);
+                if let Some(index) = self.open.iter().position(|open| open.id == task_id) {
+                    let row = finished(self.open.remove(index), Status::Failed, "stopped");
+                    self.sink.publish(Change::Updated(row));
+                }
+                self.publish_state();
+            }
         }
         Ok(())
     }
@@ -414,6 +519,7 @@ fn capabilities() -> v1::ChatCapabilities {
         permission: true,
         fork: true,
         questions: true,
+        attachments: true,
     }
 }
 
@@ -636,6 +742,247 @@ fn after_permission(turn: u32, request: &v1::ChatPendingRequest, allow: bool) ->
     ])
 }
 
+/// The turn `message` asks for by name, one of those the module's description
+/// lists. Its items' ids start with `demo-{number}`.
+fn demo(message: &str, number: u32, used_tokens: u64) -> Option<VecDeque<Step>> {
+    let id = |name: &str| format!("demo-{number}-{name}");
+    Some(match message.trim().to_lowercase().as_str() {
+        "demo markdown" => markdown_demo(id),
+        "demo long" => long_demo(id),
+        "demo subagent" => subagent_demo(id),
+        "demo background" => background_demo(id),
+        "demo compact" => compact_demo(id, used_tokens),
+        "demo attachments" => attachments_demo(id),
+        _ => return None,
+    })
+}
+
+/// Every block of Markdown a client draws, in the parts it arrives in. One
+/// line of the code is longer than a pane is wide.
+const MARKDOWN: [&str; 5] = [
+    "## Why wrapped paths are missed\n\n\
+     The detector **joins** rows only when the terminal marks them *soft-wrapped*. \
+     Boxed output never is, so `join_rows` skips it. \
+     The rule is in the [wrapping notes](https://example.com/docs).\n\n",
+    concat!(
+        "```rust\n",
+        "fn join_rows(rows: &[Row]) -> String {\n",
+        "    let mut joined = String::new();\n",
+        "    for row in rows {\n",
+        "        // A border ends the continuation, so it is stripped before deciding whether the next row carries on with the same path.\n",
+        "        joined.push_str(row.text.trim_end_matches(BORDER));\n",
+        "    }\n",
+        "    joined\n",
+        "}\n",
+        "```\n\n",
+    ),
+    "| Case | Wrap | Detected |\n\
+     | --- | --- | --- |\n\
+     | Plain output | soft | yes |\n\
+     | Boxed output | hard | no |\n\
+     | Indented continuation | hard | yes |\n\n",
+    concat!(
+        "1. Strip the border before the join.\n",
+        "   - `│` and `|` at the end of a row\n",
+        "   - the padding before them\n",
+        "2. Join a row that ends in `/` with the next.\n\n",
+    ),
+    "> A path that breaks right after a `/` is the common case.\n",
+];
+
+fn markdown_demo(id: impl Fn(&str) -> String) -> VecDeque<Step> {
+    let mut steps = VecDeque::new();
+    stream(&mut steps, id("reply"), &MARKDOWN);
+    steps.push_back(Step::Idle);
+    steps
+}
+
+fn long_demo(id: impl Fn(&str) -> String) -> VecDeque<Step> {
+    let ok = |row: v1::ChatItem, steps: usize, summary: &str| {
+        (row.clone(), steps, finished(row, Status::Ok, summary))
+    };
+    let read = |name: &str, path: &str| {
+        let mut row = tool(id(name), Tool::Read, "read", path);
+        if let Some(tool) = &mut row.tool {
+            tool.path = path.into();
+        }
+        ok(row, 1, "done")
+    };
+    let search = |name: &str, query: &str, summary: &str| {
+        ok(tool(id(name), Tool::Search, "search", query), 2, summary)
+    };
+    let fetch = |name: &str, url: &str| ok(tool(id(name), Tool::Web, "fetch", url), 11, "done");
+    let edit = |name: &str| (file_tool(id(name), Tool::Edit, "edit"), 2, edited(id(name)));
+    let fmt = |name: &str| tool(id(name), Tool::Command, "run", "cargo fmt --check");
+    let mut unformatted = finished(fmt("format"), Status::Failed, "exit 1");
+    if let Some(tool) = &mut unformatted.tool {
+        tool.output_preview = format!("Diff in {FILE}:212:\n-        joined\n+    joined\n");
+    }
+    // Each row as it starts, the steps it runs for, and as it ends.
+    let rows = [
+        read("read-links", FILE),
+        search("search-wrap", "hard_wrap", "6 matches"),
+        read("read-wrap", "crates/terminal-interactions/src/wrap.rs"),
+        (tests(id("test")), 24, tests_passed(id("test"))),
+        fetch("fetch-width", "docs.rs/unicode-width"),
+        read("read-fixture", "tests/fixtures/boxed.txt"),
+        search("search-trim", "trim_end_matches", "3 matches"),
+        edit("edit"),
+        (fmt("format"), 8, unformatted),
+        edit("edit-format"),
+        ok(fmt("format-again"), 8, "clean"),
+        search("search-join", "join_rows", "4 matches"),
+        fetch("fetch-grid", "docs.rs/alacritty_terminal"),
+        read("read-again", FILE),
+        (tests(id("test-again")), 28, tests_passed(id("test-again"))),
+    ];
+    let mut steps = VecDeque::from([Step::Item(text(
+        id("think"),
+        Kind::Reasoning,
+        "The join, its callers and the fixture all need a look before anything changes.",
+    ))]);
+    for (number, (running, runs, ended)) in rows.into_iter().enumerate() {
+        steps.push_back(Step::Item(running));
+        steps.extend(wait(runs));
+        steps.push_back(Step::Item(ended));
+        if number == 7 {
+            steps.push_back(Step::Item(text(
+                id("progress"),
+                Kind::Assistant,
+                "The border is what ends the join, so it is stripped first. Checking the rest.",
+            )));
+        }
+        steps.extend(wait(LONG_PAUSE));
+    }
+    steps.extend([
+        Step::Item(text(
+            id("done"),
+            Kind::Assistant,
+            &format!(
+                "Wrapped paths inside a box are joined now. The fix is in [links.rs]({FILE})."
+            ),
+        )),
+        Step::Usage(12_000),
+        Step::Idle,
+    ]);
+    steps
+}
+
+fn subagent_demo(id: impl Fn(&str) -> String) -> VecDeque<Step> {
+    const ACTIVITIES: [&str; 5] = [
+        "reading crates/terminal-interactions/src/wrap.rs",
+        "searching hard_wrap",
+        "reading crates/terminal-interactions/src/links.rs",
+        "searching join_rows",
+        "running cargo test -p terminal-interactions wrap",
+    ];
+    // Five updates to an activity, each with one more tool call made.
+    let row = |update: u32| {
+        let activity = ACTIVITIES[(update as usize / 5).min(ACTIVITIES.len() - 1)];
+        subagent(id("agent"), activity, update, 1_850 * u64::from(update))
+    };
+    let mut steps: VecDeque<Step> = (0..25).map(|update| Step::Item(row(update))).collect();
+    steps.extend([
+        Step::Item(finished(row(25), Status::Ok, "3 files")),
+        Step::Item(text(
+            id("done"),
+            Kind::Assistant,
+            "Three other files call it, and all of them pass whole rows.",
+        )),
+        Step::Idle,
+    ]);
+    steps
+}
+
+fn background_demo(id: impl Fn(&str) -> String) -> VecDeque<Step> {
+    let dev = tool(id("dev"), Tool::Command, "run", "pnpm dev");
+    let agent = |tool_uses, tokens| {
+        in_background(subagent(
+            id("agent"),
+            "searching join_rows",
+            tool_uses,
+            tokens,
+        ))
+    };
+    // A task has its row's id, which is how stopping it finds the row.
+    let task = |name: &str, kind: v1::ChatTaskKind, description: &str| v1::ChatBackgroundTask {
+        id: id(name),
+        kind: kind.into(),
+        description: description.into(),
+        stoppable: true,
+        ..Default::default()
+    };
+    VecDeque::from([
+        Step::Item(dev.clone()),
+        Step::Item(finished(dev, Status::Ok, "in the background")),
+        Step::Start(task("dev", v1::ChatTaskKind::Command, "pnpm dev"), None),
+        Step::Item(agent(1, 2_300)),
+        Step::Start(
+            task(
+                "agent",
+                v1::ChatTaskKind::Subagent,
+                "Find the other callers",
+            ),
+            Some((
+                BACKGROUND_STEPS,
+                finished(agent(14, 31_400), Status::Ok, "3 files"),
+            )),
+        ),
+        Step::Item(text(
+            id("done"),
+            Kind::Assistant,
+            "The dev server is up and a subagent is looking for the other callers. \
+             Both run in the background.",
+        )),
+        Step::Idle,
+    ])
+}
+
+fn compact_demo(id: impl Fn(&str) -> String, used_tokens: u64) -> VecDeque<Step> {
+    let notice = format!(
+        "Context compacted, was {} tokens",
+        super::claude::tokens(used_tokens)
+    );
+    let mut steps = VecDeque::from([Step::Compacting(true)]);
+    steps.extend(wait(COMPACTING_STEPS));
+    steps.extend([
+        Step::Compacting(false),
+        Step::Item(text(id("notice"), Kind::Notice, &notice)),
+        Step::Used(40_000),
+        Step::Idle,
+    ]);
+    steps
+}
+
+fn attachments_demo(id: impl Fn(&str) -> String) -> VecDeque<Step> {
+    let attachment = |path: &str, name: &str, media_type: &str, size_bytes| v1::ChatAttachment {
+        path: path.into(),
+        name: name.into(),
+        media_type: media_type.into(),
+        size_bytes,
+    };
+    // As another client's message arrives: an item this one did not send.
+    let mut ask = text(id("ask"), Kind::User, "Why is the header cut off here?");
+    ask.attachments = vec![
+        // An image the agent's record holds inline has no path.
+        attachment("", "screenshot.png", "image/png", 248_113),
+        attachment("/tmp/layout.log", "layout.log", "text/plain", 18_432),
+    ];
+    VecDeque::from([
+        Step::Item(ask),
+        Step::Item(text(
+            id("reply"),
+            Kind::Assistant,
+            "The header's row has a fixed height, so the second line of the title is clipped.",
+        )),
+        Step::Idle,
+    ])
+}
+
+fn wait(steps: usize) -> impl Iterator<Item = Step> {
+    std::iter::repeat_with(|| Step::Wait).take(steps)
+}
+
 /// An assistant message that arrives as an empty streaming item, its text in
 /// `parts`, then the whole item again, finished.
 fn stream(steps: &mut VecDeque<Step>, id: String, parts: &[&'static str]) {
@@ -681,6 +1028,25 @@ fn finished(mut item: v1::ChatItem, status: Status, summary: &str) -> v1::ChatIt
     if let Some(tool) = &mut item.tool {
         tool.status = status.into();
         tool.result_summary = summary.into();
+    }
+    item
+}
+
+/// A running subagent row: what it does now, and its figures so far.
+fn subagent(id: String, activity: &str, tool_uses: u32, tokens: u64) -> v1::ChatItem {
+    let mut item = tool(id, Tool::Subagent, "agent", "Find the other callers");
+    if let Some(tool) = &mut item.tool {
+        tool.agent_type = "Explore".into();
+        tool.activity = activity.into();
+        tool.tool_uses = tool_uses;
+        tool.tokens = tokens;
+    }
+    item
+}
+
+fn in_background(mut item: v1::ChatItem) -> v1::ChatItem {
+    if let Some(tool) = &mut item.tool {
+        tool.background = true;
     }
     item
 }

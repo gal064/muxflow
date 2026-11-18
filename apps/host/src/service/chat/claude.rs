@@ -177,6 +177,7 @@ impl ChatProvider for ClaudeProvider {
             permission: true,
             fork: true,
             questions: true,
+            attachments: true,
         }
     }
 
