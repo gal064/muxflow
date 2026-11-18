@@ -78,7 +78,7 @@ function ToolRow({ item, tool }: { item: ChatItem; tool: ChatTool }) {
           )}
         </View>
         {/* Codex says only that its subagent runs, which the outcome has said already. */}
-        {under && under !== row.outcome ? <Text numberOfLines={1} style={styles.under}>{under}</Text> : null}
+        {under && under !== row.outcome ? <Text numberOfLines={2} style={styles.under}>{under}</Text> : null}
       </Pressable>
       {open ? (
         <View style={styles.detail}>

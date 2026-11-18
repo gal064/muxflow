@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type TextStyle } from "react-native";
 
 import { externalLinkTarget } from "../../../ui/externalLinks";
@@ -25,10 +25,31 @@ export type ChatMarkdownProps = {
    * would both answer the same touch.
    */
   selectable?: boolean;
+  /** What a hold on the reply does, where the reply sits in something that answers a hold. See `Sideways`. */
+  hold?: ChatMarkdownHold | undefined;
 };
+
+export interface ChatMarkdownHold {
+  onLongPress: () => void;
+  delayMs: number;
+}
 
 /** Whether the text of the reply being drawn can be selected in place. */
 const Selectable = createContext(true);
+const Hold = createContext<ChatMarkdownHold | undefined>(undefined);
+
+/**
+ * What scrolls sideways takes its touches itself. Left to a pressable around
+ * the reply, that one becomes the touch's owner a moment after the finger
+ * lands and takes every later move from the scroller inside it, so only a
+ * quick flick, which starts scrolling before that, would move the code. This
+ * one is inside the scroller, which keeps the moves; a hold still does what
+ * it does on the rest of the reply.
+ */
+function Sideways({ children, grow = false }: { children: ReactNode; grow?: boolean }) {
+  const hold = useContext(Hold);
+  return <Pressable accessible={false} delayLongPress={hold?.delayMs} onLongPress={hold?.onLongPress} style={grow ? styles.grow : undefined}>{children}</Pressable>;
+}
 
 /** How long the copy button reads "Copied". */
 const COPIED_MS = 1500;
@@ -92,7 +113,7 @@ function CodeBlock({ block, tail }: { block: ChatCodeBlock; tail: boolean }) {
         <CopyButton text={text} />
       </View>
       <ScrollView contentContainerStyle={styles.codeScroll} horizontal>
-        <Text selectable={selectable} style={styles.codeText}>{text}</Text>
+        <Sideways><Text selectable={selectable} style={styles.codeText}>{text}</Text></Sideways>
       </ScrollView>
     </View>
   );
@@ -125,10 +146,12 @@ function Table({ block, dim }: { block: ChatTableBlock; dim: boolean }) {
   );
   return (
     <ScrollView contentContainerStyle={styles.tableScroll} horizontal style={styles.table}>
-      <View style={styles.tableRows}>
-        {row(block.header, -1, true, block.rows.length === 0)}
-        {block.rows.map((cells, index) => row(cells, index, false, index === block.rows.length - 1))}
-      </View>
+      <Sideways grow>
+        <View style={styles.tableRows}>
+          {row(block.header, -1, true, block.rows.length === 0)}
+          {block.rows.map((cells, index) => row(cells, index, false, index === block.rows.length - 1))}
+        </View>
+      </Sideways>
     </ScrollView>
   );
 }
@@ -200,11 +223,13 @@ function Blocks({ blocks, dim, tail }: { blocks: ChatBlock[]; dim: boolean; tail
  * and kept by `source` (see `parseChatMarkdown`), and a block whose source
  * did not change is not rendered again, so a long reply can grow line by line.
  */
-export const ChatMarkdown = memo(function ChatMarkdown({ source, streaming = false, selectable = true }: ChatMarkdownProps) {
+export const ChatMarkdown = memo(function ChatMarkdown({ source, streaming = false, selectable = true, hold }: ChatMarkdownProps) {
   const blocks = useMemo(() => parseChatMarkdown(source), [source]);
   return (
     <Selectable.Provider value={selectable}>
-      <View style={styles.root}><Blocks blocks={blocks} dim={false} tail={streaming} /></View>
+      <Hold.Provider value={hold}>
+        <View style={styles.root}><Blocks blocks={blocks} dim={false} tail={streaming} /></View>
+      </Hold.Provider>
     </Selectable.Provider>
   );
 });
@@ -251,6 +276,7 @@ const styles = StyleSheet.create({
   table: { borderColor: colors.chromeHairline, borderRadius: radii.card, borderWidth: metrics.hairlineWidth },
   tableScroll: { flexDirection: "row", flexGrow: 1 },
   tableRows: { flexGrow: 1 },
+  grow: { flexGrow: 1 },
   tableRow: { borderBottomColor: colors.chromeHairline, borderBottomWidth: metrics.hairlineWidth, flexDirection: "row" },
   tableLastRow: { borderBottomWidth: 0 },
   tableHeader: { backgroundColor: colors.chromeRaised },

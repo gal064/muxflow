@@ -29,7 +29,7 @@ import { FOCUS_AFTER_SHEET_MS } from "./useMessageActions";
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn(async () => true) }));
 
 // The reply field says when it is focused: the stub's own field keeps no count.
-const field = vi.hoisted(() => ({ focused: 0 }));
+const field = vi.hoisted(() => ({ focused: 0, blurred: 0, has: false }));
 vi.mock("react-native", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const { createElement, forwardRef, useImperativeHandle } = await import("react");
@@ -37,8 +37,13 @@ vi.mock("react-native", async (importOriginal) => {
     useImperativeHandle(ref, () => ({
       focus() {
         field.focused += 1;
+        field.has = true;
       },
-      blur() {},
+      blur() {
+        field.blurred += 1;
+        field.has = false;
+      },
+      isFocused: () => field.has,
     }));
     return createElement("TextInput", props);
   });
@@ -236,6 +241,8 @@ beforeEach(() => {
   vi.setSystemTime(NOON);
   vi.mocked(Clipboard.setStringAsync).mockClear();
   field.focused = 0;
+  field.blurred = 0;
+  field.has = false;
   forgetDrafts();
 });
 afterEach(() => {
@@ -601,6 +608,19 @@ describe("Edit and resend", () => {
     expect(field.focused).toBe(0);
     advance(FOCUS_AFTER_SHEET_MS);
     expect(field.focused).toBe(1);
+    expect(field.blurred).toBe(0);
+
+    // A field that kept the focus after its keyboard was put away lets go first, so the keyboard comes back.
+    longPress(message(view, "Why does it break?"));
+    press(byText(view, "Edit and resend"));
+    advance(FOCUS_AFTER_SHEET_MS);
+    expect(field.blurred).toBe(1);
+    expect(field.focused).toBe(1);
+    advance(100);
+    expect(field.focused).toBe(2);
+    longPress(message(view, "Run the full suite"));
+    press(byText(view, "Edit and resend"));
+    advance(FOCUS_AFTER_SHEET_MS + 100);
 
     expect(flat(message(view, "Run the full suite").props.style)).toMatchObject({ borderColor: colors.accent, backgroundColor: colors.accentWash });
     // Oldest first: five rows up to the message, and the reply after it dimmed.

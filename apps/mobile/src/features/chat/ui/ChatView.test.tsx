@@ -204,7 +204,11 @@ describe("phone chat mocks", () => {
     press(byLabel(view, /^Other\./));
     type(byLabel(view, "Your answer"), "Only the boxed case, plus a fixture");
     writeRender("question-other", view.toJSON());
+    // The keyboard is put away before the Other field goes, so its focus does not pass to the reply field and fold the card.
+    const dismiss = vi.spyOn(Keyboard, "dismiss");
     press(byText(view, "Next"));
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    dismiss.mockRestore();
     shown = textOf(view.toJSON());
     expect(shown).toContain("Which checks should run afterwards?");
     expect(shown).toContain("2 of 2");

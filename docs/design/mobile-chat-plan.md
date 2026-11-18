@@ -185,6 +185,10 @@ why on its chip. Facts in §3, the wire in §4.
 - The steps line reads title, counts, failed, line counts, as the mock draws
   it; the desktop puts failed before the counts.
 - The newest reply's row is drawn in the reply's own cell, not as a list row.
+- A finished subagent shows its tools and tokens and not how long it took:
+  the host reports when a subagent started, not when it ended.
+- Files on the reply field are not kept when the chat is left; the typed
+  text is.
 - Attachment chips sit inside the user's bubble, above the text. Every chip
   on the reply field has its cross in a column of its own, so it is 44 dp.
 - A failed upload has no Retry: the chip is removed and the file picked again.
