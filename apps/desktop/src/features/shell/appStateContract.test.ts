@@ -3,7 +3,8 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
+  type AppOwnedTab, type PersistedAppState, type WorkspaceDefaults, type WorkspaceRestoreHost,
+  type WorkspaceRestoreTab, type WorkspaceRestoreWorkspace, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -50,9 +51,18 @@ describe("persisted app state contract", () => {
     // fields are optional — exactly the shape that stops being saved without
     // anything failing.
     const defaults: Required<WorkspaceDefaults> = { directory: "", startupCommand: "" };
+    // The workspace-restore records cross it too, three levels deep.
+    const restoreHost: Required<WorkspaceRestoreHost> = { workspaces: [], selectedSessionName: "" };
+    const restoreWorkspace: Required<WorkspaceRestoreWorkspace> = { name: "", tabs: [] };
+    const restoreTab: Required<WorkspaceRestoreTab> = { directory: "" };
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
     expect(Object.keys(contract.workspaceDefaults.local).sort()).toEqual(Object.keys(defaults).sort());
+    expect(Object.keys(contract.workspaceRestore.local).sort()).toEqual(Object.keys(restoreHost).sort());
+    expect(Object.keys(contract.workspaceRestore.local.workspaces[0]).sort())
+      .toEqual(Object.keys(restoreWorkspace).sort());
+    expect(Object.keys(contract.workspaceRestore.local.workspaces[0].tabs[0]).sort())
+      .toEqual(Object.keys(restoreTab).sort());
   });
 
   it("is a value this side would actually produce", () => {
@@ -71,7 +81,10 @@ describe("persisted app state contract", () => {
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
     expect(typed.shell.defaultMarkdownView).toBe("live");
+    expect(typed.shell.restoreWorkspaces).toBe(true);
     expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
+    expect(typed.workspaceRestore.local.workspaces[1].tabs[0]).toEqual({});
+    expect(typed.workspaceRestore["ssh-remote-linux"].selectedSessionName).toBeUndefined();
   });
 
   it("persists the pinned-only filter and leaves saves from before it showing everything", () => {
@@ -217,6 +230,78 @@ describe("per-host workspace defaults", () => {
     expect(selected("")).toBeUndefined();
     expect(selected(42)).toBeUndefined();
     expect(selected(undefined)).toBeUndefined();
+  });
+});
+
+describe("workspace restore records", () => {
+  const loaded = (workspaceRestore: unknown) => normalizePersistedAppState({
+    schemaVersion: 1, appTabs: [], workspaceUi: [], shell: {}, workspaceRestore,
+  }).workspaceRestore;
+
+  it("keeps a remembered workspace with the directory of every tab", () => {
+    expect(loaded({
+      local: {
+        workspaces: [{ name: "project", tabs: [{ directory: "/work" }, {}] }],
+        selectedSessionName: "project",
+      },
+    })).toEqual({
+      local: {
+        workspaces: [{ name: "project", tabs: [{ directory: "/work" }, {}] }],
+        selectedSessionName: "project",
+      },
+    });
+  });
+
+  it("drops what could never be restored instead of saving a doomed create", () => {
+    // An empty or control-character name cannot become a tmux session, a
+    // duplicate answers a question twice, and a non-object tab is not a tab.
+    expect(loaded({
+      local: {
+        workspaces: [
+          { name: "keep", tabs: [{ directory: "/a" }, "not-a-tab", null] },
+          { name: "keep", tabs: [] },
+          { name: "", tabs: [] },
+          { name: "evil\nkill-server", tabs: [] },
+          { name: 7, tabs: [] },
+          null,
+        ],
+      },
+    })).toEqual({ local: { workspaces: [{ name: "keep", tabs: [{ directory: "/a" }] }] } });
+    // A host entry that is not an object, and the legal-but-evil empty key.
+    expect(loaded({ "": { workspaces: [] }, local: "everything" })).toEqual({});
+    expect(loaded(undefined)).toEqual({});
+    expect(loaded(["local"])).toEqual({});
+  });
+
+  it("bounds the record so a corrupt file cannot grow the save without limit", () => {
+    // The storage side refuses the *whole* save past its caps; dropping here
+    // is what keeps one corrupt host from freezing every other preference.
+    const manyTabs = Array.from({ length: 100 }, () => ({ directory: "/x" }));
+    expect(loaded({ local: { workspaces: [{ name: "wide", tabs: manyTabs }] } })
+      .local.workspaces[0].tabs).toHaveLength(64);
+    const manyWorkspaces = Array.from({ length: 300 }, (_, index) => ({ name: `w-${index}`, tabs: [] }));
+    expect(loaded({ local: { workspaces: manyWorkspaces } })
+      .local.workspaces).toHaveLength(256);
+    const manyHosts = Object.fromEntries(
+      Array.from({ length: 1_100 }, (_, index) => [`host-${index}`, { workspaces: [] }]),
+    );
+    expect(Object.keys(loaded(manyHosts))).toHaveLength(1_024);
+  });
+
+  it("restores the setting and leaves saves from before it off", () => {
+    const shell = (value: Record<string, unknown>) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: value,
+    }).shell;
+    expect(shell({ restoreWorkspaces: true }).restoreWorkspaces).toBe(true);
+    expect(shell({ restoreWorkspaces: false }).restoreWorkspaces).toBe(false);
+    expect(shell({}).restoreWorkspaces).toBe(false);
+    expect(defaultShellState.restoreWorkspaces).toBe(false);
+    expect((contract as unknown as PersistedAppState).shell.restoreWorkspaces).toBe(true);
+    // A save from before the feature loads whole, with nothing remembered.
+    const legacy = normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: {},
+    });
+    expect(legacy.workspaceRestore).toEqual({});
   });
 });
 

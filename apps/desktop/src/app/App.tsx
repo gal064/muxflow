@@ -106,6 +106,7 @@ import { useClientResize } from "./useClientResize";
 import { commitScopedAppTabClose, reportAnnouncedPaneResult, useShellNavigation } from "./useShellNavigation";
 import { useTmuxActionPerformer, type TmuxActionTarget } from "./useTmuxActionPerformer";
 import { useWorkspaceCreate } from "./useWorkspaceCreate";
+import { useWorkspaceRestore } from "./useWorkspaceRestore";
 import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
@@ -934,6 +935,25 @@ export function App() {
       },
     };
   }, [hostScopeRef, linkFor]);
+  // Workspace restore: remember which workspaces each host had open and at
+  // which directories, and recreate the ones a dead tmux server lost. The
+  // rules live in `useWorkspaceRestore`; the switch lives in Settings.
+  const restorePerformAction = useCallback((
+    action: TmuxAction,
+    target: TmuxActionTarget | undefined,
+  ) => performAction(action, undefined, undefined, target), [performAction]);
+  useWorkspaceRestore({
+    appStateLoaded,
+    enabled: appState.shell.restoreWorkspaces,
+    links,
+    activeHostProfileId: currentHostProfileId,
+    linkFor,
+    appStateRef,
+    setAppState,
+    performAction: restorePerformAction,
+    targetFor: actionTargetFor,
+    selectSessionOnActiveHost: selectSession,
+  });
   // Both pins are host state now, so both take the action pipeline: the pin
   // outlives this app, and every client of the same tmux server sees it. The
   // scope check is the same one every row action makes — a menu can outlive the
@@ -1547,7 +1567,14 @@ export function App() {
     ?? (currentHostProfileId === "local" ? "Local" : currentHostProfileId);
 
   const updateShell = (update: Partial<ShellState>) =>
-    setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
+    setAppState((current) => ({
+      ...current,
+      shell: { ...current.shell, ...update },
+      // Turning restore off discards the record with it, so switching it
+      // back on a month later reopens what is open now, not a layout left
+      // over from whenever it happened to be last enabled.
+      ...(update.restoreWorkspaces === false ? { workspaceRestore: {} } : {}),
+    }));
 
   const sidebarWidth = sidebarWidthForWindow(appState.shell.sidebarWidth, windowWidth);
   const panelWidth = panelWidthForWindow(appState.shell.panelWidth, windowWidth);

@@ -37,7 +37,9 @@ export interface TmuxAction {
   pinned?: boolean;
   confirmed?: boolean;
   /**
-   * Where a created session's first pane starts (`createSession` only).
+   * Where a created session's first pane starts (`createSession`) or where a
+   * created tab starts (`createWindow`). Every other action leaves it empty
+   * and tmux resolves the path itself, inheriting the source pane's live one.
    *
    * Resolved and validated on the host that owns the filesystem, not here: the
    * path may name a directory only the remote machine has, and a create that

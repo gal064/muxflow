@@ -13,6 +13,11 @@ use uuid::Uuid;
 const APP_STATE_SCHEMA_VERSION: u32 = 1;
 const MAX_APP_TABS: usize = 10_000;
 const MAX_TEXT_FIELD_BYTES: usize = 16 * 1024;
+/// Tabs one remembered workspace may hold. Generously past any strip a person
+/// keeps open, and low enough that a corrupt file cannot grow the state without
+/// bound. A refusal of the whole save is the failure these caps prevent.
+const MAX_RESTORE_TABS: usize = 64;
+const MAX_RESTORE_WORKSPACES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -201,6 +206,12 @@ pub struct ShellPreferences {
     /// before the setting existed, which is the same thing as "split".
     #[serde(default)]
     pub default_markdown_view: Option<AppTabViewMode>,
+    /// Reopen the remembered workspaces when a host's tmux server comes back
+    /// without them. Off is also the pre-setting default, so a plain bool is
+    /// honest here: absence and a deliberate off read the same, and they mean
+    /// the same thing.
+    #[serde(default)]
+    pub restore_workspaces: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
 }
@@ -217,6 +228,47 @@ pub struct WorkspaceDefaults {
     pub directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_command: Option<String>,
+}
+
+/// One remembered terminal inside a restored workspace.
+///
+/// A tab is remembered by its directory and nothing else. The window's name is
+/// deliberately not stored: passing `-n` to `new-window` switches tmux's
+/// automatic renaming off, and the agents that name their tab after the task
+/// would lose it. An absent directory restores the tab wherever tmux would have
+/// started it, the same rule `WorkspaceDefaults::directory` follows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRestoreTab {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+}
+
+/// One workspace the app last saw open, named the way tmux names it.
+///
+/// Matching is by *name*, not by tmux's `$N` id: the case this record exists
+/// for is the tmux server that died with a reboot, and its ids die with it.
+/// The name is the one identity that survives the server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRestoreWorkspace {
+    pub name: String,
+    /// The tabs in strip order. The first is the session's own first window,
+    /// so a restore creates the session for it and `new-window` for the rest.
+    #[serde(default)]
+    pub tabs: Vec<WorkspaceRestoreTab>,
+}
+
+/// What one host profile had open the last time this app was watching it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRestoreHost {
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceRestoreWorkspace>,
+    /// The workspace that was on screen. A name for the same reason the
+    /// workspaces are named: ids do not outlive the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,6 +351,8 @@ pub struct PersistedAppState {
     pub host_setup: HashMap<String, HostSetupDecision>,
     #[serde(default)]
     pub workspace_defaults: BTreeMap<String, WorkspaceDefaults>,
+    #[serde(default)]
+    pub workspace_restore: BTreeMap<String, WorkspaceRestoreHost>,
 }
 
 impl Default for PersistedAppState {
@@ -311,6 +365,7 @@ impl Default for PersistedAppState {
             commands: CommandPreferences::default(),
             host_setup: HashMap::new(),
             workspace_defaults: BTreeMap::new(),
+            workspace_restore: BTreeMap::new(),
         }
     }
 }
@@ -445,6 +500,40 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
         }
         if let Some(startup_command) = defaults.startup_command.as_deref() {
             validate_text("workspace startup command", startup_command, false)?;
+        }
+    }
+    if value.workspace_restore.len() > 1_024 {
+        return Err("too many recorded workspace restores".into());
+    }
+    for (host_profile_id, restore) in &value.workspace_restore {
+        validate_text("workspace restore profile ID", host_profile_id, false)?;
+        if restore.workspaces.len() > MAX_RESTORE_WORKSPACES {
+            return Err(format!(
+                "workspace restore for {host_profile_id} exceeds {MAX_RESTORE_WORKSPACES} workspaces"
+            ));
+        }
+        let mut names = HashSet::new();
+        for workspace in &restore.workspaces {
+            validate_text("restored workspace name", &workspace.name, false)?;
+            // Names match sessions by name when the restore runs, so two of one
+            // name is a record nothing could honor.
+            if !names.insert(workspace.name.as_str()) {
+                return Err(format!("duplicate restored workspace {}", workspace.name));
+            }
+            if workspace.tabs.len() > MAX_RESTORE_TABS {
+                return Err(format!(
+                    "restored workspace {} exceeds {MAX_RESTORE_TABS} tabs",
+                    workspace.name
+                ));
+            }
+            for tab in &workspace.tabs {
+                if let Some(directory) = tab.directory.as_deref() {
+                    validate_text("restored tab directory", directory, false)?;
+                }
+            }
+        }
+        if let Some(selected) = restore.selected_session_name.as_deref() {
+            validate_text("restored selected workspace name", selected, false)?;
         }
     }
     let mut ids = HashSet::new();
@@ -720,6 +809,7 @@ mod tests {
                 markdown_appearance: Some(MarkdownAppearance::Dark),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
+                restore_workspaces: true,
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -738,6 +828,27 @@ mod tests {
                 WorkspaceDefaults {
                     directory: Some("/work/projects".into()),
                     startup_command: Some("git status".into()),
+                },
+            )]),
+            workspace_restore: BTreeMap::from([(
+                "local".into(),
+                WorkspaceRestoreHost {
+                    workspaces: vec![
+                        WorkspaceRestoreWorkspace {
+                            name: "project".into(),
+                            tabs: vec![
+                                WorkspaceRestoreTab {
+                                    directory: Some("/work/project".into()),
+                                },
+                                WorkspaceRestoreTab { directory: None },
+                            ],
+                        },
+                        WorkspaceRestoreWorkspace {
+                            name: "scratch".into(),
+                            tabs: vec![],
+                        },
+                    ],
+                    selected_session_name: Some("project".into()),
                 },
             )]),
         }
@@ -950,6 +1061,43 @@ mod tests {
                 .and_then(|defaults| defaults.directory.as_deref()),
             Some("/srv/checkout")
         );
+        // The restore records are per host too, and a tab without a directory
+        // is a real state ("tmux's own choice"), not a field that forgot to
+        // serialize.
+        assert!(value.shell.restore_workspaces);
+        let restored = value
+            .workspace_restore
+            .get("local")
+            .expect("the fixture names a local restore");
+        assert_eq!(
+            restored.workspaces,
+            [
+                WorkspaceRestoreWorkspace {
+                    name: "project".into(),
+                    tabs: vec![
+                        WorkspaceRestoreTab {
+                            directory: Some("/work/project".into())
+                        },
+                        WorkspaceRestoreTab {
+                            directory: Some("/work/project/api".into())
+                        },
+                    ],
+                },
+                WorkspaceRestoreWorkspace {
+                    name: "scratch".into(),
+                    tabs: vec![WorkspaceRestoreTab { directory: None }],
+                },
+            ]
+        );
+        assert_eq!(restored.selected_session_name.as_deref(), Some("project"));
+        assert_eq!(
+            value
+                .workspace_restore
+                .get("ssh-remote-linux")
+                .and_then(|host| host.selected_session_name.as_deref()),
+            None,
+            "a host with no remembered selection loads as none, not as a refusal"
+        );
         validate(&value).expect("the frontend's own payload must validate");
 
         // Nothing may be stored that the frontend does not send, and nothing the
@@ -983,6 +1131,21 @@ mod tests {
             keys(&stored["workspaceDefaults"]["local"]),
             keys(&expected["workspaceDefaults"]["local"]),
             "workspaceDefaults"
+        );
+        assert_eq!(
+            keys(&stored["workspaceRestore"]["local"]),
+            keys(&expected["workspaceRestore"]["local"]),
+            "workspaceRestore"
+        );
+        assert_eq!(
+            keys(&stored["workspaceRestore"]["local"]["workspaces"][0]),
+            keys(&expected["workspaceRestore"]["local"]["workspaces"][0]),
+            "restored workspaces"
+        );
+        assert_eq!(
+            keys(&stored["workspaceRestore"]["local"]["workspaces"][0]["tabs"][0]),
+            keys(&expected["workspaceRestore"]["local"]["workspaces"][0]["tabs"][0]),
+            "restored tabs"
         );
         // And the envelope itself, so a whole section cannot go missing.
         assert_eq!(
@@ -1080,5 +1243,60 @@ mod tests {
         );
         assert_eq!(fs::read(path).unwrap(), original);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The workspace-restore records a build before the feature never wrote.
+    /// Loading one with the new section defaulted, rather than refused, is what
+    /// lets the setting arrive without touching anyone's saved tabs.
+    #[test]
+    fn saves_written_before_workspace_restore_still_load() {
+        let legacy: PersistedAppState = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1, "appTabs": [], "workspaceUi": [], "shell": {},
+            "workspaceDefaults": { "local": { "directory": "/work" } }
+        }))
+        .unwrap();
+        assert!(legacy.workspace_restore.is_empty());
+        assert!(!legacy.shell.restore_workspaces);
+        validate(&legacy).unwrap();
+    }
+
+    #[test]
+    fn workspace_restore_refuses_duplicates_and_overlong_records() {
+        let mut value = sample_state();
+        value
+            .workspace_restore
+            .get_mut("local")
+            .unwrap()
+            .workspaces
+            .push(WorkspaceRestoreWorkspace {
+                name: "project".into(),
+                tabs: vec![],
+            });
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("duplicate restored workspace")
+        );
+
+        let mut value = sample_state();
+        value
+            .workspace_restore
+            .get_mut("local")
+            .unwrap()
+            .workspaces
+            .push(WorkspaceRestoreWorkspace {
+                name: String::new(),
+                tabs: vec![],
+            });
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("restored workspace name")
+        );
+
+        let mut value = sample_state();
+        value.workspace_restore.get_mut("local").unwrap().workspaces[0].tabs =
+            vec![WorkspaceRestoreTab::default(); MAX_RESTORE_TABS + 1];
+        assert!(validate(&value).unwrap_err().contains("exceeds"));
     }
 }

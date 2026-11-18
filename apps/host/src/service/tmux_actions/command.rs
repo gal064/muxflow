@@ -131,21 +131,29 @@ fn searchable(path: &std::path::Path) -> bool {
     unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
 }
 
+/// One new tab. With no directory on the action the tab inherits the session's
+/// live active-pane path, which is what a tab opened beside a working shell
+/// wants. Workspace restore is the one client that names a directory exactly:
+/// the tab it recreates has no live pane to inherit from, and the path the user
+/// was sitting in *is* the restore. It is judged here, on the machine that owns
+/// the path, by the same `resolved_start_directory` a new session's directory
+/// passes through. A remembered directory that no longer exists refuses the
+/// tab rather than starting it somewhere the user never had it.
 pub(super) fn configure_new_window(
     command: &mut std::process::Command,
     action: &v1::TmuxAction,
 ) -> anyhow::Result<()> {
-    command.args([
-        "new-window",
-        "-P",
-        "-F",
-        "#{window_id}",
+    command.args(["new-window", "-P", "-F", "#{window_id}"]);
+    if action.directory.is_empty() {
         // Resolve the active pane path in the target session at execution time.
-        "-c",
-        "#{pane_current_path}",
-        "-t",
-        &action.session_id,
-    ]);
+        command.args(["-c", "#{pane_current_path}"]);
+    } else {
+        command.args([
+            "-c",
+            &escaped_format_literal(&resolved_start_directory(&action.directory)?),
+        ]);
+    }
+    command.args(["-t", &action.session_id]);
     if !action.name.is_empty() {
         validate_name(&action.name)?;
         command.args(["-n", &escaped_format_literal(&action.name)]);
@@ -706,5 +714,50 @@ mod tests {
                 APP_SHELL,
             ]
         );
+    }
+
+    /// Workspace restore names the directory exactly. The placeholder is gone
+    /// because there is no live pane to inherit from. The remembered path is
+    /// the whole point of the recreate.
+    #[test]
+    fn new_window_starts_at_an_explicit_directory_when_the_action_names_one() {
+        let directory = std::env::temp_dir();
+        let action = v1::TmuxAction {
+            session_id: "$1".into(),
+            directory: directory.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut command = std::process::Command::new("tmux");
+        configure_new_window(&mut command, &action).unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let index = args.iter().position(|argument| argument == "-c").unwrap();
+        assert_eq!(args[index + 1], directory.to_string_lossy());
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument == "#{pane_current_path}")
+        );
+    }
+
+    /// A remembered directory is judged before tmux is asked, exactly like a
+    /// new session's: one that was deleted since refuses the tab instead of
+    /// starting a shell somewhere the user never had it.
+    #[test]
+    fn new_window_refuses_an_explicit_directory_it_cannot_stand_behind() {
+        let mut command = std::process::Command::new("tmux");
+        let refusal = configure_new_window(
+            &mut command,
+            &v1::TmuxAction {
+                session_id: "$1".into(),
+                directory: "/nonexistent-muxflow-tab-directory".into(),
+                ..Default::default()
+            },
+        )
+        .map(|_| String::new())
+        .unwrap_or_else(|error| error.to_string());
+        assert!(refusal.contains("does not exist"), "{refusal}");
     }
 }
