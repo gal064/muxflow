@@ -15,11 +15,25 @@ import {
   type ChatState,
 } from "../../protocol/gen/chat_pb";
 
+/** A file sent with a message: where it is on the host, and on this phone when it came from here. */
+export interface OutgoingAttachment {
+  /** Absolute, in the host's upload folder. */
+  path: string;
+  name: string;
+  /** An image type such as "image/png"; "" for any other file. */
+  mediaType: string;
+  sizeBytes: number;
+  /** The file on the phone, for a thumbnail while the message is on its way. */
+  localUri?: string;
+}
+
 /** A message this phone sent that the host has not shown back yet. */
 export interface OutgoingMessage {
   /** The `client_message_id`, which becomes the USER item's id. */
   id: string;
   text: string;
+  /** The files it carries, already on the host. Absent when there are none. */
+  attachments?: readonly OutgoingAttachment[];
   /** The host accepted the send; the next snapshot is the truth about it. */
   acked: boolean;
   /**

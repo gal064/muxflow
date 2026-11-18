@@ -14,6 +14,8 @@ export default defineConfig({
       { find: /^react-native-reanimated$/, replacement: stub("reanimated.tsx") },
       { find: /^react-native-safe-area-context$/, replacement: stub("safeArea.tsx") },
       { find: /^expo-router$/, replacement: stub("expoRouter.tsx") },
+      { find: /^expo-image-picker$/, replacement: stub("expoImagePicker.ts") },
+      { find: /^expo-document-picker$/, replacement: stub("expoDocumentPicker.ts") },
     ],
   },
   test: {

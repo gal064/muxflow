@@ -42,6 +42,15 @@
           "microphonePermission": "Record speech to send to your coding agent."
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose photos to send to your coding agent.",
+          "cameraPermission": "Take a photo to send to your coding agent.",
+          "microphonePermission": "Record speech to send to your coding agent."
+        }
+      ],
+      "expo-document-picker",
       "expo-secure-store",
       "./plugins/withLocalNotifications",
       [

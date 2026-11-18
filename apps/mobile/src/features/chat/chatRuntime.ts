@@ -22,6 +22,11 @@ export const chatClient = new ChatClient({
   getConnection: () => source(),
   serverIdentity: () => sessionStore.getState().serverIdentity,
   onUnconfirmed: (_paneId, text, error) => {
+    // A message of files alone has no text to quote.
+    if (text === "") {
+      toast(error === undefined ? "Couldn't confirm the attachments were sent." : `The attachments were not sent. ${refusalText(error)}`);
+      return;
+    }
     const quoted = `"${text.length > 40 ? `${text.slice(0, 40)}…` : text}"`;
     toast(error === undefined ? `Couldn't confirm ${quoted} was sent.` : `Not sent: ${quoted}. ${refusalText(error)}`);
   },

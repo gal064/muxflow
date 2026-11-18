@@ -6,10 +6,12 @@ import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { isStep } from "../steps";
 import { latestMark, type OlderState, type TimelineRow } from "../timelineRows";
+import { AttachmentChips } from "./AttachmentChips";
 import { ArrowDownIcon } from "./ChatIcons";
 import { StepsRow } from "./StepsRow";
 import { OpenKeys, TimelineCellContext, TimelineOpenContext, type TimelineOpen } from "./timelineOpen";
 import { StepRow } from "./ToolRow";
+import type { TimelineMessages } from "./useMessageActions";
 
 /** Within this many dp of the newest message the reader is "at the end": the list follows what arrives. */
 export const END_REACH = 80;
@@ -26,6 +28,11 @@ const AWAY_AFTER_MS = 500;
 const RESETTLE_AFTER_MS = 50;
 /** A row that reports a new height later than this after a tap on it changed for another reason. */
 const HOLD_WAIT_MS = 500;
+/** A touch on a message that lasts this long is a hold: it opens the message's sheet. */
+const HOLD_MS = 350;
+/** What a screen reader offers on your message: the sheet a hold opens, and the edit. */
+const HOLD_ACTION = { name: "longpress", label: "Message actions" } as const;
+const EDIT_ACTION = { name: "activate", label: "Edit and resend" } as const;
 /** `END_REACH` as the list's own follow threshold, which Android compares with a scroll position in physical pixels. */
 const FOLLOW_WITHIN = Platform.OS === "android" ? Math.round(END_REACH * PixelRatio.get()) : END_REACH;
 
@@ -41,6 +48,8 @@ export interface ChatTimelineProps {
   /** Your messages can be edited and resent. */
   canEdit: boolean;
   onEdit: (item: ChatItem) => void;
+  /** Holding a message, the message that is outlined, and what goes under the newest finished reply. */
+  messages: TimelineMessages;
   /** Drawn after the newest row: voice mode's reply player. */
   tail?: ReactNode;
 }
@@ -66,7 +75,7 @@ function heightNow(view: View | null): number | undefined {
  * where it is. Earlier messages are added past the list's far end, which
  * moves nothing on screen.
  */
-export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, onEdit, tail }: ChatTimelineProps) {
+export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, onEdit, messages, tail }: ChatTimelineProps) {
   const list = useRef<FlatList<TimelineRow>>(null);
   // How far the reader is from the newest message, as the list last reported it.
   const offset = useRef(0);
@@ -113,7 +122,11 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
 
   // A reader who stops a little short of the end is taken to it, so "at the
   // end" always shows the newest line and not all but its last few.
+  // Only a move by hand is settled. The glide to the end reports its own
+  // stop the same way, and settling that would start it again without end,
+  // each start taking the list out from under the reader's finger.
   const settle = useCallback(() => {
+    if (!moving.current) return;
     moving.current = false;
     if (offset.current > 0 && offset.current <= END_REACH) list.current?.scrollToOffset({ animated: true, offset: 0 });
   }, []);
@@ -217,7 +230,22 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
     if (older === "more") onLoadOlder();
   }, [older, onLoadOlder]);
 
-  const renderRow = useCallback(({ item }: ListRenderItemInfo<TimelineRow>) => <RowView canEdit={canEdit} onEdit={onEdit} row={item} />, [canEdit, onEdit]);
+  // The row of the message being edited. The rows after it (nearer the end,
+  // so before it in `rows`) are what sending the edit removes: they are dimmed.
+  const { editingId } = messages;
+  const editingAt = useMemo(() => (editingId ? rows.findIndex((row) => row.kind === "item" && row.key === editingId) : -1), [editingId, rows]);
+
+  const renderRow = useCallback(({ item, index }: ListRenderItemInfo<TimelineRow>) => (
+    <RowView
+      canEdit={canEdit}
+      dimmed={index < editingAt}
+      marked={item.kind === "item" && (item.key === messages.editingId || item.key === messages.heldId)}
+      onEdit={onEdit}
+      onHold={messages.onHold}
+      row={item}
+      under={item.kind === "item" && item.key === messages.replyEndId ? messages.replyActions : undefined}
+    />
+  ), [canEdit, editingAt, messages, onEdit]);
 
   return (
     <TimelineOpenContext.Provider value={timeline}>
@@ -296,7 +324,18 @@ function OlderRow({ older, onRetry }: { older: "loading" | "failed" | "unavailab
   );
 }
 
-const RowView = memo(function RowView({ row, canEdit, onEdit }: { row: TimelineRow; canEdit: boolean; onEdit: (item: ChatItem) => void }) {
+interface MessageRowProps {
+  canEdit: boolean;
+  onEdit: (item: ChatItem) => void;
+  /** The message was held. */
+  onHold: (item: ChatItem) => void;
+  /** Outlined: the message being edited, or the one whose sheet is open. */
+  marked: boolean;
+  /** Drawn under the agent's text: the newest finished reply's actions. */
+  under?: ReactNode;
+}
+
+const RowView = memo(function RowView({ row, canEdit, onEdit, onHold, marked, dimmed, under }: MessageRowProps & { row: TimelineRow; dimmed: boolean }) {
   const timeline = useContext(TimelineOpenContext);
   const view = useRef<View>(null);
   const cell = useMemo(() => ({ key: row.key, view }), [row.key]);
@@ -305,34 +344,44 @@ const RowView = memo(function RowView({ row, canEdit, onEdit }: { row: TimelineR
   const onLayout = useCallback((event: LayoutChangeEvent) => timeline.laidOut(row.key, event.nativeEvent.layout.height), [row.key, timeline]);
   return (
     <TimelineCellContext.Provider value={cell}>
-      <View onLayout={opens ? onLayout : undefined} ref={view} style={styles.cell}>
+      <View onLayout={opens ? onLayout : undefined} ref={view} style={dimmed ? styles.cellDimmed : styles.cell}>
         {row.kind === "outgoing" ? (
           <UserBubble pending>
-            <Text style={styles.userText}>{row.message.text}</Text>
+            <AttachmentChips attachments={row.message.attachments} withText={row.message.text !== ""} />
+            {/* Files alone are a message: no empty line under them. */}
+            {row.message.text === "" && row.message.attachments?.length ? null : <Text style={styles.userText}>{row.message.text}</Text>}
           </UserBubble>
         ) : row.kind === "steps" ? (
           <StepsRow row={row} />
         ) : (
-          <TimelineItem canEdit={canEdit && row.item.rewindable} item={row.item} onEdit={onEdit} />
+          <TimelineItem canEdit={canEdit && row.item.rewindable} item={row.item} marked={marked} onEdit={onEdit} onHold={onHold} under={under} />
         )}
       </View>
     </TimelineCellContext.Provider>
   );
 });
 
-const TimelineItem = memo(function TimelineItem({ item, canEdit, onEdit }: { item: ChatItem; canEdit: boolean; onEdit: (item: ChatItem) => void }) {
+const TimelineItem = memo(function TimelineItem({ item, canEdit, onEdit, onHold, marked, under }: MessageRowProps & { item: ChatItem }) {
   switch (item.kind) {
     case ChatItemKind.USER:
       return (
-        <UserBubble onEdit={canEdit ? () => onEdit(item) : undefined}>
-          <Text selectable={!canEdit} style={styles.userText}>{item.text}</Text>
+        <UserBubble marked={marked} onEdit={canEdit ? () => onEdit(item) : undefined} onHold={() => onHold(item)}>
+          <AttachmentChips attachments={item.attachments} onLongPress={() => onHold(item)} withText={item.text !== ""} />
+          {/* Not selectable in place: a hold opens the message's sheet, where Select text is. */}
+          {item.text === "" && item.attachments.length > 0 ? null : <Text style={styles.userText}>{item.text}</Text>}
         </UserBubble>
       );
     case ChatItemKind.ASSISTANT:
+      // A hold anywhere on the reply opens its sheet. It is not one element to
+      // a screen reader, which still reads the reply piece by piece and
+      // reaches its links and code buttons.
       return (
-        <View accessibilityLabel={item.streaming ? "Agent, still writing" : undefined} style={styles.assistant}>
-          {item.text ? <ChatMarkdown source={item.text} streaming={item.streaming} /> : <Text style={styles.faint}>…</Text>}
-        </View>
+        <Pressable accessible={false} delayLongPress={HOLD_MS} onLongPress={() => onHold(item)} style={styles.reply}>
+          <View accessibilityLabel={item.streaming ? "Agent, still writing" : undefined} style={styles.assistant}>
+            {item.text ? <ChatMarkdown selectable={false} source={item.text} streaming={item.streaming} /> : <Text style={styles.faint}>…</Text>}
+          </View>
+          {under}
+        </Pressable>
       );
     case ChatItemKind.REASONING:
     case ChatItemKind.TOOL:
@@ -344,19 +393,23 @@ const TimelineItem = memo(function TimelineItem({ item, canEdit, onEdit }: { ite
   }
 });
 
-/** Your message; hold it to edit and resend when the agent allows that. */
-function UserBubble({ children, onEdit, pending }: { children: ReactNode; onEdit?: (() => void) | undefined; pending?: boolean }) {
+/**
+ * Your message. A hold opens its sheet. A screen reader has that as an action
+ * of the message, and Edit and resend as another when the agent allows it.
+ * One still on its way has neither.
+ */
+function UserBubble({ children, onEdit, onHold, marked = false, pending }: { children: ReactNode; onEdit?: (() => void) | undefined; onHold?: (() => void) | undefined; marked?: boolean; pending?: boolean }) {
   return (
     <View style={styles.userRow}>
       <Pressable
-        accessibilityActions={onEdit ? [{ name: "activate", label: "Edit and resend" }] : undefined}
-        accessibilityHint={onEdit ? "Hold to edit and resend" : undefined}
+        accessibilityActions={onHold ? (onEdit ? [HOLD_ACTION, EDIT_ACTION] : [HOLD_ACTION]) : undefined}
+        accessibilityHint={onHold ? "Hold for message actions" : undefined}
         accessibilityLabel={pending ? "Your message, sending" : undefined}
-        delayLongPress={350}
-        disabled={!onEdit}
-        onAccessibilityAction={onEdit}
-        onLongPress={onEdit}
-        style={({ pressed }) => [styles.user, pending && styles.userPending, pressed && styles.pressed]}
+        delayLongPress={HOLD_MS}
+        disabled={!onHold}
+        onAccessibilityAction={(event) => (event.nativeEvent.actionName === EDIT_ACTION.name ? onEdit : onHold)?.()}
+        onLongPress={onHold}
+        style={({ pressed }) => [styles.user, marked && styles.userMarked, pending && styles.userPending, pressed && styles.pressed]}
       >
         {children}
       </Pressable>
@@ -371,6 +424,8 @@ const styles = StyleSheet.create({
   // padding stays the same on both sides and each cell carries the rest.
   content: { paddingVertical: 6 },
   cell: { paddingHorizontal: 12, paddingVertical: 6 },
+  // What sending the edit in progress removes.
+  cellDimmed: { opacity: 0.45, paddingHorizontal: 12, paddingVertical: 6 },
   pressed: { opacity: 0.75 },
   notice: { alignSelf: "center", color: colors.chromeFaint, fontSize: typeScale.meta, textAlign: "center" },
   olderFailed: { alignItems: "center", flexDirection: "row", justifyContent: "center", paddingVertical: 0 },
@@ -413,7 +468,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   userPending: { opacity: 0.6 },
+  // The message being edited, or the one whose sheet is open.
+  userMarked: { backgroundColor: colors.accentWash, borderColor: colors.accent },
   userText: { color: colors.chromeInkStrong, fontSize: typeScale.body, lineHeight: 20 },
+  reply: { alignSelf: "stretch", gap: 2 },
   assistant: { alignSelf: "stretch" },
   faint: { color: colors.chromeFaint, fontSize: typeScale.body },
 });

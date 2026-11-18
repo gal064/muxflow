@@ -526,6 +526,16 @@ export function chatSideFork(target: ChatTarget, text: string): Request {
   return chat(ChatAction.SIDE_FORK, target, { text });
 }
 
+/**
+ * CHAT_ACTION_FORK: copies the conversation through the end of the turn
+ * `itemId` is in into a new pane, named by `Response.chat.forkedPaneId`. Any
+ * item of the turn names it; the newest turn can be forked only once it has
+ * ended.
+ */
+export function chatFork(target: ChatTarget, itemId: string): Request {
+  return chat(ChatAction.FORK, target, { itemId });
+}
+
 /** CHAT_ACTION_STOP_TASK: stops the background task `taskId`, one of `ChatState.background`. The answer is empty; the task leaves the list by a later state event. */
 export function chatStopTask(target: ChatTarget, taskId: string): Request {
   return chat(ChatAction.STOP_TASK, target, { taskId });

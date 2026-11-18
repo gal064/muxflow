@@ -4,10 +4,14 @@ import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { ChatConnection, ChatTurnState, type ChatBackgroundTask, type ChatCommand, type ChatItem, type ChatOptionsSchema } from "../../../protocol/gen/chat_pb";
 import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
+import { filesState } from "../attach/attachState";
+import type { ChatAttachments } from "../attach/useAttachments";
 import { sideQuestion, type ChatPane, type CommandGroup } from "../chatModel";
 import { chatStatus, followTurn, newTurnClock } from "../chatStatus";
 import type { GitDetails } from "../gitDetails";
 import { olderState, timelineRows, type TimelineRow } from "../timelineRows";
+import { AttachSheet } from "./AttachSheet";
+import { AttachStrip } from "./AttachStrip";
 import { ChatHeader } from "./ChatHeader";
 import { BackgroundTasks } from "./BackgroundTasks";
 import { ChatTimeline } from "./ChatTimeline";
@@ -16,6 +20,7 @@ import { DetailsSheet } from "./DetailsSheet";
 import type { PendingAnswer } from "./PendingCard";
 import { RequestDock } from "./RequestDock";
 import { StatusLine } from "./StatusLine";
+import { useMessageActions } from "./useMessageActions";
 
 export interface ChatViewProps {
   title: string;
@@ -33,6 +38,19 @@ export interface ChatViewProps {
   editing: ChatItem | undefined;
   onEdit: (item: ChatItem) => void;
   onCancelEdit: () => void;
+  /**
+   * Fork from here was picked: forks from the item and opens the fork.
+   * Answers whether it was opened; a refusal is said by whoever forks. Absent
+   * offers no fork.
+   */
+  onFork?: ((itemId: string) => Promise<boolean>) | undefined;
+  /** The item whose fork is on its way, or "". */
+  forking?: string | undefined;
+  /**
+   * The files on the reply field, and how they get there and leave it. Absent
+   * offers no attaching; so does an agent without the `attachments` capability.
+   */
+  attach?: Pick<ChatAttachments, "entries" | "choose" | "remove"> | undefined;
   /** A send, answer or option change is on its way. */
   busy: boolean;
   onSend: () => void;
@@ -93,11 +111,27 @@ export function ChatView(props: ChatViewProps) {
   const [foldedRequest, setFoldedRequest] = useState("");
   const folded = pending !== undefined && foldedRequest === pending.requestId;
 
+  // Attaching (S7) is offered only to an agent that takes files with a message.
+  const attach = capabilities?.attachments === true ? props.attach : undefined;
+  const [attaching, setAttaching] = useState(false);
+
+  // What a hold on a message opens, the row under the newest reply, and editing (S5).
+  const messages = useMessageActions({
+    pane: shown,
+    usable,
+    editing: props.editing,
+    onEdit: props.onEdit,
+    onCancelEdit: props.onCancelEdit,
+    onBack: props.onBack,
+    onFork: props.onFork,
+    forking: props.forking,
+  });
+
   return (
     <View style={styles.root}>
       <ChatHeader
         connected={connected}
-        onBack={props.onBack}
+        onBack={messages.back}
         onDetails={() => props.onDetails(true)}
         onVoiceMode={props.onVoiceMode}
         pane={pane}
@@ -119,8 +153,9 @@ export function ChatView(props: ChatViewProps) {
         canEdit={capabilities?.rewind === true && usable}
         // Another chat is another conversation: what was open in this one is not open in that.
         key={pane?.paneId ?? ""}
+        messages={messages.timeline}
         older={olderState(pane, props.olderFailed)}
-        onEdit={props.onEdit}
+        onEdit={messages.edit}
         onLoadOlder={props.onLoadOlder}
         onRetryOlder={props.onRetryOlder}
         rows={rows}
@@ -148,11 +183,20 @@ export function ChatView(props: ChatViewProps) {
       {voiceMode && voice ? voice.status : null}
       {voiceMode && voice?.ready ? voice.bar : (
         <Composer
+          attach={attach ? {
+            files: filesState(attach.entries),
+            onOpen: () => {
+              Keyboard.dismiss();
+              setAttaching(true);
+            },
+            strip: <AttachStrip entries={attach.entries} onRemove={attach.remove} />,
+          } : undefined}
           canSendMidTurn={capabilities?.sendMidTurn === true}
           commands={props.commands}
           disabled={!usable}
           draft={props.draft}
           editing={props.editing !== undefined}
+          inputRef={messages.field}
           onCancelEdit={props.onCancelEdit}
           onDraft={props.onDraft}
           // Room to read and type: the request folds to its one line.
@@ -181,6 +225,8 @@ export function ChatView(props: ChatViewProps) {
         pane={pane}
         visible={props.detailsOpen}
       />
+      {messages.sheet}
+      {attach ? <AttachSheet onChoose={attach.choose} onDismiss={() => setAttaching(false)} visible={attaching} /> : null}
     </View>
   );
 }

@@ -220,4 +220,30 @@ describe("the attachment queue", () => {
     expect(statuses(queue)).toEqual(["c.txt:uploading"]);
     expect(started).toHaveLength(3);
   });
+
+  it("takes a file the host already holds as ready, with nothing uploaded", async () => {
+    const { upload, started } = fakeUploader();
+    const queue = new AttachmentQueue(upload);
+    const hosted = queue.addHosted({ path: "/uploads/shot.png", name: "shot.png", mediaType: "", sizeBytes: 2048, localUri: "file:///cache/shot.png" });
+    if (!("entry" in hosted)) throw new Error(hosted.refused);
+    expect(hosted.entry).toEqual({
+      id: hosted.entry.id,
+      name: "shot.png",
+      sizeBytes: 2048,
+      // Not said by the host: read from the name, as for a file from the phone.
+      mediaType: "image/png",
+      localUri: "file:///cache/shot.png",
+      status: "ready",
+      sentBytes: 2048,
+      hostPath: "/uploads/shot.png",
+    });
+    await settle();
+    expect(started).toEqual([]);
+    expect(queue.ready()).toBe(true);
+    expect(queue.attachmentsForSend()).toEqual([{ path: "/uploads/shot.png", name: "shot.png" }]);
+
+    // It counts toward the ten like any other.
+    for (let index = 1; index < MAX_ATTACHMENTS; index += 1) queue.addHosted({ path: `/uploads/${index}.txt`, name: `${index}.txt`, mediaType: "", sizeBytes: 1 });
+    expect(queue.addHosted({ path: "/uploads/more.txt", name: "more.txt", mediaType: "", sizeBytes: 1 })).toEqual({ refused: "A message takes at most 10 attachments." });
+  });
 });

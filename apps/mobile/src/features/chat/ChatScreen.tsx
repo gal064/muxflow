@@ -15,13 +15,19 @@ import { agentForPane, agentTitle } from "../agents/agentViews";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { notificationAttention } from "../notifications/attention";
 import { waitForPane } from "../terminal/WorkspaceActionsSheet";
+import { attachDeps, chatImages } from "./attach/attachRuntime";
+import { filesRefusal, filesState } from "./attach/attachState";
+import { ChatImagesContext } from "./attach/chatImages";
+import { sendWithFiles, useAttachments } from "./attach/useAttachments";
 import { sideQuestion, slashMatches, turnOf, withPickedCommand } from "./chatModel";
 import { chatClient, chatStore, setVoiceMode } from "./chatRuntime";
 import { refusalText } from "./refusals";
 import { ChatView } from "./ui/ChatView";
 import type { PendingAnswer } from "./ui/PendingCard";
 import { useChatVoice } from "./useChatVoice";
+import { useFork } from "./useFork";
 import { useGitDetails } from "./useGitDetails";
+import { useReplyDraft } from "./useReplyDraft";
 
 const FORK_PANE_WAIT_MS = 3_000;
 /** A Stop the host has not answered, with the turn still working, is Stop again after this long. */
@@ -61,8 +67,23 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const windowName = useSession((s) => s.windows[s.panes[paneId]?.windowId ?? ""]?.name ?? "");
   const title = agent ? agentTitle({ windows, adapters }, agent) : windowName || "Chat";
 
-  const [draft, setDraft] = useState("");
-  const [editing, setEditing] = useState<ChatItem | undefined>(undefined);
+  // The reply field: this chat's draft, kept while the app runs, or the message being edited.
+  const { draft, setDraft, editing, setEditing, edit, cancelEdit } = useReplyDraft(serverIdentity, paneId);
+  // The files on the reply field (S7). Leaving the chat stops their uploads.
+  const files = useAttachments(paneId, attachDeps);
+  const images = useMemo(() => chatImages(paneId), [paneId]);
+  // An edited message's files come back with its text, as they are on the
+  // host, in place of what was on the field; cancelling takes them off again.
+  // An image the agent's record holds inline has no file to send again.
+  const { replace: replaceFiles, clear: clearFiles } = files;
+  const editWithFiles = useCallback((item: ChatItem) => {
+    replaceFiles(item.attachments.flatMap((file) => (file.path === "" ? [] : [{ path: file.path, name: file.name, mediaType: file.mediaType, sizeBytes: Number(file.sizeBytes) }])));
+    edit(item);
+  }, [edit, replaceFiles]);
+  const cancelEditWithFiles = useCallback(() => {
+    if (editing) clearFiles();
+    cancelEdit();
+  }, [cancelEdit, clearFiles, editing]);
   const [busy, setBusy] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const commands = useMemo(() => slashMatches(pane?.catalog, draft), [draft, pane?.catalog]);
@@ -90,12 +111,17 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
 
   const send = useCallback(() => {
     const text = draft.trim();
-    if (!text) return;
     const target = editing;
     const question = target ? undefined : sideQuestion(pane?.catalog, text);
+    // A side question goes alone: the files wait for the next message.
+    const waiting = question === undefined ? filesState(files.entries) : "none";
+    if (!text && waiting === "none") return;
+    // Send is off while a file uploads or after one failed; said here too, should a send get past that.
+    const held = filesRefusal(waiting);
+    if (held !== undefined) return toast(held);
     void run(async () => {
       if (target) {
-        await chatClient.rewindAndSend(paneId, target.id, text);
+        await sendWithFiles(files, (attached) => chatClient.rewindAndSend(paneId, target.id, text, attached));
         setEditing(undefined);
         setDraft("");
         return;
@@ -109,16 +135,16 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
         router.push({ pathname: "/chat/[paneId]", params: { paneId: toRouteParam(forked) } });
         return;
       }
-      // The message shows at once; the draft comes back if it was refused.
+      // The message shows at once, with its files; the draft and the files come back if it was refused.
       setDraft("");
       try {
-        await chatClient.send(paneId, text);
+        await sendWithFiles(files, (attached) => chatClient.send(paneId, text, attached));
       } catch (error) {
         setDraft((current) => current || text);
         throw error;
       }
     });
-  }, [draft, editing, pane?.catalog, paneId, router, run]);
+  }, [draft, editing, files, pane?.catalog, paneId, router, run]);
 
   const answer = useCallback((given: PendingAnswer) => {
     const requestId = pane?.state?.pending?.requestId;
@@ -131,15 +157,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     void run(() => chatClient.setOptions(paneId, options));
   }, [paneId, run]);
 
-  const pickCommand = useCallback((command: ChatCommand) => setDraft((current) => withPickedCommand(current, command)), []);
-  const edit = useCallback((item: ChatItem) => {
-    setEditing(item);
-    setDraft(item.text);
-  }, []);
-  const cancelEdit = useCallback(() => {
-    setEditing(undefined);
-    setDraft("");
-  }, []);
+  const pickCommand = useCallback((command: ChatCommand) => setDraft((current) => withPickedCommand(current, command)), [setDraft]);
   const retry = useCallback(() => chatClient.retry(paneId), [paneId]);
 
   // Stop shows at once, until the turn stops working, the host refuses, the
@@ -178,6 +196,14 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     }
   }, [paneId]);
 
+  // Fork from here: the fork opens as a side question's does. A refusal is said as a toast.
+  const { forking, fork } = useFork({
+    fork: (itemId) => chatClient.fork(paneId, itemId),
+    wait: (forked) => waitForPane(forked, FORK_PANE_WAIT_MS),
+    open: (forked) => router.push({ pathname: "/chat/[paneId]", params: { paneId: toRouteParam(forked) } }),
+    say: toast,
+  });
+
   // Earlier messages load by themselves, so a failure is said in the
   // conversation, where Retry is, and as a toast only when Retry was pressed.
   // A fresh snapshot starts over.
@@ -197,38 +223,43 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   return (
     <Animated.View style={[styles.root, { paddingTop: insets.top }, keyboardPadding]}>
       <ConnectionStrip />
-      <ChatView
-        busy={busy}
-        commands={commands}
-        connected={connected}
-        detailsOpen={detailsOpen}
-        draft={draft}
-        editing={editing}
-        folder={folder}
-        git={git}
-        hostLabel={hostLabel}
-        onAnswer={answer}
-        onBack={() => router.back()}
-        onCancelEdit={cancelEdit}
-        onDetails={setDetailsOpen}
-        onDraft={setDraft}
-        onEdit={edit}
-        olderFailed={olderFailed}
-        onLoadOlder={loadOlderOnReach}
-        onPickCommand={pickCommand}
-        onRetry={retry}
-        onRetryOlder={retryOlder}
-        onSend={send}
-        onSetOptions={setOptions}
-        onStop={stop}
-        onStopTask={stopTask}
-        onVoiceMode={(on) => setVoiceMode(paneId, on)}
-        pane={pane}
-        stopping={stopping}
-        title={title}
-        voice={voice}
-        voiceMode={voiceMode}
-      />
+      <ChatImagesContext.Provider value={images}>
+        <ChatView
+          attach={files}
+          busy={busy}
+          commands={commands}
+          connected={connected}
+          detailsOpen={detailsOpen}
+          draft={draft}
+          editing={editing}
+          folder={folder}
+          forking={forking}
+          git={git}
+          hostLabel={hostLabel}
+          onAnswer={answer}
+          onBack={() => router.back()}
+          onCancelEdit={cancelEditWithFiles}
+          onDetails={setDetailsOpen}
+          onDraft={setDraft}
+          onEdit={editWithFiles}
+          onFork={fork}
+          olderFailed={olderFailed}
+          onLoadOlder={loadOlderOnReach}
+          onPickCommand={pickCommand}
+          onRetry={retry}
+          onRetryOlder={retryOlder}
+          onSend={send}
+          onSetOptions={setOptions}
+          onStop={stop}
+          onStopTask={stopTask}
+          onVoiceMode={(on) => setVoiceMode(paneId, on)}
+          pane={pane}
+          stopping={stopping}
+          title={title}
+          voice={voice}
+          voiceMode={voiceMode}
+        />
+      </ChatImagesContext.Provider>
     </Animated.View>
   );
 }

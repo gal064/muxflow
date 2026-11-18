@@ -4,6 +4,7 @@
 
 import { useState } from "react";
 import { FlatList, Keyboard } from "react-native";
+import { flatListScrolls } from "../../../testing/stubs/reactNative";
 import { act, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -297,9 +298,11 @@ describe("phone chat mocks", () => {
   it("Edit an earlier message: hold it, the banner says what sending does, Cancel restores", () => {
     const calls = newCalls();
     const view = render(<Harness calls={calls} pane={paneFrom([snapshotEvent(5n, chatItems())])} />);
-    const bubble = view.root.findAll((node) => isHost(node, "Pressable") && node.props.accessibilityHint === "Hold to edit and resend");
+    const bubble = view.root.findAll((node) => isHost(node, "Pressable") && node.props.accessibilityHint === "Hold for message actions");
     expect(bubble).toHaveLength(1);
+    // A hold opens the message's sheet, where Edit and resend is.
     longPress(bubble[0]!);
+    press(byText(view, "Edit and resend"));
     expect(calls.edits).toEqual(["q1"]);
     expect(textOf(view.toJSON())).toContain("Editing an earlier message. Sending removes everything after it. Files on disk stay as they are.");
     expect(byLabel(view, "Message").props.value).toBe("Find out why wrapped paths are missed.");
@@ -312,7 +315,9 @@ describe("phone chat mocks", () => {
     const pane = paneFrom([snapshotEvent(5n, chatItems())]);
     const noRewind: ChatPane = { ...pane, catalog: { ...pane.catalog!, capabilities: { ...pane.catalog!.capabilities!, rewind: false } } };
     const view = render(<Harness calls={newCalls()} pane={noRewind} />);
-    expect(view.root.findAll((node) => isHost(node, "Pressable") && node.props.accessibilityHint === "Hold to edit and resend")).toHaveLength(0);
+    longPress(view.root.find((node) => isHost(node, "Pressable") && node.props.accessibilityHint === "Hold for message actions"));
+    byText(view, "Copy message");
+    expect(textOf(view.toJSON())).not.toContain("Edit and resend");
   });
 
   it("Details: host, folder, model, effort, permissions, speed and context", () => {
@@ -512,6 +517,33 @@ describe("the conversation as one anchored list (mobile-chat-mock.html, S1)", ()
       vi.advanceTimersByTime(1_000);
     });
     byLabel(view, "Jump to latest");
+  });
+
+  it("A reader let go a little short of the end is taken to it once; the glide stopping is not settled again", () => {
+    const view = render(<Harness calls={newCalls()} pane={paneFrom([snapshotEvent(5n, chatItems())])} />);
+    flatListScrolls.length = 0;
+    scrollTo(view, 40);
+    expect(flatListScrolls).toEqual([{ offset: 0, animated: true }]);
+    // The glide stops short (the list reports no further move) and says it stopped, as a flick does.
+    reportOffset(view, 3);
+    act(() => {
+      (listOf(view).props.onMomentumScrollEnd as () => void)();
+      (listOf(view).props.onMomentumScrollEnd as () => void)();
+    });
+    expect(flatListScrolls).toHaveLength(1);
+    // A flick that coasts to a stop near the end is still settled.
+    act(() => {
+      (listOf(view).props.onScrollBeginDrag as () => void)();
+    });
+    reportOffset(view, 30);
+    act(() => {
+      (listOf(view).props.onScrollEndDrag as (event: unknown) => void)({ nativeEvent: { contentOffset: { x: 0, y: 30 }, velocity: { x: 0, y: 2 } } });
+    });
+    expect(flatListScrolls).toHaveLength(1);
+    act(() => {
+      (listOf(view).props.onMomentumScrollEnd as () => void)();
+    });
+    expect(flatListScrolls).toHaveLength(2);
   });
 
   it("Earlier messages load by themselves when the top comes within reach, once per reach", () => {
