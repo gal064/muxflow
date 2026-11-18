@@ -27,6 +27,8 @@ export interface AiChatMessage {
 export type AiEvent =
   | { type: "delta"; text: string }
   | { type: "toolCall"; id: string; name: string; arguments: string }
+  /** The tokens this round's answer cost, when the server reports it. */
+  | { type: "usage"; completionTokens: number }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -48,6 +50,9 @@ export interface AiTurn {
    * sent, an answer as it finishes. 0 means still filling in, and the panel
    * shows no stamp until the answer lands. */
   createdAt: number;
+  /** Tokens the answer cost, summed over the round(s) that produced it.
+   * Only when the server reported usage; absent never means zero. */
+  tokens?: number;
 }
 
 /**

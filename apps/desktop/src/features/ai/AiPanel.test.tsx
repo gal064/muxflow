@@ -246,8 +246,21 @@ describe("the AI panel", () => {
     expect(times[0].props.dateTime).toBe(new Date(asked).toISOString());
     // The li carries the side; the stylesheet right-aligns the user's and
     // left-aligns the assistant's.
-    expect(times[0].parent?.props.className).toBe("ai-turn ai-turn-user");
-    expect(times[1].parent?.props.className).toBe("ai-turn ai-turn-assistant");
+    expect(times[0].parent?.props.className).toBe("ai-turn-meta");
+    expect(times[0].parent?.parent?.props.className).toBe("ai-turn ai-turn-user");
+    expect(times[1].parent?.parent?.props.className).toBe("ai-turn ai-turn-assistant");
+  });
+
+  it("counts the tokens the server reports beside the answer's stamp", async () => {
+    const call = streamedCall();
+    const renderer = await render(<AiPanel {...props()} />);
+    await ask(renderer, "how long was it");
+    await act(async () => call.emit({ type: "delta", text: "A short story." }));
+    // Usage is not a terminal event: the call is still open after it.
+    await act(async () => call.emit({ type: "usage", completionTokens: 212 }));
+    expect(text(renderer)).toContain("Stop");
+    await call.finish();
+    expect(text(renderer)).toContain("212 tok");
   });
 
   it("re-renders only the answering bubble while a stream fills in", async () => {
@@ -512,13 +525,20 @@ describe("the assistant acts through approved tools", () => {
 });
 
 describe("the round budget asks before it stops", () => {
-  /** Spend `n` rounds, each ending in a read-only tool call. */
-  async function spendRounds(call: ReturnType<typeof streamedCall>, n: number) {
+  /** Spend `n` rounds, each ending in a denied request to type — asking to
+   * act is the spend, and a denial does not refund it. */
+  async function spendRounds(call: ReturnType<typeof streamedCall>, renderer: ReactTestRenderer, n: number) {
     for (let round = 0; round < n; round++) {
       await act(async () => call.emit({
-        type: "toolCall", id: `t${round}`, name: "list_panes", arguments: "{}",
+        type: "toolCall", id: `t${round}`, name: "send_to_pane",
+        arguments: "{\"paneId\":\"%1\",\"text\":\"echo hi\"}",
       }));
       await call.finish();
+      const denies = renderer.root.findAll((node) => node.type === "button" && node.props.children === "Deny");
+      await act(async () => {
+        denies[denies.length - 1]?.props.onClick();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
     }
   }
 
@@ -526,8 +546,8 @@ describe("the round budget asks before it stops", () => {
     const call = streamedCall();
     const renderer = await render(<AiPanel {...props()} />);
     await ask(renderer, "keep digging");
-    await spendRounds(call, 6);
-    // Six rounds spent: the seventh asks the user, not the model.
+    await spendRounds(call, renderer, 6);
+    // Six action rounds spent: the seventh asks the user, not the model.
     expect(api.chat).toHaveBeenCalledTimes(6);
     expect(text(renderer)).toContain("This is taking a while");
 
@@ -547,7 +567,7 @@ describe("the round budget asks before it stops", () => {
     const call = streamedCall();
     const renderer = await render(<AiPanel {...props()} />);
     await ask(renderer, "keep digging");
-    await spendRounds(call, 6);
+    await spendRounds(call, renderer, 6);
     expect(text(renderer)).toContain("This is taking a while");
     // The card's Stop, not the footer's: the card renders before the footer.
     const stops = renderer.root.findAll((node) => node.type === "button" && node.props.children === "Stop");
@@ -559,5 +579,24 @@ describe("the round budget asks before it stops", () => {
     expect(text(renderer)).not.toContain("This is taking a while");
     const box = renderer.root.findByProps({ "aria-label": "Ask about this session" });
     expect(box.props.disabled).toBe(false);
+  });
+
+  it("does not spend the budget on rounds that only read the screen", async () => {
+    const call = streamedCall();
+    const renderer = await render(<AiPanel {...props()} />);
+    await ask(renderer, "look around");
+    for (let round = 0; round < 8; round++) {
+      await act(async () => call.emit({
+        type: "toolCall", id: `t${round}`, name: "list_panes", arguments: "{}",
+      }));
+      await call.finish();
+    }
+    // Eight read rounds spent, and the loop has already asked the model for
+    // a ninth: reading never runs out the budget.
+    expect(api.chat).toHaveBeenCalledTimes(9);
+    expect(text(renderer)).not.toContain("This is taking a while");
+    await act(async () => call.emit({ type: "delta", text: "all read" }));
+    await call.finish();
+    expect(text(renderer)).toContain("all read");
   });
 });

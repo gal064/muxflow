@@ -76,9 +76,13 @@ not involved.
 ## Limits
 
 - One generation at a time per thread; **Stop** ends it, and the partial answer
-  stays visible. A question buys the model six tool rounds; when they run out
-  without an answer the panel asks — **Continue** spends six more on the same
-  run, Stop ends it.
+  stays visible. A question buys the model six rounds that ask to *do*
+  something — type in a pane, run an automation; rounds that only read the
+  screen are free. When the six run out without an answer the panel asks —
+  **Continue** spends six more on the same run, Stop ends it.
+- A finished answer shows its token count beside the timestamp when the
+  server reports one. Servers that stay silent about usage show no count,
+  which is not the same as zero.
 - The snapshot is bounded — sixty git files, twenty automations, and so on —
   so a huge repository arrives as a count plus the first part, not as a
   timeout. Tool arguments are bounded too: the assistant cannot type more than

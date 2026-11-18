@@ -129,6 +129,19 @@ export const aiConversations = {
     publish();
   },
 
+  /** Reports what one round's answer cost, under the answer it cost it;
+   * rounds of one answer add up. Ignored after `end`, like a late delta. */
+  addTokens(key: string, tokens: number): void {
+    const current = conversations.get(key);
+    if (!current?.streaming || tokens <= 0) return;
+    const turns = [...current.turns];
+    const last = turns[turns.length - 1];
+    if (last?.role !== "assistant") return;
+    turns[turns.length - 1] = { ...last, tokens: (last.tokens ?? 0) + tokens };
+    conversations.set(key, { ...current, turns });
+    publish();
+  },
+
   /** What the assistant is doing between deltas; `undefined` clears it. */
   setActivity(key: string, activity: string | undefined): void {
     const current = conversations.get(key);

@@ -52,7 +52,7 @@ export function aiChat(
   const channel = new Channel<AiEvent>();
   let finished = false;
   const settle = (event: AiEvent) => {
-    if (event.type === "delta" || event.type === "toolCall") {
+    if (event.type === "delta" || event.type === "toolCall" || event.type === "usage") {
       if (!finished) onEvent(event);
       return;
     }

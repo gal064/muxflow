@@ -52,13 +52,18 @@ const TurnBubble = memo(function TurnBubble(
             ? <span className="ai-thinking" role="status">Thinking…</span>
             : !turn.actions?.length && <span className="ai-answer quiet-empty">(no answer)</span>}
       </>}
-    {turn.createdAt > 0 && <time className="ai-turn-time" dateTime={new Date(turn.createdAt).toISOString()}>
-      {TURN_TIME.format(turn.createdAt)}
-    </time>}
+    {(turn.createdAt > 0 || turn.tokens) && <span className="ai-turn-meta">
+      {turn.createdAt > 0 && <time className="ai-turn-time" dateTime={new Date(turn.createdAt).toISOString()}>
+        {TURN_TIME.format(turn.createdAt)}
+      </time>}
+      {turn.tokens ? <span className="ai-turn-tokens">{`${turn.tokens} tok`}</span> : null}
+    </span>}
   </li>;
 });
 /** Tool rounds one question buys before the panel asks the user whether the
- * run is worth continuing; Continue spends another budget. A loop that
+ * run is worth continuing. Only rounds that ask to *do* something — type in
+ * a pane, run an automation — spend it; a round that only reads the screen
+ * is free, because reading is how the model thinks out loud. A loop that
  * cannot answer is stopped by the user, not by a number. */
 const MAX_TOOL_ROUNDS = 6;
 
@@ -237,7 +242,6 @@ export function AiPanel(props: PanelExtensionProps) {
     // exactly like an approval, so a tab switch cannot lose it either.
     for (;;) {
       while (roundsLeft > 0) {
-        roundsLeft--;
         if (bubbleHasText) aiConversations.delta(key, "\n\n");
         let text = "";
         const calls: AiToolCall[] = [];
@@ -248,6 +252,8 @@ export function AiPanel(props: PanelExtensionProps) {
             aiConversations.delta(key, event.text);
           } else if (event.type === "toolCall") {
             calls.push({ id: event.id, name: event.name, arguments: event.arguments });
+          } else if (event.type === "usage") {
+            aiConversations.addTokens(key, event.completionTokens);
           } else if (event.type === "error") {
             // A refusal is terminal: show it now, not when the call settles.
             failure = event.message;
@@ -273,12 +279,16 @@ export function AiPanel(props: PanelExtensionProps) {
         // The model asked for actions: answer every one — asking the user first
         // where the tool says to — and let it see the results.
         messages.push({ role: "assistant", content: text || null, toolCalls: calls });
+        // Reading the screen is free; asking to type or to run costs a round,
+        // whether the user allowed it or not — the asking is the spend.
+        let askedToAct = false;
         for (const toolCall of calls) {
           const summary = summarizeCall(toolCall);
           aiConversations.setActivity(key, `${toolCall.name}: ${summary}`);
           let outcome: "done" | "denied" | "failed" = "done";
           let result: string;
           if (APPROVAL_TOOLS.has(toolCall.name)) {
+            askedToAct = true;
             const approved = await new Promise<boolean>((resolve) => {
               aiConversations.addApproval(key, { id: toolCall.id, name: toolCall.name, summary, decide: resolve });
             });
@@ -308,6 +318,7 @@ export function AiPanel(props: PanelExtensionProps) {
           messages.push({ role: "tool", content: result, toolCallId: toolCall.id });
         }
         aiConversations.setActivity(key, undefined);
+        if (askedToAct) roundsLeft--;
       }
       // The budget is spent without an answer. Stop asking the model and ask
       // the user instead; Continue spends another budget on the same run.
@@ -385,8 +396,9 @@ export function AiPanel(props: PanelExtensionProps) {
 
     {conversation.continuation && key && <div className="ai-approval ai-continuation">
       <strong>This is taking a while</strong>
-      <p className="ai-approval-detail">The assistant has used {conversation.continuation.roundsUsed} tool rounds
-        without finishing its answer. Continue gives it {conversation.continuation.roundsUsed} more on the same run.</p>
+      <p className="ai-approval-detail">The assistant has spent its {conversation.continuation.roundsUsed} rounds
+        that ask to type or run something, without finishing its answer. Continue spends {conversation.continuation.roundsUsed}
+        more on the same run; reading the screen stays free.</p>
       <span className="ai-approval-actions">
         <button
           autoFocus

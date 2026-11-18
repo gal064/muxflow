@@ -61,7 +61,8 @@ pub struct AiChatRequest {
     tools: Option<Vec<serde_json::Value>>,
 }
 
-/// One streamed event: text, a finished tool call, the end, or a refusal.
+/// One streamed event: text, a finished tool call, the reported cost of the
+/// round, the end, or a refusal.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AiEvent {
@@ -74,6 +75,12 @@ pub enum AiEvent {
         id: String,
         name: String,
         arguments: String,
+    },
+    /// The tokens the server says this round's answer cost, when it says.
+    /// Not every server reports usage; the panel shows a count only when
+    /// one did.
+    Usage {
+        completion_tokens: u64,
     },
     Done,
     Error {
@@ -242,6 +249,10 @@ fn prepare(request: AiChatRequest) -> Result<Prepared, String> {
         "messages": request.messages.iter().map(wire_message).collect::<Vec<_>>(),
         "stream": true,
     });
+    // Ask servers that honor it to end the stream with a usage line; the
+    // panel shows the answer's token count when there is one to show. A
+    // server that chokes on the field gets the request again without it.
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
     if let Some(tools) = tools {
         body["tools"] = serde_json::Value::Array(tools);
     }
@@ -371,7 +382,7 @@ fn model_ids(body: &str) -> Result<Vec<String>, String> {
     }
     // Settings shows the list to a person scanning for one name; the servers'
     // own orders (load order, arrival order) do not help with that.
-    ids.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+    ids.sort_by_key(|id| id.to_lowercase());
     Ok(ids)
 }
 
@@ -388,20 +399,23 @@ fn run(
         .http_status_as_error(false)
         .build()
         .into();
-    let mut request = agent.post(&prepared.url);
-    if !prepared.api_key.trim().is_empty() {
-        request = request.header(
-            "authorization",
-            format!("Bearer {}", prepared.api_key.trim()),
-        );
-    }
     // The body is sent as text with the JSON content type rather than through
     // `send_json`, which ureq keeps behind its `json` feature; the body is
     // already a `serde_json::Value`'s string.
-    let mut response = match request
-        .header("content-type", "application/json")
-        .send(prepared.body.to_string())
-    {
+    let mut body = prepared.body;
+    let send = |body: &serde_json::Value| {
+        let mut request = agent.post(&prepared.url);
+        if !prepared.api_key.trim().is_empty() {
+            request = request.header(
+                "authorization",
+                format!("Bearer {}", prepared.api_key.trim()),
+            );
+        }
+        request
+            .header("content-type", "application/json")
+            .send(body.to_string())
+    };
+    let mut response = match send(&body) {
         Ok(response) => response,
         Err(error) => {
             let message = format!("the model server could not be reached: {error}");
@@ -411,6 +425,28 @@ fn run(
             return Err(message);
         }
     };
+    if response.status().as_u16() == 400
+        && body
+            .as_object()
+            .is_some_and(|map| map.contains_key("stream_options"))
+    {
+        // A 400 with `stream_options` in the body reads as "I do not know
+        // that field": ask again without it. The usage line was always a
+        // nicety; the answer is the point.
+        if let Some(map) = body.as_object_mut() {
+            map.remove("stream_options");
+        }
+        response = match send(&body) {
+            Ok(response) => response,
+            Err(error) => {
+                let message = format!("the model server could not be reached: {error}");
+                let _ = on_event.send(AiEvent::Error {
+                    message: message.clone(),
+                });
+                return Err(message);
+            }
+        };
+    }
     if !response.status().is_success() {
         let body = response
             .body_mut()
@@ -452,6 +488,11 @@ fn run(
             {
                 return Err("the panel closed mid-answer".into());
             }
+            if let Some(tokens) = reported_tokens(&body) {
+                let _ = on_event.send(AiEvent::Usage {
+                    completion_tokens: tokens,
+                });
+            }
             Ok(())
         }
         WholeReply::Refusal(message) => {
@@ -471,6 +512,7 @@ fn stream_reply(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     let mut saw_content = false;
+    let mut usage: Option<u64> = None;
     let mut calls = ToolCalls::default();
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -510,6 +552,11 @@ fn stream_reply(
             });
             return Err(message);
         }
+        // Servers that honor `include_usage` end the stream with a chunk of
+        // no choices and the round's counts; the last one seen is the truth.
+        if let Some(tokens) = chunk.usage.and_then(|reported| reported.completion_tokens) {
+            usage = Some(tokens);
+        }
         for choice in chunk.choices {
             if let Some(text) = choice
                 .delta
@@ -543,6 +590,11 @@ fn stream_reply(
         }
     }
     let complete = calls.finish();
+    if let Some(tokens) = usage {
+        let _ = on_event.send(AiEvent::Usage {
+            completion_tokens: tokens,
+        });
+    }
     if !complete.is_empty() {
         // The calls are reported after the text they followed, in the order
         // the model asked for them.
@@ -576,6 +628,28 @@ struct StreamChunk {
     choices: Vec<ChunkChoice>,
     #[serde(default)]
     error: Option<ServerError>,
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+/// The usage line a server may append: only the answer's cost is wanted.
+#[derive(Deserialize)]
+struct Usage {
+    completion_tokens: Option<u64>,
+}
+
+/// The answer's token count from a whole (non-streaming) response body,
+/// when the server reported one.
+fn reported_tokens(body: &str) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct WithUsage {
+        #[serde(default)]
+        usage: Option<Usage>,
+    }
+    serde_json::from_str::<WithUsage>(body)
+        .ok()?
+        .usage?
+        .completion_tokens
 }
 
 #[derive(Deserialize, Default)]
@@ -894,6 +968,38 @@ mod tests {
         });
         assert_eq!(answer["tool_call_id"], "c1");
         assert_eq!(answer["content"], "two panes");
+    }
+
+    #[test]
+    fn the_request_asks_for_a_usage_line() {
+        let prepared = prepare(AiChatRequest {
+            request_id: 1,
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            api_key: String::new(),
+            model: "qwen".into(),
+            messages: vec![message("user", "x")],
+            tools: None,
+        })
+        .unwrap();
+        assert_eq!(prepared.body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn the_usage_line_reports_the_answer_cost_when_a_server_sends_one() {
+        let chunk: StreamChunk = serde_json::from_str(
+            r#"{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":212,"total_tokens":221}}"#,
+        )
+        .unwrap();
+        assert_eq!(chunk.usage.unwrap().completion_tokens, Some(212));
+        assert_eq!(
+            reported_tokens(r#"{"choices":[],"usage":{"completion_tokens":7}}"#),
+            Some(7)
+        );
+        // A server that says nothing about usage reports no count, not zero.
+        assert_eq!(
+            reported_tokens(r#"{"choices":[{"message":{"content":"hi"}}]}"#),
+            None
+        );
     }
 
     #[test]
