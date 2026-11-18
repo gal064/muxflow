@@ -5,6 +5,8 @@
 
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import {
+  type ChatBackgroundTask,
+  ChatBackgroundTaskSchema,
   ChatCommandKind,
   ChatConnection,
   ChatEventSchema,
@@ -12,6 +14,7 @@ import {
   ChatPermissionMode,
   ChatRequestKind,
   ChatSpeed,
+  ChatTaskKind,
   ChatToolKind,
   ChatToolStatus,
   ChatTurnState,
@@ -99,6 +102,35 @@ export function chatItems(): ChatItem[] {
       outputPreview: "running 14 tests\n..............\ntest result: ok. 14 passed; 0 failed\n",
     }),
   ];
+}
+
+/** A subagent's row as Claude Code reports it: its type, what it was asked, what it does now and its figures. */
+export function subagent(id: string, fields: Omit<Partial<ChatTool>, "$typeName" | "$unknown"> = {}): ChatItem {
+  return tool(id, { kind: ChatToolKind.SUBAGENT, title: "agent", agentType: "Explore", detail: "Find the other callers", ...fields });
+}
+
+/**
+ * The steps of the phone mock's finished turn (mobile-chat-mock.html, S2):
+ * a read, a test run with output, an edit, and a command that failed.
+ */
+export function stepItems(): ChatItem[] {
+  return [
+    tool("s-read", { kind: ChatToolKind.READ, title: "read", detail: FILE, path: FILE }),
+    tool("s-test", { title: "run", detail: "cargo test -p terminal-interactions links", resultSummary: "14 passed", outputPreview: "test result: ok. 14 passed; 0 failed\n" }),
+    tool("s-edit", { kind: ChatToolKind.EDIT, title: "edit", detail: FILE, path: FILE, added: 3, removed: 1 }),
+    tool("s-clippy", { title: "run", detail: "cargo clippy", status: ChatToolStatus.FAILED, resultSummary: "exit 101" }),
+  ];
+}
+
+/** One background task, started `ranSeconds` before now. */
+export function backgroundTask(id: string, description: string, fields: { kind?: ChatTaskKind; ranSeconds?: number; stoppable?: boolean } = {}): ChatBackgroundTask {
+  return create(ChatBackgroundTaskSchema, {
+    id,
+    description,
+    kind: fields.kind ?? ChatTaskKind.COMMAND,
+    startedAtUnixMillis: fields.ranSeconds === undefined ? 0n : BigInt(Date.now() - fields.ranSeconds * 1000),
+    stoppable: fields.stoppable ?? true,
+  });
 }
 
 export function permissionRequest(): ChatPendingRequest {

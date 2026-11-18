@@ -13,6 +13,8 @@ import {
   AgentRequestSchema,
   CollisionPolicy,
   FileServiceRequestSchema,
+  GitRequestSchema,
+  GitSummaryBase,
   Operation,
   RequestSchema,
   TmuxActionKind,
@@ -279,6 +281,38 @@ export function openFileStream(operationId: string, target: RootedPath, expected
   });
 }
 
+// Git, read only (docs/design/mobile-chat-plan.md §3 "Git rows"). Control
+// lane, in `Request.git`. `root` and `rootToken` are an active root's, which
+// is the worktree's root inside a repository; the host refuses a folder
+// outside one with `not_git_repository`.
+
+/**
+ * GIT_BRANCH_SUMMARY: what the working tree changes, in
+ * `Response.git.branchSummary`. `summaryBase` unset compares with the merge
+ * base of HEAD and the default branch; `GitSummaryBase.HEAD` with HEAD, which
+ * is the uncommitted work, and that answer's `baseRef` is "HEAD".
+ */
+export function gitBranchSummary(
+  operationId: string,
+  root: string,
+  rootToken: string,
+  expectedServerIdentity: string,
+  summaryBase: GitSummaryBase = GitSummaryBase.UNSPECIFIED,
+): Request {
+  return create(RequestSchema, {
+    operation: Operation.GIT_BRANCH_SUMMARY,
+    git: create(GitRequestSchema, { operationId, root, rootToken, expectedServerIdentity, summaryBase }),
+  });
+}
+
+/** GIT_BRANCHES: the local branches and the current one, in `Response.git.branches`. */
+export function gitBranches(operationId: string, root: string, rootToken: string, expectedServerIdentity: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.GIT_BRANCHES,
+    git: create(GitRequestSchema, { operationId, root, rootToken, expectedServerIdentity }),
+  });
+}
+
 // Terminal upload (docs/design/mobile-chat-plan.md §3 "Attachments"): how a
 // file reaches the host's upload folder. Bulk lane only, and all four on the
 // same connection: the host keeps an upload with the connection that prepared
@@ -490,6 +524,11 @@ export function chatLoadOlder(target: ChatTarget, olderCursor: string): Request 
 /** CHAT_ACTION_SIDE_FORK (`/btw`, `/side`): forks into a split and sends `text` there. */
 export function chatSideFork(target: ChatTarget, text: string): Request {
   return chat(ChatAction.SIDE_FORK, target, { text });
+}
+
+/** CHAT_ACTION_STOP_TASK: stops the background task `taskId`, one of `ChatState.background`. The answer is empty; the task leaves the list by a later state event. */
+export function chatStopTask(target: ChatTarget, taskId: string): Request {
+  return chat(ChatAction.STOP_TASK, target, { taskId });
 }
 
 // Session history and snooze (docs/design/chat-plan.md §4), in

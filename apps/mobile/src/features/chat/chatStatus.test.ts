@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ChatItemKind, ChatToolKind, ChatToolStatus, ChatTurnState, type ChatItem } from "../../protocol/gen/chat_pb";
 import { applyChatEvent, newChatPane } from "./chatModel";
-import { chatStatus, doing, elapsed, followTurn, newTurnClock, running, stepsLabel, stepsSoFar } from "./chatStatus";
+import { chatStatus, doing, followTurn, newTurnClock, running } from "./chatStatus";
 import { paneFrom, PANE, permissionRequest, SERVER, snapshotEvent, state, stateEvent, text, tool } from "./testing";
 
 const user = (id: string, at = 0) => text(id, ChatItemKind.USER, "Do it.", { atUnixMillis: BigInt(at) });
@@ -55,37 +55,6 @@ describe("what the agent is doing", () => {
     // A tool the chat has no verb for is said by what it does.
     expect(of({ kind: ChatToolKind.UNSPECIFIED, detail: "Update the task list" })).toBe("Update the task list…");
     expect(of({ kind: ChatToolKind.UNSPECIFIED })).toBe("Working…");
-  });
-});
-
-describe("the steps so far", () => {
-  it("counts the tools and the thinking with text since the newest message, reply text or notice", () => {
-    expect(stepsSoFar([])).toBe(0);
-    expect(stepsSoFar([user("u")])).toBe(0);
-    expect(stepsSoFar([user("u"), run("a"), thought("r"), run("b", ChatToolStatus.RUNNING)])).toBe(3);
-    expect(stepsSoFar([user("u"), run("a"), thought("blank", true, " ")])).toBe(1);
-    expect(stepsSoFar([user("u"), run("a"), says("a1"), run("b")])).toBe(1);
-    expect(stepsSoFar([run("a"), text("n", ChatItemKind.NOTICE, "Context compacted")])).toBe(0);
-  });
-
-  it("is worded as the desktop words it", () => {
-    expect(stepsLabel(1, true)).toBe("1 step so far");
-    expect(stepsLabel(7, true)).toBe("7 steps so far");
-    expect(stepsLabel(1, false)).toBe("1 step");
-    expect(stepsLabel(12, false)).toBe("12 steps");
-  });
-});
-
-describe("elapsed time", () => {
-  it("reads in seconds, then minutes, then hours", () => {
-    expect(elapsed(400)).toBe("0s");
-    expect(elapsed(12_000)).toBe("12s");
-    expect(elapsed(59_999)).toBe("59s");
-    expect(elapsed(64_000)).toBe("1m 04s");
-    expect(elapsed(125_000)).toBe("2m 05s");
-    expect(elapsed(3_720_000)).toBe("1h 02m");
-    expect(elapsed(3_900_000)).toBe("1h 05m");
-    expect(elapsed(-5)).toBe("0s");
   });
 });
 
@@ -154,7 +123,9 @@ describe("the status line", () => {
   it("shows while the turn works, with the turn's time and the steps so far", () => {
     expect(chatStatus(pane([user("u")]), clock, false)).toEqual({ label: "Working…", since: 1_000, steps: "" });
     expect(chatStatus(pane([user("u"), run("a"), run("b", ChatToolStatus.RUNNING)]), clock, false)).toEqual({ label: "Running cargo test…", since: 1_000, steps: "2 steps so far" });
-    expect(chatStatus(pane([user("u"), run("a"), thought("r", true)]), clock, false)).toEqual({ label: "Thinking…", since: 1_000, steps: "2 steps so far" });
+    // Thinking that still streams is what the label says, and not a step yet.
+    expect(chatStatus(pane([user("u"), run("a"), thought("r", true)]), clock, false)).toEqual({ label: "Thinking…", since: 1_000, steps: "1 step so far" });
+    expect(chatStatus(pane([user("u"), run("a"), thought("r")]), clock, false)).toEqual({ label: "Working…", since: 1_000, steps: "2 steps so far" });
     expect(chatStatus(pane([user("u"), agent("s")]), clock, false)).toEqual({ label: "Waiting on 1 subagent…", since: 1_000, steps: "1 step so far" });
   });
 

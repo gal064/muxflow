@@ -21,6 +21,7 @@ import { refusalText } from "./refusals";
 import { ChatView } from "./ui/ChatView";
 import type { PendingAnswer } from "./ui/PendingCard";
 import { useChatVoice } from "./useChatVoice";
+import { useGitDetails } from "./useGitDetails";
 
 const FORK_PANE_WAIT_MS = 3_000;
 /** A Stop the host has not answered, with the turn still working, is Stop again after this long. */
@@ -66,6 +67,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const [detailsOpen, setDetailsOpen] = useState(false);
   const commands = useMemo(() => slashMatches(pane?.catalog, draft), [draft, pane?.catalog]);
   const voice = useChatVoice({ paneId, sessionId, serverIdentity, pane, enabled: voiceMode, connected });
+  const git = useGitDetails({ paneId, serverIdentity, folder, turn: turnOf(pane), open: detailsOpen, connected });
 
   const agentId = agent?.id;
   useFocusEffect(useCallback(() => (agentId ? notificationAttention.focusAgent(agentId) : undefined), [agentId]));
@@ -166,6 +168,16 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     });
   }, [paneId, run, stopping]);
 
+  // A refusal is said as a toast, and passed on so the task's row can be stopped again.
+  const stopTask = useCallback(async (taskId: string) => {
+    try {
+      await chatClient.stopTask(paneId, taskId);
+    } catch (error) {
+      toast(refusalText(error));
+      throw error;
+    }
+  }, [paneId]);
+
   // Earlier messages load by themselves, so a failure is said in the
   // conversation, where Retry is, and as a toast only when Retry was pressed.
   // A fresh snapshot starts over.
@@ -193,6 +205,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
         draft={draft}
         editing={editing}
         folder={folder}
+        git={git}
         hostLabel={hostLabel}
         onAnswer={answer}
         onBack={() => router.back()}
@@ -208,6 +221,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
         onSend={send}
         onSetOptions={setOptions}
         onStop={stop}
+        onStopTask={stopTask}
         onVoiceMode={(on) => setVoiceMode(paneId, on)}
         pane={pane}
         stopping={stopping}

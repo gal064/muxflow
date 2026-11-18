@@ -85,9 +85,16 @@ function push(out: ChatInline[], text: string, marks: Marks): void {
   else out.push({ text, ...marks });
 }
 
+/** `<br>`, `<br/>`, `<br />`: the one piece of raw HTML replies use, mostly to break a line inside a table cell. */
+const LINE_BREAK_TAG = /^<br\s*\/?>$/iu;
+
 /** Flattens marked's nested inline tokens into runs, each carrying every style around it. */
 function inlines(tokens: Token[] | undefined, marks: Marks = NO_MARKS, out: ChatInline[] = []): ChatInline[] {
+  // A `<br>` at the end of a source line: the line's own end is not a second break.
+  let broke = false;
   for (const token of (tokens ?? []) as MarkedToken[]) {
+    const afterBreak = broke;
+    broke = false;
     switch (token.type) {
       case "strong":
         inlines(token.tokens, { ...marks, strong: true }, out);
@@ -117,24 +124,43 @@ function inlines(tokens: Token[] | undefined, marks: Marks = NO_MARKS, out: Chat
         push(out, token.text, marks);
         break;
       case "text":
-        if (token.tokens) inlines(token.tokens, marks, out);
-        else push(out, token.escaped ? token.text : decodeEntities(token.text), marks);
+        if (token.tokens) {
+          inlines(token.tokens, marks, out);
+        } else {
+          const text = token.escaped ? token.text : decodeEntities(token.text);
+          push(out, afterBreak && text.startsWith("\n") ? text.slice(1) : text, marks);
+        }
         break;
       case "checkbox":
         break;
+      case "html":
+        if (LINE_BREAK_TAG.test(token.raw.trim())) {
+          push(out, "\n", marks);
+          broke = true;
+          break;
+        }
+        // Any other raw HTML is shown as it was written.
+        push(out, token.raw, marks);
+        break;
       default:
-        // Raw HTML, and anything marked adds later, is shown as it was written.
+        // Anything marked adds later is shown as it was written.
         push(out, token.raw, marks);
     }
   }
   return out;
 }
 
-/** A cell's length for sizing its column; a wide character (CJK, emoji) counts as two. */
+/** The length of a cell's longest line, for sizing its column; a wide character (CJK, emoji) counts as two. */
 function cellChars(cell: ChatInline[]): number {
+  let longest = 0;
   let count = 0;
-  for (const run of cell) for (const character of run.text) count += character.codePointAt(0)! >= 0x2e80 ? 2 : 1;
-  return count;
+  for (const run of cell) {
+    for (const character of run.text) {
+      count = character === "\n" ? 0 : count + (character.codePointAt(0)! >= 0x2e80 ? 2 : 1);
+      longest = Math.max(longest, count);
+    }
+  }
+  return longest;
 }
 
 function fenceClosed(raw: string): boolean {
@@ -200,6 +226,8 @@ function block(token: MarkedToken, depth: number): ChatBlock | undefined {
       return { kind: "rule" };
     case "html": {
       const text = token.text.replace(/\n+$/u, "");
+      // Line breaks standing alone between two blocks have no line to break.
+      if (/^(?:<br\s*\/?>\s*)+$/iu.test(text)) return undefined;
       return paragraph(text ? [{ text }] : []);
     }
     default:

@@ -34,6 +34,35 @@ describe("chat Markdown blocks", () => {
     });
   });
 
+  it("reads a raw <br> as a line break, in a paragraph and in a table cell", () => {
+    expect(only("one<br>two<br/>three<BR />four")).toEqual({ kind: "paragraph", content: [{ text: "one\ntwo\nthree\nfour" }] });
+    // At the end of a source line it is one break, not two; inside a style it keeps the style.
+    expect(only("one<br>\ntwo **bold<br>still**")).toEqual({
+      kind: "paragraph",
+      content: [{ text: "one\ntwo " }, { text: "bold\nstill", strong: true }],
+    });
+    // In code it is the text that was written, and other tags still are too.
+    expect(only("`a<br>b` <br> <b>raw</b>")).toEqual({
+      kind: "paragraph",
+      content: [{ text: "a<br>b", code: true }, { text: " \n <b>raw</b>" }],
+    });
+    const table = only("| Step | Notes |\n| --- | --- |\n| Build | cargo build<br>cargo test |\n| Ship | tag<br/>**push** |\n");
+    expect(table).toMatchObject({
+      kind: "table",
+      rows: [
+        [[{ text: "Build" }], [{ text: "cargo build\ncargo test" }]],
+        [[{ text: "Ship" }], [{ text: "tag\n" }, { text: "push", strong: true }]],
+      ],
+    });
+    // A column is as wide as its longest line, not as the lines put end to end.
+    expect(table).toMatchObject({ chars: [5, "cargo build".length] });
+    // Standing alone between two blocks it has no line to break.
+    expect(parseChatMarkdown("first\n\n<br>\n\nsecond")).toEqual([
+      { kind: "paragraph", content: [{ text: "first" }] },
+      { kind: "paragraph", content: [{ text: "second" }] },
+    ]);
+  });
+
   it("reads headings of every level", () => {
     const blocks = parseChatMarkdown("# One\n\n## Two\n\n###### Six `code`\n\nSetext\n---\n");
     expect(blocks).toEqual([

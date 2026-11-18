@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ChatAction, ChatPermissionMode, ChatSpeed } from "./gen/chat_pb";
-import { CollisionPolicy, Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
+import { CollisionPolicy, GitSummaryBase, Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
 import { HistoryAction } from "./gen/history_pb";
 import {
   agentDiagnostics, cancelTerminalUpload, chatAnswer, chatClose, chatInterrupt, chatLoadOlder, chatOpen, chatRewind, chatSend, chatSetOptions, chatSideFork,
-  closeTmuxTarget, commitTerminalUpload, historyList, historyResume, historySnooze, historyWake, prepareTerminalUpload, resolveTerminalFile, setPinnedTarget,
+  closeTmuxTarget, commitTerminalUpload, gitBranches, gitBranchSummary, historyList, historyResume, historySnooze, historyWake, prepareTerminalUpload, resolveTerminalFile, setPinnedTarget,
   UPLOAD_CHUNK_BYTES, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe, writeTerminalUploadChunk,
 } from "./requests";
 
@@ -69,6 +69,37 @@ describe("terminal upload request builders", () => {
     const cancel = cancelTerminalUpload(id);
     expect(cancel.operation).toBe(Operation.CANCEL_TERMINAL_UPLOAD);
     expect(cancel.file).toMatchObject({ operationId: id, transferId: id, totalBytes: 0n, blake3: "", destination: "" });
+  });
+});
+
+// Field usage against the host's Git service (apps/host/src/service/git/branch.rs):
+// a read names the root, its token and the server, and nothing a mutation needs.
+describe("git request builders", () => {
+  it("asks for the summary against the default branch, or against HEAD", () => {
+    const branch = gitBranchSummary("op-1", "/work/repo", "file-v2:root", "server-a");
+    expect(branch.operation).toBe(Operation.GIT_BRANCH_SUMMARY);
+    expect(branch.git).toMatchObject({
+      operationId: "op-1",
+      root: "/work/repo",
+      rootToken: "file-v2:root",
+      expectedServerIdentity: "server-a",
+      summaryBase: GitSummaryBase.UNSPECIFIED,
+      repositoryId: "",
+      connectionEpoch: 0n,
+      expectedStatusGeneration: 0n,
+      watchId: "",
+    });
+    expect(branch.file).toBeUndefined();
+
+    const uncommitted = gitBranchSummary("op-2", "/work/repo", "file-v2:root", "server-a", GitSummaryBase.HEAD);
+    expect(uncommitted.operation).toBe(Operation.GIT_BRANCH_SUMMARY);
+    expect(uncommitted.git).toMatchObject({ operationId: "op-2", root: "/work/repo", rootToken: "file-v2:root", expectedServerIdentity: "server-a", summaryBase: GitSummaryBase.HEAD });
+  });
+
+  it("asks for the branch list", () => {
+    const request = gitBranches("op-3", "/work/repo", "file-v2:root", "server-a");
+    expect(request.operation).toBe(Operation.GIT_BRANCHES);
+    expect(request.git).toMatchObject({ operationId: "op-3", root: "/work/repo", rootToken: "file-v2:root", expectedServerIdentity: "server-a", summaryBase: GitSummaryBase.UNSPECIFIED, branch: "" });
   });
 });
 
