@@ -1,7 +1,7 @@
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import type { ChatCommand } from "../../../protocol/gen/chat_pb";
-import { MicIcon } from "../../../ui/components/MediaIcons";
+import { ArrowUpIcon, MicIcon } from "../../../ui/components/MediaIcons";
 import { colors, fixedChromeText, fonts, typeScale } from "../../../ui/tokens";
 import type { CommandGroup } from "../chatModel";
 
@@ -92,9 +92,10 @@ export function Composer(props: ComposerProps) {
               disabled={sendDisabled}
               hitSlop={6}
               onPress={onSend}
-              style={({ pressed }) => [styles.send, sendDisabled && styles.disabled, pressed && styles.pressed]}
+              // Nothing typed is a plain grey button; any other reason it is off dims it.
+              style={({ pressed }) => [styles.send, hasText ? sendDisabled && styles.disabled : styles.sendEmpty, pressed && styles.pressed]}
             >
-              <Text {...fixedChromeText} style={styles.sendGlyph}>↑</Text>
+              <ArrowUpIcon color={hasText ? colors.accentInk : colors.chromeFaint} size={18} />
             </Pressable>
           ) : null}
         </View>
@@ -139,7 +140,7 @@ const styles = StyleSheet.create({
   input: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.body, maxHeight: 140, minHeight: 34, paddingBottom: 6, paddingTop: 6 },
   mic: { alignItems: "center", borderColor: colors.chromeBorder, borderRadius: 17, borderWidth: 1, height: 34, justifyContent: "center", width: 34 },
   send: { alignItems: "center", backgroundColor: colors.accent, borderRadius: 9, height: 34, justifyContent: "center", width: 34 },
-  sendGlyph: { color: colors.accentInk, fontSize: 17, fontWeight: "700" },
+  sendEmpty: { backgroundColor: colors.chromeRaised },
   stop: { backgroundColor: colors.danger },
   stopGlyph: { backgroundColor: colors.chromeInkStrong, borderRadius: 2, height: 11, width: 11 },
   disabled: { opacity: 0.4 },

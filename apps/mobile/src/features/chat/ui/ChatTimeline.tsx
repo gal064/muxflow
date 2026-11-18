@@ -1,12 +1,15 @@
-import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { FlatList, PixelRatio, Platform, Pressable, StyleSheet, Text, View, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { FlatList, PixelRatio, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 
 import { ChatItemKind, type ChatItem } from "../../../protocol/gen/chat_pb";
 import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
-import { VoiceMarkdown } from "../../voice/VoiceMarkdown";
+import { ChatMarkdown } from "../markdown/ChatMarkdown";
+import { isStep } from "../steps";
 import { latestMark, type OlderState, type TimelineRow } from "../timelineRows";
 import { ArrowDownIcon } from "./ChatIcons";
-import { ToolRow } from "./ToolRow";
+import { StepsRow } from "./StepsRow";
+import { OpenKeys, TimelineCellContext, TimelineOpenContext, type TimelineOpen } from "./timelineOpen";
+import { StepRow } from "./ToolRow";
 
 /** Within this many dp of the newest message the reader is "at the end": the list follows what arrives. */
 export const END_REACH = 80;
@@ -14,6 +17,15 @@ export const END_REACH = 80;
 const GLIDE_WITHIN = 2400;
 /** A position away from the end that no finger put there counts as away once it has lasted this long. */
 const AWAY_AFTER_MS = 500;
+/**
+ * A scroll made to keep a tapped line in place is looked at again after this
+ * long. Android takes a scroll before the layout sent with it, and so stops
+ * it where the conversation used to end when the row's growth is what makes
+ * room for it.
+ */
+const RESETTLE_AFTER_MS = 50;
+/** A row that reports a new height later than this after a tap on it changed for another reason. */
+const HOLD_WAIT_MS = 500;
 /** `END_REACH` as the list's own follow threshold, which Android compares with a scroll position in physical pixels. */
 const FOLLOW_WITHIN = Platform.OS === "android" ? Math.round(END_REACH * PixelRatio.get()) : END_REACH;
 
@@ -33,9 +45,19 @@ export interface ChatTimelineProps {
   tail?: ReactNode;
 }
 
+/** The height `view` is laid out at now, where the renderer can say at once. It cannot in a test, or for a view that is gone. */
+function heightNow(view: View | null): number | undefined {
+  let height: number | undefined;
+  view?.measure((_x, _y, _width, measured) => {
+    if (measured > 0) height = measured;
+  });
+  return height;
+}
+
 /**
- * The conversation (mobile-chat-mock.html, S1): your messages on the right,
- * the agent's text unboxed, tools as rows.
+ * The conversation (mobile-chat-mock.html, S1 and S2): your messages on the
+ * right, the agent's text unboxed, its steps as plain rows, a run of them
+ * folded into one line.
  *
  * It is one inverted list, so its offset 0 is the newest message: the chat
  * opens there and stays there when the keyboard changes the list's height.
@@ -59,6 +81,8 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
   const lasting = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Something arrived at the end since the reader left it.
   const [unseen, setUnseen] = useState(false);
+  // Until this time a move of the list is the reader's own: they opened or closed a row.
+  const byHandUntil = useRef(0);
 
   const leave = useCallback((left: boolean) => {
     clearTimeout(lasting.current);
@@ -74,7 +98,7 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
     const y = event.nativeEvent.contentOffset.y;
     offset.current = y;
     if (y <= END_REACH) leave(false);
-    else if (moving.current) leave(true);
+    else if (moving.current || Date.now() < byHandUntil.current) leave(true);
     else if (!isAway.current && lasting.current === undefined) {
       lasting.current = setTimeout(() => {
         lasting.current = undefined;
@@ -121,6 +145,74 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
     if (sending) list.current?.scrollToOffset({ animated: false, offset: 0 });
   }, [sending]);
 
+  // ---- opening a row in place ----
+  //
+  // The list is inverted, so a row that grows keeps its lower edge and its
+  // top, where the line just tapped is, moves up. The reader opened it to
+  // read what comes under that line, so the line has to stay: the list is
+  // scrolled by exactly what the row grew (or shrank), which leaves the line
+  // where it was and unfolds the rest below it.
+  //
+  // The row's height is read just before the change and again once the change
+  // is laid out, before it is on screen. In a test, where nothing is laid
+  // out, the heights are the ones the rows report.
+  const [keys] = useState(() => ({ groups: new OpenKeys(), rows: new OpenKeys() }));
+  const heights = useRef(new Map<string, number>());
+  const awaited = useRef<{ key: string; drawn: (height: number | undefined) => void } | undefined>(undefined);
+  const resettle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(resettle.current), []);
+  // The row the list passes over, away from the end, when it picks the one to
+  // hold still (`minIndexForVisible` below). With a tail the tail is first.
+  const passedOver = useRef("");
+  passedOver.current = tail ? "" : rows[0]?.key ?? "";
+
+  const keepLine = useCallback((wanted: number, listHolds: boolean) => {
+    const target = Math.max(0, wanted);
+    // Wherever this leaves the reader, their own tap put them there: past the
+    // end's reach they are away at once, and nothing glides them back.
+    byHandUntil.current = Date.now() + AWAY_AFTER_MS;
+    clearTimeout(resettle.current);
+    // The scroll is sent in the next task, after the row's new height has
+    // been: both then reach the screen together, the height first. Sent
+    // first, the scroll would be taken on the old layout, and the list would
+    // pick the row it holds still (below) from there and move a second time
+    // when the tapped row grew.
+    resettle.current = setTimeout(() => {
+      if (!listHolds) list.current?.scrollToOffset({ animated: false, offset: target });
+      resettle.current = setTimeout(() => {
+        resettle.current = undefined;
+        if (dragging.current || moving.current || Math.abs(offset.current - target) <= 1) return;
+        list.current?.scrollToOffset({ animated: false, offset: target });
+      }, RESETTLE_AFTER_MS);
+    }, 0);
+  }, []);
+
+  const hold = useCallback((key: string, cell: View | null) => {
+    const from = heightNow(cell) ?? heights.current.get(key);
+    const start = offset.current;
+    // Away from the end, the list itself holds everything but its newest row
+    // still when that row changes height. Scrolling as well would move it twice.
+    const listHolds = isAway.current && passedOver.current === key;
+    const asked = Date.now();
+    let settled = false;
+    const drawn = (to: number | undefined) => {
+      if (settled || to === undefined) return;
+      settled = true;
+      if (awaited.current?.drawn === drawn) awaited.current = undefined;
+      if (from === undefined || Date.now() - asked > HOLD_WAIT_MS || Math.abs(to - from) < 0.5) return;
+      keepLine(start + to - from, listHolds);
+    };
+    awaited.current = { key, drawn };
+    return () => drawn(heightNow(cell));
+  }, [keepLine]);
+
+  const laidOut = useCallback((key: string, height: number) => {
+    heights.current.set(key, height);
+    if (awaited.current?.key === key) awaited.current.drawn(height);
+  }, []);
+
+  const timeline = useMemo<TimelineOpen>(() => ({ ...keys, hold, laidOut }), [hold, keys, laidOut]);
+
   const reach = useCallback(() => {
     if (older === "more") onLoadOlder();
   }, [older, onLoadOlder]);
@@ -128,54 +220,56 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
   const renderRow = useCallback(({ item }: ListRenderItemInfo<TimelineRow>) => <RowView canEdit={canEdit} onEdit={onEdit} row={item} />, [canEdit, onEdit]);
 
   return (
-    <View style={styles.wrap}>
-      <FlatList
-        ListFooterComponent={older === "none" || older === "more" ? null : <OlderRow older={older} onRetry={onRetryOlder} />}
-        ListHeaderComponent={tail ? <View style={styles.cell}>{tail}</View> : null}
-        contentContainerStyle={styles.content}
-        data={rows}
-        inverted
-        keyExtractor={rowKey}
-        keyboardShouldPersistTaps="handled"
-        // The list keeps one row where it is on screen when rows nearer the
-        // end than it arrive or change height: the first row, counted from
-        // `minIndexForVisible`, that reaches into view. At the end that is
-        // the newest row, so its text grows in place and a row arriving
-        // after it is scrolled to. Away from the end the newest row is
-        // passed over, so its text can grow without moving what is read,
-        // even when what is read is that row.
-        maintainVisibleContentPosition={{ autoscrollToTopThreshold: FOLLOW_WITHIN, minIndexForVisible: away ? 1 : 0 }}
-        onEndReached={reach}
-        onEndReachedThreshold={1}
-        onMomentumScrollEnd={settle}
-        onScroll={onScroll}
-        onScrollBeginDrag={onScrollBeginDrag}
-        onScrollEndDrag={onScrollEndDrag}
-        ref={list}
-        // The position is held by counting the list's children, which only
-        // matches its rows while none of them is detached for being off screen.
-        removeClippedSubviews={false}
-        renderItem={renderRow}
-        style={styles.list}
-      />
-      {away ? (
-        <Pressable
-          accessibilityHint={unseen ? "New messages below" : undefined}
-          accessibilityLabel="Jump to latest"
-          accessibilityRole="button"
-          hitSlop={8}
-          onPress={() => {
-            setUnseen(false);
-            toEnd();
-          }}
-          style={({ pressed }) => [styles.latest, pressed && styles.pressed]}
-        >
-          <ArrowDownIcon color={colors.chromeInkStrong} size={16} />
-          <Text {...fixedChromeText} style={styles.latestLabel}>Latest</Text>
-          {unseen ? <View style={styles.latestDot} /> : null}
-        </Pressable>
-      ) : null}
-    </View>
+    <TimelineOpenContext.Provider value={timeline}>
+      <View style={styles.wrap}>
+        <FlatList
+          ListFooterComponent={older === "none" || older === "more" ? null : <OlderRow older={older} onRetry={onRetryOlder} />}
+          ListHeaderComponent={tail ? <View style={styles.cell}>{tail}</View> : null}
+          contentContainerStyle={styles.content}
+          data={rows}
+          inverted
+          keyExtractor={rowKey}
+          keyboardShouldPersistTaps="handled"
+          // The list keeps one row where it is on screen when rows nearer the
+          // end than it arrive or change height: the first row, counted from
+          // `minIndexForVisible`, that reaches into view. At the end that is
+          // the newest row, so its text grows in place and a row arriving
+          // after it is scrolled to. Away from the end the newest row is
+          // passed over, so its text can grow without moving what is read,
+          // even when what is read is that row.
+          maintainVisibleContentPosition={{ autoscrollToTopThreshold: FOLLOW_WITHIN, minIndexForVisible: away ? 1 : 0 }}
+          onEndReached={reach}
+          onEndReachedThreshold={1}
+          onMomentumScrollEnd={settle}
+          onScroll={onScroll}
+          onScrollBeginDrag={onScrollBeginDrag}
+          onScrollEndDrag={onScrollEndDrag}
+          ref={list}
+          // The position is held by counting the list's children, which only
+          // matches its rows while none of them is detached for being off screen.
+          removeClippedSubviews={false}
+          renderItem={renderRow}
+          style={styles.list}
+        />
+        {away ? (
+          <Pressable
+            accessibilityHint={unseen ? "New messages below" : undefined}
+            accessibilityLabel="Jump to latest"
+            accessibilityRole="button"
+            hitSlop={8}
+            onPress={() => {
+              setUnseen(false);
+              toEnd();
+            }}
+            style={({ pressed }) => [styles.latest, pressed && styles.pressed]}
+          >
+            <ArrowDownIcon color={colors.chromeInkStrong} size={16} />
+            <Text {...fixedChromeText} style={styles.latestLabel}>Latest</Text>
+            {unseen ? <View style={styles.latestDot} /> : null}
+          </Pressable>
+        ) : null}
+      </View>
+    </TimelineOpenContext.Provider>
   );
 }
 
@@ -203,16 +297,26 @@ function OlderRow({ older, onRetry }: { older: "loading" | "failed" | "unavailab
 }
 
 const RowView = memo(function RowView({ row, canEdit, onEdit }: { row: TimelineRow; canEdit: boolean; onEdit: (item: ChatItem) => void }) {
+  const timeline = useContext(TimelineOpenContext);
+  const view = useRef<View>(null);
+  const cell = useMemo(() => ({ key: row.key, view }), [row.key]);
+  // Only a row that can open says how tall it is: a tap on it is what changes that.
+  const opens = row.kind === "steps" || (row.kind === "item" && isStep(row.item));
+  const onLayout = useCallback((event: LayoutChangeEvent) => timeline.laidOut(row.key, event.nativeEvent.layout.height), [row.key, timeline]);
   return (
-    <View style={styles.cell}>
-      {row.kind === "outgoing" ? (
-        <UserBubble pending>
-          <Text style={styles.userText}>{row.message.text}</Text>
-        </UserBubble>
-      ) : (
-        <TimelineItem canEdit={canEdit && row.item.rewindable} item={row.item} onEdit={onEdit} />
-      )}
-    </View>
+    <TimelineCellContext.Provider value={cell}>
+      <View onLayout={opens ? onLayout : undefined} ref={view} style={styles.cell}>
+        {row.kind === "outgoing" ? (
+          <UserBubble pending>
+            <Text style={styles.userText}>{row.message.text}</Text>
+          </UserBubble>
+        ) : row.kind === "steps" ? (
+          <StepsRow row={row} />
+        ) : (
+          <TimelineItem canEdit={canEdit && row.item.rewindable} item={row.item} onEdit={onEdit} />
+        )}
+      </View>
+    </TimelineCellContext.Provider>
   );
 });
 
@@ -227,13 +331,12 @@ const TimelineItem = memo(function TimelineItem({ item, canEdit, onEdit }: { ite
     case ChatItemKind.ASSISTANT:
       return (
         <View accessibilityLabel={item.streaming ? "Agent, still writing" : undefined} style={styles.assistant}>
-          {item.text ? <VoiceMarkdown source={item.text} /> : <Text style={styles.faint}>…</Text>}
+          {item.text ? <ChatMarkdown source={item.text} streaming={item.streaming} /> : <Text style={styles.faint}>…</Text>}
         </View>
       );
     case ChatItemKind.REASONING:
-      return <Reasoning text={item.text} />;
     case ChatItemKind.TOOL:
-      return item.tool ? <ToolRow tool={item.tool} /> : null;
+      return <StepRow item={item} />;
     case ChatItemKind.NOTICE:
       return <Text style={styles.notice}>{item.text}</Text>;
     default:
@@ -258,23 +361,6 @@ function UserBubble({ children, onEdit, pending }: { children: ReactNode; onEdit
         {children}
       </Pressable>
     </View>
-  );
-}
-
-/** The agent's thinking: two dim lines, tap for the rest. */
-function Reasoning({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  if (!text.trim()) return null;
-  return (
-    <Pressable
-      accessibilityHint={open ? "Collapses it" : "Shows all of it"}
-      accessibilityLabel={`Thinking: ${text}`}
-      accessibilityRole="button"
-      onPress={() => setOpen((value) => !value)}
-      style={styles.reasoning}
-    >
-      <Text numberOfLines={open ? undefined : 2} style={styles.reasoningText}>{text}</Text>
-    </Pressable>
   );
 }
 
@@ -330,6 +416,4 @@ const styles = StyleSheet.create({
   userText: { color: colors.chromeInkStrong, fontSize: typeScale.body, lineHeight: 20 },
   assistant: { alignSelf: "stretch" },
   faint: { color: colors.chromeFaint, fontSize: typeScale.body },
-  reasoning: { borderLeftColor: colors.chromeBorder, borderLeftWidth: 2, paddingLeft: 10 },
-  reasoningText: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, fontStyle: "italic", lineHeight: 18 },
 });

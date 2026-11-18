@@ -53,6 +53,17 @@ function adapterDisplayName(state: Pick<SessionState, "adapters">, agent: Agent)
   return state.adapters.find((a) => a.id === agent.adapterId)?.displayName ?? agent.adapterId;
 }
 
+/**
+ * A window row's second line (§9.4): its agents by name, else the command its
+ * active pane runs. A window whose active pane is a chat says so first:
+ * "Chat · Claude Code", or "Chat" alone with no agent.
+ */
+export function windowSubtitle(chat: boolean, agentNames: string[], command: string): string {
+  const agents = agentNames.join(", ");
+  if (chat) return agents ? `Chat · ${agents}` : "Chat";
+  return agents || command;
+}
+
 export function agentsInWindow(state: Pick<SessionState, "agents">, windowId: string): Agent[] {
   return Object.values(state.agents).filter((agent) => agent.present && agent.route.windowId === windowId);
 }

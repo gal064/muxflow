@@ -1,8 +1,9 @@
 // Voice mode inside a chat (chat-mock.html, "Voice mode, inside the chat"):
-// the composer becomes the hold-to-talk bar, a transcript is sent as a chat
-// message, and each finished reply is read aloud with VOICE_SPEAK. The same
-// `VoiceController` as the Voice screen does the recording, transcription and
-// playback; it registers nothing with the host, so no reply is pushed twice.
+// once voice is set up on the host, the composer becomes the hold-to-talk
+// bar, a transcript is sent as a chat message, and each finished reply is
+// read aloud with VOICE_SPEAK. The same `VoiceController` as the Voice screen
+// does the recording, transcription and playback; it registers nothing with
+// the host, so no reply is pushed twice.
 
 import { useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -31,6 +32,8 @@ export interface ChatVoiceParts {
   status: ReactNode;
   reply: ReactNode;
   bar: ReactNode;
+  /** Voice is set up on the host, so the bar can take the reply field's place. Until then the field stays, under the status card. */
+  ready: boolean;
 }
 
 export function useChatVoice({ paneId, sessionId, serverIdentity, pane, enabled, connected }: {
@@ -119,6 +122,7 @@ export function useChatVoice({ paneId, sessionId, serverIdentity, pane, enabled,
     status: <VoiceStatusCard connected={connected} controller={controller} />,
     reply: reply ? <ChatReplyRow controller={controller} message={reply} playbackRate={playbackRate} /> : null,
     bar: <ChatVoiceBar controller={controller} hint={hint} onStop={() => void chatClient.interrupt(paneId).catch(() => undefined)} phase={phase} working={turnOf(pane) === ChatTurnState.WORKING} />,
+    ready: readiness === "ready",
   };
 }
 

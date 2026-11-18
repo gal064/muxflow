@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Agent } from "../../store/sessionStore";
 import { colors } from "../../ui/tokens";
-import { agentDisplayName, agentStateLabel, agentTitle, waitingColor, waitingInSession, waitingLabel } from "./agentViews";
+import { agentDisplayName, agentStateLabel, agentTitle, waitingColor, waitingInSession, waitingLabel, windowSubtitle } from "./agentViews";
 
 function agent(overrides: Partial<Agent> & { id: string; sessionId: string }): Agent {
   const { sessionId, ...rest } = overrides;
@@ -87,6 +87,18 @@ describe("agentDisplayName (§9.4 line 2: who, when the row is already the windo
     expect(agentDisplayName({ adapters }, agent({ id: "a", sessionId: "$1", displayName: "Nightly triage" }))).toBe("Nightly triage");
     expect(agentDisplayName({ adapters }, agent({ id: "a", sessionId: "$1", displayName: " " }))).toBe("Codex CLI");
     expect(agentDisplayName({ adapters: [] }, agent({ id: "a", sessionId: "$1", displayName: "" }))).toBe("codex");
+  });
+});
+
+describe("windowSubtitle (§9.4 line 2 of a window row)", () => {
+  it("names the agents, else the command, and says first when the window is a chat", () => {
+    expect(windowSubtitle(false, [], "bash")).toBe("bash");
+    expect(windowSubtitle(false, ["Claude Code", "Codex CLI"], "node")).toBe("Claude Code, Codex CLI");
+    expect(windowSubtitle(true, ["Claude Code"], "bash")).toBe("Chat · Claude Code");
+    expect(windowSubtitle(true, ["Claude Code", "Codex CLI"], "bash")).toBe("Chat · Claude Code, Codex CLI");
+    // A chat's pane runs a shell under it; the command says nothing about the chat.
+    expect(windowSubtitle(true, [], "bash")).toBe("Chat");
+    expect(windowSubtitle(false, [], "")).toBe("");
   });
 });
 

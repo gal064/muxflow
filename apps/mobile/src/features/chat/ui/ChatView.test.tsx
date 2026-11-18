@@ -36,6 +36,9 @@ import { ChatView, type ChatViewProps } from "./ChatView";
 import { ChatReplyRow, ChatVoiceBar } from "./ChatVoiceParts";
 import type { PendingAnswer } from "./PendingCard";
 
+// The replies' Copy buttons reach the clipboard, which is native.
+vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn(async () => true) }));
+
 type Calls = { send: string[]; answers: PendingAnswer[]; stop: number; options: unknown[]; edits: string[]; voice: boolean[]; older: number; retryOlder: number; details: boolean[] };
 
 /** ChatView with the screen's own state (draft, edit, details) and every action recorded. */
@@ -67,6 +70,7 @@ function Harness({ pane, calls, connected = true, voiceMode = false, voice, busy
       onSend={() => { calls.send.push(draft); setDraft(""); }}
       onSetOptions={(options) => calls.options.push(options)}
       onStop={() => { calls.stop += 1; }}
+      onStopTask={() => undefined}
       onVoiceMode={(on) => calls.voice.push(on)}
       pane={pane}
       stopping={stopping}
@@ -410,6 +414,7 @@ describe("phone chat mocks", () => {
         status: null,
         reply: <ChatReplyRow controller={controller} message={message} playbackRate={1.5} />,
         bar: <ChatVoiceBar controller={controller} hint="" onStop={() => undefined} phase="idle" working={false} />,
+        ready: true,
       };
       const view = render(<Harness calls={calls} pane={pane} voice={voice} voiceMode />);
       const shown = textOf(view.toJSON());
@@ -574,7 +579,8 @@ describe("above the reply field (mobile-chat-mock.html, S3)", () => {
 
     const thinking = [...running.slice(0, 2), text("think", ChatItemKind.REASONING, "Boxed output is hard-wrapped", { streaming: true })];
     rerender(view, <Harness calls={calls} pane={workingOn(thinking)} />);
-    expect(textOf(view.toJSON())).toContain("Thinking… 6s 2 steps so far");
+    // Thinking that still streams is what the line says, and not a step yet.
+    expect(textOf(view.toJSON())).toContain("Thinking… 6s 1 step so far");
     writeRender("status", view.toJSON());
 
     const agents = [user("q", "Check every caller.", 6), tool("agent", { kind: ChatToolKind.SUBAGENT, title: "agent", detail: "Find the other callers", status: ChatToolStatus.RUNNING })];

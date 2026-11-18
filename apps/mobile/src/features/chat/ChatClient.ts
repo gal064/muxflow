@@ -19,6 +19,7 @@ import {
   chatSend,
   chatSetOptions,
   chatSideFork,
+  chatStopTask,
   type ChatTarget,
 } from "../../protocol/requests";
 import { applyChatEvent, applyOlderPage, newChatPane, newClientMessageId, type ChatPane, type OlderPage, type OutgoingMessage } from "./chatModel";
@@ -348,6 +349,11 @@ export class ChatClient {
   async sideFork(paneId: string, question: string): Promise<string> {
     const response = await this.request(chatSideFork(this.target(this.requirePane(paneId)), question));
     return response.chat?.forkedPaneId ?? "";
+  }
+
+  /** Stops one of the pane's background tasks (`ChatState.background`). It leaves the list by a later state event. */
+  async stopTask(paneId: string, taskId: string): Promise<void> {
+    await this.request(chatStopTask(this.target(this.requirePane(paneId)), taskId));
   }
 
   /** The page before what the pane holds. */

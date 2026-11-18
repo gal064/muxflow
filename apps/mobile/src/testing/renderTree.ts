@@ -16,7 +16,7 @@ function children(node: ReactTestRendererJSON): Node[] {
 /**
  * Every string in the tree, in order: one text element's runs joined as it
  * draws them, separate elements with single spaces. What is not displayed
- * (`display: "none"`) is not read.
+ * (`display: "none"`) or not seen (`opacity: 0`) is not read.
  */
 export function textOf(tree: Node | Node[] | null): string {
   const out: string[] = [];
@@ -25,7 +25,8 @@ export function textOf(tree: Node | Node[] | null): string {
     if (node === null) return;
     if (Array.isArray(node)) return node.forEach(walk);
     if (typeof node === "string") return void out.push(node);
-    if (flatten(node.props.style).display === "none") return;
+    const style = flatten(node.props.style);
+    if (style.display === "none" || style.opacity === 0) return;
     if (node.type === "Text") return void out.push(inline(node));
     if (typeof node.props.placeholder === "string" && !node.props.value) out.push(node.props.placeholder);
     if (typeof node.props.value === "string") out.push(node.props.value);

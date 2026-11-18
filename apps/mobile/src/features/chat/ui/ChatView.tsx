@@ -2,12 +2,14 @@ import type { MessageInitShape } from "@bufbuild/protobuf";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { ChatConnection, ChatTurnState, type ChatCommand, type ChatItem, type ChatOptionsSchema } from "../../../protocol/gen/chat_pb";
-import { BackIcon } from "../../../ui/components/MediaIcons";
-import { colors, fixedChromeText, metrics, typeScale } from "../../../ui/tokens";
+import { ChatConnection, ChatTurnState, type ChatBackgroundTask, type ChatCommand, type ChatItem, type ChatOptionsSchema } from "../../../protocol/gen/chat_pb";
+import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
 import { sideQuestion, type ChatPane, type CommandGroup } from "../chatModel";
 import { chatStatus, followTurn, newTurnClock } from "../chatStatus";
+import type { GitDetails } from "../gitDetails";
 import { olderState, timelineRows, type TimelineRow } from "../timelineRows";
+import { ChatHeader } from "./ChatHeader";
+import { BackgroundTasks } from "./BackgroundTasks";
 import { ChatTimeline } from "./ChatTimeline";
 import { Composer } from "./Composer";
 import { DetailsSheet } from "./DetailsSheet";
@@ -21,6 +23,8 @@ export interface ChatViewProps {
   connected: boolean;
   hostLabel: string;
   folder: string;
+  /** What the host said about the folder's repository, for Details. */
+  git?: GitDetails | undefined;
   draft: string;
   onDraft: (text: string) => void;
   commands: CommandGroup[];
@@ -35,6 +39,8 @@ export interface ChatViewProps {
   onStop: () => void;
   /** Stop was pressed and the turn has not stopped yet. */
   stopping: boolean;
+  /** Stop was pressed for a background task. A promise that rejects says the host refused. */
+  onStopTask: (taskId: string) => Promise<void> | void;
   onAnswer: (answer: PendingAnswer) => void;
   /** The top of the conversation came within reach while older messages can be loaded. */
   onLoadOlder: () => void;
@@ -48,16 +54,18 @@ export interface ChatViewProps {
   onSetOptions: (options: MessageInitShape<typeof ChatOptionsSchema>) => void;
   voiceMode: boolean;
   onVoiceMode: (on: boolean) => void;
-  /** Voice mode only: the readiness card, the newest reply's player, and the bar that replaces the composer. */
-  voice?: { status: ReactNode; reply: ReactNode; bar: ReactNode } | undefined;
+  /** Voice mode only: the readiness card, the newest reply's player, and the bar that replaces the composer once voice is `ready` on the host. */
+  voice?: { status: ReactNode; reply: ReactNode; bar: ReactNode; ready: boolean } | undefined;
 }
 
 const NO_ROWS: TimelineRow[] = [];
+const NO_TASKS: ChatBackgroundTask[] = [];
 
 /**
- * The chat screen (mobile-chat-mock.html, S1 and S3): header, conversation,
+ * The chat screen (mobile-chat-mock.html, S1 to S4): header, conversation,
  * then what cannot scroll away: the request the agent waits on, the line that
- * says it works, and the composer or voice bar.
+ * says it works, the chip for what runs in the background, and the composer
+ * or voice bar.
  */
 export function ChatView(props: ChatViewProps) {
   const { title, pane, connected, voiceMode, voice } = props;
@@ -73,7 +81,7 @@ export function ChatView(props: ChatViewProps) {
   const shown = pane && pane.status !== "opening" ? pane : undefined;
   const items = shown?.items;
   const outgoing = shown?.outgoing;
-  const rows = useMemo(() => (items && outgoing ? timelineRows(items, outgoing) : NO_ROWS), [items, outgoing]);
+  const rows = useMemo(() => (items && outgoing ? timelineRows(items, outgoing, turn) : NO_ROWS), [items, outgoing, turn]);
 
   // When the turn began is kept from the moment it is seen, whatever is on
   // screen then, so the status line has it when it shows.
@@ -87,28 +95,15 @@ export function ChatView(props: ChatViewProps) {
 
   return (
     <View style={styles.root}>
-      <View style={styles.header}>
-        <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={props.onBack} style={styles.iconButton}>
-          <BackIcon color={colors.chromeInkStrong} />
-        </Pressable>
-        <Text {...fixedChromeText} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
-        <Pressable
-          accessibilityLabel="Voice mode: read replies aloud"
-          accessibilityRole="switch"
-          accessibilityState={{ checked: voiceMode }}
-          onPress={() => props.onVoiceMode(!voiceMode)}
-          style={styles.iconButton}
-        >
-          <View style={[styles.round, voiceMode && styles.roundOn]}>
-            <Text {...fixedChromeText} style={[styles.roundGlyph, voiceMode && styles.roundGlyphOn]}>♪</Text>
-          </View>
-        </Pressable>
-        <Pressable accessibilityLabel="Details" accessibilityRole="button" onPress={() => props.onDetails(true)} style={styles.iconButton}>
-          <View style={styles.round}>
-            <Text {...fixedChromeText} style={styles.roundGlyph}>i</Text>
-          </View>
-        </Pressable>
-      </View>
+      <ChatHeader
+        connected={connected}
+        onBack={props.onBack}
+        onDetails={() => props.onDetails(true)}
+        onVoiceMode={props.onVoiceMode}
+        pane={pane}
+        title={title}
+        voiceMode={voiceMode}
+      />
       {banner ? (
         <View style={[styles.banner, banner.tone === "danger" && styles.bannerDanger]}>
           <Text style={styles.bannerText}>{banner.text}</Text>
@@ -122,6 +117,8 @@ export function ChatView(props: ChatViewProps) {
 
       <ChatTimeline
         canEdit={capabilities?.rewind === true && usable}
+        // Another chat is another conversation: what was open in this one is not open in that.
+        key={pane?.paneId ?? ""}
         older={olderState(pane, props.olderFailed)}
         onEdit={props.onEdit}
         onLoadOlder={props.onLoadOlder}
@@ -145,13 +142,11 @@ export function ChatView(props: ChatViewProps) {
         />
       ) : null}
       {status ? <StatusLine status={status} /> : null}
+      <BackgroundTasks onStop={props.onStopTask} tasks={usable ? state?.background ?? NO_TASKS : NO_TASKS} />
 
-      {voiceMode && voice ? (
-        <>
-          {voice.status}
-          {voice.bar}
-        </>
-      ) : (
+      {/* The setup card shows until voice is ready on the host, and the reply field stays under it until then. */}
+      {voiceMode && voice ? voice.status : null}
+      {voiceMode && voice?.ready ? voice.bar : (
         <Composer
           canSendMidTurn={capabilities?.sendMidTurn === true}
           commands={props.commands}
@@ -164,7 +159,7 @@ export function ChatView(props: ChatViewProps) {
           onFocus={() => {
             if (pending) setFoldedRequest(pending.requestId);
           }}
-          onMic={() => props.onVoiceMode(true)}
+          onMic={voiceMode ? undefined : () => props.onVoiceMode(true)}
           onPickCommand={props.onPickCommand}
           onSend={props.onSend}
           onStop={props.onStop}
@@ -179,6 +174,7 @@ export function ChatView(props: ChatViewProps) {
       <DetailsSheet
         busy={props.busy}
         folder={props.folder}
+        git={props.git}
         hostLabel={props.hostLabel}
         onDismiss={() => props.onDetails(false)}
         onSetOptions={props.onSetOptions}
@@ -210,13 +206,6 @@ export function bannerFor(pane: ChatPane | undefined, connected: boolean): { tex
 
 const styles = StyleSheet.create({
   root: { backgroundColor: colors.chromeBg, flex: 1 },
-  header: { alignItems: "center", backgroundColor: colors.chromeBg, borderBottomColor: colors.chromeHairline, borderBottomWidth: 1, flexDirection: "row", height: metrics.terminalHeaderHeight + 4, paddingHorizontal: 4 },
-  iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 44 },
-  title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600", minWidth: 0 },
-  round: { alignItems: "center", borderColor: colors.chromeBorder, borderRadius: 15, borderWidth: 1, height: 30, justifyContent: "center", width: 30 },
-  roundOn: { backgroundColor: colors.accentWash, borderColor: colors.accent },
-  roundGlyph: { color: colors.chromeDim, fontSize: 13, fontWeight: "600" },
-  roundGlyphOn: { color: colors.accent },
   banner: { alignItems: "center", backgroundColor: colors.accentWash, borderBottomColor: colors.chromeHairline, borderBottomWidth: 1, flexDirection: "row", gap: 12, paddingHorizontal: 14, paddingVertical: 8 },
   bannerDanger: { backgroundColor: colors.dangerWash },
   bannerText: { color: colors.chromeInk, flex: 1, fontSize: typeScale.rowSecondary, lineHeight: 18 },

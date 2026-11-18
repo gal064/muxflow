@@ -335,6 +335,19 @@ describe("ChatClient", () => {
     expect(sent[3]!.text).toBe("which file?");
   });
 
+  it("stops a background task by its id, and passes a refusal on", async () => {
+    const { client, answers, connection } = setup();
+    client.acquire(PANE);
+    await flush();
+    await client.stopTask(PANE, "task-dev");
+    const sent = connection.of(Operation.CHAT).at(-1)!.chat!;
+    expect(sent).toMatchObject({ action: ChatAction.STOP_TASK, paneId: PANE, expectedServerIdentity: SERVER, taskId: "task-dev" });
+    answers[ChatAction.STOP_TASK] = () => {
+      throw new HostError("chat_task_not_stoppable", "This task can't be stopped.");
+    };
+    await expect(client.stopTask(PANE, "task-dev")).rejects.toMatchObject({ code: "chat_task_not_stoppable" });
+  });
+
   it("loads an older page and drops one that answers a request from before a new snapshot", async () => {
     const { client, store, answers } = setup();
     client.acquire(PANE);
