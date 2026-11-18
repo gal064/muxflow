@@ -6,6 +6,7 @@ import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
 import type { MarkdownAppearance, ThemePreference } from "../../ui/appearance";
+import { fetchAiModels } from "../ai/api";
 import { hostLetter } from "./hostProfiles";
 import { PANEL_EXTENSIONS } from "./panelExtensions";
 import {
@@ -71,7 +72,7 @@ interface SettingsDialogProps {
   agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
-type SettingsTab = "connection" | "workspace" | "terminal" | "appearance" | "sounds" | "accessibility";
+type SettingsTab = "connection" | "workspace" | "assistant" | "terminal" | "appearance" | "sounds" | "accessibility";
 
 const THEMES: readonly { id: ThemePreference; label: string }[] = [
   { id: "system", label: "System" },
@@ -88,6 +89,7 @@ const MARKDOWN_APPEARANCES: readonly { id: MarkdownAppearance; label: string }[]
 const TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "connection", label: "Connection" },
   { id: "workspace", label: "Workspace" },
+  { id: "assistant", label: "Assistant" },
   { id: "terminal", label: "Terminal" },
   { id: "appearance", label: "Appearance" },
   { id: "sounds", label: "Sounds" },
@@ -319,6 +321,38 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </fieldset>
         </>}
 
+        {tab === "assistant" && <>
+          {/* The AI tab of the right panel. The request leaves from the Rust
+              side — the webview may speak to no outside origin — and its shape
+              is fixed to the OpenAI chat contract, which is how one field set
+              serves Ollama, MLX and vLLM at home and a hosted API alike. */}
+          <label>Endpoint
+            <input
+              onChange={(event) => props.onShell({ aiBaseUrl: event.target.value })}
+              placeholder="http://127.0.0.1:11434/v1"
+              spellCheck={false}
+              value={props.shell.aiBaseUrl}
+            />
+          </label>
+          <p className="settings-hint">An OpenAI-compatible server's base URL, usually ending in <code>/v1</code>. The call goes from this computer straight to it — never through a connected host.</p>
+          <AssistantModelField
+            apiKey={props.shell.aiApiKey}
+            baseUrl={props.shell.aiBaseUrl}
+            model={props.shell.aiModel}
+            onModel={(aiModel) => props.onShell({ aiModel })}
+          />
+          <label>API key
+            <input
+              onChange={(event) => props.onShell({ aiApiKey: event.target.value })}
+              placeholder="Only for hosted providers"
+              spellCheck={false}
+              type="password"
+              value={props.shell.aiApiKey}
+            />
+          </label>
+          <p className="settings-hint">Sent to the endpoint above as a bearer token, and nowhere else. It is stored in this app's own state file, which is written so only your user can read it; a local model server needs none.</p>
+        </>}
+
         {tab === "terminal" && <>
           <label>Font size
             <TerminalFontSizeField
@@ -453,6 +487,65 @@ function TerminalFontSizeField({ value, onCommit }: { value: number; onCommit(si
     type="number"
     value={draft ?? String(value)}
   />;
+}
+
+/**
+ * The model field, with a button that asks the endpoint what it serves.
+ *
+ * The fetched ids ride a `datalist` and not a `select`: the field has to stay
+ * freely typable, because a server can serve a model it does not list, and the
+ * id is just a string the user may know from anywhere. The list belongs to the
+ * endpoint it was fetched from, so editing the endpoint drops it rather than
+ * offering one machine's models as another's choices.
+ */
+function AssistantModelField(props: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  onModel(value: string): void;
+}) {
+  const listId = useId();
+  const [models, setModels] = useState<string[]>();
+  const [fetching, setFetching] = useState(false);
+  const [failure, setFailure] = useState<unknown>();
+  useEffect(() => {
+    setModels(undefined);
+    setFailure(undefined);
+  }, [props.baseUrl.trim()]);
+
+  return <>
+    <label>Model
+      <span className="settings-model-field">
+        <input
+          list={listId}
+          onChange={(event) => props.onModel(event.target.value)}
+          placeholder="qwen2.5-coder:32b"
+          spellCheck={false}
+          value={props.model}
+        />
+        {models !== undefined && models.length > 0 && <span aria-hidden="true" className="settings-model-caret" />}
+      </span>
+    </label>
+    <datalist id={listId}>{(models ?? []).map((id) => <option key={id} value={id} />)}</datalist>
+    <div className="settings-host-actions">
+      <button
+        disabled={fetching || props.baseUrl.trim() === ""}
+        onClick={() => {
+          setFetching(true);
+          setFailure(undefined);
+          fetchAiModels(props.baseUrl, props.apiKey).then(
+            (ids) => { setModels(ids); setFetching(false); },
+            (reason: unknown) => { setFailure(reason); setFetching(false); },
+          );
+        }}
+        type="button"
+      >{fetching ? "Fetching…" : "Fetch models"}</button>
+      {models !== undefined && <span className="settings-hint">
+        {models.length === 1 ? "One model on this server." : `${models.length} models on this server.`}
+      </span>}
+    </div>
+    {failure !== undefined && <SurfaceError detail={String(failure)} summary="The model list could not be fetched." />}
+  </>;
 }
 
 /**

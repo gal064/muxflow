@@ -201,6 +201,17 @@ pub struct ShellPreferences {
     /// before the setting existed, which is the same thing as "split".
     #[serde(default)]
     pub default_markdown_view: Option<AppTabViewMode>,
+    /// The assistant's OpenAI-compatible endpoint; empty is "not configured".
+    /// The AI tab refuses to ask until Settings has a base URL and a model.
+    #[serde(default)]
+    pub ai_base_url: String,
+    #[serde(default)]
+    pub ai_model: String,
+    /// Sent as a bearer token to `aiBaseUrl` and nowhere else. Stored in the
+    /// app-state file, which is written owner-only; there is no keychain here,
+    /// and a local model server — the common case — needs no key at all.
+    #[serde(default)]
+    pub ai_api_key: String,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
 }
@@ -438,6 +449,9 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
     if value.workspace_defaults.len() > 1_024 {
         return Err("too many recorded workspace defaults".into());
     }
+    validate_text("assistant endpoint", &value.shell.ai_base_url, true)?;
+    validate_text("assistant model", &value.shell.ai_model, true)?;
+    validate_text("assistant API key", &value.shell.ai_api_key, true)?;
     for (host_profile_id, defaults) in &value.workspace_defaults {
         validate_text("workspace defaults profile ID", host_profile_id, false)?;
         if let Some(directory) = defaults.directory.as_deref() {
@@ -720,6 +734,9 @@ mod tests {
                 markdown_appearance: Some(MarkdownAppearance::Dark),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
+                ai_base_url: "http://127.0.0.1:11434/v1".into(),
+                ai_model: "qwen2.5-coder".into(),
+                ai_api_key: String::new(),
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -934,6 +951,9 @@ mod tests {
             value.shell.default_markdown_view,
             Some(AppTabViewMode::Live)
         );
+        assert_eq!(value.shell.ai_base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(value.shell.ai_model, "qwen2.5-coder");
+        assert_eq!(value.shell.ai_api_key, "sk-test-key");
         // Per host, and never merged: the local directory and the remote one
         // are two different machines' filesystems.
         assert_eq!(

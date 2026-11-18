@@ -88,6 +88,9 @@
     "markdownAppearance": "light",
     "newWorkspaceHostProfileId": "ssh-remote-linux",
     "defaultMarkdownView": "live",
+    "aiBaseUrl": "http://127.0.0.1:11434/v1",
+    "aiModel": "qwen2.5-coder",
+    "aiApiKey": "sk-test-key",
     "windowGeometry": {
       "x": 20,
       "y": 30,

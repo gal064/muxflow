@@ -1,3 +1,4 @@
+mod ai;
 mod app_state;
 mod connection;
 mod external_links;
@@ -202,6 +203,7 @@ pub fn run() {
             app.manage(connection::files::FileIoManager);
             app.manage(connection::files::UploadManager);
             app.manage(connection::ports::PortForwards::default());
+            app.manage(ai::AiRequests::default());
             let notifications = notifications::NativeNotifications::new(app.handle().clone());
             // At launch, not at the first agent event, so the permission prompt
             // is there while the person is looking. A no-op once they answered.
@@ -289,6 +291,9 @@ pub fn run() {
             connection::files::native_clipboard::read_native_terminal_clipboard,
             connection::files::native_clipboard::write_native_terminal_clipboard,
             external_links::open_external_link,
+            ai::ai_chat,
+            ai::ai_cancel,
+            ai::ai_models,
             update_check::check_for_update,
             update_check::install_update,
             perf_log::sink::perf_log_enabled,

@@ -280,9 +280,22 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.uiScale).toBe(1);
   });
 
-  it("turns on Automations for saves without an extension list, and keeps an explicit empty one", () => {
-    expect(saved({}).shell.enabledPanelExtensions).toEqual(["automations"]);
+  it("turns on Automations and the assistant for saves without an extension list, and keeps an explicit empty one", () => {
+    expect(saved({}).shell.enabledPanelExtensions).toEqual(["automations", "ai"]);
     expect(saved({ enabledPanelExtensions: [] }).shell.enabledPanelExtensions).toEqual([]);
+  });
+
+  it("restores the assistant settings, bounds them, and leaves saves without them unconfigured", () => {
+    const shell = (value: Record<string, unknown>) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: value,
+    }).shell;
+    expect(shell({ aiBaseUrl: " http://127.0.0.1:11434/v1 ", aiModel: "qwen", aiApiKey: "sk-test" }))
+      .toMatchObject({ aiBaseUrl: "http://127.0.0.1:11434/v1", aiModel: "qwen", aiApiKey: "sk-test" });
+    expect(shell({}).aiBaseUrl).toBe("");
+    expect(shell({ aiBaseUrl: 42 }).aiBaseUrl).toBe("");
+    // Bounded so one stray paste cannot push the storage side past its 16 KiB
+    // per-field refusal and freeze every other saved preference.
+    expect(shell({ aiModel: "x".repeat(4_000) }).aiModel).toHaveLength(512);
   });
 
   it("restores focus-follows-mouse and leaves it off for saves without it", () => {
