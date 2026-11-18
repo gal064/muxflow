@@ -165,6 +165,12 @@ export interface ShellState {
    * the setting is the starting point, not a mirror of the last tab touched.
    */
   defaultMarkdownView: AppTabViewMode;
+  /**
+   * Reopen the remembered workspaces when a host's tmux server comes back
+   * without them. Off until asked: recreating terminals nobody opened is a
+   * decision only the user gets to make on their machine.
+   */
+  restoreWorkspaces: boolean;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -199,6 +205,45 @@ export interface WorkspaceDefaults {
   startupCommand?: string;
 }
 
+/** The same ceiling `hostSetup` and `workspaceDefaults` use: one entry per host profile. */
+export const MAX_RESTORE_HOSTS = MAX_WORKSPACE_DEFAULT_HOSTS;
+/** Tabs one remembered workspace may hold; mirrors `MAX_RESTORE_TABS` in `app_state.rs`. */
+export const MAX_RESTORE_TABS_PER_WORKSPACE = 64;
+/** Workspaces one host may remember; mirrors `MAX_RESTORE_WORKSPACES` in `app_state.rs`. */
+export const MAX_RESTORE_WORKSPACES_PER_HOST = 256;
+
+/**
+ * One remembered terminal inside a restored workspace, by the directory its
+ * pane was in. The tab's name is deliberately not stored: restoring it would
+ * take `-n`, and `-n` switches tmux's automatic window renaming off for that
+ * tab forever, and the agents that name their tab after the task would lose it.
+ */
+export interface WorkspaceRestoreTab {
+  /** Absent restores the tab wherever tmux would have started it. */
+  directory?: string;
+}
+
+/**
+ * One workspace the app last saw open, named the way tmux names it.
+ *
+ * Name, not tmux's `$N` id, because the case restore exists for is the tmux
+ * server that died with a reboot, and its ids die with it. The name is the one
+ * identity that survives the server; it is also what tells a restore that the
+ * workspace is already open and must not be created a second time.
+ */
+export interface WorkspaceRestoreWorkspace {
+  name: string;
+  /** In tab-strip order. The first entry is the session's own first window. */
+  tabs: WorkspaceRestoreTab[];
+}
+
+/** What one host profile had open the last time this app was watching it. */
+export interface WorkspaceRestoreHost {
+  workspaces: WorkspaceRestoreWorkspace[];
+  /** The workspace that was on screen, by name for the same reason as above. */
+  selectedSessionName?: string;
+}
+
 export interface PersistedAppState {
   schemaVersion: 1;
   appTabs: AppOwnedTab[];
@@ -207,6 +252,7 @@ export interface PersistedAppState {
   commands: { shortcutOverrides: Record<string, string | null> };
   hostSetup: Record<string, HostSetupDecision>;
   workspaceDefaults: Record<string, WorkspaceDefaults>;
+  workspaceRestore: Record<string, WorkspaceRestoreHost>;
 }
 
 export const defaultShellState: ShellState = {
@@ -234,6 +280,7 @@ export const defaultShellState: ShellState = {
   markdownAppearance: "default",
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
+  restoreWorkspaces: false,
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -244,6 +291,7 @@ export const defaultAppState: PersistedAppState = {
   commands: { shortcutOverrides: {} },
   hostSetup: {},
   workspaceDefaults: {},
+  workspaceRestore: {},
 };
 
 export function hostProfileId(connection: ConnectionSpec): string {
@@ -312,12 +360,14 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         ? shell.newWorkspaceHostProfileId
         : undefined,
       defaultMarkdownView: normalizedViewMode(shell?.defaultMarkdownView),
+      restoreWorkspaces: Boolean(shell?.restoreWorkspaces),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
     workspaceDefaults: normalizeWorkspaceDefaults(candidate.workspaceDefaults),
+    workspaceRestore: normalizeWorkspaceRestore(candidate.workspaceRestore),
   };
 }
 
@@ -364,6 +414,55 @@ function usableDefault(value: unknown): value is string {
 export function usableWorkspaceDefault(value: unknown): string | undefined {
   if (!usableDefault(value)) return undefined;
   return value.trim().slice(0, MAX_WORKSPACE_DEFAULT_LENGTH);
+}
+
+/**
+ * One restore record's text: bounded, and without the control characters that
+ * would make the host refuse the create it describes. A file edited by hand
+ * can carry them; a tmux session name or a pane path written by this app never
+ * does, so dropping such an entry loses nothing real.
+ */
+function restorableText(value: unknown): string | undefined {
+  if (typeof value !== "string" || value === "" || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  return value.slice(0, MAX_WORKSPACE_DEFAULT_LENGTH);
+}
+
+/**
+ * The per-host workspace-restore records, with everything unusable dropped.
+ *
+ * An entry is kept when it can be *restored*, not when it merely parses: a
+ * workspace without a usable name would create nothing, so the entry goes; a
+ * tab without a directory stays, because "tmux's own choice" is a real state
+ * and not a missing value. The caps mirror `app_state.rs`, which refuses the
+ * whole save past them.
+ */
+function normalizeWorkspaceRestore(value: unknown): Record<string, WorkspaceRestoreHost> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries: [string, WorkspaceRestoreHost][] = [];
+  for (const [host, raw] of Object.entries(value)) {
+    if (entries.length >= MAX_RESTORE_HOSTS) break;
+    if (!host || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record = raw as Partial<WorkspaceRestoreHost>;
+    const workspaces: WorkspaceRestoreWorkspace[] = [];
+    for (const item of Array.isArray(record.workspaces) ? record.workspaces : []) {
+      if (workspaces.length >= MAX_RESTORE_WORKSPACES_PER_HOST) break;
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const candidate = item as Partial<WorkspaceRestoreWorkspace>;
+      const name = restorableText(candidate.name);
+      if (!name || workspaces.some((seen) => seen.name === name)) continue;
+      const tabs: WorkspaceRestoreTab[] = [];
+      for (const tab of Array.isArray(candidate.tabs) ? candidate.tabs : []) {
+        if (tabs.length >= MAX_RESTORE_TABS_PER_WORKSPACE) break;
+        if (!tab || typeof tab !== "object" || Array.isArray(tab)) continue;
+        const directory = restorableText((tab as WorkspaceRestoreTab).directory);
+        tabs.push(directory ? { directory } : {});
+      }
+      workspaces.push({ name, tabs });
+    }
+    const selectedSessionName = restorableText(record.selectedSessionName);
+    entries.push([host, { workspaces, ...(selectedSessionName ? { selectedSessionName } : {}) }]);
+  }
+  return Object.fromEntries(entries);
 }
 
 /**

@@ -290,6 +290,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </select>
           </label>
           <p className="settings-hint">Applies to Markdown files opened from now on. Tabs already open keep the view they are in.</p>
+          <label className="settings-check">
+            <input checked={props.shell.restoreWorkspaces} onChange={(event) => props.onShell({ restoreWorkspaces: event.target.checked })} type="checkbox" />
+            Reopen workspaces after a restart
+          </label>
+          <p className="settings-hint">Remembers the workspaces open on each host and the directory of every tab. When a host&apos;s tmux server comes back without them, after a machine restart or a <code>kill-server</code>, they are created again at those directories, and the app lands on the workspace you left. An ordinary app restart changes nothing: the terminals are still running, and nothing is recreated.</p>
           {/* Named after the host, because both fields are about one machine:
               a path that exists on a laptop is not a path on a build box, and
               silently applying either across hosts is how a create fails on a

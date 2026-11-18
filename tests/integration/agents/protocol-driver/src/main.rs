@@ -98,7 +98,7 @@ fn main() -> Result<(), String> {
     let server_identity = initial.server_identity.clone();
 
     let registry = connection.agent_snapshot()?;
-    if registry.adapters.len() != 3
+    if registry.adapters.len() != 4
         || !registry.adapters.iter().all(|adapter| {
             adapter.supports_launch
                 && adapter.supports_resume

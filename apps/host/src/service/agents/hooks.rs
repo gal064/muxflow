@@ -154,6 +154,9 @@ impl HookManager {
         path: &Path,
         running: &std::collections::BTreeSet<&str>,
     ) -> anyhow::Result<v1::AgentHookWiring> {
+        if let Some(files) = adapter.managed_files(&self.helper_path) {
+            return self.inspect_tree(path, &files, adapter, running);
+        }
         inspect_config_path(path)?;
         let bytes = read_config(path)?;
         if let Some(expected) = adapter.managed_file(&self.helper_path) {
@@ -225,7 +228,14 @@ impl HookManager {
         let mut managed = Vec::new();
         for adapter in adapters::all() {
             let path = self.config_path(adapter);
-            let owned = match adapter.managed_file(&self.helper_path) {
+            let owned = if let Some(files) = adapter.managed_files(&self.helper_path) {
+                // A managed plugin directory is ours when any file we would write
+                // is present under our marker. A read failure means nothing of
+                // ours is safely observable there, which is `false`, not an error
+                // that would fail the answer for every other adapter.
+                tree_is_owned(&path, &files).unwrap_or(false)
+            } else {
+                match adapter.managed_file(&self.helper_path) {
                 // A managed file is never written through an unsafe path, so a
                 // path that cannot be read safely holds nothing of ours. Its
                 // state must not fail the answer for every other adapter.
@@ -237,6 +247,7 @@ impl HookManager {
                     let value = parse_config(&read_config(&path)?)?;
                     validate_hook_shape(&value, adapter.hook_events())?;
                     managed_entry_count(&value, adapter) > 0
+                }
                 }
             };
             if owned {
@@ -253,6 +264,9 @@ impl HookManager {
     ) -> anyhow::Result<v1::HookManagementPlan> {
         let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
         let path = self.config_path(adapter_impl);
+        if let Some(files) = adapter_impl.managed_files(&self.helper_path) {
+            return self.review_tree(adapter, action, &path, &files);
+        }
         inspect_config_path(&path)?;
         let bytes = read_config(&path)?;
         if let Some(expected) = adapter_impl.managed_file(&self.helper_path) {
@@ -355,6 +369,17 @@ impl HookManager {
         if confirmation_token_value != review.confirmation_token {
             bail!("hook configuration changed while acquiring its exclusive lock");
         }
+        if let Some(files) = adapter_impl.managed_files(&self.helper_path) {
+            // A managed plugin directory is written or removed whole; each file
+            // is replaced atomically against the bytes just reviewed for it, and
+            // an interrupted install is repaired by the next idempotent run.
+            if action == v1::HookManagementAction::Install {
+                write_tree(&path, &files)?;
+            } else {
+                remove_tree(&path, &files)?;
+            }
+            return self.review_tree(adapter, action, &path, &files);
+        }
         let bytes = read_config(&path)?;
         if confirmation_token(adapter, action, &bytes) != review.confirmation_token {
             bail!("hook review changed while acquiring the configuration lock");
@@ -440,6 +465,234 @@ impl HookManager {
             preview_truncated: before_preview.1 || after_preview.1,
         })
     }
+
+    /// The wiring for an adapter whose managed artifact is a plugin directory.
+    /// `Wired` when every declared file is present and byte-identical to what
+    /// this helper would write; `Partial` when some carry our marker but the set
+    /// is not current; a file that exists without our marker is refused outright
+    /// rather than overwritten.
+    fn inspect_tree(
+        &self,
+        dir: &Path,
+        files: &[(&'static str, String)],
+        adapter: &dyn adapters::AgentAdapter,
+        running: &std::collections::BTreeSet<&str>,
+    ) -> anyhow::Result<v1::AgentHookWiring> {
+        inspect_tree_path(dir, files)?;
+        let mut any_present = false;
+        let mut all_current = true;
+        for (name, expected) in files {
+            let bytes = read_config(&dir.join(name))?;
+            if !bytes.is_empty() && !owns_file(&bytes, expected) {
+                bail!(
+                    "{} exists and is not managed by muxflow",
+                    dir.join(name).display()
+                );
+            }
+            if bytes.is_empty() {
+                all_current = false;
+            } else {
+                any_present = true;
+                if bytes != expected.as_bytes() {
+                    all_current = false;
+                }
+            }
+        }
+        Ok(if any_present && all_current {
+            v1::AgentHookWiring::Wired
+        } else if any_present {
+            v1::AgentHookWiring::Partial
+        } else if !dir.exists() && !running.contains(adapter.id()) && !self.agent_is_present(adapter)
+        {
+            v1::AgentHookWiring::Absent
+        } else {
+            v1::AgentHookWiring::NotWired
+        })
+    }
+
+    /// The plan for an adapter whose managed artifact is a whole plugin
+    /// directory. Install writes every declared file; uninstall deletes them and
+    /// then the directory, and a directory holding files of the user's is kept.
+    fn review_tree(
+        &self,
+        adapter: v1::AgentAdapterKind,
+        action: v1::HookManagementAction,
+        dir: &Path,
+        files: &[(&'static str, String)],
+    ) -> anyhow::Result<v1::HookManagementPlan> {
+        let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
+        inspect_tree_path(dir, files)?;
+        let before = read_tree(dir, files)?;
+        // A declared file that exists without our marker belongs to the user and
+        // is never merged into or overwritten, exactly as a foreign managed file
+        // is refused by [`Self::review_file`].
+        for (index, (name, expected)) in files.iter().enumerate() {
+            let bytes = &before[index].1;
+            if !bytes.is_empty() && !owns_file(bytes, expected) {
+                bail!("{} exists and is not managed by muxflow", dir.join(name).display());
+            }
+        }
+        let before_bytes = serialize_tree(&before);
+        // `serialize_tree` always emits a header per declared file, so the
+        // serialized bytes are never empty; whether anything is installed is
+        // whether any declared file has content.
+        let any_present = before.iter().any(|(_, bytes)| !bytes.is_empty());
+        let proposed: Vec<(String, Vec<u8>)> = match action {
+            v1::HookManagementAction::Install => files
+                .iter()
+                .map(|(name, content)| ((*name).to_string(), content.as_bytes().to_vec()))
+                .collect(),
+            v1::HookManagementAction::Uninstall => Vec::new(),
+            _ => before.clone(),
+        };
+        let proposed_bytes = serialize_tree(&proposed);
+        let before_preview = bounded(String::from_utf8_lossy(&before_bytes).into_owned());
+        let after_preview = bounded(String::from_utf8_lossy(&proposed_bytes).into_owned());
+        Ok(v1::HookManagementPlan {
+            adapter_id: adapter_impl.id().into(),
+            action: action.into(),
+            config_path: dir.to_string_lossy().into_owned(),
+            backup_path: String::new(),
+            managed_version: adapters::MANAGED_VERSION.to_string(),
+            summary: match action {
+                v1::HookManagementAction::Install => {
+                    "Write muxflow's managed plugin directory; nothing else is changed"
+                }
+                v1::HookManagementAction::Uninstall => {
+                    "Delete muxflow's managed plugin directory; nothing else is changed"
+                }
+                _ => "Review managed plugin directory",
+            }
+            .into(),
+            confirmation_token: confirmation_token(adapter, action, &before_bytes),
+            already_current: match action {
+                v1::HookManagementAction::Install => before_bytes == proposed_bytes,
+                v1::HookManagementAction::Uninstall => !any_present,
+                _ => true,
+            },
+            proposed_events: adapter_impl
+                .hook_events()
+                .iter()
+                .map(|event| (*event).into())
+                .collect(),
+            proposed_command: adapter_impl.hook_command(&self.helper_path),
+            ownership_marker: files
+                .first()
+                .map(|(_, content)| content.lines().next().unwrap_or_default().to_string())
+                .unwrap_or_default(),
+            trust_guidance: adapter_impl.hook_trust_guidance().into(),
+            before_hash: blake3::hash(&before_bytes).to_hex().to_string(),
+            after_hash: blake3::hash(&proposed_bytes).to_hex().to_string(),
+            creates_config: !any_present && action == v1::HookManagementAction::Install,
+            removes_config: any_present && action == v1::HookManagementAction::Uninstall,
+            before_preview: before_preview.0,
+            after_preview: after_preview.0,
+            diff_preview: String::new(),
+            preview_truncated: before_preview.1 || after_preview.1,
+        })
+    }
+}
+
+/// The files a managed plugin directory currently holds, in declaration order,
+/// each read as a bounded regular file (empty when the file or directory is
+/// absent).
+fn read_tree(dir: &Path, files: &[(&'static str, String)]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    files
+        .iter()
+        .map(|(name, _)| Ok(((*name).to_string(), read_config(&dir.join(name))?)))
+        .collect()
+}
+
+/// A stable byte form of a managed directory for hashing, review and the
+/// confirmation token: declared order, each file under a header, so the token is
+/// identical on every re-read of the same tree.
+fn serialize_tree(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, bytes) in files {
+        out.extend_from_slice(b"## ");
+        out.extend_from_slice(name.as_bytes());
+        out.push(b'\n');
+        out.extend_from_slice(bytes);
+        out.push(b'\n');
+    }
+    out
+}
+
+/// Whether any file this adapter would write is present under its marker.
+fn tree_is_owned(dir: &Path, files: &[(&'static str, String)]) -> anyhow::Result<bool> {
+    for (name, expected) in files {
+        if owns_file(&read_config(&dir.join(name))?, expected) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Path safety for a managed plugin directory: the directory, if it exists, is a
+/// real directory and not a symlink, and every declared file, if it exists, is a
+/// bounded regular file and not a symlink.
+fn inspect_tree_path(dir: &Path, files: &[(&'static str, String)]) -> anyhow::Result<()> {
+    if let Some(parent) = dir.parent().filter(|parent| parent.exists()) {
+        inspect_parent(parent)?;
+    }
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("refusing to mutate a non-directory or symlinked plugin directory");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for (name, _) in files {
+        let path = dir.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    bail!(
+                        "refusing to mutate a non-regular or symlinked plugin file {}",
+                        path.display()
+                    );
+                }
+                if metadata.len() > MAX_CONFIG_BYTES {
+                    bail!("plugin file exceeds the {MAX_CONFIG_BYTES}-byte safety limit");
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn write_tree(dir: &Path, files: &[(&'static str, String)]) -> anyhow::Result<()> {
+    for (name, content) in files {
+        let path = dir.join(name);
+        let reviewed = read_config(&path)?;
+        write_atomic(&path, content.as_bytes(), &reviewed)?;
+    }
+    Ok(())
+}
+
+fn remove_tree(dir: &Path, files: &[(&'static str, String)]) -> anyhow::Result<()> {
+    for (name, expected) in files {
+        let path = dir.join(name);
+        let bytes = read_config(&path)?;
+        if bytes.is_empty() {
+            continue;
+        }
+        if !owns_file(&bytes, expected) {
+            bail!("{} exists and is not managed by muxflow", path.display());
+        }
+        remove_atomic(&path, &bytes)?;
+    }
+    // Remove the directory only once it holds nothing. A directory the user
+    // filled with anything of their own is kept; the managed files are already
+    // gone, so the adapter reads as not wired and a reinstall recreates it.
+    match fs::remove_dir(dir) {
+        Ok(()) | Err(_) => {}
+    }
+    Ok(())
 }
 
 /// A managed file is ours when its first line is the first line of what we
@@ -1070,9 +1323,15 @@ mod tests {
         );
         assert_eq!(
             review.proposed_command,
-            "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 6"
+            format!(
+                "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version {}",
+                adapters::MANAGED_VERSION
+            )
         );
-        assert_eq!(review.ownership_marker, "owner=muxflow;version=6");
+        assert_eq!(
+            review.ownership_marker,
+            format!("owner=muxflow;version={}", adapters::MANAGED_VERSION)
+        );
         assert!(review.trust_guidance.contains("never edits or bypasses"));
         assert!(review.before_preview.contains("keep-me"));
         assert!(review.after_preview.contains("--managed-owner"));
@@ -1508,7 +1767,7 @@ mod tests {
         let installed = String::from_utf8(fs::read(&path).unwrap()).unwrap();
         assert!(!installed.contains(&format!("\"command\": \"{legacy}\"")));
         assert!(installed.contains(&format!("{legacy} lookalike")));
-        assert!(installed.contains("--managed-version 6"));
+        assert!(installed.contains(&format!("--managed-version {}", adapters::MANAGED_VERSION)));
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -1924,5 +2183,117 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"racing editor bytes");
         assert_eq!(fs::read(&temporary).unwrap(), b"our proposed bytes");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_plugin_directory_installs_wires_and_uninstalls_whole() {
+        use std::collections::BTreeSet;
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase-opencode-tree-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let manager = HookManager::with_overrides(Some(home.clone()), None).unwrap();
+        let helper = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let adapter = adapters::adapter(v1::AgentAdapterKind::Opencode).unwrap();
+        let dir = adapter.hook_path(&home);
+        let expected = adapter.managed_files(&helper).unwrap();
+
+        // Present on the host (a running agent forces presence, so the answer
+        // does not depend on this machine's PATH) with nothing installed.
+        let mut running = BTreeSet::new();
+        running.insert("opencode");
+        let state = |manager: &HookManager| {
+            manager
+                .wiring_with_running(&running)
+                .into_iter()
+                .find(|(candidate, _)| candidate.id() == "opencode")
+                .map(|(_, observed)| observed.state)
+        };
+        assert_eq!(state(&manager).unwrap(), v1::AgentHookWiring::NotWired);
+
+        let install = manager
+            .review(
+                v1::AgentAdapterKind::Opencode,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        assert!(!install.already_current);
+        assert!(install.creates_config);
+        manager
+            .apply(
+                v1::AgentAdapterKind::Opencode,
+                v1::HookManagementAction::Install,
+                &install.confirmation_token,
+            )
+            .unwrap();
+        // Every declared file is present under the marker, byte-for-byte.
+        for (name, content) in &expected {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), content.as_bytes(), "{name}");
+        }
+        assert_eq!(state(&manager).unwrap(), v1::AgentHookWiring::Wired);
+        // Idempotent: a second install finds it current and writes nothing.
+        assert!(
+            manager
+                .review(
+                    v1::AgentAdapterKind::Opencode,
+                    v1::HookManagementAction::Install,
+                )
+                .unwrap()
+                .already_current
+        );
+
+        // A file the user put where our plugin belongs is refused, not overwritten.
+        fs::write(dir.join("tui.ts"), b"// someone else's plugin\n").unwrap();
+        assert!(
+            manager
+                .review(
+                    v1::AgentAdapterKind::Opencode,
+                    v1::HookManagementAction::Install,
+                )
+                .is_err()
+        );
+        assert!(
+            manager
+                .review(
+                    v1::AgentAdapterKind::Opencode,
+                    v1::HookManagementAction::Uninstall,
+                )
+                .is_err()
+        );
+
+        // The user clears it, a fresh install recreates the plugin, and uninstall
+        // removes our files and then the now-empty directory.
+        fs::remove_dir_all(&dir).unwrap();
+        let reinstall = manager
+            .review(
+                v1::AgentAdapterKind::Opencode,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::Opencode,
+                v1::HookManagementAction::Install,
+                &reinstall.confirmation_token,
+            )
+            .unwrap();
+        assert_eq!(state(&manager).unwrap(), v1::AgentHookWiring::Wired);
+        let uninstall = manager
+            .review(
+                v1::AgentAdapterKind::Opencode,
+                v1::HookManagementAction::Uninstall,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::Opencode,
+                v1::HookManagementAction::Uninstall,
+                &uninstall.confirmation_token,
+            )
+            .unwrap();
+        assert!(!dir.exists(), "the managed directory is removed when it is left empty");
+        assert_eq!(state(&manager).unwrap(), v1::AgentHookWiring::NotWired);
+        fs::remove_dir_all(home).unwrap();
     }
 }

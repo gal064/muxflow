@@ -4,6 +4,7 @@ use tmux_agent_protocol::v1;
 
 use crate::service::topology::agent_title_suffix;
 
+mod opencode;
 mod pi;
 
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
@@ -36,7 +37,7 @@ pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed event set or entry configuration changes. An
 /// older install can otherwise look current while missing an event or carrying
 /// vendor-invalid settings such as an excessive timeout.
-pub(crate) const MANAGED_VERSION: u32 = 6;
+pub(crate) const MANAGED_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -97,6 +98,16 @@ pub(crate) trait AgentAdapter: Send + Sync {
     /// `None` means the managed artifact is entries merged into a JSON
     /// configuration.
     fn managed_file(&self, _helper_path: &Path) -> Option<String> {
+        None
+    }
+
+    /// The whole directory this adapter installs at [`Self::hook_path`], as
+    /// `(file name, contents)` pairs, for an agent that discovers a plugin
+    /// directory rather than reading one file or one setting. `hook_path` is then
+    /// the directory, muxflow owns it whole through the marker line each file
+    /// carries, and nothing outside it is touched. Mutually exclusive with
+    /// [`Self::managed_file`]; a directory is never merged with a config file.
+    fn managed_files(&self, _helper_path: &Path) -> Option<Vec<(&'static str, String)>> {
         None
     }
 
@@ -410,10 +421,12 @@ pub(crate) fn adapter(kind: v1::AgentAdapterKind) -> Option<&'static dyn AgentAd
     static CODEX: CodexAdapter = CodexAdapter;
     static CLAUDE: ClaudeCodeAdapter = ClaudeCodeAdapter;
     static PI: pi::PiAdapter = pi::PiAdapter;
+    static OPENCODE: opencode::OpenCodeAdapter = opencode::OpenCodeAdapter;
     [
         &CODEX as &dyn AgentAdapter,
         &CLAUDE as &dyn AgentAdapter,
         &PI as &dyn AgentAdapter,
+        &OPENCODE as &dyn AgentAdapter,
     ]
     .into_iter()
     .find(|adapter| adapter.legacy_kind() == kind)
@@ -424,6 +437,7 @@ pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
         v1::AgentAdapterKind::Codex,
         v1::AgentAdapterKind::ClaudeCode,
         v1::AgentAdapterKind::Pi,
+        v1::AgentAdapterKind::Opencode,
     ]
     .into_iter()
     .filter_map(adapter)
@@ -667,6 +681,7 @@ mod tests {
                 v1::AgentHookWiring::Wired,
                 v1::AgentHookWiring::NotWired,
                 v1::AgentHookWiring::Absent,
+                v1::AgentHookWiring::Absent,
             ])
             .map(|(adapter, state)| {
                 (
@@ -681,7 +696,7 @@ mod tests {
             })
             .collect();
         let descriptors = descriptors(home, &observed);
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), 4);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 10);
@@ -691,7 +706,9 @@ mod tests {
         assert_eq!(codex.hook_timeout_seconds("Stop"), 5);
         assert_eq!(
             codex.hook_command(Path::new("/opt/muxflow-host")),
-            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 6"
+            format!(
+                "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version {MANAGED_VERSION}"
+            )
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
@@ -734,6 +751,7 @@ mod tests {
                 ("codex", v1::AgentHookWiring::Wired as i32, false),
                 ("claude-code", v1::AgentHookWiring::NotWired as i32, true),
                 ("pi", v1::AgentHookWiring::Absent as i32, false),
+                ("opencode", v1::AgentHookWiring::Absent as i32, false),
             ]
         );
         let pi = adapter(v1::AgentAdapterKind::Pi).unwrap();
@@ -743,6 +761,18 @@ mod tests {
         );
         assert!(codex.managed_file(Path::new("/opt/muxflow-host")).is_none());
         assert!(pi.managed_file(Path::new("/opt/muxflow-host")).is_some());
+        let opencode = adapter(v1::AgentAdapterKind::Opencode).unwrap();
+        assert_eq!(
+            opencode.hook_path(home),
+            home.join(".config/opencode/plugins/muxflow-agent-status")
+        );
+        assert_eq!(opencode.hook_events().len(), 7);
+        assert_eq!(opencode.descriptor(home, &observed[3].1).id, "opencode");
+        // OpenCode is owned as a whole plugin directory, not a single config file:
+        // the singular managed_file is the trait default (None) and the plural,
+        // directory-shaped managed_files is what the installer acts on.
+        assert!(opencode.managed_file(Path::new("/opt/muxflow-host")).is_none());
+        assert!(opencode.managed_files(Path::new("/opt/muxflow-host")).is_some());
     }
 
     /// Only a running subagent extends the user's turn. Ordinary background

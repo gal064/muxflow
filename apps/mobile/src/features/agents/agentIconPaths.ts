@@ -34,6 +34,20 @@ export const PI_ICON = {
   path: "M420 280H280V140H0V0H420V280ZM560 560H420V280H560V560ZM140 560H0V140H140V280H280V420H140V560Z",
 } as const;
 
+/**
+ * OpenCode: the brand mark — a frame with the solid block resting inside it,
+ * scaled into a 24-unit box at the mark's own ratios. The brand draws that
+ * block a half-tone under the frame; one fused silhouette would be a 90%-ink
+ * blob that smudges at 12px, so the block keeps a half opacity instead.
+ */
+export const OPENCODE_ICON = {
+  viewBox: "0 0 24 24",
+  transform: "translate(12 12) scale(.78) translate(-12 -12)",
+  frame: "M22 24H2V0h20zM17 4.8H7v14.4h10z",
+  block: "M17 9.6H7v9.6h10z",
+  blockOpacity: 0.5,
+} as const;
+
 /** Any other adapter: a stroked face — outline circle, two filled eyes, a mouth line. */
 export const GENERIC_ICON = {
   viewBox: "0 0 16 16",
@@ -63,4 +77,8 @@ export function isCodexAdapter(adapterId: string): boolean {
 
 export function isPiAdapter(adapterId: string): boolean {
   return adapterId === "pi";
+}
+
+export function isOpencodeAdapter(adapterId: string): boolean {
+  return adapterId === "opencode";
 }
