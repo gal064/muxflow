@@ -141,7 +141,7 @@ describe("the attachment queue", () => {
     const file = added(queue, source("huge.iso", MAX_UPLOAD_BYTES + 1));
     await settle();
     expect(image).toMatchObject({ status: "failed", error: "huge.png is over 25 MB, the most an image can be." });
-    expect(file).toMatchObject({ status: "failed", error: "That file is too large to send from the phone." });
+    expect(file).toMatchObject({ status: "failed", error: "huge.iso is over 100 MB, the most the phone can send." });
     expect(started).toEqual([]);
     expect(queue.ready()).toBe(false);
   });

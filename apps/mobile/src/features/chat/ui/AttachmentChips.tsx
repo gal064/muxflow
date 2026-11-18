@@ -164,8 +164,9 @@ function NamedChip({ attachment, name, label, onPress, onLongPress }: { attachme
 }
 
 const styles = StyleSheet.create({
-  // Above the message's text, against the same edge.
-  chips: { alignItems: "flex-end", gap: 6, paddingVertical: 2 },
+  // Above the message's text, against the same edge. Side by side where they
+  // fit, so a message of many images is not one tall column of them.
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: 6, justifyContent: "flex-end", paddingVertical: 2 },
   chipsOverText: { paddingBottom: 6 },
   pressed: { opacity: 0.75 },
   thumb: { backgroundColor: colors.chromeBg, borderColor: colors.chromeBorder, borderRadius: 9, borderWidth: 1, height: 96, overflow: "hidden", width: 136 },

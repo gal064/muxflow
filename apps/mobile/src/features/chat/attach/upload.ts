@@ -87,7 +87,7 @@ export class UploadError extends Error {
 /** Why the phone will not send this file at all, or undefined when it will. */
 export function uploadRefusal(name: string, sizeBytes: number): string | undefined {
   if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) return "That file could not be read.";
-  if (sizeBytes > MAX_UPLOAD_BYTES) return "That file is too large to send from the phone.";
+  if (sizeBytes > MAX_UPLOAD_BYTES) return `${name} is over 100 MB, the most the phone can send.`;
   // The desktop's sentence.
   if (mediaTypeForName(name) !== "" && sizeBytes > MAX_IMAGE_UPLOAD_BYTES) return `${name} is over 25 MB, the most an image can be.`;
   return undefined;

@@ -416,10 +416,16 @@ describe("background tasks (mobile-chat-mock.html, S4)", () => {
     expect(calls.stopTask).toEqual(["dev", "dev"]);
     expect(dimmed(stop())).toBe(true);
 
-    // The task leaves the list: its row goes, the others stay as they were.
+    // The task leaves the list: its row stays where it was, ended and without
+    // its Stop, so the row after it does not move up under the finger.
     rerender(view, chat(idle([user("q"), says("a")], { background: tasks().slice(1) }), calls));
     expect(allByLabel(view, "Stop pnpm dev")).toHaveLength(0);
+    expect(textOf(view.toJSON())).toContain("Background tasks pnpm dev Ended Find the other callers Subagent · 1m 04s Stop Watching the build Task");
     expect(dimmed(byLabel(view, "Stop Find the other callers"))).toBe(false);
+    // A task that starts while the sheet is open comes after the rows already there.
+    rerender(view, chat(idle([user("q"), says("a")], { background: [backgroundTask("new", "pnpm test"), ...tasks().slice(1)] }), calls));
+    expect(textOf(view.toJSON())).toContain("pnpm dev Ended Find the other callers Subagent · 1m 04s Stop Watching the build Task pnpm test");
+    rerender(view, chat(idle([user("q"), says("a")], { background: tasks().slice(1) }), calls));
     // The last one ends: the sheet closes by itself, and the chip goes.
     rerender(view, chat(idle([user("q"), says("a")]), calls));
     expect(textOf(view.toJSON())).not.toContain("Background tasks");

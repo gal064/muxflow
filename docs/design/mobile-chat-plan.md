@@ -199,6 +199,11 @@ why on its chip. Facts in §3, the wire in §4.
   its folder relative to home and no Git rows.
 - The workspace row keeps its state in the pill it had; the second line says
   "Chat" and the agent's name.
+- A message's images sit side by side and wrap, rather than one under the
+  other: the mock draws only one per message.
+- While the background tasks sheet is open, a task that ends keeps its row,
+  marked "Ended" and without Stop, so the row after it does not move under a
+  finger reaching for its Stop.
 
 ## 3. Facts the packages rest on
 

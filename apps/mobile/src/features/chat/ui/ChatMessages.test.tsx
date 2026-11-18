@@ -15,7 +15,7 @@ import { HostError } from "../../../protocol/HostConnection";
 import { colors } from "../../../ui/tokens";
 import { textOf, writeRender } from "../../../testing/renderTree";
 import { allByLabel, byLabel, byText, isHost, longPress, press, render as renderOnce, rerender, type } from "../../../testing/render";
-import { pressHardwareBack } from "../../../testing/stubs/reactNative";
+import { flatListIndexScrolls, pressHardwareBack } from "../../../testing/stubs/reactNative";
 import type { ChatPane } from "../chatModel";
 import { forgetDrafts } from "../drafts";
 import { messageTime, replyTime } from "../messageTime";
@@ -635,6 +635,16 @@ describe("Edit and resend", () => {
     longPress(message(view, "Why does it break?"));
     press(byText(view, "Edit and resend"));
     expect(cells(view).map((cell) => flat(cell.props.style).opacity === 0.45)).toEqual([false, true, true, true, true, true]);
+  });
+
+  it("the message being edited is brought to the middle of the list, not left under the keyboard", () => {
+    const view = render(<Screen pane={idle(conversation())} world={newWorld()} />);
+    flatListIndexScrolls.length = 0;
+    longPress(message(view, "Why does it break?"));
+    expect(flatListIndexScrolls).toEqual([]);
+    press(byText(view, "Edit and resend"));
+    // Newest first, as the inverted list counts: the five dimmed rows after it come before it.
+    expect(flatListIndexScrolls).toEqual([{ index: 5, viewPosition: 0.5 }]);
   });
 
   it("Back cancels the edit first and puts the draft back; only the next Back leaves the chat", () => {
