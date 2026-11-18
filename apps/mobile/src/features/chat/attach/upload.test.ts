@@ -163,8 +163,8 @@ describe("what the phone will not send", () => {
     expect(uploadRefusal("clip.heic", MAX_IMAGE_UPLOAD_BYTES + 1)).toBe("clip.heic is over 25 MB, the most an image can be.");
     expect(uploadRefusal("build.log", MAX_IMAGE_UPLOAD_BYTES + 1)).toBeUndefined();
     expect(uploadRefusal("build.log", MAX_UPLOAD_BYTES)).toBeUndefined();
-    expect(uploadRefusal("build.log", MAX_UPLOAD_BYTES + 1)).toBe("That file is too large to send from the phone.");
-    expect(uploadRefusal("shot.png", MAX_UPLOAD_BYTES + 1)).toBe("That file is too large to send from the phone.");
+    expect(uploadRefusal("build.log", MAX_UPLOAD_BYTES + 1)).toBe("build.log is over 100 MB, the most the phone can send.");
+    expect(uploadRefusal("shot.png", MAX_UPLOAD_BYTES + 1)).toBe("shot.png is over 100 MB, the most the phone can send.");
   });
 
   it("refuses before a connection is opened", async () => {
@@ -175,7 +175,7 @@ describe("what the phone will not send", () => {
     };
     const signal = new AbortController().signal;
     const tooLarge = await failure(uploadFile({ openLane, source: sized("video.mov", MAX_UPLOAD_BYTES + 1), signal }));
-    expect(tooLarge.message).toBe("That file is too large to send from the phone.");
+    expect(tooLarge.message).toBe("video.mov is over 100 MB, the most the phone can send.");
     const image = await failure(uploadFile({ openLane, source: sized("photo.jpg", MAX_IMAGE_UPLOAD_BYTES + 1), signal }));
     expect(image.message).toBe("photo.jpg is over 25 MB, the most an image can be.");
     expect(opened).toBe(0);

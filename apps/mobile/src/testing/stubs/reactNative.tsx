@@ -27,6 +27,8 @@ export const KeyboardAvoidingView = host("View");
 
 /** Every `scrollToOffset` a list was sent, oldest first. A test empties it and reads what its own steps sent. */
 export const flatListScrolls: { offset: number; animated: boolean }[] = [];
+/** Every `scrollToIndex` a list was sent, oldest first, as `flatListScrolls`. */
+export const flatListIndexScrolls: { index: number; viewPosition: number | undefined }[] = [];
 
 /**
  * A FlatList draws every row, in the order the screen shows them: an inverted
@@ -45,7 +47,9 @@ export const FlatList = forwardRef<unknown, Props>(function FlatList(props, ref)
   };
   useImperativeHandle(ref, () => ({
     scrollToEnd() {},
-    scrollToIndex() {},
+    scrollToIndex({ index, viewPosition }: { index: number; viewPosition?: number }) {
+      flatListIndexScrolls.push({ index, viewPosition });
+    },
     scrollToOffset({ offset, animated }: { offset: number; animated?: boolean }) {
       flatListScrolls.push({ offset, animated: animated ?? true });
       (rest.onScroll as ((event: unknown) => void) | undefined)?.({

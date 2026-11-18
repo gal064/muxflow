@@ -1,5 +1,5 @@
 import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FlatList, PixelRatio, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import { FlatList, Keyboard, PixelRatio, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 
 import { ChatItemKind, type ChatItem } from "../../../protocol/gen/chat_pb";
 import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
@@ -234,6 +234,21 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
   // so before it in `rows`) are what sending the edit removes: they are dimmed.
   const { editingId } = messages;
   const editingAt = useMemo(() => (editingId ? rows.findIndex((row) => row.kind === "item" && row.key === editingId) : -1), [editingId, rows]);
+  // The message being edited is shown, mid-screen: it may be well up the
+  // list, and the keyboard the edit opens takes the lower part of the screen,
+  // which would leave only the dimmed rows after it in view.
+  const editingNow = useRef(editingAt);
+  editingNow.current = editingAt;
+  useEffect(() => {
+    if (!editingId) return undefined;
+    const show = () => {
+      const index = editingNow.current;
+      if (index >= 0) list.current?.scrollToIndex({ animated: true, index, viewPosition: 0.5 });
+    };
+    show();
+    const opened = Keyboard.addListener("keyboardDidShow", show);
+    return () => opened.remove();
+  }, [editingId]);
 
   const renderRow = useCallback(({ item, index }: ListRenderItemInfo<TimelineRow>) => (
     <RowView
@@ -272,6 +287,9 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
           onScroll={onScroll}
           onScrollBeginDrag={onScrollBeginDrag}
           onScrollEndDrag={onScrollEndDrag}
+          // Only an edited message is scrolled to, and it was on screen when
+          // it was held: a row not laid out yet is not worth a guess.
+          onScrollToIndexFailed={noScrollToIndex}
           ref={list}
           // The position is held by counting the list's children, which only
           // matches its rows while none of them is detached for being off screen.
@@ -300,6 +318,8 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
     </TimelineOpenContext.Provider>
   );
 }
+
+function noScrollToIndex(): void {}
 
 function rowKey(row: TimelineRow): string {
   return row.key;

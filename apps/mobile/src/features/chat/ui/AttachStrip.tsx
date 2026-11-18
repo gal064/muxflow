@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
@@ -19,9 +20,29 @@ export interface AttachStripProps {
  * away.
  */
 export function AttachStrip({ entries, onRemove }: AttachStripProps) {
+  const strip = useRef<ScrollView>(null);
+  // A chip just added is at the end of the row: the row is taken to it, so
+  // its upload, or why it was refused, is in view.
+  const count = useRef(entries.length);
+  const grown = entries.length > count.current;
+  count.current = entries.length;
+  const toAdded = useRef(false);
+  if (grown) toAdded.current = true;
   if (entries.length === 0) return null;
   return (
-    <ScrollView contentContainerStyle={styles.strip} horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} style={styles.scroll}>
+    <ScrollView
+      contentContainerStyle={styles.strip}
+      horizontal
+      keyboardShouldPersistTaps="always"
+      onContentSizeChange={() => {
+        if (!toAdded.current) return;
+        toAdded.current = false;
+        strip.current?.scrollToEnd({ animated: true });
+      }}
+      ref={strip}
+      showsHorizontalScrollIndicator={false}
+      style={styles.scroll}
+    >
       {entries.map((entry) => <Chip entry={entry} key={entry.id} onRemove={onRemove} />)}
     </ScrollView>
   );
