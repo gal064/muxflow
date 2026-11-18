@@ -167,6 +167,63 @@ describe("classifications the host answers with (§9.7 step 1)", () => {
   });
 });
 
+// The chat shows an attached image; the file viewer above never does.
+describe("keeping an image's bytes (keepImages)", () => {
+  const imageHeader = (totalBytes: number, contentStreaming = true): FileStreamFrame =>
+    headerFrame(OPERATION, { contentKind: FileContentKind.IMAGE, totalBytes: BigInt(totalBytes), contentStreaming });
+
+  it("assembles the image the host streams, with its metadata", () => {
+    const assembler = new FileStreamAssembler(OPERATION, { keepImages: true });
+    const bytes = Uint8Array.from({ length: 2048 }, (_, index) => index % 251);
+    assembler.push(imageHeader(bytes.length));
+    assembler.push(bodyFrame(OPERATION, 0, bytes.slice(0, 1024)));
+    assembler.push(bodyFrame(OPERATION, 1024, bytes.slice(1024), true));
+    const body = assembler.finish();
+    expect(body.kind).toBe("image");
+    const image = body as { bytes?: Uint8Array; metadata?: { name: string } };
+    expect(image.bytes).toEqual(bytes);
+    expect(image.metadata?.name).toBe("file.txt");
+  });
+
+  it("holds an image to the same coverage checks as text", () => {
+    const short = new FileStreamAssembler(OPERATION, { keepImages: true });
+    short.push(imageHeader(2048));
+    short.push(bodyFrame(OPERATION, 0, new Uint8Array(1024), true));
+    expect(() => short.finish()).toThrow(FileStreamError);
+
+    const skipped = new FileStreamAssembler(OPERATION, { keepImages: true });
+    skipped.push(imageHeader(2048));
+    expect(() => skipped.push(bodyFrame(OPERATION, 1024, new Uint8Array(1024), true))).toThrow(FileStreamError);
+  });
+
+  it("answers a bare `image` for one the host does not stream", () => {
+    // Over the host's 25 MiB limit the answer is the classification alone.
+    const assembler = new FileStreamAssembler(OPERATION, { keepImages: true });
+    assembler.push(imageHeader(0, false));
+    expect(assembler.finish()).toEqual({ kind: "image" });
+  });
+
+  it("leaves text under the phone's own cap", () => {
+    const assembler = new FileStreamAssembler(OPERATION, { keepImages: true });
+    assembler.push(textHeader(MAX_CLIENT_FILE_BYTES + 1));
+    assembler.push(bodyFrame(OPERATION, 0, new Uint8Array(16), true));
+    expect(assembler.finish()).toEqual({ kind: "tooLarge", size: BigInt(MAX_CLIENT_FILE_BYTES + 1) });
+  });
+
+  it("reaches the assembler through readFile's options", async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const request = async (value: Request, options: { onFileStream: (frame: FileStreamFrame) => void }): Promise<Response> => {
+      const operationId = value.file!.operationId;
+      options.onFileStream(headerFrame(operationId, { contentKind: FileContentKind.IMAGE, totalBytes: 4n, contentStreaming: true }));
+      options.onFileStream(bodyFrame(operationId, 0, bytes, true));
+      return create(ResponseSchema, { ok: true });
+    };
+    const target = { root: "/w", rootToken: "token", path: "/w/a.png" };
+    expect(await readFile(request, target, "identity")).toEqual({ kind: "image" });
+    expect(await readFile(request, target, "identity", { keepImages: true })).toMatchObject({ kind: "image", bytes });
+  });
+});
+
 describe("readFile", () => {
   it("streams a file over the bulk lane", async () => {
     const request = vi.fn(async (value: Request, options: { onFileStream: (frame: FileStreamFrame) => void }) => {
