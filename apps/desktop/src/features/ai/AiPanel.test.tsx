@@ -209,6 +209,33 @@ describe("the AI panel", () => {
     expect(text(renderer)).not.toContain("Stop");
   });
 
+  it("stamps each bubble as it happens, the question's time to the right and the answer's to the left", async () => {
+    const asked = new Date(2026, 10, 18, 14, 52).getTime();
+    const answered = new Date(2026, 10, 18, 14, 53, 30).getTime();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(asked);
+    const call = streamedCall();
+    const renderer = await render(<AiPanel {...props()} />);
+    await ask(renderer, "what is going on?");
+    await act(async () => call.emit({ type: "delta", text: "All quiet." }));
+    // Mid-answer there is no stamp on the assistant's bubble: its time is
+    // when it arrives, and it has not.
+    expect(renderer.root.findAll((node) => node.type === "time")).toHaveLength(1);
+    clock.mockReturnValue(answered);
+    await call.finish();
+    clock.mockRestore();
+
+    const times = renderer.root.findAll((node) => node.type === "time");
+    expect(times).toHaveLength(2);
+    const clockFace = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+    expect(times[0].children).toEqual([clockFace.format(asked)]);
+    expect(times[1].children).toEqual([clockFace.format(answered)]);
+    expect(times[0].props.dateTime).toBe(new Date(asked).toISOString());
+    // The li carries the side; the stylesheet right-aligns the user's and
+    // left-aligns the assistant's.
+    expect(times[0].parent?.props.className).toBe("ai-turn ai-turn-user");
+    expect(times[1].parent?.props.className).toBe("ai-turn ai-turn-assistant");
+  });
+
   it("leaves a turned-off tab out of the snapshot", async () => {
     const call = streamedCall();
     const renderer = await render(<AiPanel {...props()} />);

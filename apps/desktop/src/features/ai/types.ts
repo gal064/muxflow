@@ -44,6 +44,10 @@ export interface AiTurn {
   role: "user" | "assistant";
   text: string;
   actions?: AiAction[];
+  /** When the bubble happened, epoch ms: a question is stamped as it is
+   * sent, an answer as it finishes. 0 means still filling in, and the panel
+   * shows no stamp until the answer lands. */
+  createdAt: number;
 }
 
 /**

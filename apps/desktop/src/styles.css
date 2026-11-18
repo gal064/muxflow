@@ -1411,6 +1411,10 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .ai-turns { flex: 1; min-height: 0; display: grid; align-content: start; gap: 10px; margin: 0; padding: 10px 12px; overflow: auto; list-style: none; }
 .ai-turn { display: grid; gap: 2px; font-size: var(--type-secondary); }
 .ai-turn-user { color: var(--chrome-ink-strong); font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Under the bubble: the question's stamp sits right, the answer's left. */
+.ai-turn-time { font-size: var(--type-meta); color: var(--chrome-faint); }
+.ai-turn-user .ai-turn-time { justify-self: end; }
+.ai-turn-assistant .ai-turn-time { justify-self: start; }
 .ai-answer { color: var(--chrome-ink); overflow-wrap: anywhere; user-select: text; }
 .ai-answer > :first-child { margin-top: 0; }
 .ai-answer > :last-child { margin-bottom: 0; }

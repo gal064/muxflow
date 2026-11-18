@@ -87,7 +87,14 @@ export const aiConversations = {
     if (current) retire(key, current);
     const generation = nextGeneration++;
     const history = current?.turns ?? [];
-    const turns: AiTurn[] = [...history, { role: "user", text: question }, { role: "assistant", text: "" }];
+    const createdAt = Date.now();
+    const turns: AiTurn[] = [
+      ...history,
+      { role: "user", text: question, createdAt },
+      // The answer is stamped when `end` closes it, not now: its time is
+      // when it arrived, and until then the panel shows no stamp.
+      { role: "assistant", text: "", createdAt: 0 },
+    ];
     conversations.set(key, {
       turns: turns.slice(-MAX_TURNS),
       streaming: true,
@@ -184,8 +191,13 @@ export const aiConversations = {
     if (!current || !current.streaming) return;
     for (const approval of current.pending) approval.decide(false);
     current.continuation?.resume(false);
+    const turns = [...current.turns];
+    const last = turns[turns.length - 1];
+    if (last?.role === "assistant" && !last.createdAt) {
+      turns[turns.length - 1] = { ...last, createdAt: Date.now() };
+    }
     conversations.set(key, {
-      ...current, streaming: false, pending: [], continuation: undefined, cancel: undefined, activity: undefined, error,
+      ...current, turns, streaming: false, pending: [], continuation: undefined, cancel: undefined, activity: undefined, error,
     });
     publish();
   },

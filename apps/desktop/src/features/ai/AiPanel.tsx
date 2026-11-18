@@ -22,6 +22,9 @@ import type { AiChatMessage, AiEvent, AiToolCall } from "./types";
 
 /** How much of the conversation the model is shown. */
 const HISTORY_TURNS = 12;
+
+/** The clock stamp under each bubble, in the user's locale and clock. */
+const TURN_TIME = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 /** Tool rounds one question buys before the panel asks the user whether the
  * run is worth continuing; Continue spends another budget. A loop that
  * cannot answer is stopped by the user, not by a number. */
@@ -341,6 +344,9 @@ export function AiPanel(props: PanelExtensionProps) {
                   ? <span className="ai-thinking" role="status">Thinking…</span>
                   : !turn.actions?.length && <span className="ai-answer quiet-empty">(no answer)</span>}
             </>}
+          {turn.createdAt > 0 && <time className="ai-turn-time" dateTime={new Date(turn.createdAt).toISOString()}>
+            {TURN_TIME.format(turn.createdAt)}
+          </time>}
         </li>)}
       </ol>}
 
