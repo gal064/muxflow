@@ -1,16 +1,19 @@
 import type { MessageInitShape } from "@bufbuild/protobuf";
-import { useCallback, useRef, type ReactNode } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { ChatConnection, ChatTurnState, type ChatCommand, type ChatItem, type ChatOptionsSchema } from "../../../protocol/gen/chat_pb";
 import { BackIcon } from "../../../ui/components/MediaIcons";
 import { colors, fixedChromeText, metrics, typeScale } from "../../../ui/tokens";
-import { WorkingIndicator } from "../../voice/WorkingIndicator";
 import { sideQuestion, type ChatPane, type CommandGroup } from "../chatModel";
+import { chatStatus, followTurn, newTurnClock } from "../chatStatus";
+import { olderState, timelineRows, type TimelineRow } from "../timelineRows";
 import { ChatTimeline } from "./ChatTimeline";
 import { Composer } from "./Composer";
 import { DetailsSheet } from "./DetailsSheet";
-import { PendingCard, type PendingAnswer } from "./PendingCard";
+import type { PendingAnswer } from "./PendingCard";
+import { RequestDock } from "./RequestDock";
+import { StatusLine } from "./StatusLine";
 
 export interface ChatViewProps {
   title: string;
@@ -30,8 +33,14 @@ export interface ChatViewProps {
   busy: boolean;
   onSend: () => void;
   onStop: () => void;
+  /** Stop was pressed and the turn has not stopped yet. */
+  stopping: boolean;
   onAnswer: (answer: PendingAnswer) => void;
+  /** The top of the conversation came within reach while older messages can be loaded. */
   onLoadOlder: () => void;
+  /** The last load of older messages failed; the conversation offers Retry instead of loading by itself. */
+  olderFailed: boolean;
+  onRetryOlder: () => void;
   onRetry: () => void;
   onBack: () => void;
   detailsOpen: boolean;
@@ -43,19 +52,15 @@ export interface ChatViewProps {
   voice?: { status: ReactNode; reply: ReactNode; bar: ReactNode } | undefined;
 }
 
-/** The chat screen (chat-mock.html, "Phone"): header, conversation, request card, composer or voice bar. */
+const NO_ROWS: TimelineRow[] = [];
+
+/**
+ * The chat screen (mobile-chat-mock.html, S1 and S3): header, conversation,
+ * then what cannot scroll away: the request the agent waits on, the line that
+ * says it works, and the composer or voice bar.
+ */
 export function ChatView(props: ChatViewProps) {
   const { title, pane, connected, voiceMode, voice } = props;
-  const list = useRef<ScrollView>(null);
-  // New text follows the end only while the reader is there; reading further up stays put.
-  const atEnd = useRef(true);
-  const toEnd = useCallback((animated: boolean) => {
-    if (atEnd.current) list.current?.scrollToEnd({ animated });
-  }, []);
-  const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 80;
-  }, []);
   const state = pane?.state;
   const capabilities = pane?.catalog?.capabilities;
   const turn = state?.turn ?? ChatTurnState.UNSPECIFIED;
@@ -64,6 +69,21 @@ export function ChatView(props: ChatViewProps) {
   const ended = pane?.status === "gone" || state?.connection === ChatConnection.ENDED || state?.connection === ChatConnection.FAILED;
   const usable = connected && pane?.status === "open" && !ended;
   const banner = bannerFor(pane, connected);
+
+  const shown = pane && pane.status !== "opening" ? pane : undefined;
+  const items = shown?.items;
+  const outgoing = shown?.outgoing;
+  const rows = useMemo(() => (items && outgoing ? timelineRows(items, outgoing) : NO_ROWS), [items, outgoing]);
+
+  // When the turn began is kept from the moment it is seen, whatever is on
+  // screen then, so the status line has it when it shows.
+  const clock = useRef(newTurnClock());
+  clock.current = followTurn(clock.current, pane, Date.now());
+  const status = usable ? chatStatus(pane, clock.current, props.stopping) : undefined;
+
+  // The request folded to one line. Kept by its id, so the next request shows whole.
+  const [foldedRequest, setFoldedRequest] = useState("");
+  const folded = pending !== undefined && foldedRequest === pending.requestId;
 
   return (
     <View style={styles.root}>
@@ -100,32 +120,31 @@ export function ChatView(props: ChatViewProps) {
         </View>
       ) : null}
 
-      <ScrollView
-        contentContainerStyle={styles.listContent}
-        keyboardShouldPersistTaps="handled"
-        onContentSizeChange={() => toEnd(true)}
-        onLayout={() => toEnd(false)}
-        onScroll={onScroll}
-        ref={list}
-        scrollEventThrottle={100}
-        style={styles.list}
-      >
-        {pane && pane.status !== "opening" ? (
-          <ChatTimeline
-            canEdit={capabilities?.rewind === true && usable}
-            hasOlder={pane.olderCursor !== ""}
-            historyIncomplete={state?.historyComplete === false}
-            items={pane.items}
-            loadingOlder={pane.loadingOlder}
-            onEdit={props.onEdit}
-            onLoadOlder={props.onLoadOlder}
-            outgoing={pane.outgoing}
-          />
-        ) : null}
-        {pending ? <PendingCard busy={props.busy || !usable} onAnswer={props.onAnswer} request={pending} /> : null}
-        <WorkingIndicator working={working} />
-        {voiceMode ? voice?.reply : null}
-      </ScrollView>
+      <ChatTimeline
+        canEdit={capabilities?.rewind === true && usable}
+        older={olderState(pane, props.olderFailed)}
+        onEdit={props.onEdit}
+        onLoadOlder={props.onLoadOlder}
+        onRetryOlder={props.onRetryOlder}
+        rows={rows}
+        tail={voiceMode ? voice?.reply : undefined}
+      />
+
+      {pending ? (
+        <RequestDock
+          busy={props.busy || !usable}
+          folded={folded}
+          key={pending.requestId}
+          onAnswer={props.onAnswer}
+          onFold={() => setFoldedRequest(pending.requestId)}
+          onUnfold={() => {
+            setFoldedRequest("");
+            Keyboard.dismiss();
+          }}
+          request={pending}
+        />
+      ) : null}
+      {status ? <StatusLine status={status} /> : null}
 
       {voiceMode && voice ? (
         <>
@@ -141,12 +160,17 @@ export function ChatView(props: ChatViewProps) {
           editing={props.editing !== undefined}
           onCancelEdit={props.onCancelEdit}
           onDraft={props.onDraft}
+          // Room to read and type: the request folds to its one line.
+          onFocus={() => {
+            if (pending) setFoldedRequest(pending.requestId);
+          }}
           onMic={() => props.onVoiceMode(true)}
           onPickCommand={props.onPickCommand}
           onSend={props.onSend}
           onStop={props.onStop}
           sending={props.busy}
           sideQuestion={props.editing === undefined && sideQuestion(pane?.catalog, props.draft) !== undefined}
+          stopping={props.stopping}
           waiting={pending !== undefined}
           working={working}
         />
@@ -198,6 +222,4 @@ const styles = StyleSheet.create({
   bannerText: { color: colors.chromeInk, flex: 1, fontSize: typeScale.rowSecondary, lineHeight: 18 },
   bannerButton: { justifyContent: "center", minHeight: 44, paddingHorizontal: 4 },
   bannerAction: { color: colors.accent, fontSize: typeScale.rowSecondary, fontWeight: "600" },
-  list: { flex: 1 },
-  listContent: { flexGrow: 1, gap: 12, paddingHorizontal: 12, paddingVertical: 12 },
 });

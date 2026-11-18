@@ -6,7 +6,7 @@ import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-re
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useStore } from "zustand";
 
-import type { ChatCommand, ChatItem, ChatOptionsSchema } from "../../protocol/gen/chat_pb";
+import { ChatTurnState, type ChatCommand, type ChatItem, type ChatOptionsSchema } from "../../protocol/gen/chat_pb";
 import { toRouteParam } from "../../navigation/routeParams";
 import { toast } from "../../session/connectionManager";
 import { colors } from "../../ui/tokens";
@@ -15,7 +15,7 @@ import { agentForPane, agentTitle } from "../agents/agentViews";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { notificationAttention } from "../notifications/attention";
 import { waitForPane } from "../terminal/WorkspaceActionsSheet";
-import { sideQuestion, slashMatches, withPickedCommand } from "./chatModel";
+import { sideQuestion, slashMatches, turnOf, withPickedCommand } from "./chatModel";
 import { chatClient, chatStore, setVoiceMode } from "./chatRuntime";
 import { refusalText } from "./refusals";
 import { ChatView } from "./ui/ChatView";
@@ -23,6 +23,8 @@ import type { PendingAnswer } from "./ui/PendingCard";
 import { useChatVoice } from "./useChatVoice";
 
 const FORK_PANE_WAIT_MS = 3_000;
+/** A Stop the host has not answered, with the turn still working, is Stop again after this long. */
+const STOP_WAIT_MS = 10_000;
 
 export interface ChatScreenProps {
   paneId: string;
@@ -138,6 +140,48 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   }, []);
   const retry = useCallback(() => chatClient.retry(paneId), [paneId]);
 
+  // Stop shows at once, until the turn stops working, the host refuses, the
+  // connection goes, or no answer comes.
+  const [stopping, setStopping] = useState(false);
+  const working = turnOf(pane) === ChatTurnState.WORKING;
+  useEffect(() => {
+    if (!working || !connected) setStopping(false);
+  }, [connected, working]);
+  useEffect(() => {
+    if (!stopping) return undefined;
+    const timer = setTimeout(() => setStopping(false), STOP_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [stopping]);
+  const stop = useCallback(() => {
+    // A press the host has not answered yet is not sent twice.
+    if (stopping) return;
+    setStopping(true);
+    void run(async () => {
+      try {
+        await chatClient.interrupt(paneId);
+      } catch (error) {
+        setStopping(false);
+        throw error;
+      }
+    });
+  }, [paneId, run, stopping]);
+
+  // Earlier messages load by themselves, so a failure is said in the
+  // conversation, where Retry is, and as a toast only when Retry was pressed.
+  // A fresh snapshot starts over.
+  const [olderFailed, setOlderFailed] = useState(false);
+  const snapshotSeq = pane?.snapshotSeq;
+  useEffect(() => setOlderFailed(false), [paneId, snapshotSeq]);
+  const loadOlder = useCallback((asked: boolean) => {
+    setOlderFailed(false);
+    chatClient.loadOlder(paneId).catch((error: unknown) => {
+      setOlderFailed(true);
+      if (asked) toast(refusalText(error));
+    });
+  }, [paneId]);
+  const loadOlderOnReach = useCallback(() => loadOlder(false), [loadOlder]);
+  const retryOlder = useCallback(() => loadOlder(true), [loadOlder]);
+
   return (
     <Animated.View style={[styles.root, { paddingTop: insets.top }, keyboardPadding]}>
       <ConnectionStrip />
@@ -156,14 +200,17 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
         onDetails={setDetailsOpen}
         onDraft={setDraft}
         onEdit={edit}
-        onLoadOlder={() => void chatClient.loadOlder(paneId).catch((error: unknown) => toast(refusalText(error)))}
+        olderFailed={olderFailed}
+        onLoadOlder={loadOlderOnReach}
         onPickCommand={pickCommand}
         onRetry={retry}
+        onRetryOlder={retryOlder}
         onSend={send}
         onSetOptions={setOptions}
-        onStop={() => void run(() => chatClient.interrupt(paneId))}
+        onStop={stop}
         onVoiceMode={(on) => setVoiceMode(paneId, on)}
         pane={pane}
+        stopping={stopping}
         title={title}
         voice={voice}
         voiceMode={voiceMode}

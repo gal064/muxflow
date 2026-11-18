@@ -3,7 +3,7 @@
 // render as elements named after the component, with their props, so a test
 // can find them and call their handlers; `renderHtml` draws the same tree.
 
-import { createElement, forwardRef, useImperativeHandle, type ReactNode } from "react";
+import { createElement, forwardRef, Fragment, isValidElement, useImperativeHandle, type ComponentType, type ReactNode } from "react";
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
@@ -24,6 +24,38 @@ export const ActivityIndicator = host("ActivityIndicator");
 export const Switch = host("Switch");
 export const Image = host("Image");
 export const KeyboardAvoidingView = host("View");
+
+/**
+ * A FlatList draws every row, in the order the screen shows them: an inverted
+ * list's first row is the last one on screen, its header under that and its
+ * footer on top. A test fires `onScroll` and `onEndReached` from the element's
+ * props. `scrollToOffset` reports the offset it went to through `onScroll`, as
+ * the real list does once it has scrolled.
+ */
+export const FlatList = forwardRef<unknown, Props>(function FlatList(props, ref) {
+  const { data, renderItem, keyExtractor, ListHeaderComponent, ListFooterComponent, ...rest } = props as Props & {
+    data?: readonly unknown[] | null;
+    renderItem: (info: { item: unknown; index: number }) => ReactNode;
+    keyExtractor?: (item: unknown, index: number) => string;
+    ListHeaderComponent?: ComponentType | ReactNode;
+    ListFooterComponent?: ComponentType | ReactNode;
+  };
+  useImperativeHandle(ref, () => ({
+    scrollToEnd() {},
+    scrollToIndex() {},
+    scrollToOffset({ offset }: { offset: number }) {
+      (rest.onScroll as ((event: unknown) => void) | undefined)?.({
+        nativeEvent: { contentOffset: { x: 0, y: offset }, contentSize: { height: 0, width: 0 }, layoutMeasurement: { height: 0, width: 0 } },
+      });
+    },
+  }));
+  const part = (value: ComponentType | ReactNode, key: string) =>
+    value === null || value === undefined || isValidElement(value) ? createElement(Fragment, { key }, value as ReactNode) : createElement(value as ComponentType, { key });
+  const cells = (data ?? []).map((item, index) => createElement(Fragment, { key: keyExtractor ? keyExtractor(item, index) : String(index) }, renderItem({ item, index })));
+  const header = part(ListHeaderComponent, "$header");
+  const footer = part(ListFooterComponent, "$footer");
+  return createElement("FlatList", rest, rest.inverted ? [footer, ...cells.reverse(), header] : [header, ...cells, footer]);
+});
 
 /** Resolves `style` and `children` given as functions of the press state, as React Native does. */
 export const Pressable = forwardRef<unknown, Props>(function Pressable(props, _ref) {
@@ -78,6 +110,7 @@ export const Linking = { openURL: async () => undefined };
 export const Alert = { alert() {} };
 export const ToastAndroid = { show() {}, SHORT: 0, LONG: 1 };
 export const Dimensions = { get: () => ({ width: 360, height: 780, scale: 3, fontScale: 1 }), addEventListener: () => subscription };
+export const PixelRatio = { get: () => 3, getFontScale: () => 1, roundToNearestPixel: (size: number) => size };
 export function useWindowDimensions() {
   return { width: 360, height: 780, scale: 3, fontScale: 1 };
 }

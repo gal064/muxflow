@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { ChatRequestKind, type ChatPendingRequest, type ChatQuestion } from "../../../protocol/gen/chat_pb";
 import { colors, fonts, typeScale } from "../../../ui/tokens";
+import { ChevronDownIcon } from "./ChatIcons";
 
 /** What the user chose for one question. */
 export interface QuestionChoice {
@@ -22,36 +23,57 @@ export interface PendingCardProps {
   /** An answer is on its way; the buttons wait for it. */
   busy: boolean;
   onAnswer: (answer: PendingAnswer) => void;
+  /** Folds the card away; absent, its header has no arrow. */
+  onFold?: (() => void) | undefined;
 }
 
-/** The request the agent stopped on, as a card at the end of the conversation. */
-export function PendingCard({ request, busy, onAnswer }: PendingCardProps) {
-  if (request.kind === ChatRequestKind.QUESTION && request.questions.length > 0) {
-    return <QuestionCard busy={busy} key={request.requestId} onAnswer={onAnswer} request={request} />;
+/** Whether the request is a question the card asks, rather than a permission it grants. */
+export function isQuestion(request: ChatPendingRequest): boolean {
+  return request.kind === ChatRequestKind.QUESTION && request.questions.length > 0;
+}
+
+/**
+ * The request the agent stopped on, as a card: a header that stays, and a
+ * body that scrolls inside the card when the card is given less room than it
+ * needs.
+ */
+export function PendingCard({ request, busy, onAnswer, onFold }: PendingCardProps) {
+  if (isQuestion(request)) {
+    return <QuestionCard busy={busy} key={request.requestId} onAnswer={onAnswer} onFold={onFold} request={request} />;
   }
-  return <PermissionCard busy={busy} onAnswer={onAnswer} request={request} />;
+  return <PermissionCard busy={busy} onAnswer={onAnswer} onFold={onFold} request={request} />;
+}
+
+/** The header's arrow. Its drawing is small, so the touch target reaches past it. */
+function FoldButton({ onFold }: { onFold: () => void }) {
+  return (
+    <Pressable accessibilityLabel="Collapse request" accessibilityRole="button" hitSlop={12} onPress={onFold} style={({ pressed }) => [styles.fold, pressed && styles.pressed]}>
+      <ChevronDownIcon color={colors.chromeFaint} size={18} />
+    </Pressable>
+  );
 }
 
 /** Auto mode declined to decide: a plain Allow / Deny so the turn does not hang. */
-function PermissionCard({ request, busy, onAnswer }: PendingCardProps) {
+function PermissionCard({ request, busy, onAnswer, onFold }: PendingCardProps) {
   return (
     <View accessibilityLabel={`${request.title || "Permission request"}${request.detail ? `: ${request.detail}` : ""}, waiting for you`} style={[styles.card, styles.askCard]}>
       <View style={[styles.head, styles.askHead]}>
-        <Text style={styles.headTitle}>{request.title || "Allow this action?"}</Text>
+        <Text style={[styles.headTitle, styles.flex]}>{request.title || "Allow this action?"}</Text>
+        {onFold ? <FoldButton onFold={onFold} /> : null}
       </View>
-      <View style={styles.body}>
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled" style={styles.scroll}>
         {request.detail ? <Text selectable style={styles.command}>{request.detail}</Text> : null}
         <View style={styles.buttons}>
           <CardButton disabled={busy} label="Allow" onPress={() => onAnswer({ kind: "permission", allow: true })} primary />
           <CardButton disabled={busy} label="Deny" onPress={() => onAnswer({ kind: "permission", allow: false })} />
         </View>
-      </View>
+      </ScrollView>
     </View>
   );
 }
 
 /** One question at a time, "1 of 2"; Submit answers them all together. */
-function QuestionCard({ request, busy, onAnswer }: PendingCardProps) {
+function QuestionCard({ request, busy, onAnswer, onFold }: PendingCardProps) {
   const questions = request.questions;
   const [step, setStep] = useState(0);
   const [choices, setChoices] = useState<QuestionChoice[]>(() => questions.map(() => ({ optionIds: [], other: "", otherOn: false })));
@@ -82,8 +104,9 @@ function QuestionCard({ request, busy, onAnswer }: PendingCardProps) {
       <View style={styles.head}>
         <Text style={[styles.headTitle, styles.flex]}>{question.prompt || question.header || request.title}</Text>
         {questions.length > 1 ? <Text style={styles.headNote}>{step + 1} of {questions.length}</Text> : null}
+        {onFold ? <FoldButton onFold={onFold} /> : null}
       </View>
-      <View style={styles.body}>
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled" style={styles.scroll}>
         {question.multiSelect ? <Text style={styles.hint}>Choose any that apply.</Text> : null}
         {question.options.map((option) => (
           <OptionRow
@@ -119,7 +142,7 @@ function QuestionCard({ request, busy, onAnswer }: PendingCardProps) {
           {step > 0 ? <CardButton disabled={busy} label="Back" onPress={() => setStep(step - 1)} /> : null}
           <CardButton disabled={busy} ghost label="Skip" onPress={() => onAnswer({ kind: "skip" })} />
         </View>
-      </View>
+      </ScrollView>
     </View>
   );
 }
@@ -165,7 +188,10 @@ function CardButton({ label, onPress, disabled, primary, ghost }: { label: strin
 
 const styles = StyleSheet.create({
   flex: { flex: 1, minWidth: 0 },
-  card: { backgroundColor: colors.chromeBg, borderColor: colors.chromeBorder, borderRadius: 9, borderWidth: 1, overflow: "hidden" },
+  // Shrinks to the room it is given; the body scrolls then.
+  card: { backgroundColor: colors.chromeBg, borderColor: colors.chromeBorder, borderRadius: 9, borderWidth: 1, flexShrink: 1, overflow: "hidden" },
+  scroll: { flexGrow: 0, flexShrink: 1 },
+  fold: { alignItems: "center", height: 28, justifyContent: "center", width: 28 },
   askCard: { borderColor: colors.danger },
   head: { alignItems: "center", borderBottomColor: colors.chromeHairline, borderBottomWidth: 1, flexDirection: "row", gap: 8, paddingHorizontal: 12, paddingVertical: 8 },
   askHead: { backgroundColor: colors.dangerWash },
