@@ -256,6 +256,13 @@ release-gate item for M7, not a shipping path today.
   Rejected: changing the arrow chip bytes (§9.5 fixes them; the scratch
   host's bash has no readline, so `[A` echoes are expected), a chip-row
   separator, and overflow/tone nits.
+- **Slash text is keys, and key chips flush the field first.** A paste does
+  not trigger the pi agent's slash autocomplete; pasting `/` and then sending
+  `0d` submitted `/` as a normal message and closed the menu. Send now sends
+  `/`-prefixed text as keys with no `0d`, leaving the menu open for `Tab`,
+  `↑`/`↓`, or `Enter`. A chip also sends the field before its bytes, so `cd re`
+  plus Tab reaches the editor as `cd re` first; otherwise Tab acted on an empty
+  line. `⇧` sends nothing, so it leaves the field pending.
 - **A pane absent from a loaded topology is "gone".** New terminal waits
   (≤ 3 s) for the created pane to reach the store before navigating, so an
   absent pane on the Terminal screen is conclusive, including for retained

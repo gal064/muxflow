@@ -617,10 +617,13 @@ For one pane displayed on the Terminal screen (§9.5):
    most once per `TAKE_INTERVAL_MS` (2 s).
 
 Input: `terminalInput(paneId, bytes)` per §9.5. Never coalesce input with
-a delay; send each tap immediately. The one deliberate gap is Send's: the
-text goes as a paste, and the CR that submits it follows as keys
-`SUBMIT_DELAY_MS` (100 ms) after the paste is acknowledged, so a composer
+a delay; send each tap immediately. Send's only deliberate gap is the CR: text
+that does not start with `/` goes as a paste, and the CR that submits it follows
+as keys `SUBMIT_DELAY_MS` (100 ms) after the paste is acknowledged, so a composer
 that reads an Enter inside a fast burst as a newline sees the CR alone.
+Slash-prefixed text goes as keys with no following CR, so the agent's slash
+autocomplete stays open. A key chip first sends any text still in the field
+(slash as keys, other text as a paste), then the chip's bytes.
 
 ### 7.6.1 Scrollback paging
 
@@ -1136,21 +1139,27 @@ The one screen without the standard app bar. Layout:
    | `y` | `79` | `79` |
    | `n` | `6e` | `6e` |
 
-   Each tap calls `terminalInput(paneId, bytes)` once (`pressChip` in
-   `chips.ts` picks the bytes). `⇧` is a one-shot modifier: while armed it is
+   Each tap delivers the chip's bytes after any text still in the field: the
+   field is sent first as keys when it starts with `/` (so the agent's slash
+   menu opens) and as one paste otherwise, then the chip (`onChip` in
+   `TerminalScreen.tsx`, `flushText` in `TerminalController`). `pressChip` in
+   `chips.ts` picks the bytes. `⇧` is a one-shot modifier: while armed it is
    drawn as a font-metric-independent SVG in `--accent` with `--accent-ink` and
    `accessibilityState.selected`; the next chip (or Send) disarms it, and a
-   chip without a shifted form sends its plain bytes.
+   chip without a shifted form sends its plain bytes. `⇧` sends nothing and
+   leaves the field pending.
 4. **Input bar** (56 dp): a single-line text field, placeholder
    `"Type, then Send"`, and a `Send` button (`--accent`). The field is
    plain text: pasting text works, pasting an image or file is ignored
    (Android `contentMimeTypes` left unset; `onReceiveContent` not
    implemented), and the app is not registered as a share target. Send clears
-   the field, sends its UTF-8 bytes as one `terminalInput(paneId, bytes,
-   { paste: true })`, waits 100 ms after the acknowledgement, then sends `0d`
-   as keys (`TerminalController.submitText`). A refused paste sends no `0d`.
-   The keyboard's return key is labelled Send and does the same. Empty text +
-   Send sends just `0d`, with no delay.
+   the field. Text starting with `/` is sent as keys (no paste), and no `0d`
+   follows, so the agent's slash autocomplete stays open; `Tab`, `↑`/`↓`, or
+   `Enter` chips then choose and submit a command. Other text is sent as one
+   `terminalInput(paneId, bytes, { paste: true })`, waits 100 ms after the
+   acknowledgement, then sends `0d` as keys (`TerminalController.submitText`).
+   A refused paste sends no `0d`. The keyboard's return key is labelled Send
+   and does the same. Empty text + Send sends just `0d`, with no delay.
 
 States (shown as a centred overlay on the terminal area, 14 sp `--chrome-dim`):
 

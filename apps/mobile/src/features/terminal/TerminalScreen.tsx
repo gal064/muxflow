@@ -209,14 +209,6 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
     }
   }, [openTerminalFile]);
 
-  const send = useCallback((bytes: Uint8Array) => {
-    const instance = controller.current;
-    if (!instance) return;
-    instance.sendInput(bytes).catch(toastError);
-  }, []);
-
-  // Clear the field before the submit round trip so a second Send cannot
-  // resend the same text; the controller pastes the body, then sends the CR.
   const sendText = useCallback(() => {
     const instance = controller.current;
     if (!instance) return;
@@ -226,11 +218,23 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
     instance.submitText(body).catch(toastError);
   }, [text]);
 
+  // A chip before any text is a key after that text: deliver the field first,
+  // then the chip. Slash text opens the agent's menu so Tab/arrows/Enter can
+  // choose a command.
   const onChip = useCallback((chip: (typeof KEY_CHIPS)[number]) => {
+    const instance = controller.current;
+    if (!instance) return;
     const press = pressChip(chip, shiftArmed);
     setShiftArmed(press.shiftArmed);
-    if (press.send) send(press.send);
-  }, [send, shiftArmed]);
+    if (!press.send) return;
+    const bytes = press.send;
+    const body = text;
+    if (body) setText("");
+    const run = body
+      ? instance.flushText(body).then(() => instance.sendInput(bytes))
+      : instance.sendInput(bytes);
+    run.catch(toastError);
+  }, [shiftArmed, text]);
 
   useEffect(() => {
     if (snapshot.lastError) toast(snapshot.lastError);
