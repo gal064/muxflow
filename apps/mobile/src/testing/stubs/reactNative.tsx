@@ -25,6 +25,9 @@ export const Switch = host("Switch");
 export const Image = host("Image");
 export const KeyboardAvoidingView = host("View");
 
+/** Every `scrollToOffset` a list was sent, oldest first. A test empties it and reads what its own steps sent. */
+export const flatListScrolls: { offset: number; animated: boolean }[] = [];
+
 /**
  * A FlatList draws every row, in the order the screen shows them: an inverted
  * list's first row is the last one on screen, its header under that and its
@@ -43,7 +46,8 @@ export const FlatList = forwardRef<unknown, Props>(function FlatList(props, ref)
   useImperativeHandle(ref, () => ({
     scrollToEnd() {},
     scrollToIndex() {},
-    scrollToOffset({ offset }: { offset: number }) {
+    scrollToOffset({ offset, animated }: { offset: number; animated?: boolean }) {
+      flatListScrolls.push({ offset, animated: animated ?? true });
       (rest.onScroll as ((event: unknown) => void) | undefined)?.({
         nativeEvent: { contentOffset: { x: 0, y: offset }, contentSize: { height: 0, width: 0 }, layoutMeasurement: { height: 0, width: 0 } },
       });
@@ -107,6 +111,25 @@ export const AccessibilityInfo = {
 };
 export const Keyboard = { addListener: () => subscription, dismiss() {}, isVisible: () => false, metrics: () => undefined };
 export const Linking = { openURL: async () => undefined };
+
+const backListeners: (() => boolean | null | undefined)[] = [];
+/** The system Back button: `pressHardwareBack` is a press of it. */
+export const BackHandler = {
+  addEventListener(_event: "hardwareBackPress", listener: () => boolean | null | undefined) {
+    backListeners.push(listener);
+    return {
+      remove() {
+        const at = backListeners.indexOf(listener);
+        if (at >= 0) backListeners.splice(at, 1);
+      },
+    };
+  },
+};
+/** Asks the listeners newest first, as a device does, until one says it took the press. False: nothing did, and the screen would be left. */
+export function pressHardwareBack(): boolean {
+  for (const listener of [...backListeners].reverse()) if (listener() === true) return true;
+  return false;
+}
 export const Alert = { alert() {} };
 export const ToastAndroid = { show() {}, SHORT: 0, LONG: 1 };
 export const Dimensions = { get: () => ({ width: 360, height: 780, scale: 3, fontScale: 1 }), addEventListener: () => subscription };

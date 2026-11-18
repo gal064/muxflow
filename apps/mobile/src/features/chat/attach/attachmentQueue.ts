@@ -51,6 +51,15 @@ export interface AttachmentSource extends ByteSource {
   localUri?: string;
 }
 
+/** A file the host already holds: `ChatAttachment` as an item carries it, with its place on the phone when that is known. */
+export interface HostedFile {
+  path: string;
+  name: string;
+  mediaType: string;
+  sizeBytes: number;
+  localUri?: string;
+}
+
 /** One upload. The app binds `uploadFile` to its bulk connection; rejects with a sentence to show. */
 export type Uploader = (
   source: ByteSource,
@@ -96,6 +105,26 @@ export class AttachmentQueue {
     if (refusal === undefined) this.sources.set(entry.id, source);
     this.store.setState((state) => ({ entries: [...state.entries, entry] }));
     this.pump();
+    return { entry };
+  }
+
+  /**
+   * Adds a file that is already on the host, as the files of a message being
+   * edited are: nothing uploads, and it goes with the next send as it is.
+   */
+  addHosted(file: HostedFile): AddResult {
+    if (this.entries.length >= MAX_ATTACHMENTS) return { refused: TOO_MANY_ATTACHMENTS };
+    const entry: AttachmentEntry = {
+      id: `attachment-${this.nextId++}`,
+      name: file.name,
+      sizeBytes: file.sizeBytes,
+      mediaType: file.mediaType || mediaTypeForName(file.name),
+      ...(file.localUri === undefined ? {} : { localUri: file.localUri }),
+      status: "ready",
+      sentBytes: file.sizeBytes,
+      hostPath: file.path,
+    };
+    this.store.setState((state) => ({ entries: [...state.entries, entry] }));
     return { entry };
   }
 

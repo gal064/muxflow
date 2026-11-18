@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type TextStyle } from "react-native";
 
 import { externalLinkTarget } from "../../../ui/externalLinks";
@@ -19,7 +19,16 @@ export type ChatMarkdownProps = {
   source: string;
   /** The reply is still being written: `source` will grow. */
   streaming?: boolean;
+  /**
+   * Whether a hold on the text selects it, which it does unless told
+   * otherwise. Off where a hold on the reply means something else: the two
+   * would both answer the same touch.
+   */
+  selectable?: boolean;
 };
+
+/** Whether the text of the reply being drawn can be selected in place. */
+const Selectable = createContext(true);
 
 /** How long the copy button reads "Copied". */
 const COPIED_MS = 1500;
@@ -75,6 +84,7 @@ function CopyButton({ text }: { text: string }) {
 /** Code in a box: its language and a copy button on top, lines that scroll sideways instead of wrapping. */
 function CodeBlock({ block, tail }: { block: ChatCodeBlock; tail: boolean }) {
   const text = tail ? streamingCodeText(block) : block.text;
+  const selectable = useContext(Selectable);
   return (
     <View style={styles.code}>
       <View style={styles.codeTop}>
@@ -82,7 +92,7 @@ function CodeBlock({ block, tail }: { block: ChatCodeBlock; tail: boolean }) {
         <CopyButton text={text} />
       </View>
       <ScrollView contentContainerStyle={styles.codeScroll} horizontal>
-        <Text selectable style={styles.codeText}>{text}</Text>
+        <Text selectable={selectable} style={styles.codeText}>{text}</Text>
       </ScrollView>
     </View>
   );
@@ -95,6 +105,7 @@ function CodeBlock({ block, tail }: { block: ChatCodeBlock; tail: boolean }) {
  */
 function Table({ block, dim }: { block: ChatTableBlock; dim: boolean }) {
   const { fontScale } = useWindowDimensions();
+  const selectable = useContext(Selectable);
   const widths = block.chars.map((chars) => columnWidth(chars, fontScale));
   const row = (cells: ChatInline[][], key: number, header: boolean, last: boolean) => (
     <View key={key} style={[styles.tableRow, header && styles.tableHeader, last && styles.tableLastRow]}>
@@ -103,7 +114,7 @@ function Table({ block, dim }: { block: ChatTableBlock; dim: boolean }) {
         return (
           <Text
             key={column}
-            selectable
+            selectable={selectable}
             style={[styles.tableCell, header ? styles.tableHeaderCell : dim && styles.dim, { flexGrow: width, textAlign: block.align[column] ?? "left", width }]}
           >
             <Runs content={cell} dim={dim && !header} />
@@ -155,12 +166,13 @@ function List({ block, dim, tail }: { block: Extract<ChatBlock, { kind: "list" }
 }
 
 const Block = memo(function Block({ block, dim, tail }: { block: ChatBlock; dim: boolean; tail: boolean }) {
+  const selectable = useContext(Selectable);
   switch (block.kind) {
     case "paragraph":
-      return <Text selectable style={[styles.body, dim && styles.dim]}><Runs content={block.content} dim={dim} /></Text>;
+      return <Text selectable={selectable} style={[styles.body, dim && styles.dim]}><Runs content={block.content} dim={dim} /></Text>;
     case "heading":
       return (
-        <Text accessibilityRole="header" selectable style={[block.level === 1 ? styles.heading1 : block.level === 2 ? styles.heading2 : styles.heading3, dim && styles.dim]}>
+        <Text accessibilityRole="header" selectable={selectable} style={[block.level === 1 ? styles.heading1 : block.level === 2 ? styles.heading2 : styles.heading3, dim && styles.dim]}>
           <Runs content={block.content} dim={dim} />
         </Text>
       );
@@ -188,9 +200,13 @@ function Blocks({ blocks, dim, tail }: { blocks: ChatBlock[]; dim: boolean; tail
  * and kept by `source` (see `parseChatMarkdown`), and a block whose source
  * did not change is not rendered again, so a long reply can grow line by line.
  */
-export const ChatMarkdown = memo(function ChatMarkdown({ source, streaming = false }: ChatMarkdownProps) {
+export const ChatMarkdown = memo(function ChatMarkdown({ source, streaming = false, selectable = true }: ChatMarkdownProps) {
   const blocks = useMemo(() => parseChatMarkdown(source), [source]);
-  return <View style={styles.root}><Blocks blocks={blocks} dim={false} tail={streaming} /></View>;
+  return (
+    <Selectable.Provider value={selectable}>
+      <View style={styles.root}><Blocks blocks={blocks} dim={false} tail={streaming} /></View>
+    </Selectable.Provider>
+  );
 });
 
 const COPY_HEIGHT = 30;

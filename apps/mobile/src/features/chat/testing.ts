@@ -39,7 +39,7 @@ const START = 1_767_225_600_000;
 export function catalog(overrides: MessageInitShape<typeof ChatCatalogSchema> = {}): ChatCatalog {
   const command = (name: string, description: string, argumentHint: string, kind: ChatCommandKind) => ({ name, description, argumentHint, kind });
   return create(ChatCatalogSchema, {
-    capabilities: { rewind: true, sendMidTurn: true, model: true, effort: true, speed: true, permission: true, fork: true, questions: true },
+    capabilities: { rewind: true, sendMidTurn: true, model: true, effort: true, speed: true, permission: true, fork: true, questions: true, attachments: true },
     models: [
       { id: "opus-5-5", label: "Opus 5.5", efforts: ["low", "medium", "high", "xhigh", "max"], supportsFast: true },
       { id: "fable-5-2", label: "Fable 5.2", efforts: ["low", "medium", "high"], supportsFast: false },

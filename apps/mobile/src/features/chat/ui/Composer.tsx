@@ -1,9 +1,12 @@
+import type { ReactNode, Ref } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import type { ChatCommand } from "../../../protocol/gen/chat_pb";
 import { ArrowUpIcon, MicIcon } from "../../../ui/components/MediaIcons";
 import { colors, fixedChromeText, fonts, typeScale } from "../../../ui/tokens";
+import { filesRefusal, type FilesState } from "../attach/attachState";
 import type { CommandGroup } from "../chatModel";
+import { PlusIcon } from "./AttachIcons";
 
 export interface ComposerProps {
   draft: string;
@@ -30,17 +33,39 @@ export interface ComposerProps {
   stopping?: boolean;
   /** The field took the focus. */
   onFocus?: (() => void) | undefined;
+  /** The field itself, for whoever has to focus it: starting an edit does. */
+  inputRef?: Ref<TextInput> | undefined;
   /** Turns voice mode on. Absent hides the button. */
   onMic?: (() => void) | undefined;
+  /** Attaching files. Absent hides the plus button: the agent takes none. */
+  attach?: ComposerAttach | undefined;
+}
+
+export interface ComposerAttach {
+  /** The plus button was pressed. */
+  onOpen: () => void;
+  /** The chips of the files waiting to go, drawn in the box above the field. */
+  strip: ReactNode;
+  /** Whether those files can go. Send waits while one uploads, and after one failed. */
+  files: FilesState;
 }
 
 /** The reply field: text, the mic, and Send, which is Stop while the agent works. */
 export function Composer(props: ComposerProps) {
   const { draft, onDraft, commands, onPickCommand, working, canSendMidTurn, waiting, sideQuestion, disabled, sending, editing, onCancelEdit, onSend, onStop, stopping = false, onFocus, onMic } = props;
   const hasText = draft.trim() !== "";
-  const showSend = !working || ((canSendMidTurn || sideQuestion) && hasText) || editing;
+  const attach = props.attach;
+  // A side question goes alone: the files wait for the next message.
+  const files = attach && !sideQuestion ? attach.files : "none";
+  // Files are a message too, with or without text.
+  const hasMessage = hasText || files !== "none";
+  // Still on their way, or one that failed: the message they go with waits.
+  const filesHeld = filesRefusal(files);
+  const showSend = !working || ((canSendMidTurn || sideQuestion) && hasMessage) || editing;
   const blocked = waiting && !canSendMidTurn;
-  const sendDisabled = disabled || sending || (blocked && !sideQuestion) || !hasText;
+  const sendDisabled = disabled || sending || (blocked && !sideQuestion) || !hasMessage || filesHeld !== undefined;
+  // Nothing to send yet, or not all of it on the host yet.
+  const sendPlain = !hasMessage || files === "uploading";
   const placeholder = blocked ? "Answer the card above" : working && canSendMidTurn ? "Send a follow-up while it works" : "Reply";
   return (
     <View style={styles.wrap}>
@@ -54,7 +79,13 @@ export function Composer(props: ComposerProps) {
             </Pressable>
           </View>
         ) : null}
-        <View style={styles.row}>
+        {attach ? attach.strip : null}
+        <View style={[styles.row, attach && styles.rowAttach]}>
+          {attach ? (
+            <Pressable accessibilityHint="Photos and files" accessibilityLabel="Attach" accessibilityRole="button" disabled={disabled} hitSlop={6} onPress={attach.onOpen} style={({ pressed }) => [styles.mic, pressed && styles.pressed]}>
+              <PlusIcon color={colors.chromeDim} size={18} />
+            </Pressable>
+          ) : null}
           <TextInput
             accessibilityLabel="Message"
             editable={!disabled}
@@ -63,6 +94,7 @@ export function Composer(props: ComposerProps) {
             onFocus={onFocus}
             placeholder={placeholder}
             placeholderTextColor={colors.chromeFaint}
+            ref={props.inputRef}
             style={styles.input}
             value={draft}
           />
@@ -86,16 +118,17 @@ export function Composer(props: ComposerProps) {
           ) : null}
           {showSend ? (
             <Pressable
+              accessibilityHint={filesHeld}
               accessibilityLabel="Send"
               accessibilityRole="button"
               accessibilityState={{ disabled: sendDisabled }}
               disabled={sendDisabled}
               hitSlop={6}
               onPress={onSend}
-              // Nothing typed is a plain grey button; any other reason it is off dims it.
-              style={({ pressed }) => [styles.send, hasText ? sendDisabled && styles.disabled : styles.sendEmpty, pressed && styles.pressed]}
+              // Nothing typed is a plain grey button, and so is one that waits for a file to upload; any other reason it is off dims it.
+              style={({ pressed }) => [styles.send, sendPlain ? styles.sendEmpty : sendDisabled && styles.disabled, pressed && styles.pressed]}
             >
-              <ArrowUpIcon color={hasText ? colors.accentInk : colors.chromeFaint} size={18} />
+              <ArrowUpIcon color={sendPlain ? colors.chromeFaint : colors.accentInk} size={18} />
             </Pressable>
           ) : null}
         </View>
@@ -137,6 +170,8 @@ const styles = StyleSheet.create({
   wrap: { paddingBottom: 12, paddingHorizontal: 10 },
   box: { backgroundColor: colors.chromeBg, borderColor: colors.chromeBorder, borderRadius: 16, borderWidth: 1, overflow: "hidden" },
   row: { alignItems: "flex-end", flexDirection: "row", gap: 8, paddingBottom: 7, paddingLeft: 12, paddingRight: 8, paddingTop: 7 },
+  // The plus button sits as far from its edge as Send does from the other.
+  rowAttach: { paddingLeft: 8 },
   input: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.body, maxHeight: 140, minHeight: 34, paddingBottom: 6, paddingTop: 6 },
   mic: { alignItems: "center", borderColor: colors.chromeBorder, borderRadius: 17, borderWidth: 1, height: 34, justifyContent: "center", width: 34 },
   send: { alignItems: "center", backgroundColor: colors.accent, borderRadius: 9, height: 34, justifyContent: "center", width: 34 },

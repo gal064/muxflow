@@ -12,6 +12,7 @@ import { HostError } from "../../protocol/HostConnection";
 import {
   chatAnswer,
   chatClose,
+  chatFork,
   chatInterrupt,
   chatLoadOlder,
   chatOpen,
@@ -22,7 +23,7 @@ import {
   chatStopTask,
   type ChatTarget,
 } from "../../protocol/requests";
-import { applyChatEvent, applyOlderPage, newChatPane, newClientMessageId, type ChatPane, type OlderPage, type OutgoingMessage } from "./chatModel";
+import { applyChatEvent, applyOlderPage, newChatPane, newClientMessageId, type ChatPane, type OlderPage, type OutgoingAttachment, type OutgoingMessage } from "./chatModel";
 
 export interface ChatStoreState {
   panes: Record<string, ChatPane>;
@@ -265,22 +266,25 @@ export class ChatClient {
    * Sends `text`; it shows at once and is replaced by the host's own item. A
    * refusal throws and takes it off screen. A lost answer does not throw: the
    * message stays and is sent again, with the same id, after the next snapshot.
+   * `attachments` are files already in the host's upload folder; with any,
+   * `text` may be empty.
    */
-  async send(paneId: string, text: string): Promise<void> {
+  async send(paneId: string, text: string, attachments: readonly OutgoingAttachment[] = []): Promise<void> {
     const pane = this.requirePane(paneId);
     if (!this.live()) throw new Error("Not connected.");
     const id = newClientMessageId();
-    this.update(paneId, (held) => ({ ...held, outgoing: [...held.outgoing, { id, text, acked: false }] }));
-    await this.deliver(pane, id, text, true);
+    const message: OutgoingMessage = { id, text, acked: false, ...(attachments.length > 0 ? { attachments } : {}) };
+    this.update(paneId, (held) => ({ ...held, outgoing: [...held.outgoing, message] }));
+    await this.deliver(pane, id, text, true, attachments);
   }
 
   /** One SEND of an outgoing message. */
-  private async deliver(pane: ChatPane, id: string, text: string, first: boolean): Promise<void> {
+  private async deliver(pane: ChatPane, id: string, text: string, first: boolean, attachments: readonly OutgoingAttachment[] = []): Promise<void> {
     const paneId = pane.paneId;
     const mark = (change: (message: OutgoingMessage) => OutgoingMessage | undefined) =>
       this.update(paneId, (held) => ({ ...held, outgoing: held.outgoing.flatMap((message) => (message.id === id ? (change(message) ?? []) : [message])) }));
     try {
-      await this.request(chatSend(this.target(pane), text, id));
+      await this.request(chatSend(this.target(pane), text, id, attachments));
     } catch (error) {
       if (error instanceof HostError && error.code === "chat_message_duplicate") {
         // The first send of this id arrived; the answer to it was lost. Sent
@@ -323,14 +327,14 @@ export class ChatClient {
       if (!message.unsure) continue;
       this.update(paneId, (held) => ({ ...held, outgoing: held.outgoing.map((entry) => (entry.id === message.id ? { ...entry, unsure: false } : entry)) }));
       this.log(`chat.send.again pane=${paneId}`);
-      void this.deliver(pane, message.id, message.text, false);
+      void this.deliver(pane, message.id, message.text, false, message.attachments);
     }
   }
 
-  /** Edit-and-resend: drop the user message `itemId` and what follows, then send `text` in its place. */
-  async rewindAndSend(paneId: string, itemId: string, text: string): Promise<void> {
+  /** Edit-and-resend: drop the user message `itemId` and what follows, then send `text` in its place, with `attachments`. */
+  async rewindAndSend(paneId: string, itemId: string, text: string, attachments: readonly OutgoingAttachment[] = []): Promise<void> {
     await this.request(chatRewind(this.target(this.requirePane(paneId)), itemId));
-    await this.send(paneId, text);
+    await this.send(paneId, text, attachments);
   }
 
   async interrupt(paneId: string): Promise<void> {
@@ -348,6 +352,15 @@ export class ChatClient {
   /** `/btw` and `/side`: answers the pane the fork opened in. */
   async sideFork(paneId: string, question: string): Promise<string> {
     const response = await this.request(chatSideFork(this.target(this.requirePane(paneId)), question));
+    return response.chat?.forkedPaneId ?? "";
+  }
+
+  /**
+   * Fork from here: the conversation through the end of the turn `itemId` is
+   * in, as a new chat. Answers the pane the fork opened in; a refusal throws.
+   */
+  async fork(paneId: string, itemId: string): Promise<string> {
+    const response = await this.request(chatFork(this.target(this.requirePane(paneId)), itemId));
     return response.chat?.forkedPaneId ?? "";
   }
 
