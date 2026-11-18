@@ -194,6 +194,9 @@ importers:
       expo-system-ui:
         specifier: 57.0.2
         version: 57.0.2(expo@57.0.16)(react-native@0.86.2(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.86.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1))(supports-color@8.1.1)
+      marked:
+        specifier: 18.0.9
+        version: 18.0.9
       react:
         specifier: 19.2.3
         version: 19.2.3
@@ -258,9 +261,6 @@ importers:
       jsdom:
         specifier: 30.0.1
         version: 30.0.1
-      marked:
-        specifier: 18.0.9
-        version: 18.0.9
       react-test-renderer:
         specifier: 19.2.3
         version: 19.2.3(react@19.2.3)
