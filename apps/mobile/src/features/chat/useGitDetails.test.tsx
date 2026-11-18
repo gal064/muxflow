@@ -182,17 +182,6 @@ describe("one read of the Git details", () => {
     expect(gitRows(details)).toEqual({});
   });
 
-  it("keeps what a previous released host answers for HEAD, which the rows then leave out", async () => {
-    // That host ignores `summary_base` and answers both with the default-branch summary.
-    const host = repositoryHost();
-    host.answer(Operation.GIT_BRANCH_SUMMARY, () => summaryResponse("origin/main", 14, 412, 96));
-    const { details } = await read(host);
-    expect(details.uncommitted).toEqual({ status: "ready", value: { baseRef: "origin/main", files: 14n, added: 412n, removed: 96n } });
-    const rows = gitRows(details);
-    expect(rows.uncommitted).toBeUndefined();
-    expect(rows.changes?.title).toBe("Changes vs main");
-  });
-
   it("keeps the last counts on screen while the same root is read again", async () => {
     const host = repositoryHost();
     const first = await read(host);

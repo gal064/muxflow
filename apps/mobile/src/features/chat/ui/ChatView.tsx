@@ -71,6 +71,8 @@ export interface ChatViewProps {
   onDetails: (open: boolean) => void;
   onSetOptions: (options: MessageInitShape<typeof ChatOptionsSchema>) => void;
   voiceMode: boolean;
+  /** This screen is the one in front (absent: it is). Under another screen it does not take the system Back button. */
+  focused?: boolean | undefined;
   onVoiceMode: (on: boolean) => void;
   /** Voice mode only: the readiness card, the newest reply's player, and the bar that replaces the composer once voice is `ready` on the host. */
   voice?: { status: ReactNode; reply: ReactNode; bar: ReactNode; ready: boolean } | undefined;
@@ -125,6 +127,8 @@ export function ChatView(props: ChatViewProps) {
     onBack: props.onBack,
     onFork: props.onFork,
     forking: props.forking,
+    field: !(voiceMode && voice?.ready === true),
+    focused: props.focused,
   });
 
   return (
@@ -150,7 +154,7 @@ export function ChatView(props: ChatViewProps) {
       ) : null}
 
       <ChatTimeline
-        canEdit={capabilities?.rewind === true && usable}
+        canEdit={capabilities?.rewind === true && usable && !(voiceMode && voice?.ready === true)}
         // Another chat is another conversation: what was open in this one is not open in that.
         key={pane?.paneId ?? ""}
         messages={messages.timeline}

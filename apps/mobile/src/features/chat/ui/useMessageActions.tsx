@@ -42,6 +42,10 @@ export interface MessageActionsInput {
   onFork?: ((itemId: string) => Promise<boolean>) | undefined;
   /** The item whose fork is on its way, or "". */
   forking?: string | undefined;
+  /** The reply field is on screen. Without it (the voice bar took its place) no edit is offered: there is nowhere to make it. */
+  field?: boolean | undefined;
+  /** This screen is the one in front. Under another screen it leaves the system Back button to that one. */
+  focused?: boolean | undefined;
 }
 
 export interface MessageActions {
@@ -84,7 +88,7 @@ export function useMessageActions(input: MessageActionsInput): MessageActions {
   const turn = pane?.state?.turn ?? ChatTurnState.UNSPECIFIED;
   const sending = (pane?.outgoing.length ?? 0) > 0;
   const capabilities = pane?.catalog?.capabilities;
-  const canEdit = capabilities?.rewind === true && usable;
+  const canEdit = capabilities?.rewind === true && usable && input.field !== false;
   const canFork = capabilities?.fork === true && usable && input.onFork !== undefined;
 
   // The newest of everything, for the callbacks the rows keep.
@@ -129,15 +133,16 @@ export function useMessageActions(input: MessageActionsInput): MessageActions {
   }, [focusField]);
 
   const isEditing = editing !== undefined;
+  const focused = input.focused !== false;
   useEffect(() => {
-    if (!isEditing) return undefined;
+    if (!isEditing || !focused) return undefined;
     // Registered last, so asked first: the edit goes before the screen does.
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
       now.current.input.onCancelEdit();
       return true;
     });
     return () => subscription.remove();
-  }, [isEditing]);
+  }, [focused, isEditing]);
   const back = useCallback(() => {
     const { editing: edited, onCancelEdit, onBack } = now.current.input;
     if (edited) onCancelEdit();

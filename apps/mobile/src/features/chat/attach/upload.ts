@@ -58,7 +58,7 @@ export interface UploadLane {
 }
 
 export interface UploadFileOptions {
-  /** Opens the bulk connection this upload runs on, and closes when it ends. The app passes `openBulkConnection`. */
+  /** Opens the bulk connection this upload runs on, and closes when it ends. The app passes `openUploadConnection`, a lane of the upload's own. */
   openLane: () => Promise<UploadLane>;
   source: ByteSource;
   signal: AbortSignal;

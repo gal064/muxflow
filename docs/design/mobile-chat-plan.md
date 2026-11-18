@@ -284,8 +284,9 @@ Where the phone departs from the desktop, on purpose:
 
 ### Attachments (M6)
 
-- Upload is the terminal upload, on one bulk connection from start to end
-  (`openBulkConnection()`): `PREPARE_TERMINAL_UPLOAD` (`destination` and
+- Upload is the terminal upload, on one bulk connection of its own from start
+  to end (`openUploadConnection()`; the upload closes it, so it cannot be the
+  lane the file viewer shares): `PREPARE_TERMINAL_UPLOAD` (`destination` and
   `source_name` the file's name, `total_bytes`, `collision_policy` RENAME,
   transfer id a UUID in both `operation_id` and `transfer_id`), then
   `WRITE_TERMINAL_UPLOAD_CHUNK` with `offset`, `total_bytes` and at most 1 MiB
@@ -330,10 +331,18 @@ button only when it is set.
 | `CHAT_ACTION_FORK` | Refused with "Unknown chat action.", shown as a toast | — |
 | `CHAT_ACTION_STOP_TASK` | Never sent: that host lists no background task | — |
 | `ChatState.background`, `compacting`; `ChatTool` fields 11–15; `ChatItem.attachments` | Reads empty values: no chip, no figures, no attachment | Already ignored |
-| `GIT_BRANCH_SUMMARY`, `GIT_BRANCHES` | Both are older than the chat and answered. `summary_base` is ignored there, so the uncommitted read comes back as the default-branch one; the Uncommitted row is drawn only from an answer whose `base_ref` is "HEAD", and so is left out | — |
+| `GIT_BRANCH_SUMMARY` with `summary_base`, `GIT_BRANCHES`, `RESOLVE_ACTIVE_ROOT` | Not met: see below | — |
 | `RESOLVE_TERMINAL_FILE`, `OPEN_FILE_STREAM` for an image | Already used by the phone | — |
 
-No major bump: nothing breaks or misleads in either direction.
+The previous released host is v0.1.32, which is protocol major 4 and is
+refused at admission, so the middle column describes a host the phone never
+talks to. The v0.1.33 release candidates are major 5 and are not releases:
+against one of them Fork is offered and refused ("Unknown chat action."), and
+Uncommitted shows the default-branch counts, because that host ignores
+`summary_base`. The phone carries no check for either, as CLAUDE.md asks.
+
+No major bump: nothing breaks or misleads against a released build in either
+direction.
 
 ## 5. Verification
 

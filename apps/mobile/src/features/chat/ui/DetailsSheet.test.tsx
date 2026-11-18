@@ -99,13 +99,6 @@ describe("Details: where the chat runs", () => {
     writeRender("details-no-git", details(NOT_A_REPOSITORY, { folder: "/home/operator/notes/drafts" }).toJSON());
   });
 
-  it("a previous host's answer for HEAD is not the uncommitted work: that row is absent", () => {
-    // That host ignores `summary_base`, so both answers are the default-branch summary.
-    const view = details(repository({ uncommitted: summary("origin/main", 14, 412, 96) }));
-    expect(place(view)).toBe("Details devbox muxflow/apps/mobile gpui/chat Changes vs main +412 −96 14 files");
-    expect(allByLabel(view, /^Uncommitted/)).toHaveLength(0);
-  });
-
   it("a read in flight: … where the branch and the counts will be", () => {
     const view = details(repository({ branch: READING, changes: READING, uncommitted: READING }));
     expect(place(view)).toBe("Details devbox muxflow/apps/mobile … Changes … Uncommitted …");

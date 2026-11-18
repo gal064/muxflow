@@ -244,7 +244,7 @@ export function openUploadConnection(): Promise<HostConnection> {
   const connection = control;
   const host = controlHost;
   if (!factory || !connection || !host || connection.state !== "connected") {
-    return Promise.reject(new Error("not connected"));
+    return Promise.reject(new Error("The phone is not connected to the host."));
   }
   let unsubscribe = (): void => undefined;
   const { lane, store, ready } = dialBulkLane(factory, connection, host, "upload", (failed) => {
