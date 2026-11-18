@@ -25,12 +25,19 @@ import { newOperationId, openFileStream, type RootedPath } from "../../protocol/
  */
 export const MAX_CLIENT_FILE_BYTES = 2 * 1024 * 1024;
 
+/** The host streams an image's bytes up to this size (`MAX_IMAGE_BYTES`), and only its classification above it. */
+export const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
 export type FileBody =
   | { kind: "text"; bytes: Uint8Array; metadata: FileMetadata | undefined }
   /** Too large for the host (`FILE_CONTENT_KIND_TOO_LARGE`) or past the phone's own cap. */
   | { kind: "tooLarge"; size: bigint }
   | { kind: "binary" }
-  | { kind: "image" }
+  /**
+   * `bytes` and `metadata` only when the reader asked to keep images
+   * (`keepImages`) and the host streamed this one.
+   */
+  | { kind: "image"; bytes?: Uint8Array; metadata?: FileMetadata }
   /** `UNSPECIFIED`, a missing header, or text the host declined to stream. */
   | { kind: "unavailable" };
 
@@ -50,14 +57,25 @@ export class FileStreamError extends Error {
  * cuts them from one buffer in order down one connection. Checking the offset
  * is what turns "the right number of bytes arrived" into "every byte arrived".
  */
+export interface FileStreamOptions {
+  /**
+   * Keep the bytes of an image the host streams, for a caller that shows it.
+   * The file viewer leaves this off: it draws a placeholder and holds nothing.
+   */
+  keepImages?: boolean;
+}
+
 export class FileStreamAssembler {
   private header: FileStreamHeader | undefined;
   private buffer: Uint8Array | undefined;
   private received = 0;
   private draining = false;
   private sawEof = false;
+  private readonly keepImages: boolean;
 
-  constructor(private readonly operationId: string) {}
+  constructor(private readonly operationId: string, options: FileStreamOptions = {}) {
+    this.keepImages = options.keepImages === true;
+  }
 
   push(frame: FileStreamFrame): void {
     // §9.7 step 2: frames for a different operation are not this file's.
@@ -69,9 +87,12 @@ export class FileStreamAssembler {
       // `content_streaming` — not the classification — decides whether body
       // frames follow (`open_stream.rs`). An image under the host's 25 MiB
       // preview limit streams its bytes even though §9.7 only ever shows a
-      // placeholder for it, so those frames are drained rather than kept.
+      // placeholder for it, so those frames are drained rather than kept,
+      // unless the caller asked for them.
       if (frame.header.contentStreaming) {
-        const readable = frame.header.contentKind === FileContentKind.TEXT && total <= BigInt(MAX_CLIENT_FILE_BYTES);
+        const text = frame.header.contentKind === FileContentKind.TEXT && total <= BigInt(MAX_CLIENT_FILE_BYTES);
+        const image = this.keepImages && frame.header.contentKind === FileContentKind.IMAGE && total <= BigInt(MAX_IMAGE_BYTES);
+        const readable = text || image;
         // §11.1: past the cap, do not read the body. Frames still arrive and
         // are dropped so the request id settles on the response.
         if (readable) this.buffer = new Uint8Array(Number(total));
@@ -110,22 +131,30 @@ export class FileStreamAssembler {
         return { kind: "tooLarge", size };
       case FileContentKind.BINARY:
         return { kind: "binary" };
-      case FileContentKind.IMAGE:
-        return { kind: "image" };
+      case FileContentKind.IMAGE: {
+        // Not kept, not streamed (over the host's limit), or drained.
+        if (!this.buffer) return { kind: "image" };
+        const bytes = this.complete(this.buffer);
+        return header.metadata ? { kind: "image", bytes, metadata: header.metadata } : { kind: "image", bytes };
+      }
       case FileContentKind.TEXT: {
         if (this.draining) return { kind: "tooLarge", size: header.totalBytes };
         const buffer = this.buffer;
         if (!buffer) return { kind: "unavailable" };
-        // §9.7 step 1: the assembled length must be the declared length.
-        if (this.received !== buffer.length) {
-          throw new FileStreamError(`the file ended early: ${this.received} of ${buffer.length} bytes`);
-        }
-        if (buffer.length > 0 && !this.sawEof) throw new FileStreamError("the file stream ended without an eof frame");
-        return { kind: "text", bytes: buffer, metadata: header.metadata };
+        return { kind: "text", bytes: this.complete(buffer), metadata: header.metadata };
       }
       default:
         return { kind: "unavailable" };
     }
+  }
+
+  /** §9.7 step 1: the assembled length must be the declared length. */
+  private complete(buffer: Uint8Array): Uint8Array {
+    if (this.received !== buffer.length) {
+      throw new FileStreamError(`the file ended early: ${this.received} of ${buffer.length} bytes`);
+    }
+    if (buffer.length > 0 && !this.sawEof) throw new FileStreamError("the file stream ended without an eof frame");
+    return buffer;
   }
 }
 
@@ -140,9 +169,10 @@ export async function readFile(
   request: OpenFileStreamFn,
   target: RootedPath,
   expectedServerIdentity: string,
+  options: FileStreamOptions = {},
 ): Promise<FileBody> {
   const operationId = newOperationId();
-  const assembler = new FileStreamAssembler(operationId);
+  const assembler = new FileStreamAssembler(operationId, options);
   let pushError: unknown;
   await request(openFileStream(operationId, target, expectedServerIdentity), {
     onFileStream: (frame) => {

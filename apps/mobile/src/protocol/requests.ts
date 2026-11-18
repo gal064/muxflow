@@ -11,6 +11,7 @@ import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { ChatAction, ChatAnswerSchema, ChatOptionsSchema, ChatRequestSchema } from "./gen/chat_pb";
 import {
   AgentRequestSchema,
+  CollisionPolicy,
   FileServiceRequestSchema,
   Operation,
   RequestSchema,
@@ -278,6 +279,67 @@ export function openFileStream(operationId: string, target: RootedPath, expected
   });
 }
 
+// Terminal upload (docs/design/mobile-chat-plan.md §3 "Attachments"): how a
+// file reaches the host's upload folder. Bulk lane only, and all four on the
+// same connection: the host keeps an upload with the connection that prepared
+// it and removes the partial when that connection goes. Field usage follows
+// the desktop's client (crates/desktop-core/src/connection/files/upload_manager.rs).
+// `transferId` must be a UUID: the host refuses any other id.
+
+/** The most bytes one WRITE_TERMINAL_UPLOAD_CHUNK carries; the host refuses a larger chunk. */
+export const UPLOAD_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * PREPARE_TERMINAL_UPLOAD: reserves `name` in the upload folder for
+ * `totalBytes`. A name already taken is renamed, "shot.png" to "shot (1).png";
+ * the answer's `upload.destinationName` is the name reserved.
+ */
+export function prepareTerminalUpload(transferId: string, name: string, totalBytes: bigint): Request {
+  return create(RequestSchema, {
+    operation: Operation.PREPARE_TERMINAL_UPLOAD,
+    file: create(FileServiceRequestSchema, {
+      operationId: transferId,
+      transferId,
+      destination: name,
+      sourceName: name,
+      totalBytes,
+      collisionPolicy: CollisionPolicy.RENAME,
+    }),
+  });
+}
+
+/**
+ * WRITE_TERMINAL_UPLOAD_CHUNK: 1 byte to 1 MiB at `offset`, which must be
+ * where the last chunk ended. The answer's `transferChunk.offset` is the next
+ * offset.
+ */
+export function writeTerminalUploadChunk(transferId: string, offset: bigint, totalBytes: bigint, content: Uint8Array): Request {
+  return create(RequestSchema, {
+    operation: Operation.WRITE_TERMINAL_UPLOAD_CHUNK,
+    file: create(FileServiceRequestSchema, { operationId: transferId, transferId, offset, totalBytes, content }),
+  });
+}
+
+/**
+ * COMMIT_TERMINAL_UPLOAD: `blake3` is the hex BLAKE3 of every byte sent. The
+ * host publishes the file only when its own digest agrees, and answers with
+ * `upload.finalPath`.
+ */
+export function commitTerminalUpload(transferId: string, totalBytes: bigint, blake3: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.COMMIT_TERMINAL_UPLOAD,
+    file: create(FileServiceRequestSchema, { operationId: transferId, transferId, totalBytes, blake3 }),
+  });
+}
+
+/** CANCEL_TERMINAL_UPLOAD: removes the partial. An upload the host no longer holds is not an error. */
+export function cancelTerminalUpload(transferId: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.CANCEL_TERMINAL_UPLOAD,
+    file: create(FileServiceRequestSchema, { operationId: transferId, transferId }),
+  });
+}
+
 // Voice (docs/mobile/voice-mode-plan.md §3). Every voice operation reads
 // `Request.voice` only; `scope`, `data` and the other payloads stay empty. The
 // host echoes `operationId` in `Response.voice.operationId` on success and on
@@ -380,9 +442,24 @@ export function chatClose(target: ChatTarget): Request {
   return chat(ChatAction.CLOSE, target);
 }
 
-/** CHAT_ACTION_SEND: `clientMessageId` becomes the id of the USER item this message appears as. */
-export function chatSend(target: ChatTarget, text: string, clientMessageId: string): Request {
-  return chat(ChatAction.SEND, target, { text, clientMessageId });
+/** A file SEND carries: `path` is an upload's `finalPath`, `name` what the message shows. */
+export interface ChatSendAttachment {
+  path: string;
+  name: string;
+}
+
+/**
+ * CHAT_ACTION_SEND: `clientMessageId` becomes the id of the USER item this
+ * message appears as. `attachments` are files already in the host's upload
+ * folder, at most 10; the host works out each one's type and size itself.
+ * `text` may be empty when there are any.
+ */
+export function chatSend(target: ChatTarget, text: string, clientMessageId: string, attachments: readonly ChatSendAttachment[] = []): Request {
+  return chat(ChatAction.SEND, target, {
+    text,
+    clientMessageId,
+    attachments: attachments.map(({ path, name }) => ({ path, name })),
+  });
 }
 
 /** CHAT_ACTION_INTERRUPT: stops the running turn. */

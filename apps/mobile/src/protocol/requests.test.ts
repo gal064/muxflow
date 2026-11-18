@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ChatAction, ChatPermissionMode, ChatSpeed } from "./gen/chat_pb";
-import { Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
+import { CollisionPolicy, Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
 import { HistoryAction } from "./gen/history_pb";
 import {
-  agentDiagnostics, chatAnswer, chatClose, chatInterrupt, chatLoadOlder, chatOpen, chatRewind, chatSend, chatSetOptions, chatSideFork,
-  closeTmuxTarget, historyList, historyResume, historySnooze, historyWake, resolveTerminalFile, setPinnedTarget,
-  voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe,
+  agentDiagnostics, cancelTerminalUpload, chatAnswer, chatClose, chatInterrupt, chatLoadOlder, chatOpen, chatRewind, chatSend, chatSetOptions, chatSideFork,
+  closeTmuxTarget, commitTerminalUpload, historyList, historyResume, historySnooze, historyWake, prepareTerminalUpload, resolveTerminalFile, setPinnedTarget,
+  UPLOAD_CHUNK_BYTES, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe, writeTerminalUploadChunk,
 } from "./requests";
 
 describe("terminal file request builder", () => {
@@ -27,6 +27,48 @@ describe("terminal file request builder", () => {
       expectedWindowId: "@5",
       expectedCwd: "/home/dev/project/src",
     });
+  });
+});
+
+// Field usage against the host's filesystem dispatcher and the desktop's
+// upload client: the transfer id is both ids, and nothing but the fields each
+// step reads is set.
+describe("terminal upload request builders", () => {
+  const id = "3e0f7a52-6f0b-4c36-9d55-0b1f5f1d2a77";
+
+  it("prepares under the file's own name, renaming on a collision", () => {
+    const request = prepareTerminalUpload(id, "shot.png", 2_621_440n);
+    expect(request.operation).toBe(Operation.PREPARE_TERMINAL_UPLOAD);
+    expect(request.file).toMatchObject({
+      operationId: id,
+      transferId: id,
+      destination: "shot.png",
+      sourceName: "shot.png",
+      totalBytes: 2_621_440n,
+      collisionPolicy: CollisionPolicy.RENAME,
+      largeUploadConfirmed: false,
+      imagePng: false,
+    });
+  });
+
+  it("writes a chunk at its offset", () => {
+    const content = new Uint8Array([1, 2, 3]);
+    const request = writeTerminalUploadChunk(id, 1_048_576n, 2_621_440n, content);
+    expect(request.operation).toBe(Operation.WRITE_TERMINAL_UPLOAD_CHUNK);
+    expect(request.file).toMatchObject({ operationId: id, transferId: id, offset: 1_048_576n, totalBytes: 2_621_440n });
+    expect(request.file?.content).toEqual(content);
+    expect(request.data.length).toBe(0);
+    expect(UPLOAD_CHUNK_BYTES).toBe(1024 * 1024);
+  });
+
+  it("commits with the size and the digest, and cancels by id alone", () => {
+    const commit = commitTerminalUpload(id, 2_621_440n, "af13");
+    expect(commit.operation).toBe(Operation.COMMIT_TERMINAL_UPLOAD);
+    expect(commit.file).toMatchObject({ operationId: id, transferId: id, totalBytes: 2_621_440n, blake3: "af13" });
+
+    const cancel = cancelTerminalUpload(id);
+    expect(cancel.operation).toBe(Operation.CANCEL_TERMINAL_UPLOAD);
+    expect(cancel.file).toMatchObject({ operationId: id, transferId: id, totalBytes: 0n, blake3: "", destination: "" });
   });
 });
 
@@ -143,6 +185,7 @@ describe("chat request builders", () => {
 
   it("carries each action's own fields", () => {
     expect(chatSend(target, "hello", "m1").chat).toMatchObject({ text: "hello", clientMessageId: "m1" });
+    expect(chatSend(target, "hello", "m1").chat?.attachments).toEqual([]);
     expect(chatRewind(target, "m1").chat?.itemId).toBe("m1");
     expect(chatLoadOlder(target, "c1").chat?.olderCursor).toBe("c1");
     expect(chatSideFork(target, "why?").chat?.text).toBe("why?");
@@ -155,6 +198,27 @@ describe("chat request builders", () => {
     // Unset options stay empty or unspecified, which the host reads as "keep".
     const options = chatSetOptions(target, { speed: ChatSpeed.FAST }).chat?.options;
     expect(options).toMatchObject({ model: "", effort: "", permission: ChatPermissionMode.UNSPECIFIED, speed: ChatSpeed.FAST });
+  });
+});
+
+describe("chat send with attachments", () => {
+  const target = { paneId: "%7", expectedServerIdentity: "server-a" };
+
+  it("names each uploaded file by its path and name, and leaves type and size to the host", () => {
+    const request = chatSend(target, "", "m2", [
+      { path: "/home/dev/.cache/muxflow/uploads/shot (1).png", name: "shot.png" },
+      { path: "/home/dev/.cache/muxflow/uploads/notes.txt", name: "notes.txt" },
+    ]);
+    expect(request.operation).toBe(Operation.CHAT);
+    expect(request.chat).toMatchObject({ action: ChatAction.SEND, text: "", clientMessageId: "m2" });
+    expect(request.chat?.attachments).toHaveLength(2);
+    expect(request.chat?.attachments[0]).toMatchObject({
+      path: "/home/dev/.cache/muxflow/uploads/shot (1).png",
+      name: "shot.png",
+      mediaType: "",
+      sizeBytes: 0n,
+    });
+    expect(request.chat?.attachments[1]).toMatchObject({ path: "/home/dev/.cache/muxflow/uploads/notes.txt", name: "notes.txt" });
   });
 });
 
