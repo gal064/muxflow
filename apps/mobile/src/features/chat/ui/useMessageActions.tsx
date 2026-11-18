@@ -29,6 +29,9 @@ export interface TimelineMessages {
   replyActions: ReactNode;
 }
 
+/** How long after the reply field let go of the focus it is given it again. */
+const REFOCUS_AFTER_MS = 50;
+
 export interface MessageActionsInput {
   /** The chat on screen, once it has something to show. */
   pane: ChatPane | undefined;
@@ -121,7 +124,14 @@ export function useMessageActions(input: MessageActionsInput): MessageActions {
     clearTimeout(focusTimer.current);
     if (!focusWanted.current) return;
     focusWanted.current = false;
-    field.current?.focus();
+    const input = field.current;
+    if (!input) return;
+    // A field that kept the focus when its keyboard was put away does not
+    // bring the keyboard back by being focused again: it lets go first.
+    if (input.isFocused()) {
+      input.blur();
+      focusTimer.current = setTimeout(() => input.focus(), REFOCUS_AFTER_MS);
+    } else input.focus();
   }, []);
   const edit = useCallback((item: ChatItem) => {
     const fromSheet = heldNow.current !== "";

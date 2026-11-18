@@ -362,6 +362,8 @@ const RowView = memo(function RowView({ row, canEdit, onEdit, onHold, marked, di
 });
 
 const TimelineItem = memo(function TimelineItem({ item, canEdit, onEdit, onHold, marked, under }: MessageRowProps & { item: ChatItem }) {
+  // The same hold for what scrolls sideways inside the reply, which answers its own touches.
+  const hold = useMemo(() => ({ onLongPress: () => onHold(item), delayMs: HOLD_MS }), [item, onHold]);
   switch (item.kind) {
     case ChatItemKind.USER:
       return (
@@ -378,7 +380,7 @@ const TimelineItem = memo(function TimelineItem({ item, canEdit, onEdit, onHold,
       return (
         <Pressable accessible={false} delayLongPress={HOLD_MS} onLongPress={() => onHold(item)} style={styles.reply}>
           <View accessibilityLabel={item.streaming ? "Agent, still writing" : undefined} style={styles.assistant}>
-            {item.text ? <ChatMarkdown selectable={false} source={item.text} streaming={item.streaming} /> : <Text style={styles.faint}>…</Text>}
+            {item.text ? <ChatMarkdown hold={hold} selectable={false} source={item.text} streaming={item.streaming} /> : <Text style={styles.faint}>…</Text>}
           </View>
           {under}
         </Pressable>

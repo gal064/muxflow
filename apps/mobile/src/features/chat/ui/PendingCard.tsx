@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { ChatRequestKind, type ChatPendingRequest, type ChatQuestion } from "../../../protocol/gen/chat_pb";
 import { colors, fonts, typeScale } from "../../../ui/tokens";
@@ -91,6 +91,13 @@ function QuestionCard({ request, busy, onAnswer, onFold }: PendingCardProps) {
   };
   const toggleOther = () => set(question.multiSelect ? { ...choice, otherOn: !choice.otherOn } : { ...choice, optionIds: [], otherOn: true });
   const answered = choice.optionIds.length > 0 || (choice.otherOn && choice.other.trim() !== "");
+  // The "Other" field goes with its question. Left focused, its focus would
+  // pass to the reply field, which folds the card: the keyboard is put away
+  // first, so the next question is answered where it is asked.
+  const leaving = (then: () => void) => () => {
+    Keyboard.dismiss();
+    then();
+  };
   const submit = () => onAnswer({
     kind: "questions",
     answers: questions.map((entry, index) => ({
@@ -137,10 +144,10 @@ function QuestionCard({ request, busy, onAnswer, onFold }: PendingCardProps) {
         ) : null}
         <View style={styles.buttons}>
           {last
-            ? <CardButton disabled={busy || !allAnswered(questions, choices)} label="Submit" onPress={submit} primary />
-            : <CardButton disabled={!answered} label="Next" onPress={() => setStep(step + 1)} primary />}
-          {step > 0 ? <CardButton disabled={busy} label="Back" onPress={() => setStep(step - 1)} /> : null}
-          <CardButton disabled={busy} ghost label="Skip" onPress={() => onAnswer({ kind: "skip" })} />
+            ? <CardButton disabled={busy || !allAnswered(questions, choices)} label="Submit" onPress={leaving(submit)} primary />
+            : <CardButton disabled={!answered} label="Next" onPress={leaving(() => setStep(step + 1))} primary />}
+          {step > 0 ? <CardButton disabled={busy} label="Back" onPress={leaving(() => setStep(step - 1))} /> : null}
+          <CardButton disabled={busy} ghost label="Skip" onPress={leaving(() => onAnswer({ kind: "skip" }))} />
         </View>
       </ScrollView>
     </View>
