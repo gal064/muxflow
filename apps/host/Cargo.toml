@@ -23,6 +23,9 @@ prost.workspace = true
 rubato.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+# Hermes keeps its hook settings in YAML; this app merges labeled entries
+# without rewriting unrelated settings.
+serde-saphyr = "2"
 sha2.workspace = true
 # Voice mode decodes the phone's AAC/M4A utterance in-process before handing
 # PCM to the sidecar (docs/mobile/voice-mode-plan.md §4.1). Only the two

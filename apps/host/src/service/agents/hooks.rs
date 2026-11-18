@@ -170,8 +170,8 @@ impl HookManager {
                 v1::AgentHookWiring::NotWired
             });
         }
-        let value = parse_config(&bytes)?;
-        validate_hook_shape(&value, adapter.hook_events())?;
+        let value = parse_config(&bytes, adapter)?;
+        validate_hook_shape(&value, adapter)?;
         Ok(
             if managed_entries_are_current(&value, adapter, &self.helper_path) {
                 v1::AgentHookWiring::Wired
@@ -234,8 +234,8 @@ impl HookManager {
                 }
                 None => {
                     inspect_config_path(&path)?;
-                    let value = parse_config(&read_config(&path)?)?;
-                    validate_hook_shape(&value, adapter.hook_events())?;
+                    let value = parse_config(&read_config(&path)?, adapter)?;
+                    validate_hook_shape(&value, adapter)?;
                     managed_entry_count(&value, adapter) > 0
                 }
             };
@@ -258,9 +258,9 @@ impl HookManager {
         if let Some(expected) = adapter_impl.managed_file(&self.helper_path) {
             return self.review_file(adapter, action, &path, &bytes, &expected);
         }
-        let value = parse_config(&bytes)?;
+        let value = parse_config(&bytes, adapter_impl)?;
         ensure_no_future_managed(&value, adapter_impl)?;
-        validate_hook_shape(&value, adapter_impl.hook_events())?;
+        validate_hook_shape(&value, adapter_impl)?;
         let already_current = match action {
             v1::HookManagementAction::Install => {
                 managed_entries_are_current(&value, adapter_impl, &self.helper_path)
@@ -280,14 +280,14 @@ impl HookManager {
         let proposed_bytes = if removes_config {
             Vec::new()
         } else {
-            serde_json::to_vec_pretty(&proposed)?
+            serialize_config(&proposed, adapter_impl)?
         };
         // Each once. Every one of these deep-clones a configuration of up to
         // two megabytes, redacts it and pretty-prints it, and `apply` calls
         // `review` three times.
-        let before_preview = preview(&value);
-        let after_preview = preview(&proposed);
-        let diff_preview = diff_preview(&value, &proposed);
+        let before_preview = preview(&value, adapter_impl);
+        let after_preview = preview(&proposed, adapter_impl);
+        let diff_preview = diff_preview(&value, &proposed, adapter_impl);
         Ok(v1::HookManagementPlan {
             adapter_id: adapter_impl.id().into(),
             action: action.into(),
@@ -367,16 +367,16 @@ impl HookManager {
             }
             return self.review(adapter, action);
         }
-        let mut value = parse_config(&bytes)?;
+        let mut value = parse_config(&bytes, adapter_impl)?;
         remove_managed(&mut value, adapter_impl);
         if action == v1::HookManagementAction::Install {
             add_managed(&mut value, adapter_impl, &self.helper_path);
             write_backup_once(&path, &bytes)?;
-            write_atomic(&path, &serde_json::to_vec_pretty(&value)?, &bytes)?;
+            write_atomic(&path, &serialize_config(&value, adapter_impl)?, &bytes)?;
         } else if value.as_object().is_some_and(Map::is_empty) && !backup_path(&path).exists() {
             remove_atomic(&path, &bytes)?;
         } else {
-            write_atomic(&path, &serde_json::to_vec_pretty(&value)?, &bytes)?;
+            write_atomic(&path, &serialize_config(&value, adapter_impl)?, &bytes)?;
         }
         self.review(adapter, action)
     }
@@ -636,29 +636,65 @@ impl Drop for ConfigLock {
     }
 }
 
-fn parse_config(bytes: &[u8]) -> anyhow::Result<Value> {
+fn parse_config(bytes: &[u8], adapter: &dyn adapters::AgentAdapter) -> anyhow::Result<Value> {
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    let value: Value = serde_json::from_slice(bytes).context("parse hook JSON configuration")?;
+    let value: Value = if adapter.hook_config_is_yaml() {
+        serde_saphyr::from_str(std::str::from_utf8(bytes).context("hook configuration is not UTF-8")?)
+            .context("parse hook YAML configuration")?
+    } else {
+        serde_json::from_slice(bytes).context("parse hook JSON configuration")?
+    };
     if !value.is_object() {
-        bail!("hook configuration root must be a JSON object");
+        bail!("hook configuration root must be an object");
     }
     Ok(value)
 }
 
-fn validate_hook_shape(value: &Value, events: &[&str]) -> anyhow::Result<()> {
+fn validate_hook_shape(
+    value: &Value,
+    adapter: &dyn adapters::AgentAdapter,
+) -> anyhow::Result<()> {
     let Some(hooks) = value.get("hooks") else {
         return Ok(());
     };
     let hooks = hooks
         .as_object()
-        .context("existing hooks setting must be a JSON object")?;
-    for event in events {
+        .context("existing hooks setting must be an object")?;
+    for event in adapter.hook_events() {
         if let Some(groups) = hooks.get(*event)
             && !groups.is_array()
         {
-            bail!("existing {event} hooks must be a JSON array");
+            bail!("existing {event} hooks must be an array");
+        }
+        if adapter.hook_config_is_yaml()
+            && let Some(groups) = hooks.get(*event).and_then(Value::as_array)
+        {
+            for entry in groups {
+                let entry = entry
+                    .as_object()
+                    .context("existing YAML hook entry must be an object")?;
+                entry
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .context("existing YAML hook entry must have a command")?;
+                if let Some(timeout) = entry.get("timeout")
+                    && !timeout.is_u64()
+                {
+                    bail!("existing {event} hook timeout must be an integer");
+                }
+                if let Some(fail_closed) = entry.get("fail_closed")
+                    && fail_closed.as_bool().is_none()
+                {
+                    bail!("existing {event} fail_closed must be a boolean");
+                }
+                if let Some(matcher) = entry.get("matcher")
+                    && !matcher.is_string()
+                {
+                    bail!("existing {event} matcher must be a string");
+                }
+            }
         }
     }
     Ok(())
@@ -678,12 +714,17 @@ fn add_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter, helper_p
         let groups = hooks
             .entry((*event).to_owned())
             .or_insert_with(|| Value::Array(Vec::new()));
-        groups
-            .as_array_mut()
-            .expect("review validated event array")
-            .push(serde_json::json!({
+        let groups = groups.as_array_mut().expect("review validated event array");
+        if adapter.hook_config_is_yaml() {
+            groups.push(serde_json::json!({
+                "command": command,
+                "timeout": timeout,
+            }));
+        } else {
+            groups.push(serde_json::json!({
                 "hooks": [{"type": "command", "command": command, "timeout": timeout}]
             }));
+        }
     }
 }
 
@@ -692,9 +733,15 @@ fn remove_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter) {
         return;
     };
     for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
-        for group in groups.iter_mut() {
+        groups.retain_mut(|group| {
+            if adapter.hook_config_is_yaml() {
+                if let Some(command) = group.get("command").and_then(Value::as_str) {
+                    return !is_owned_command(command, adapter);
+                }
+                return true;
+            }
             let Some(commands) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                continue;
+                return true;
             };
             commands.retain(|command| {
                 !command
@@ -702,12 +749,7 @@ fn remove_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter) {
                     .and_then(Value::as_str)
                     .is_some_and(|command| is_owned_command(command, adapter))
             });
-        }
-        groups.retain(|group| {
-            group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .is_none_or(|commands| !commands.is_empty())
+            !commands.is_empty()
         });
     }
     hooks.retain(|_, groups| !groups.as_array().is_some_and(Vec::is_empty));
@@ -717,13 +759,24 @@ fn remove_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter) {
 }
 
 fn managed_entry_count(value: &Value, adapter: &dyn adapters::AgentAdapter) -> usize {
-    value
+    let entries = value
         .get("hooks")
         .and_then(Value::as_object)
         .into_iter()
         .flat_map(|hooks| hooks.values())
         .filter_map(Value::as_array)
-        .flatten()
+        .flatten();
+    if adapter.hook_config_is_yaml() {
+        return entries
+            .filter(|entry| {
+                entry
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| is_owned_command(command, adapter))
+            })
+            .count();
+    }
+    entries
         .flat_map(|group| {
             group
                 .get("hooks")
@@ -749,13 +802,19 @@ fn managed_entries_are_current(
         return false;
     };
     let expected = adapter.hook_command(helper_path);
-    managed_entry_count(value, adapter) == adapter.hook_events().len()
-        && adapter.hook_events().iter().all(|event| {
-            hooks
-                .get(*event)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
+    if managed_entry_count(value, adapter) != adapter.hook_events().len() {
+        return false;
+    }
+    adapter.hook_events().iter().all(|event| {
+        let mut entries = hooks.get(*event).and_then(Value::as_array).into_iter().flatten();
+        if adapter.hook_config_is_yaml() {
+            entries.any(|entry| {
+                entry.get("command").and_then(Value::as_str) == Some(expected.as_str())
+                    && entry.get("timeout").and_then(Value::as_u64)
+                        == Some(adapter.hook_timeout_seconds(event))
+            })
+        } else {
+            entries
                 .flat_map(|group| {
                     group
                         .get("hooks")
@@ -769,7 +828,8 @@ fn managed_entries_are_current(
                         && command.get("timeout").and_then(Value::as_u64)
                             == Some(adapter.hook_timeout_seconds(event))
                 })
-        })
+        }
+    })
 }
 
 fn is_owned_command(command: &str, adapter: &dyn adapters::AgentAdapter) -> bool {
@@ -801,38 +861,67 @@ fn ensure_no_future_managed(
     value: &Value,
     adapter: &dyn adapters::AgentAdapter,
 ) -> anyhow::Result<()> {
-    let future = value
+    let entries = value
         .get("hooks")
         .and_then(Value::as_object)
         .into_iter()
         .flat_map(|hooks| hooks.values())
         .filter_map(Value::as_array)
-        .flatten()
-        .flat_map(|group| {
-            group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(|command| command.get("command").and_then(Value::as_str))
-        .filter_map(|command| managed_command_version(command, adapter))
-        .any(|version| version > adapters::MANAGED_VERSION);
+        .flatten();
+    let future = if adapter.hook_config_is_yaml() {
+        entries
+            .filter_map(|entry| entry.get("command").and_then(Value::as_str))
+            .filter_map(|command| managed_command_version(command, adapter))
+            .any(|version| version > adapters::MANAGED_VERSION)
+    } else {
+        entries
+            .flat_map(|group| {
+                group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|command| command.get("command").and_then(Value::as_str))
+            .filter_map(|command| managed_command_version(command, adapter))
+            .any(|version| version > adapters::MANAGED_VERSION)
+    };
     if future {
         bail!("hook configuration is owned by a newer muxflow version");
     }
     Ok(())
 }
 
-fn preview(value: &Value) -> (String, bool) {
-    let mut redacted = value.clone();
-    redact(&mut redacted);
-    bounded(serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| "{}".into()))
+fn serialize_config(
+    value: &Value,
+    adapter: &dyn adapters::AgentAdapter,
+) -> anyhow::Result<Vec<u8>> {
+    if adapter.hook_config_is_yaml() {
+        let text = serde_saphyr::to_string(value).context("serialize hook YAML configuration")?;
+        Ok(text.into_bytes())
+    } else {
+        serde_json::to_vec_pretty(value).context("serialize hook JSON configuration")
+    }
 }
 
-fn diff_preview(before: &Value, after: &Value) -> (String, bool) {
-    let before = preview(before).0;
-    let after = preview(after).0;
+fn preview(value: &Value, adapter: &dyn adapters::AgentAdapter) -> (String, bool) {
+    let mut redacted = value.clone();
+    redact(&mut redacted);
+    let text = if adapter.hook_config_is_yaml() {
+        serde_saphyr::to_string(&redacted).unwrap_or_else(|_| "{}".into())
+    } else {
+        serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| "{}".into())
+    };
+    bounded(text)
+}
+
+fn diff_preview(
+    before: &Value,
+    after: &Value,
+    adapter: &dyn adapters::AgentAdapter,
+) -> (String, bool) {
+    let before = preview(before, adapter).0;
+    let after = preview(after, adapter).0;
     bounded(format!("--- before\n{before}\n+++ after\n{after}"))
 }
 
@@ -1136,6 +1225,68 @@ mod tests {
         assert_eq!(managed_entry_count(&removed, adapter), 0);
         assert!(removed.to_string().contains("keep-me"));
         assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn hermes_yaml_install_preserves_unrelated_settings_and_uninstalls_only_owned_entries() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase8-hermes-hooks-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(home.join(".hermes")).unwrap();
+        let path = home.join(".hermes/config.yaml");
+        fs::write(
+            &path,
+            "model: test\nhooks:\n  pre_tool_call:\n    - matcher: Bash\n      command: keep-me\n      timeout: 10\n",
+        )
+        .unwrap();
+        let manager = HookManager::for_home(&home);
+        let adapter = adapters::adapter(v1::AgentAdapterKind::Hermes).unwrap();
+        let review = manager
+            .review(
+                v1::AgentAdapterKind::Hermes,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        assert_eq!(
+            review.proposed_events,
+            adapter_events(v1::AgentAdapterKind::Hermes)
+        );
+        manager
+            .apply(
+                v1::AgentAdapterKind::Hermes,
+                v1::HookManagementAction::Install,
+                &review.confirmation_token,
+            )
+            .unwrap();
+        let installed = fs::read_to_string(&path).unwrap();
+        assert!(installed.contains("model: test"));
+        assert!(installed.contains("keep-me"));
+        assert_eq!(
+            managed_entry_count(
+                &parse_config(fs::read(&path).unwrap().as_slice(), adapter).unwrap(),
+                adapter
+            ),
+            adapter.hook_events().len()
+        );
+        let uninstall = manager
+            .review(
+                v1::AgentAdapterKind::Hermes,
+                v1::HookManagementAction::Uninstall,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::Hermes,
+                v1::HookManagementAction::Uninstall,
+                &uninstall.confirmation_token,
+            )
+            .unwrap();
+        let removed = fs::read_to_string(&path).unwrap();
+        assert!(removed.contains("model: test"));
+        assert!(removed.contains("keep-me"));
+        assert!(!removed.contains("--managed-owner"));
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -1514,10 +1665,11 @@ mod tests {
 
     #[test]
     fn redacted_review_previews_include_the_truncation_marker_within_the_bound() {
+        let codex = adapters::adapter(v1::AgentAdapterKind::Codex).unwrap();
         let (preview, truncated) = preview(&serde_json::json!({
             "password": "never-visible",
             "ordinary": "x".repeat(MAX_PREVIEW_BYTES * 2)
-        }));
+        }), codex);
         assert!(truncated);
         assert!(preview.len() <= MAX_PREVIEW_BYTES);
         assert!(preview.ends_with("preview truncated …"));
@@ -1526,13 +1678,14 @@ mod tests {
 
     #[test]
     fn redacted_review_never_exposes_nested_private_or_authorization_values() {
+        let codex = adapters::adapter(v1::AgentAdapterKind::Codex).unwrap();
         let (preview, truncated) = preview(&serde_json::json!({
             "unrelated": {
                 "privateFixtureValue": "phase6-private-value",
                 "authorizationHeader": "Bearer phase6-secret",
                 "ordinary": "visible-review-value"
             }
-        }));
+        }), codex);
         assert!(!truncated);
         assert!(!preview.contains("phase6-private-value"));
         assert!(!preview.contains("Bearer phase6-secret"));

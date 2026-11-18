@@ -80,6 +80,11 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn hook_timeout_seconds(&self, _event: &str) -> u64 {
         5
     }
+    /// True when the managed artifact is entries in a YAML configuration rather
+    /// than entries in a JSON configuration.
+    fn hook_config_is_yaml(&self) -> bool {
+        false
+    }
     fn hook_trust_guidance(&self) -> &'static str;
     fn identifies_process(&self, command: &str) -> bool;
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
@@ -406,14 +411,119 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 }
 
+pub(super) struct HermesAdapter;
+
+impl AgentAdapter for HermesAdapter {
+    fn kind(&self) -> &'static str {
+        "hermes"
+    }
+
+    fn legacy_kind(&self) -> v1::AgentAdapterKind {
+        v1::AgentAdapterKind::Hermes
+    }
+
+    fn id(&self) -> &'static str {
+        "hermes"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Hermes"
+    }
+
+    fn executable(&self) -> &'static str {
+        "hermes"
+    }
+
+    fn hook_relative_path(&self) -> &'static str {
+        ".hermes/config.yaml"
+    }
+
+    fn hook_config_is_yaml(&self) -> bool {
+        true
+    }
+
+    /// Hermes shell hooks. `pre_approval_request` is the explicit blocked
+    /// signal; `pre_llm_call` is its UserPromptSubmit equivalent, `on_session_end`
+    /// is per-turn and observer-only, and `agent_loop_stopped` marks an
+    /// interrupted turn.
+    fn hook_events(&self) -> &'static [&'static str] {
+        &[
+            "on_session_start",
+            "pre_llm_call",
+            "pre_tool_call",
+            "post_tool_call",
+            "pre_approval_request",
+            "post_approval_response",
+            "subagent_start",
+            "subagent_stop",
+            "agent_loop_stopped",
+            "on_session_end",
+        ]
+    }
+
+    fn hook_trust_guidance(&self) -> &'static str {
+        "Hermes asks for consent the first time each shell hook event runs. Review the listed events and exact command before confirming installation."
+    }
+
+    fn identifies_process(&self, command: &str) -> bool {
+        matches!(command_basename(command), "hermes" | "hermes-agent")
+    }
+
+    fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec {
+        LaunchSpec {
+            program: self.executable(),
+            arguments: native_session_id
+                .map(|id| vec!["--resume".to_owned(), id.to_owned()])
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Hermes has no CLI fork flag. Its TUI `/branch` is not reachable from a
+    /// launch, so branching opens a fresh named session rather than copying the
+    /// conversation.
+    fn branch(&self, _native_session_id: &str, source_title: &str) -> LaunchSpec {
+        let source_name = agent_title_suffix(source_title).unwrap_or(source_title);
+        LaunchSpec {
+            program: self.executable(),
+            arguments: vec![
+                "chat".to_owned(),
+                "--continue".to_owned(),
+                fork_name(source_name),
+                "--create-if-missing".to_owned(),
+            ],
+        }
+    }
+
+    fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
+        parse_common_hook(
+            payload,
+            &[
+                ("on_session_start", v1::AgentLifecycleState::Idle),
+                ("pre_llm_call", v1::AgentLifecycleState::Working),
+                ("pre_tool_call", v1::AgentLifecycleState::Working),
+                ("post_tool_call", v1::AgentLifecycleState::Working),
+                ("pre_approval_request", v1::AgentLifecycleState::Blocked),
+                ("post_approval_response", v1::AgentLifecycleState::Working),
+                ("subagent_start", v1::AgentLifecycleState::Working),
+                // A subagent finishing says the parent is still mid-turn.
+                ("subagent_stop", v1::AgentLifecycleState::Working),
+                ("agent_loop_stopped", v1::AgentLifecycleState::Idle),
+                ("on_session_end", v1::AgentLifecycleState::Idle),
+            ],
+        )
+    }
+}
+
 pub(crate) fn adapter(kind: v1::AgentAdapterKind) -> Option<&'static dyn AgentAdapter> {
     static CODEX: CodexAdapter = CodexAdapter;
     static CLAUDE: ClaudeCodeAdapter = ClaudeCodeAdapter;
     static PI: pi::PiAdapter = pi::PiAdapter;
+    static HERMES: HermesAdapter = HermesAdapter;
     [
         &CODEX as &dyn AgentAdapter,
         &CLAUDE as &dyn AgentAdapter,
         &PI as &dyn AgentAdapter,
+        &HERMES as &dyn AgentAdapter,
     ]
     .into_iter()
     .find(|adapter| adapter.legacy_kind() == kind)
@@ -424,6 +534,7 @@ pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
         v1::AgentAdapterKind::Codex,
         v1::AgentAdapterKind::ClaudeCode,
         v1::AgentAdapterKind::Pi,
+        v1::AgentAdapterKind::Hermes,
     ]
     .into_iter()
     .filter_map(adapter)
@@ -667,6 +778,7 @@ mod tests {
                 v1::AgentHookWiring::Wired,
                 v1::AgentHookWiring::NotWired,
                 v1::AgentHookWiring::Absent,
+                v1::AgentHookWiring::NotWired,
             ])
             .map(|(adapter, state)| {
                 (
@@ -681,7 +793,7 @@ mod tests {
             })
             .collect();
         let descriptors = descriptors(home, &observed);
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), 4);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 10);
@@ -734,6 +846,7 @@ mod tests {
                 ("codex", v1::AgentHookWiring::Wired as i32, false),
                 ("claude-code", v1::AgentHookWiring::NotWired as i32, true),
                 ("pi", v1::AgentHookWiring::Absent as i32, false),
+                ("hermes", v1::AgentHookWiring::NotWired as i32, true),
             ]
         );
         let pi = adapter(v1::AgentAdapterKind::Pi).unwrap();
@@ -743,6 +856,17 @@ mod tests {
         );
         assert!(codex.managed_file(Path::new("/opt/muxflow-host")).is_none());
         assert!(pi.managed_file(Path::new("/opt/muxflow-host")).is_some());
+        let hermes = adapter(v1::AgentAdapterKind::Hermes).unwrap();
+        assert_eq!(hermes.hook_path(home), home.join(".hermes/config.yaml"));
+        assert!(hermes.hook_config_is_yaml());
+        assert_eq!(hermes.hook_events().len(), 10);
+        assert_eq!(
+            hermes.parse_hook(&serde_json::json!({
+                "hook_event_name": "pre_approval_request",
+                "session_id": "hermes-session"
+            })).unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked
+        );
     }
 
     /// Only a running subagent extends the user's turn. Ordinary background
