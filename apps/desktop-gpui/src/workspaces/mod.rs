@@ -1195,6 +1195,7 @@ impl Workspaces {
             app_tab: tab.or(Some(String::new())),
             seq,
         };
+        self.supersede_queued(None, cx);
         let _ = self.coordinator.navigate(intent.key.clone(), intent);
     }
 
@@ -1249,12 +1250,15 @@ impl Workspaces {
         self.intents
     }
 
-    /// A create supersedes the move still waiting behind the flight, as it
-    /// does in Tauri, and nothing will now release the guard that move
-    /// painted: it is released here, unless a later paint replaced it.
-    fn supersede_queued(&mut self, cx: &mut App) {
+    /// A create, or a newer move, supersedes the move still waiting behind
+    /// the flight, as it does in Tauri, and nothing will now release the
+    /// guard that move painted: it is released here, unless a later paint
+    /// replaced it. `keep` is the guard the newer move put up, which is the
+    /// same as the waiting one's when both go to the same place.
+    fn supersede_queued(&mut self, keep: Option<&OptimisticWindow>, cx: &mut App) {
         if let Some(queued) = self.coordinator.drop_queued()
             && let Some(guard) = &queued.optimistic
+            && !keep.is_some_and(|keep| keep.same_move(guard))
             && self.holds_guard(&queued.host, guard, cx)
         {
             self.set_guard(&queued.host, None, cx);
@@ -1346,12 +1350,15 @@ impl Workspaces {
         // observer. It is planned on the connection now on screen, so catch
         // up first: following later would drop it as the old one's.
         self.follow_connection(Some(&intent.scope));
+        if self.coordinator.has_flight() {
+            self.supersede_queued(intent.optimistic.as_ref(), cx);
+        }
         let Some((id, intent)) = self.coordinator.navigate(intent.key.clone(), intent) else {
             return;
         };
         if already_there {
             self.commit(&intent, cx);
-            self.coordinator.finish(id);
+            self.coordinator.finish(id, true);
             return;
         }
         self.start(id, intent, None, cx);
@@ -1427,9 +1434,15 @@ impl Workspaces {
         // A flight from a connection since replaced must not touch a guard or
         // a protection with the same ids on the new one.
         let current = self.scope_current(&intent.host, &intent.scope, cx);
+        let reached = matches!(outcome, Outcome::Reached { .. });
+        // Stopped short, with the same move waiting: it flies the rest, and
+        // the guard, which is its too, holds until it lands.
+        let short = matches!(outcome, Outcome::Partial { .. });
+        let refly = short && self.coordinator.has_queued() && self.coordinator.still_wanted(id);
         if let Some(guard) = intent.optimistic.as_ref().filter(|_| current) {
             let owned = self.holds_guard(&intent.host, guard, cx);
             match outcome.generation() {
+                Some(_) if refly => {}
                 // Held until a snapshot has caught up: the ack is not the
                 // snapshot.
                 Some(generation) if owned => self.set_guard(
@@ -1483,8 +1496,7 @@ impl Workspaces {
                 _ => self.protected_app_tab = None,
             }
         }
-        let reached = matches!(outcome, Outcome::Reached { .. });
-        match self.coordinator.finish(id) {
+        match self.coordinator.finish(id, !short) {
             Finish::Latest if reached && intent.seq == self.intents => self.commit(&intent, cx),
             Finish::SameDestination(newer) if reached && newer.seq == self.intents => {
                 self.commit(&newer, cx)
@@ -1658,7 +1670,7 @@ impl Workspaces {
         };
         let host = view.host.clone();
         let intent = self.begin_intent(true);
-        self.supersede_queued(cx);
+        self.supersede_queued(None, cx);
         let key = self.new_pending(&host, Some(session_id.to_owned()), "New window".into());
         cx.notify();
         let task = self.perform(
@@ -1704,7 +1716,7 @@ impl Workspaces {
         let host = view.host.clone();
         let defaults = crate::settings::get(cx).defaults_for(&host);
         let intent = self.begin_intent(true);
-        self.supersede_queued(cx);
+        self.supersede_queued(None, cx);
         let title = if name.is_empty() {
             "New session".to_owned()
         } else {
@@ -2097,7 +2109,9 @@ async fn fly(
             })
             .unwrap_or(0),
     };
-    if !current && applied.as_ref().is_some_and(|applied| applied != target) {
+    // A pane step skipped for a newer move leaves this one short of its pane.
+    let skipped_pane = !current && intent.pane.is_some();
+    if skipped_pane || !current && applied.as_ref().is_some_and(|applied| applied != target) {
         return Outcome::Partial {
             location: applied.unwrap_or_else(|| target.clone()),
             generation,
