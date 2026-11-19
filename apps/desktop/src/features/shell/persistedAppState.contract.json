@@ -76,6 +76,7 @@
     "agentStateGlyphs": true,
     "compactWorkspaces": true,
     "tabsInTitleBar": true,
+    "windowButtonsSide": "right",
     "focusFollowsMouse": true,
     "pinnedOnly": true,
     "terminalScreenReader": true,

@@ -1534,24 +1534,31 @@ describe("application shell accessibility contracts", () => {
 
   it("ends the Linux bar in window buttons only when it is given them", async () => {
     const controls = { maximized: false, onClose: vi.fn(), onMinimize: vi.fn(), onToggleMaximize: vi.fn() };
-    const bar = (windowControls?: typeof controls) => <TitleBar
+    const bar = (windowControls?: typeof controls, windowButtonsSide?: "left" | "right") => <TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={0}
+      windowButtonsSide={windowButtonsSide}
       windowControls={windowControls}
     />;
     expect(renderToStaticMarkup(bar())).not.toContain("window-controls");
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(bar(controls)); });
-    const labels = renderer.root.findByProps({ className: "window-controls" })
-      .findAllByType("button").map((button) => button.props["aria-label"]);
-    expect(labels).toEqual(["Minimize", "Maximize", "Close window"]);
-    for (const button of renderer.root.findByProps({ className: "window-controls" }).findAllByType("button")) {
+    // macOS style by default: the buttons lead the bar, close first.
+    const leading = renderer.root.findByProps({ className: "window-controls window-controls-lead" });
+    expect(leading.findAllByType("button").map((button) => button.props["aria-label"]))
+      .toEqual(["Close window", "Minimize", "Maximize"]);
+    for (const button of leading.findAllByType("button")) {
       button.props.onClick();
     }
     expect(controls.onMinimize).toHaveBeenCalledOnce();
     expect(controls.onToggleMaximize).toHaveBeenCalledOnce();
     expect(controls.onClose).toHaveBeenCalledOnce();
+    // Windows style: the same three buttons end the bar, close last.
+    await act(async () => { renderer.update(bar(controls, "right")); });
+    expect(renderer.root.findByProps({ className: "window-controls" })
+      .findAllByType("button").map((button) => button.props["aria-label"]))
+      .toEqual(["Minimize", "Maximize", "Close window"]);
     expect(renderToStaticMarkup(bar({ ...controls, maximized: true }))).toContain('aria-label="Restore"');
     // The title text itself drags the window, not just the space around it.
     expect(renderToStaticMarkup(bar())).toMatch(/class="titlebar-workspace" data-tauri-drag-region/u);
@@ -1707,6 +1714,20 @@ describe("saved host picker", () => {
     expect(toggle.props.checked).toBe(false);
     await act(async () => { toggle.props.onChange({ target: { checked: true } }); });
     expect(onShell).toHaveBeenCalledWith({ focusFollowsMouse: true });
+    await act(async () => renderer.unmount());
+  });
+
+  it("moves the window buttons between the titlebar ends from Appearance", async () => {
+    const onShell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onShell, shell: defaultShellState })); });
+    const appearanceTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Appearance")!;
+    await act(async () => { appearanceTab.props.onClick(); });
+    const sides = renderer.root.findAll((node) => node.type === "input" && node.props.name === "window-buttons-side");
+    // macOS style leads as the default, and it is the one checked.
+    expect(sides.map((input) => input.props.checked)).toEqual([true, false]);
+    await act(async () => { sides[1].props.onChange(); });
+    expect(onShell).toHaveBeenCalledWith({ windowButtonsSide: "right" });
     await act(async () => renderer.unmount());
   });
 
