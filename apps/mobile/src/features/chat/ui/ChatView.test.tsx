@@ -20,6 +20,7 @@ import { newChatPane, slashMatches, withPickedCommand, type ChatPane } from "../
 import {
   chatItems,
   deltaEvent,
+  dictation,
   itemEvent,
   paneFrom,
   PANE,
@@ -34,7 +35,7 @@ import {
   tool,
 } from "../testing";
 import { ChatView, type ChatViewProps } from "./ChatView";
-import { ChatReplyRow, ChatVoiceBar } from "./ChatVoiceParts";
+import { ChatReplyRow, ChatVoicePane } from "./ChatVoiceParts";
 import type { PendingAnswer } from "./PendingCard";
 
 // The replies' Copy buttons reach the clipboard, which is native.
@@ -155,7 +156,8 @@ describe("phone chat mocks", () => {
     expect(shown).toContain("The detector joins rows that the terminal marks as soft-wrapped.");
     expect(shown).toContain("run cargo test links ok");
     expect(shown).toContain("Reply");
-    byLabel(view, "Voice mode: read replies aloud");
+    // Voice mode is the reply field's mic, not a switch in the header.
+    expect(allByLabel(view, "Voice mode: read replies aloud")).toHaveLength(0);
     byLabel(view, "Details");
     byLabel(view, "Talk");
     expect(byLabel(view, "Send").props.disabled).toBe(true);
@@ -384,7 +386,7 @@ describe("phone chat mocks", () => {
     expect(allByLabel(view, "Your message, sending")).toHaveLength(0);
   });
 
-  it("Voice mode, inside the chat: the voice bar replaces the composer and the reply plays", async () => {
+  it("Voice mode, inside the chat: the talk pane replaces the composer and the reply plays", async () => {
     vi.useFakeTimers();
     try {
       const connection = new FakeConnection();
@@ -419,25 +421,31 @@ describe("phone chat mocks", () => {
 
       const pane = paneFrom([snapshotEvent(5n, [text("q", ChatItemKind.USER, "Add the fixture and run the tests."), text("a", ChatItemKind.ASSISTANT, reply)])]);
       const calls = newCalls();
+      const stops: string[] = [];
       const voice = {
         status: null,
-        reply: <ChatReplyRow controller={controller} message={message} playbackRate={1.5} />,
-        bar: <ChatVoiceBar controller={controller} hint="" onStop={() => undefined} phase="idle" working={false} />,
+        reply: <ChatReplyRow controller={controller} message={message} />,
+        pane: <ChatVoicePane controller={controller} hint="" onKeyboard={() => stops.push("keyboard")} onStop={() => stops.push("stop")} phase="idle" stopping={false} working />,
         ready: true,
+        dictation: dictation(),
       };
       const view = render(<Harness calls={calls} pane={pane} voice={voice} voiceMode />);
       const shown = textOf(view.toJSON());
-      expect(shown).toContain("Hold to talk. Swipe left to lock, right to cancel.");
-      // The reply's player is the conversation's last row.
+      // The Voice screen's hold surface, with its Speed and Autoplay above it.
+      expect(shown).toContain("Hold anywhere here to talk");
+      byLabel(view, /^Playback speed /);
+      expect(byLabel(view, "Autoplay replies").props.accessibilityRole).toBe("switch");
+      // The reply's player is the conversation's last row, without a speed of its own.
       const last = listOf(view).children.at(-1);
-      expect(typeof last === "object" && within(byLabel(view, "Reply read aloud"), last)).toBe(true);
-      expect(shown).toContain("1.5×");
+      const row = byLabel(view, "Reply read aloud");
+      expect(typeof last === "object" && within(row, last)).toBe(true);
+      expect(row.findAll((node) => typeof node.props.accessibilityLabel === "string" && node.props.accessibilityLabel.startsWith("Playback speed"))).toHaveLength(0);
       expect(allByLabel(view, "Message")).toHaveLength(0);
-      expect(byLabel(view, "Voice mode: read replies aloud").props.accessibilityState).toEqual({ checked: true });
       byLabel(view, /^Pause reply|^Play reply/);
       writeRender("voice", view.toJSON());
-      press(byLabel(view, "Voice mode: read replies aloud"));
-      expect(calls.voice).toEqual([false]);
+      press(byLabel(view, "Stop the agent"));
+      press(byLabel(view, "Keyboard"));
+      expect(stops).toEqual(["stop", "keyboard"]);
       controller.dispose();
     } finally {
       vi.useRealTimers();

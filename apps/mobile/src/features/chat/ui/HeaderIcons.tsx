@@ -14,14 +14,13 @@ function outline(color: string) {
   return { fill: "none", stroke: color, strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: "1.8" } as const;
 }
 
-/** Headphones: voice mode, replies read aloud. */
-export function HeadphonesIcon({ size = 18, color }: IconProps) {
+/** A keyboard: voice mode's way back to the reply field. */
+export function KeyboardIcon({ size = 18, color }: IconProps) {
   const line = outline(color);
   return (
     <Svg height={size} viewBox="0 0 24 24" width={size}>
-      <Path d="M4 14v-2a8 8 0 0 1 16 0v2" {...line} />
-      <Rect height="6" rx="1.5" width="4" x="3" y="14" {...line} />
-      <Rect height="6" rx="1.5" width="4" x="17" y="14" {...line} />
+      <Rect height="12" rx="2" width="19" x="2.5" y="6" {...line} />
+      <Path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" {...line} />
     </Svg>
   );
 }

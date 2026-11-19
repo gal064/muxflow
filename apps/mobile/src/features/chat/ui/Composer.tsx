@@ -2,11 +2,12 @@ import type { ReactNode, Ref } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import type { ChatCommand } from "../../../protocol/gen/chat_pb";
-import { ArrowUpIcon, MicIcon } from "../../../ui/components/MediaIcons";
+import { ArrowUpIcon } from "../../../ui/components/MediaIcons";
 import { colors, fixedChromeText, fonts, typeScale } from "../../../ui/tokens";
 import { filesRefusal, type FilesState } from "../attach/attachState";
 import type { CommandGroup } from "../chatModel";
 import { PlusIcon } from "./AttachIcons";
+import { ComposerMic, MicTip, type ComposerDictation } from "./ComposerMic";
 
 export interface ComposerProps {
   draft: string;
@@ -35,8 +36,8 @@ export interface ComposerProps {
   onFocus?: (() => void) | undefined;
   /** The field itself, for whoever has to focus it: starting an edit does. */
   inputRef?: Ref<TextInput> | undefined;
-  /** Turns voice mode on. Absent hides the button. */
-  onMic?: (() => void) | undefined;
+  /** The mic: a tap turns voice mode on (off when `on`), a hold dictates. Absent hides it. */
+  mic?: { on: boolean; onTap: () => void; dictation: ComposerDictation | undefined } | undefined;
   /** Attaching files. Absent hides the plus button: the agent takes none. */
   attach?: ComposerAttach | undefined;
 }
@@ -52,7 +53,7 @@ export interface ComposerAttach {
 
 /** The reply field: text, the mic, and Send, which is Stop while the agent works. */
 export function Composer(props: ComposerProps) {
-  const { draft, onDraft, commands, onPickCommand, working, canSendMidTurn, waiting, sideQuestion, disabled, sending, editing, onCancelEdit, onSend, onStop, stopping = false, onFocus, onMic } = props;
+  const { draft, onDraft, commands, onPickCommand, working, canSendMidTurn, waiting, sideQuestion, disabled, sending, editing, onCancelEdit, onSend, onStop, stopping = false, onFocus, mic } = props;
   const hasText = draft.trim() !== "";
   const attach = props.attach;
   // A side question goes alone: the files wait for the next message.
@@ -67,8 +68,12 @@ export function Composer(props: ComposerProps) {
   // Nothing to send yet, or not all of it on the host yet.
   const sendPlain = !hasMessage || files === "uploading";
   const placeholder = blocked ? "Answer the card above" : working && canSendMidTurn ? "Send a follow-up while it works" : "Reply";
+  // A dictation is sent as Send would send it, so it waits for what Send waits for.
+  const dictationRefusal = blocked && !sideQuestion ? "Answer the card above first" : working && !canSendMidTurn && !sideQuestion && !editing ? "The agent takes a message once it stops" : "";
+  const dictation = mic?.dictation;
   return (
     <View style={styles.wrap}>
+      {dictation?.tip && dictation.phase === "idle" && !disabled ? <MicTip /> : null}
       {commands.length > 0 ? <SlashList groups={commands} onPick={onPickCommand} /> : null}
       <View style={[styles.box, disabled && styles.boxDisabled]}>
         {editing ? (
@@ -98,11 +103,7 @@ export function Composer(props: ComposerProps) {
             style={styles.input}
             value={draft}
           />
-          {onMic ? (
-            <Pressable accessibilityHint="Turns voice mode on" accessibilityLabel="Talk" accessibilityRole="button" disabled={disabled} hitSlop={6} onPress={onMic} style={({ pressed }) => [styles.mic, pressed && styles.pressed]}>
-              <MicIcon color={colors.chromeDim} size={18} />
-            </Pressable>
-          ) : null}
+          {mic ? <ComposerMic dictation={dictation} disabled={disabled} on={mic.on} onTap={mic.onTap} sendRefusal={dictationRefusal} /> : null}
           {working && !editing ? (
             <Pressable
               accessibilityLabel="Stop"

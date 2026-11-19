@@ -19,7 +19,7 @@ import { flatListIndexScrolls, pressHardwareBack } from "../../../testing/stubs/
 import type { ChatPane } from "../chatModel";
 import { forgetDrafts } from "../drafts";
 import { messageTime, replyTime } from "../messageTime";
-import { catalog, paneFrom, PANE, SERVER, snapshotEvent, state, text, tool } from "../testing";
+import { catalog, dictation, paneFrom, PANE, SERVER, snapshotEvent, state, text, tool } from "../testing";
 import { useFork } from "../useFork";
 import { useReplyDraft } from "../useReplyDraft";
 import { ChatView } from "./ChatView";
@@ -126,7 +126,7 @@ function Screen({ pane, world, paneId = PANE, server = SERVER, connected = true,
       stopping={false}
       title="Wrapped links"
       focused={focused}
-      voice={voiceReady ? { status: null, reply: null, bar: null, ready: true } : undefined}
+      voice={voiceReady ? { status: null, reply: null, pane: null, ready: true, dictation: dictation() } : undefined}
       voiceMode={voiceReady}
     />
   );

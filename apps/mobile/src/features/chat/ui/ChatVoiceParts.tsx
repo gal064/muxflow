@@ -1,35 +1,74 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { prefsStore, type VoicePlaybackRate } from "../../../store/prefsStore";
-import { colors, typeScale } from "../../../ui/tokens";
+import { colors, fixedChromeText, radii, typeScale } from "../../../ui/tokens";
 import { MicButton } from "../../voice/MicButton";
 import { ReplyPlayer } from "../../voice/ReplyPlayer";
-import { SpeedButton } from "../../voice/SpeedButton";
 import type { VoiceController } from "../../voice/VoiceController";
+import { VoiceSettingsControls } from "../../voice/VoiceSettingsControls";
 import type { VoiceMessage, VoicePhase } from "../../voice/voiceStore";
+import { KeyboardIcon } from "./HeaderIcons";
 
-/** The newest reply's audio, as a row after the conversation: play, position, speed. */
-export function ChatReplyRow({ controller, message, playbackRate }: { controller: VoiceController; message: VoiceMessage; playbackRate: VoicePlaybackRate }) {
+/** The newest reply's audio, as a row after the conversation. Its speed is the pane's. */
+export function ChatReplyRow({ controller, message }: { controller: VoiceController; message: VoiceMessage }) {
   return (
     <View accessibilityLabel="Reply read aloud" style={styles.reply}>
-      <View style={styles.player}>
-        <ReplyPlayer controller={controller} message={message} />
-      </View>
-      <SpeedButton onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
+      <ReplyPlayer controller={controller} message={message} />
     </View>
   );
 }
 
-/** The hold-to-talk bar that replaces the composer. A locked take is sent by a tap anywhere on it. */
-export function ChatVoiceBar({ controller, phase, hint, working, onStop }: { controller: VoiceController; phase: VoicePhase; hint: string; working: boolean; onStop: () => void }) {
+export interface ChatVoicePaneProps {
+  controller: VoiceController;
+  phase: VoicePhase;
+  /** Why the microphone is off; empty when it is on. */
+  hint: string;
+  working: boolean;
+  /** Stop was pressed and the turn has not stopped yet. */
+  stopping: boolean;
+  onStop: () => void;
+  /** Leaves voice mode for the reply field. */
+  onKeyboard: () => void;
+}
+
+/**
+ * Voice mode's talk pane in the reply field's place (mobile-voice-mock.html):
+ * Speed and Autoplay, Stop while the agent works, and the way back to the
+ * keyboard, over the Voice screen's hold surface. A locked take is sent by a
+ * tap anywhere on the surface.
+ */
+export function ChatVoicePane({ controller, phase, hint, working, stopping, onStop, onKeyboard }: ChatVoicePaneProps) {
   const locked = phase === "recordingLocked";
   return (
-    <View>
-      {working ? (
-        <Pressable accessibilityLabel="Stop the agent" accessibilityRole="button" onPress={onStop} style={styles.stop}>
-          <Text style={styles.stopLabel}>Stop</Text>
+    <View style={styles.pane}>
+      <View accessibilityElementsHidden={locked} importantForAccessibility={locked ? "no-hide-descendants" : "auto"} style={styles.controls}>
+        <VoiceSettingsControls />
+        <View style={styles.spacer} />
+        {working ? (
+          <Pressable
+            accessibilityLabel="Stop the agent"
+            accessibilityRole="button"
+            accessibilityState={{ disabled: stopping }}
+            disabled={stopping}
+            hitSlop={{ top: 6, bottom: 6 }}
+            onPress={onStop}
+            style={({ pressed }) => [styles.stop, stopping && styles.disabled, pressed && styles.pressed]}
+          >
+            <Text {...fixedChromeText} numberOfLines={1} style={styles.stopLabel}>Stop</Text>
+          </Pressable>
+        ) : null}
+        <Pressable
+          accessibilityHint="Leaves voice mode for the reply field"
+          accessibilityLabel="Keyboard"
+          accessibilityRole="button"
+          // Not while a take is on: it is voice mode's, and leaving would send it as a dictation.
+          disabled={phase !== "idle"}
+          hitSlop={{ top: 6, bottom: 6 }}
+          onPress={onKeyboard}
+          style={({ pressed }) => [styles.keyboard, phase !== "idle" && styles.disabled, pressed && styles.pressed]}
+        >
+          <KeyboardIcon color={colors.chromeInk} size={20} />
         </Pressable>
-      ) : null}
+      </View>
       <View>
         <MicButton
           disabled={hint !== ""}
@@ -39,7 +78,6 @@ export function ChatVoiceBar({ controller, phase, hint, working, onStop }: { con
           onPressIn={() => controller.beginUtterance()}
           onSubmit={() => void controller.endUtterance()}
           phase={phase}
-          variant="bar"
         />
         {locked ? (
           <Pressable
@@ -56,9 +94,14 @@ export function ChatVoiceBar({ controller, phase, hint, working, onStop }: { con
 }
 
 const styles = StyleSheet.create({
-  /** The mock's "play · Reply · 1.5×" row: the reused player, then the speed. ReplyPlayer brings its own top margin. */
-  reply: { alignItems: "center", borderColor: colors.chromeHairline, borderRadius: 7, borderWidth: 1, flexDirection: "row", gap: 4, paddingBottom: 4, paddingHorizontal: 8 },
-  player: { flex: 1, marginTop: -4 },
-  stop: { alignItems: "center", alignSelf: "flex-end", borderColor: colors.danger, borderRadius: 999, borderWidth: 1, justifyContent: "center", marginBottom: 6, marginRight: 10, minHeight: 44, paddingHorizontal: 18 },
+  reply: { borderColor: colors.chromeHairline, borderRadius: 7, borderWidth: 1, paddingBottom: 4, paddingHorizontal: 8 },
+  /** As the Voice screen's pane: a hairline above, the controls row, then the hold surface. */
+  pane: { borderTopColor: colors.chromeBorder, borderTopWidth: 1 },
+  controls: { alignItems: "center", flexDirection: "row", gap: 8, paddingBottom: 8, paddingHorizontal: 12, paddingTop: 8 },
+  spacer: { flex: 1 },
+  stop: { alignItems: "center", borderColor: colors.danger, borderRadius: radii.card, borderWidth: 1, height: 40, justifyContent: "center", paddingHorizontal: 14 },
   stopLabel: { color: colors.dangerInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },
+  keyboard: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", width: 44 },
+  disabled: { opacity: 0.4 },
+  pressed: { opacity: 0.75 },
 });

@@ -1,14 +1,14 @@
 // Voice mode before voice can be used on the host
 // (docs/design/mobile-chat-mock.html, S9): the reply field stays, under the
-// setup card, and the hold-to-talk bar takes its place only once voice is
-// ready.
+// setup card, and the talk pane (mobile-voice-mock.html) takes its place only
+// once voice is ready.
 
 import { View } from "react-native";
 import type { ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 
-import { allByLabel, byLabel, render } from "../../../testing/render";
-import { chatItems, paneFrom, snapshotEvent } from "../testing";
+import { allByLabel, byLabel, press, render } from "../../../testing/render";
+import { chatItems, dictation, paneFrom, snapshotEvent } from "../testing";
 import { ChatView, type ChatViewProps } from "./ChatView";
 
 // The conversation's Copy buttons reach the clipboard, which is native.
@@ -19,8 +19,9 @@ function parts(ready: boolean): NonNullable<ChatViewProps["voice"]> {
   return {
     status: <View accessibilityLabel="Voice setup card" />,
     reply: null,
-    bar: <View accessibilityLabel="Voice bar" />,
+    pane: <View accessibilityLabel="Talk pane" />,
     ready,
+    dictation: dictation(),
   };
 }
 
@@ -62,24 +63,32 @@ function chat(fields: { voiceMode: boolean; voice?: ChatViewProps["voice"]; call
 
 /** The labelled parts at the foot of the screen, top to bottom. */
 function foot(view: ReactTestRenderer): string[] {
-  return allByLabel(view, /^(Voice setup card|Voice bar|Message)$/).map((node) => node.props.accessibilityLabel as string);
+  return allByLabel(view, /^(Voice setup card|Talk pane|Message)$/).map((node) => node.props.accessibilityLabel as string);
 }
 
 describe("voice mode and the reply field", () => {
-  it("voice not set up on the host: the reply field stays, under the setup card", () => {
-    const view = chat({ voiceMode: true, voice: parts(false) });
+  it("voice not set up on the host: the reply field stays, under the setup card, and its mic leaves voice mode", () => {
+    const calls: boolean[] = [];
+    const view = chat({ voiceMode: true, voice: parts(false), calls });
     expect(foot(view)).toEqual(["Voice setup card", "Message"]);
     expect(byLabel(view, "Message").props.editable).toBe(true);
     byLabel(view, "Send");
-    // Voice mode is already on: the field's mic, which turns it on, is not offered.
-    expect(allByLabel(view, "Talk")).toHaveLength(0);
-    expect(byLabel(view, "Voice mode: read replies aloud").props.accessibilityState).toEqual({ checked: true });
+    const mic = byLabel(view, "Talk");
+    expect(mic.props.accessibilityState).toMatchObject({ selected: true });
+    press(mic);
+    expect(calls).toEqual([false]);
   });
 
-  it("voice ready: the bar takes the reply field's place", () => {
+  it("not connected in voice mode, with no voice yet: the mic still leaves it", () => {
+    const calls: boolean[] = [];
+    press(byLabel(chat({ voiceMode: true, voice: undefined, calls }), "Talk"));
+    expect(calls).toEqual([false]);
+  });
+
+  it("voice ready: the talk pane takes the reply field's place", () => {
     const view = chat({ voiceMode: true, voice: parts(true) });
     // The card's place stays mounted: it holds the setup dialog and draws nothing once ready.
-    expect(foot(view)).toEqual(["Voice setup card", "Voice bar"]);
+    expect(foot(view)).toEqual(["Voice setup card", "Talk pane"]);
   });
 
   it("voice mode on with nothing to show yet: the reply field", () => {
@@ -90,7 +99,9 @@ describe("voice mode and the reply field", () => {
     const calls: boolean[] = [];
     const view = chat({ voiceMode: false, voice: parts(true), calls });
     expect(foot(view)).toEqual(["Message"]);
-    byLabel(view, "Talk");
     expect(calls).toEqual([]);
+    // A tap on it is voice mode.
+    press(byLabel(view, "Talk"));
+    expect(calls).toEqual([true]);
   });
 });

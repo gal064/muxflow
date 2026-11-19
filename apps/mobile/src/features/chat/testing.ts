@@ -30,6 +30,7 @@ import {
   type ChatTool,
 } from "../../protocol/gen/chat_pb";
 import { applyChatEvent, newChatPane, type ChatPane } from "./chatModel";
+import type { ComposerDictation } from "./ui/ComposerMic";
 
 export const FILE = "crates/terminal-interactions/src/links.rs";
 export const PANE = "%7";
@@ -231,4 +232,21 @@ export function questionTurnEvents(from: bigint): ChatEvent[] {
     updatedEvent(next(), text("turn-1-reply", ChatItemKind.ASSISTANT, "The detector joins rows the terminal marks as soft-wrapped. Before I change it, two things to settle.")),
     stateEvent(next(), state({ turn: ChatTurnState.WAITING, pending: questionRequest() })),
   ];
+}
+
+/** The reply field's dictation with nothing in the way and no take on, each action recorded by name. */
+export function dictation(fields: Partial<ComposerDictation> = {}, calls: string[] = []): ComposerDictation {
+  return {
+    phase: "idle",
+    refusal: "",
+    tip: false,
+    onPressIn: () => calls.push("pressIn"),
+    onRelease: () => calls.push("release"),
+    onBegin: () => calls.push("begin"),
+    onSubmit: () => calls.push("submit"),
+    onLock: () => calls.push("lock"),
+    onCancel: () => calls.push("cancel"),
+    onRefused: (reason) => calls.push(`refused: ${reason}`),
+    ...fields,
+  };
 }

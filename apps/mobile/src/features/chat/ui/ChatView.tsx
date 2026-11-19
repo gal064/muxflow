@@ -1,5 +1,5 @@
 import type { MessageInitShape } from "@bufbuild/protobuf";
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { ChatConnection, ChatTurnState, type ChatBackgroundTask, type ChatCommand, type ChatItem, type ChatOptionsSchema } from "../../../protocol/gen/chat_pb";
@@ -16,6 +16,7 @@ import { ChatHeader } from "./ChatHeader";
 import { BackgroundTasks } from "./BackgroundTasks";
 import { ChatTimeline } from "./ChatTimeline";
 import { Composer } from "./Composer";
+import type { ComposerDictation } from "./ComposerMic";
 import { DetailsSheet } from "./DetailsSheet";
 import type { PendingAnswer } from "./PendingCard";
 import { RequestDock } from "./RequestDock";
@@ -73,9 +74,14 @@ export interface ChatViewProps {
   voiceMode: boolean;
   /** This screen is the one in front (absent: it is). Under another screen it does not take the system Back button. */
   focused?: boolean | undefined;
+  /** The reply field's mic was tapped: voice mode on, or off when it was on and voice was not ready. */
   onVoiceMode: (on: boolean) => void;
-  /** Voice mode only: the readiness card, the newest reply's player, and the bar that replaces the composer once voice is `ready` on the host. */
-  voice?: { status: ReactNode; reply: ReactNode; bar: ReactNode; ready: boolean } | undefined;
+  /**
+   * The reply field's hold to dictate, and voice mode's parts: the readiness
+   * card, the newest reply's player, and the talk pane that replaces the
+   * reply field once voice is `ready` on the host.
+   */
+  voice?: { status: ReactNode; reply: ReactNode; pane: ReactNode; ready: boolean; dictation: ComposerDictation } | undefined;
 }
 
 const NO_ROWS: TimelineRow[] = [];
@@ -85,7 +91,7 @@ const NO_TASKS: ChatBackgroundTask[] = [];
  * The chat screen (mobile-chat-mock.html, S1 to S4): header, conversation,
  * then what cannot scroll away: the request the agent waits on, the line that
  * says it works, the chip for what runs in the background, and the composer
- * or voice bar.
+ * or voice mode's talk pane.
  */
 export function ChatView(props: ChatViewProps) {
   const { title, pane, connected, voiceMode, voice } = props;
@@ -131,16 +137,23 @@ export function ChatView(props: ChatViewProps) {
     focused: props.focused,
   });
 
+  // The talk pane's keyboard button leaves voice mode for the reply field, so the field takes the focus.
+  const voicePane = voiceMode && voice?.ready === true;
+  const wasVoicePane = useRef(voicePane);
+  const field = messages.field;
+  useEffect(() => {
+    if (wasVoicePane.current && !voiceMode) field.current?.focus();
+    wasVoicePane.current = voicePane;
+  }, [field, voiceMode, voicePane]);
+
   return (
     <View style={styles.root}>
       <ChatHeader
         connected={connected}
         onBack={messages.back}
         onDetails={() => props.onDetails(true)}
-        onVoiceMode={props.onVoiceMode}
         pane={pane}
         title={title}
-        voiceMode={voiceMode}
       />
       {banner ? (
         <View style={[styles.banner, banner.tone === "danger" && styles.bannerDanger]}>
@@ -185,7 +198,7 @@ export function ChatView(props: ChatViewProps) {
 
       {/* The setup card shows until voice is ready on the host, and the reply field stays under it until then. */}
       {voiceMode && voice ? voice.status : null}
-      {voiceMode && voice?.ready ? voice.bar : (
+      {voicePane && voice ? voice.pane : (
         <Composer
           attach={attach ? {
             files: filesState(attach.entries),
@@ -207,7 +220,15 @@ export function ChatView(props: ChatViewProps) {
           onFocus={() => {
             if (pending) setFoldedRequest(pending.requestId);
           }}
-          onMic={voiceMode ? undefined : () => props.onVoiceMode(true)}
+          // In voice mode before voice is ready (not set up, not connected) the mic is the way out.
+          mic={{
+            on: voiceMode,
+            onTap: () => {
+              if (!voiceMode) Keyboard.dismiss();
+              props.onVoiceMode(!voiceMode);
+            },
+            dictation: voice?.dictation,
+          }}
           onPickCommand={props.onPickCommand}
           onSend={props.onSend}
           onStop={props.onStop}
