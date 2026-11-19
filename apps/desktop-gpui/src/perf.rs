@@ -18,6 +18,7 @@
 //! waking a GPUI task.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -481,6 +482,15 @@ impl Probe {
     /// The surface shows `pane_id` on `host` with its content. Ends the
     /// switch waiting for it, handing back when it started and what it was.
     fn agent_switch_shown(&mut self, host: &str, pane_id: &str) -> Option<(Instant, bool)> {
+        // One whose pane never came is let go, as a span is.
+        if self
+            .agent_switch
+            .as_ref()
+            .is_some_and(|switch| switch.started.elapsed() >= SPAN_TIMEOUT)
+        {
+            self.agent_switch = None;
+            self.counter("workflow.agentSwitchTimeouts", 1);
+        }
         let switch = self
             .agent_switch
             .take_if(|switch| switch.host == host && switch.pane_id == pane_id)?;
@@ -652,7 +662,19 @@ pub fn note_pane_painted(scope: &str, pane_id: &str) {
 /// Opens the agent switch probe: `perf.agentSwitch` `requested` now, and the
 /// `agent.switch` sample once the pane is on screen.
 pub fn agent_switch_requested(host: &str, pane_id: &str) {
-    with_probe(|probe, t| probe.agent_switch_requested(host, pane_id, Instant::now(), t));
+    with_probe(|probe, t| {
+        probe.agent_switch_requested(host, pane_id, Instant::now(), t);
+        AGENT_SWITCH_PENDING.store(true, Ordering::Relaxed);
+    });
+}
+
+/// Set while an agent switch waits for its pane, so the paths that end one,
+/// which run on every paint, do nothing the rest of the time.
+static AGENT_SWITCH_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Whether an agent switch is waiting for its pane to be on screen.
+pub fn agent_switch_pending() -> bool {
+    AGENT_SWITCH_PENDING.load(Ordering::Relaxed)
 }
 
 /// Whether the move the waiting switch made paints before the host answers.
@@ -673,8 +695,16 @@ pub fn agent_switch_shown(
     held: bool,
     window: &gpui_kit::Window,
 ) {
+    if !agent_switch_pending() {
+        return;
+    }
     let mut shown = None;
-    with_probe(|probe, _| shown = probe.agent_switch_shown(host, pane_id));
+    with_probe(|probe, _| {
+        shown = probe.agent_switch_shown(host, pane_id);
+        if probe.agent_switch.is_none() {
+            AGENT_SWITCH_PENDING.store(false, Ordering::Relaxed);
+        }
+    });
     let Some((started, painted_first)) = shown else {
         return;
     };

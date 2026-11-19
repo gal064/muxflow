@@ -1090,6 +1090,16 @@ impl Workspaces {
         else {
             return false;
         };
+        // tmux's select-pane unzooms a zoomed window for any other pane, so
+        // the layout would change under the paint a round trip later.
+        let zoomed_elsewhere = window.zoomed
+            && snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.window_id == window_id && pane.active && pane.id != pane_id);
+        if zoomed_elsewhere {
+            return false;
+        }
         let mut panes: Vec<Pane> = snapshot
             .panes
             .iter()
@@ -2047,7 +2057,7 @@ async fn fly(
             window_id: None,
         });
         let current = this
-            .read_with(cx, |this, _| this.coordinator.is_current(id))
+            .read_with(cx, |this, _| this.coordinator.still_wanted(id))
             .unwrap_or(false);
         if !current && plan.select_window {
             return Outcome::Partial {
@@ -2066,8 +2076,10 @@ async fn fly(
         generation = Some(result.topology_generation);
         applied = Some(target.clone());
     }
+    // A click repeated while this flies is the same move: it takes this
+    // result without flying, so the pane is focused here.
     let current = this
-        .read_with(cx, |this, _| this.coordinator.is_current(id))
+        .read_with(cx, |this, _| this.coordinator.still_wanted(id))
         .unwrap_or(false);
     if let (Some(pane), Some(window), true) = (&intent.pane, &target.window_id, current) {
         let action = TmuxAction::pane(ActionKind::FocusPane, &target.session_id, window, pane);

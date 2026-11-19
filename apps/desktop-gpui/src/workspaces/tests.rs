@@ -1703,6 +1703,13 @@ mod agent_seams {
             at("$1", "@1", "%2"),
             "painted before the host answers"
         );
+        // The Explorer, and the root an agent launches under, follow it.
+        let explored = shell.visual.update(|_, cx| {
+            crate::files::inputs(cx.global::<ConnectionUi>().0.read(cx))
+                .selection
+                .map(|selection| selection.pane_id)
+        });
+        assert_eq!(explored.as_deref(), Some("%2"));
         // A snapshot that has not seen the move does not take focus back.
         shell.publish(vec![snapshot_frame(3, &world("@1"))]);
         assert_eq!(shell.place(), at("$1", "@1", "%2"));
@@ -1868,6 +1875,176 @@ mod agent_seams {
         shell.settle();
         assert_eq!(seen(&requests), 1);
         assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+    }
+
+    fn mark_seen_count(requests: &Requests) -> usize {
+        requests
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.operation == "markSeen")
+            .count()
+    }
+
+    fn wait_a_poll(shell: &mut Shell) {
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+    }
+
+    /// `notes`, with its one pane %4, shown and given its screen, then left:
+    /// a move back to it paints first.
+    fn keep_the_notes_screen(shell: &mut Shell) {
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$2", cx)));
+        shell.settle();
+        shell.publish(vec![seed_frame("%4", 1, "agent screen")]);
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$1", cx)));
+        shell.settle();
+        shell.publish(vec![snapshot_frame(400, &world("@1"))]);
+        assert_eq!(guard(shell), None);
+        assert!(holds(shell, "%4"));
+    }
+
+    fn notes_route() -> Route {
+        Route {
+            host_profile: "local".into(),
+            server_identity: "tmux".into(),
+            session_id: "$2".into(),
+            session_name: "notes".into(),
+            window_id: "@3".into(),
+            window_name: "shell".into(),
+            pane_id: "%4".into(),
+            agent_id: "in-notes".into(),
+            attention_generation: 7,
+        }
+    }
+
+    fn notes_agent(shell: &mut Shell) -> Requests {
+        start_agents(
+            shell,
+            HashMap::from([(
+                "client-1",
+                vec![agent("in-notes", "local", ("$2", "notes", "@3", "%4"))],
+            )]),
+        )
+    }
+
+    /// A single-pane window's one pane is tmux's active pane already, so the
+    /// painted move alone would look arrived: the guard must be gone first.
+    #[gpui_kit::test]
+    fn a_notification_is_acknowledged_only_once_the_host_has_its_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        let requests = notes_agent(&mut shell);
+        keep_the_notes_screen(&mut shell);
+        {
+            // Its answers come after the snapshots seen so far, as a host's do.
+            let mut host = shell.host.state();
+            host.hold = true;
+            host.generation = 1_000;
+        }
+        shell
+            .visual
+            .update(|_, cx| activation::activate(notes_route(), false, cx));
+        shell.settle();
+        assert_eq!(shell.place(), at("$2", "@3", "%4"), "painted first");
+        wait_a_poll(&mut shell);
+        assert_eq!(mark_seen_count(&requests), 0, "not while the host is asked");
+        shell.release();
+        wait_a_poll(&mut shell);
+        assert_eq!(
+            mark_seen_count(&requests),
+            0,
+            "nor before a snapshot has the move"
+        );
+        shell.publish(vec![snapshot_frame(2_000, &world("@1"))]);
+        wait_a_poll(&mut shell);
+        assert_eq!(mark_seen_count(&requests), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_notification_move_is_not_acknowledged(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        let requests = notes_agent(&mut shell);
+        keep_the_notes_screen(&mut shell);
+        {
+            let mut host = shell.host.state();
+            host.hold = true;
+            host.answers
+                .push_back(Err("tmux refused the switch".into()));
+        }
+        shell
+            .visual
+            .update(|_, cx| activation::activate(notes_route(), false, cx));
+        shell.settle();
+        assert_eq!(shell.place(), at("$2", "@3", "%4"));
+        wait_a_poll(&mut shell);
+        shell.release();
+        wait_a_poll(&mut shell);
+        assert_eq!(shell.place(), at("$1", "@1", "%1"), "put back");
+        assert_eq!(mark_seen_count(&requests), 0);
+    }
+
+    /// %1 and %2 given their screens, then the tab left for `server`.
+    fn keep_the_editor_screens(shell: &mut Shell) {
+        shell.publish(vec![
+            seed_frame("%1", 1, "left"),
+            seed_frame("%2", 2, "right"),
+        ]);
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
+        shell.settle();
+        shell.publish(vec![snapshot_frame(300, &world("@2"))]);
+        assert_eq!(guard(shell), None);
+        assert!(holds(shell, "%1") && holds(shell, "%2"));
+    }
+
+    /// A double click while the window step is still in flight: the first
+    /// move must still focus the pane, since the second takes its result.
+    #[gpui_kit::test]
+    fn a_click_repeated_in_flight_still_focuses_its_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        keep_the_editor_screens(&mut shell);
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        shell.publish(vec![snapshot_frame(500, &focused_on("@1", "%2"))]);
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// tmux unzooms a window to focus another of its panes, so painting the
+    /// zoomed pane swapped would be undone by a reflow a round trip later.
+    #[gpui_kit::test]
+    fn a_zoomed_window_waits_for_the_host_to_focus_another_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell.publish(vec![
+            seed_frame("%1", 1, "left"),
+            seed_frame("%2", 2, "right"),
+        ]);
+        let mut zoomed = world("@1");
+        zoomed.windows[0].zoomed = true;
+        shell.publish(vec![snapshot_frame(300, &zoomed)]);
+        assert!(holds(&mut shell, "%2"), "off screen behind the zoom");
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        assert_eq!(guard(&mut shell), None);
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%1"), "until tmux says so");
     }
 }
 

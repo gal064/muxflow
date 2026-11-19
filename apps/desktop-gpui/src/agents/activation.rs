@@ -267,6 +267,11 @@ pub fn activate(route: Route, retry_used: bool, cx: &mut App) {
                             .panes
                             .iter()
                             .any(|candidate| candidate.id == pane.id && candidate.active)
+                            // A move painted ahead of the host has not arrived
+                            // until a snapshot says so and its guard is gone.
+                            && link.optimistic_window.as_ref().is_none_or(|guard| {
+                                guard.pane_id.as_deref() != Some(pane.id.as_str())
+                            })
                     });
                 let (_, exact) = active_scope(cx);
                 let exact = exact.filter(|exact| {
