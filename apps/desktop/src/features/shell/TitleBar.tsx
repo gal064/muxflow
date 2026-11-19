@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Icon } from "../../ui/Icon";
 import type { Platform } from "../../commands/registry";
 import type { WindowControls } from "./useWindowChrome";
+import type { WindowButtonsSide } from "./types";
 
 interface TitleBarProps {
   platform: Platform;
@@ -29,6 +30,11 @@ interface TitleBarProps {
   update?: { version: string };
   /** Linux window buttons on a floating-window desktop; absent renders none. */
   windowControls?: WindowControls;
+  /**
+   * Which end `windowControls` sits on: "left" (macOS style, close leading)
+   * or "right" (Windows style, close last). Anything else is "left".
+   */
+  windowButtonsSide?: WindowButtonsSide;
   /**
    * The tab strip, when the person chose to have it here. The bar then splits
    * in two: the app's own controls over the sidebar, and the tabs over the
@@ -62,15 +68,17 @@ interface TitleBarProps {
  *
  * On Linux GTK's own bar is turned off (`src-tauri/src/linux_window.rs`), so
  * the same drag region moves the window there too, and on a floating-window
- * desktop this bar ends in minimize, maximize and close.
+ * desktop this bar carries minimize, maximize and close — on whichever end
+ * `windowButtonsSide` says: macOS style leads at the left with close first,
+ * Windows style ends at the right with close last.
  *
- * With `tabs`, the same controls are rearranged: window buttons, Settings, the
- * bell and Back/Forward over the sidebar; the tabs over the workspace; the two
- * rail toggles at the far end. The workspace name is dropped, since the
- * selected tab and the sidebar row already say it, and New workspace moves to
- * the sidebar's Workspaces header, staying here only while the sidebar is shut.
- * Linux window buttons lead in this arrangement, where the far end is the
- * tabs' own tools.
+ * With `tabs`, the same controls are rearranged: Settings, the bell and
+ * Back/Forward over the sidebar; the tabs over the workspace; the two rail
+ * toggles and, in Windows style, the window buttons at the far end. The
+ * workspace name is dropped, since the selected tab and the sidebar row
+ * already say it, and New workspace moves to the sidebar's Workspaces header,
+ * staying here only while the sidebar is shut. macOS-style Linux buttons lead
+ * this arrangement, where the far end is the tabs' own tools.
  */
 export function TitleBar(props: TitleBarProps) {
   const plural = props.unread === 1 ? "" : "s";
@@ -155,6 +163,8 @@ export function TitleBar(props: TitleBarProps) {
     title={props.panelFits ? undefined : "Widen the window to show Files and Git"}
     type="button"
   ><Icon name="panelRight" /></button>;
+  // The three buttons in Windows order — the order they read left to right at
+  // the right end. macOS style puts them at the left, and close leads there.
   const windowButtons = props.windowControls && [
     <button aria-label="Minimize" className="bar-button" key="minimize" onClick={props.windowControls.onMinimize} type="button"><Icon name="minus" /></button>,
     <button
@@ -166,13 +176,15 @@ export function TitleBar(props: TitleBarProps) {
     ><Icon name={props.windowControls.maximized ? "windowRestore" : "windowMaximize"} /></button>,
     <button aria-label="Close window" className="bar-button window-close" key="close" onClick={props.windowControls.onClose} type="button"><Icon name="close" /></button>,
   ];
+  const windowButtonsLead = windowButtons && [windowButtons[2], windowButtons[0], windowButtons[1]];
+  const buttonsOnLeft = props.windowButtonsSide !== "right";
   const overlay = props.platform === "mac" ? "titlebar-overlay" : "";
 
   if (props.tabs) {
     return <header className={`titlebar titlebar-tabs ${overlay}`} data-tauri-drag-region>
       <div className="titlebar-lead" data-tauri-drag-region>
         {/* Close leads, the way it does wherever the buttons sit on the left. */}
-        {windowButtons && <div className="window-controls">{[windowButtons[2], windowButtons[0], windowButtons[1]]}</div>}
+        {buttonsOnLeft && windowButtons && <div className="window-controls window-controls-lead">{windowButtonsLead}</div>}
         {settings}
         {bell}
         {history}
@@ -186,10 +198,14 @@ export function TitleBar(props: TitleBarProps) {
       <div className="titlebar-rails">
         {sidebarToggle}
         {panelToggle}
+        {/* Windows style ends the bar with the window buttons, inside the
+            rails so the far edge stays theirs alone. */}
+        {!buttonsOnLeft && windowButtons && <div className="window-controls">{windowButtons}</div>}
       </div>
     </header>;
   }
   return <header className={`titlebar ${overlay}`} data-tauri-drag-region>
+    {buttonsOnLeft && windowButtons && <div className="window-controls window-controls-lead">{windowButtonsLead}</div>}
     {settings}
     {sidebarToggle}
     {history}
@@ -201,6 +217,6 @@ export function TitleBar(props: TitleBarProps) {
     {bell}
     {newWorkspace}
     {panelToggle}
-    {windowButtons && <div className="window-controls">{windowButtons}</div>}
+    {!buttonsOnLeft && windowButtons && <div className="window-controls">{windowButtons}</div>}
   </header>;
 }

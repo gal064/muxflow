@@ -181,9 +181,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    and its place in the tab order — the bell, whose whole job when it has
    nowhere to go is to say so — still has to read as frozen. */
 .bar-button:disabled, .bar-button[aria-disabled="true"] { color: var(--chrome-faint); cursor: default; }
-/* Linux window buttons at the end of the title bar, set off from the app's own
-   controls by a gap so a close aimed at the panel toggle has room to miss. */
+/* Linux window buttons at either end of the title bar, set off from the app's
+   own controls by a gap so a close aimed at the panel toggle has room to miss.
+   The Windows end (the default here) hangs the gap on the left. */
 .window-controls { display: flex; gap: 2px; margin-left: 8px; }
+/* The macOS end leads the bar instead, so the gap moves to the other side. */
+.window-controls-lead { margin: 0 8px 0 0; }
 .window-controls .window-close:hover { background: var(--danger); color: var(--chrome-ink-strong); }
 
 /* Tabs in the title bar (Settings > Appearance). The bar is then as tall as
@@ -200,7 +203,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .titlebar-overlay .titlebar-lead { padding-left: calc(78px / var(--ui-scale, 1)); }
 .sidebar-collapsed .titlebar-lead { width: auto; }
-.titlebar-lead .window-controls { margin: 0 8px 0 0; }
 .titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; background: none; }
 .titlebar-tabs .titlebar-spacer { flex: 0 0 32px; }
 .titlebar-rails {

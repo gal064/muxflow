@@ -69,6 +69,14 @@ pub enum MarkdownAppearance {
     Dark,
 }
 
+/// Which end of the title bar the app-drawn window buttons sit on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowButtonsSide {
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AppTabViewMode {
@@ -165,6 +173,10 @@ pub struct ShellPreferences {
     pub compact_workspaces: Option<bool>,
     #[serde(default)]
     pub tabs_in_title_bar: Option<bool>,
+    /// `None` is a save written before the setting existed: the frontend
+    /// default, which is the macOS end — buttons on the left.
+    #[serde(default)]
+    pub window_buttons_side: Option<WindowButtonsSide>,
     #[serde(default)]
     pub focus_follows_mouse: bool,
     /// The workspace list's one filter: pinned workspaces only.
@@ -708,6 +720,7 @@ mod tests {
                 agent_state_glyphs: true,
                 compact_workspaces: Some(true),
                 tabs_in_title_bar: Some(true),
+                window_buttons_side: Some(WindowButtonsSide::Right),
                 focus_follows_mouse: true,
                 pinned_only: true,
                 terminal_screen_reader: false,
@@ -906,6 +919,10 @@ mod tests {
             Some(MarkdownAppearance::Light)
         );
         assert_eq!(
+            value.shell.window_buttons_side,
+            Some(WindowButtonsSide::Right)
+        );
+        assert_eq!(
             value.shell.new_workspace_host_profile_id.as_deref(),
             Some("ssh-remote-linux")
         );
@@ -1023,6 +1040,7 @@ mod tests {
         assert_eq!(value.shell.enabled_panel_extensions, None);
         assert_eq!(value.shell.compact_workspaces, None);
         assert_eq!(value.shell.tabs_in_title_bar, None);
+        assert_eq!(value.shell.window_buttons_side, None);
         assert_eq!(value.shell.copy_on_select, None);
         assert_eq!(value.shell.clean_wrapped_commands, None);
         assert_eq!(value.shell.terminal_application_clipboard, None);

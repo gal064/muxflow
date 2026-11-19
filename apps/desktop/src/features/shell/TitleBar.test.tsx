@@ -32,9 +32,18 @@ function labels(markup: string): string[] {
 }
 
 describe("title bar", () => {
-  it("keeps today's arrangement without tabs", () => {
+  it("leads with the window buttons, macOS style, when there are no tabs", () => {
     const markup = renderToStaticMarkup(<TitleBar {...props} />);
     expect(markup).toContain("muxflow");
+    expect(labels(markup)).toEqual([
+      "Close window", "Minimize", "Maximize",
+      "Settings", "Toggle sidebar", "Back", "Forward", "No agents waiting",
+      "New workspace", "Toggle right panel",
+    ]);
+  });
+
+  it("without tabs, Windows style ends the bar with the window buttons, close last", () => {
+    const markup = renderToStaticMarkup(<TitleBar {...props} windowButtonsSide="right" />);
     expect(labels(markup)).toEqual([
       "Settings", "Toggle sidebar", "Back", "Forward", "No agents waiting",
       "New workspace", "Toggle right panel", "Minimize", "Maximize", "Close window",
@@ -47,6 +56,14 @@ describe("title bar", () => {
     expect(labels(markup)).toEqual([
       "Close window", "Minimize", "Maximize", "Settings", "No agents waiting", "Back", "Forward",
       "Tabs", "Toggle sidebar", "Toggle right panel",
+    ]);
+  });
+
+  it("with tabs, Windows style ends the bar with the window buttons after the rail toggles", () => {
+    const markup = renderToStaticMarkup(<TitleBar {...props} tabs={<div aria-label="Tabs" />} windowButtonsSide="right" />);
+    expect(labels(markup)).toEqual([
+      "Settings", "No agents waiting", "Back", "Forward",
+      "Tabs", "Toggle sidebar", "Toggle right panel", "Minimize", "Maximize", "Close window",
     ]);
   });
 

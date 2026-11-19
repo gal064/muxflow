@@ -10,7 +10,7 @@ import { hostLetter } from "./hostProfiles";
 import { PANEL_EXTENSIONS } from "./panelExtensions";
 import {
   clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, UI_SCALES,
-  type AppTabViewMode, type ShellState, type WorkspaceDefaults,
+  type AppTabViewMode, type ShellState, type WindowButtonsSide, type WorkspaceDefaults,
 } from "./types";
 
 interface SettingsDialogProps {
@@ -83,6 +83,11 @@ const MARKDOWN_APPEARANCES: readonly { id: MarkdownAppearance; label: string }[]
   { id: "default", label: "Muxflow default" },
   { id: "light", label: "Light" },
   { id: "dark", label: "Dark" },
+];
+
+const WINDOW_BUTTON_SIDES: readonly { id: WindowButtonsSide; label: string }[] = [
+  { id: "left", label: "Left, macOS style" },
+  { id: "right", label: "Right, Windows style" },
 ];
 
 const TABS: readonly { id: SettingsTab; label: string }[] = [
@@ -372,6 +377,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Show tabs in the title bar
           </label>
           <p className="settings-hint">Gives the terminal the row the tab strip used. New workspace moves to the Workspaces header.</p>
+          <fieldset className="settings-modes">
+            <legend>Window buttons</legend>
+            {WINDOW_BUTTON_SIDES.map((item) => <label key={item.id}>
+              <input checked={props.shell.windowButtonsSide === item.id} name="window-buttons-side" onChange={() => props.onShell({ windowButtonsSide: item.id })} type="radio" /> {item.label}
+            </label>)}
+          </fieldset>
+          <p className="settings-hint">Which end minimize, maximize and close sit on, and in which order. Only Muxflow's own buttons move: macOS draws its traffic lights itself, and tiling window managers get no buttons at all.</p>
           <fieldset className="settings-modes">
             <legend>Markdown appearance</legend>
             {MARKDOWN_APPEARANCES.map((item) => <label key={item.id}>

@@ -97,6 +97,12 @@ export interface WorkspaceUiRecord {
 
 export type DockSide = "left" | "right";
 
+/**
+ * Which end of the title bar Muxflow's own window buttons sit on: the macOS
+ * end (left, close leading) or the Windows end (right, close last).
+ */
+export type WindowButtonsSide = "left" | "right";
+
 export interface ShellState {
   /** Which segment of the right panel is showing when it is open. */
   panelSurface: PanelSurface;
@@ -122,6 +128,12 @@ export interface ShellState {
   compactWorkspaces: boolean;
   /** Puts the tab strip in the title bar, beside the window controls. */
   tabsInTitleBar: boolean;
+  /**
+   * Which end the minimize, maximize and close buttons sit on. Only ever seen
+   * on Linux: macOS draws its own traffic lights, and tiling window managers
+   * get no buttons at all.
+   */
+  windowButtonsSide: WindowButtonsSide;
   /** Focuses a terminal pane when the pointer rests on it, without a click. */
   focusFollowsMouse: boolean;
   /**
@@ -222,6 +234,7 @@ export const defaultShellState: ShellState = {
   agentStateGlyphs: false,
   compactWorkspaces: true,
   tabsInTitleBar: true,
+  windowButtonsSide: "left",
   focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
@@ -292,6 +305,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       tabsInTitleBar: typeof shell?.tabsInTitleBar === "boolean"
         ? shell.tabsInTitleBar
         : defaultShellState.tabsInTitleBar,
+      windowButtonsSide: shell?.windowButtonsSide === "right" ? "right" : defaultShellState.windowButtonsSide,
       focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
