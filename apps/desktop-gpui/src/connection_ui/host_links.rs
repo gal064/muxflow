@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use desktop_core::connection::{ConnectionSpec, profiles::HostProfile};
-use tmux_control::{Session, Window};
+use tmux_control::{Pane, Session, Window};
 
 use super::{
     connection_reducer::{HostAction, NormalizedHostState, connection_reducer},
@@ -36,7 +36,8 @@ pub struct HostLink {
 /// flight. Port of `OptimisticWindowSwitch` from `app/windowSelection.ts`.
 ///
 /// Every snapshot in that gap still names the old window as active and would
-/// snap the shell back to it, so while this is held its window wins. It is
+/// snap the shell back to it, so while this is held its window wins, and its
+/// pane, if it names one, is the window's focused pane. It is
 /// released once a snapshot at or past `through_generation` arrives (the host
 /// has seen the switch), or once another workspace is selected. Until the
 /// select action answers there is no generation to wait for, and it holds.
@@ -45,7 +46,18 @@ pub struct OptimisticWindow {
     pub session_id: String,
     /// Unset where the workspace's windows were not known yet.
     pub window_id: Option<String>,
+    /// The pane a pane move focuses in that window, ahead of the host.
+    pub pane_id: Option<String>,
     pub through_generation: Option<u64>,
+}
+
+impl OptimisticWindow {
+    /// Whether `other` is this same move, whatever it has heard back since.
+    pub fn same_move(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.window_id == other.window_id
+            && self.pane_id == other.pane_id
+    }
 }
 
 impl HostLink {
@@ -62,6 +74,34 @@ impl HostLink {
             optimistic_window: None,
             detail: String::new(),
         }
+    }
+
+    /// The pane the shell shows focused in `window_id`: the one a move still
+    /// in flight focused, while its guard holds and the pane is still there,
+    /// else none, and tmux's own active pane stands.
+    pub fn optimistic_pane(&self, window_id: &str) -> Option<&str> {
+        let guard = self.optimistic_window.as_ref()?;
+        let pane = guard.pane_id.as_deref()?;
+        (guard.window_id.as_deref() == Some(window_id)
+            && self
+                .host_state
+                .snapshot
+                .panes
+                .iter()
+                .any(|candidate| candidate.id == pane && candidate.window_id == window_id))
+        .then_some(pane)
+    }
+
+    /// The id of the focused pane in `window_id`, as the shell shows it.
+    pub fn focused_pane(&self, window_id: &str) -> Option<&str> {
+        self.optimistic_pane(window_id).or_else(|| {
+            self.host_state
+                .snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.window_id == window_id && pane.active)
+                .map(|pane| pane.id.as_str())
+        })
     }
 
     pub fn scope(&self) -> HostScopeToken {
@@ -312,6 +352,21 @@ fn settle_active_window(link: &mut HostLink) {
         preferred.as_deref(),
     )
     .map(str::to_owned);
+}
+
+/// Makes `focused` the one active pane of its window among `panes`, as a pane
+/// move painted ahead of the host shows it. Panes of other windows are left.
+pub fn show_focus(panes: &mut [Pane], focused: &str) {
+    let Some(window) = panes
+        .iter()
+        .find(|pane| pane.id == focused)
+        .map(|pane| pane.window_id.clone())
+    else {
+        return;
+    };
+    for pane in panes.iter_mut().filter(|pane| pane.window_id == window) {
+        pane.active = pane.id == focused;
+    }
 }
 
 /// One workspace's windows in tab order.
@@ -726,6 +781,7 @@ mod tests {
         let guard = |through| OptimisticWindow {
             session_id: "$0".into(),
             window_id: Some("@2".into()),
+            pane_id: None,
             through_generation: through,
         };
         host_links_reducer(
@@ -758,6 +814,71 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_painted_ahead_of_the_host_is_focused_while_its_guard_holds() {
+        let mut state = two_hosts();
+        let split = |active: &str| {
+            let pane = |id: &str| Pane {
+                active: id == active,
+                ..crate::workspaces::model::fixtures::pane(id, "@2", "$0", (0, 0, 40, 24))
+            };
+            Arc::new(TmuxSnapshot {
+                panes: vec![pane("%1"), pane("%2")],
+                ..(*windowed("@1")).clone()
+            })
+        };
+        host_links_reducer(&mut state, snapshot_action("qa", split("%1"), 1));
+        let guard = |through| OptimisticWindow {
+            session_id: "$0".into(),
+            window_id: Some("@2".into()),
+            pane_id: Some("%2".into()),
+            through_generation: through,
+        };
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: Some(guard(None)),
+            },
+        );
+        host_links_reducer(&mut state, snapshot_action("qa", split("%1"), 2));
+        let link = state.link("qa").unwrap();
+        assert_eq!(link.focused_pane("@2"), Some("%2"));
+        assert_eq!(link.focused_pane("@1"), None, "only in its own window");
+        let mut panes = link.host_state.snapshot.panes.clone();
+        show_focus(&mut panes, "%2");
+        assert_eq!(
+            panes.iter().map(|pane| pane.active).collect::<Vec<_>>(),
+            [false, true]
+        );
+        // Refused: the guard goes, and tmux's pane stands again.
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: None,
+            },
+        );
+        assert_eq!(state.link("qa").unwrap().focused_pane("@2"), Some("%1"));
+        // A pane gone from the window is not shown focused.
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: Some(OptimisticWindow {
+                    pane_id: Some("%9".into()),
+                    ..guard(None)
+                }),
+            },
+        );
+        assert_eq!(state.link("qa").unwrap().focused_pane("@2"), Some("%1"));
+        assert!(guard(None).same_move(&guard(Some(3))));
+        assert!(!guard(None).same_move(&OptimisticWindow {
+            pane_id: None,
+            ..guard(None)
+        }));
+    }
+
+    #[test]
     fn a_reconnect_drops_a_guard_its_switch_can_no_longer_release() {
         let mut state = two_hosts();
         host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 1));
@@ -768,6 +889,7 @@ mod tests {
                 guard: Some(OptimisticWindow {
                     session_id: "$0".into(),
                     window_id: Some("@2".into()),
+                    pane_id: None,
                     through_generation: None,
                 }),
             },
@@ -795,6 +917,7 @@ mod tests {
                 guard: Some(OptimisticWindow {
                     session_id: "$0".into(),
                     window_id: Some("@2".into()),
+                    pane_id: None,
                     through_generation: None,
                 }),
             },

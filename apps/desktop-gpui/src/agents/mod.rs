@@ -214,13 +214,10 @@ pub fn inputs(controller: &ConnectionController) -> RuntimeInputs {
     if let Some(link) = controller.active_link() {
         focus.server_identity = link.host_state.server_identity.clone().unwrap_or_default();
         if let Some((session, window)) = active_window_id(link) {
+            // A pane move painted ahead of the host is already on screen.
             focus.pane_id = link
-                .host_state
-                .snapshot
-                .panes
-                .iter()
-                .find(|pane| pane.window_id == window && pane.active)
-                .map(|pane| pane.id.clone())
+                .focused_pane(&window)
+                .map(str::to_owned)
                 .unwrap_or_default();
             focus.session_id = session;
             focus.window_id = window;
@@ -591,6 +588,7 @@ pub fn open_pane(profile_id: &str, pane_id: &str, cx: &mut App) -> Result<(), St
         }
     }
     let workspaces = crate::workspaces::current(cx).ok_or("no window is open")?;
+    crate::perf::agent_switch_requested(profile_id, pane_id);
     workspaces.update(cx, |workspaces, cx| {
         workspaces.select_pane(profile_id, pane_id, cx)
     });

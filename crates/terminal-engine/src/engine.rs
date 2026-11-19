@@ -523,6 +523,7 @@ impl Engine {
     fn take_retained(&mut self, pane_id: &str) -> Option<RetainedScreen> {
         let screen = self.retained.shift_remove(pane_id)?;
         self.retained_bytes -= screen.byte_length;
+        self.publish_held();
         Some(screen)
     }
 
@@ -531,8 +532,18 @@ impl Engine {
     }
 
     fn clear_retained(&mut self) {
+        if self.retained.is_empty() {
+            return;
+        }
         self.retained.clear();
         self.retained_bytes = 0;
+        self.publish_held();
+    }
+
+    /// Tells the app which hidden panes would come back with their screen.
+    fn publish_held(&mut self) {
+        let held = self.retained.keys().cloned().collect();
+        self.shared.out.push(EngineOutput::Held(held));
     }
 
     fn retain(&mut self, pane_id: &str, screen: RetainedScreen) {
@@ -545,6 +556,7 @@ impl Engine {
             };
             self.retained_bytes -= oldest.byte_length;
         }
+        self.publish_held();
     }
 }
 

@@ -247,6 +247,7 @@ pub fn activate(route: Route, retry_used: bool, cx: &mut App) {
         return;
     };
     // The shell's own move: workspace, window and pane, with its history.
+    crate::perf::agent_switch_requested(&host, &pane.id);
     workspaces.update(cx, |workspaces, cx| {
         workspaces.select_pane(&host, &pane.id, cx)
     });

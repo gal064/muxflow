@@ -561,6 +561,33 @@ fn hides_with_the_applied_generation_and_says_it_kept_the_screen() {
 }
 
 #[test]
+fn tells_the_app_which_hidden_panes_keep_their_screen() {
+    let mut host = Host::connected();
+    let held = |host: &Host| {
+        host.log.iter().rev().find_map(|output| match output {
+            Out::Held(held) => Some(held.clone()),
+            _ => None,
+        })
+    };
+    host.shown_pane(1, "kept");
+    host.unmount();
+    assert_eq!(held(&host), Some(vec![PANE.to_owned()]));
+    host.answer_last_visibility(Ok(()));
+    host.log.clear();
+    // Mounted again, the screen is the pane's own and no longer kept aside.
+    host.mount();
+    assert_eq!(held(&host), Some(Vec::new()));
+    host.unmount();
+    host.answer_last_visibility(Ok(()));
+    host.log.clear();
+    host.publish(TerminalEvent::GenerationEpoch {
+        epoch: 2,
+        sequence: 0,
+    });
+    assert_eq!(held(&host), Some(Vec::new()), "a new epoch keeps nothing");
+}
+
+#[test]
 fn a_reveal_waits_for_the_hide_still_outstanding_at_the_host() {
     let mut host = Host::connected();
     host.shown_pane(1, "x");

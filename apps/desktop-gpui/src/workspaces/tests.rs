@@ -47,7 +47,17 @@ struct HostState {
     /// How many inputs to refuse first, as a bridge still reconnecting does.
     refused_inputs: usize,
     generation: u64,
+    /// While set, tmux actions are answered only by [`Shell::release`], as a
+    /// slow link answers them.
+    hold: bool,
+    held: Vec<HeldAnswer>,
 }
+
+/// An action's answer, and where to send it once the test lets it go.
+type HeldAnswer = (
+    futures::channel::oneshot::Sender<Result<Value, String>>,
+    Result<Value, String>,
+);
 
 #[derive(Clone, Default)]
 struct FakeHost(Arc<Mutex<HostState>>);
@@ -197,6 +207,11 @@ impl TerminalBackend for FakeHost {
                 "topologyGeneration": generation,
             }))
         });
+        if state.hold {
+            let (reply, answered) = futures::channel::oneshot::channel();
+            state.held.push((reply, answer));
+            return async move { answered.await.unwrap_or_else(|_| Err("dropped".into())) }.boxed();
+        }
         async move { answer }.boxed()
     }
 
@@ -354,6 +369,36 @@ impl Shell {
         // What the engine produced waits for the link's next drain.
         self.visual.executor().advance_clock(POLL_IDLE);
         self.visual.run_until_parked();
+    }
+
+    /// Answers every action held so far, and those each answer leads to,
+    /// until the host has nothing left to answer.
+    fn release(&mut self) {
+        loop {
+            let held = std::mem::take(&mut self.host.state().held);
+            if held.is_empty() {
+                return;
+            }
+            for (reply, answer) in held {
+                let _ = reply.send(answer);
+            }
+            self.settle();
+        }
+    }
+
+    fn view(&mut self) -> super::ShellView {
+        let workspaces = self.workspaces();
+        self.visual.update(|_, cx| workspaces.read(cx).view(cx))
+    }
+
+    /// The workspace, window and focused pane the shell shows.
+    fn place(&mut self) -> (String, String, String) {
+        let view = self.view();
+        (
+            view.session.map(|session| session.id).unwrap_or_default(),
+            view.window.map(|window| window.id).unwrap_or_default(),
+            view.active_pane.map(|pane| pane.id).unwrap_or_default(),
+        )
     }
 
     fn run(&mut self, id: &'static str) {
@@ -1605,6 +1650,224 @@ mod agent_seams {
                 "7".to_owned()
             )]
         );
+    }
+
+    // Switching to an agent paints first when its pane's content is here.
+
+    fn at(session: &str, window: &str, pane: &str) -> (String, String, String) {
+        (session.into(), window.into(), pane.into())
+    }
+
+    fn open(shell: &mut Shell, host: &str, pane: &str) {
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane(host, pane, cx))
+            .unwrap();
+        shell.settle();
+    }
+
+    fn guard(shell: &mut Shell) -> Option<crate::connection_ui::host_links::OptimisticWindow> {
+        shell.visual.update(|_, cx| {
+            let controller = cx.global::<ConnectionUi>().0.read(cx);
+            controller.link("local").unwrap().optimistic_window.clone()
+        })
+    }
+
+    /// `world`, with `pane` the focused one of its window.
+    fn focused_on(active_window: &str, pane: &str) -> TmuxSnapshot {
+        let mut world = world(active_window);
+        let window = world
+            .panes
+            .iter()
+            .find(|candidate| candidate.id == pane)
+            .unwrap()
+            .window_id
+            .clone();
+        for candidate in world.panes.iter_mut().filter(|p| p.window_id == window) {
+            candidate.active = candidate.id == pane;
+        }
+        world
+    }
+
+    #[gpui_kit::test]
+    fn an_agent_on_screen_is_focused_before_the_host_answers_and_the_latest_click_wins(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(
+            shell.place(),
+            at("$1", "@1", "%2"),
+            "painted before the host answers"
+        );
+        // A snapshot that has not seen the move does not take focus back.
+        shell.publish(vec![snapshot_frame(3, &world("@1"))]);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        // A second click while the first is in flight is the one that stands.
+        open(&mut shell, "local", "%1");
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        shell.release();
+        let focused: Vec<Value> = shell
+            .host
+            .state()
+            .actions
+            .iter()
+            .filter(|action| action["kind"] == "focusPane")
+            .map(|action| action["pane_id"].clone())
+            .collect();
+        assert_eq!(focused, [json!("%2"), json!("%1")], "one move at a time");
+        // The first landing does not take the screen from the second.
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        // Held until a snapshot at the answer's generation, then tmux's stands.
+        assert!(guard(&mut shell).is_some());
+        shell.publish(vec![snapshot_frame(500, &focused_on("@1", "%1"))]);
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_agent_switch_is_put_back(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell
+            .host
+            .state()
+            .answers
+            .push_back(Err("tmux refused the switch".into()));
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        // Nothing changed on the host, so no snapshot comes to correct it.
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        assert_eq!(guard(&mut shell), None);
+    }
+
+    fn seed_frame(pane: &str, sequence: u64, text: &str) -> Vec<u8> {
+        let mut bytes = vec![1];
+        bytes.extend_from_slice(&(pane.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(pane.as_bytes());
+        bytes.extend_from_slice(&sequence.to_be_bytes());
+        bytes.extend_from_slice(&1u64.to_be_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+        bytes
+    }
+
+    fn holds(shell: &mut Shell, pane: &str) -> bool {
+        shell.visual.update(|_, cx| {
+            let controller = cx.global::<ConnectionUi>().0.read(cx);
+            controller
+                .terminal_link("local")
+                .is_some_and(|link| link.read(cx).holds(pane))
+        })
+    }
+
+    /// A terminal whose screen is not here would show an empty grid for a
+    /// round trip: that switch waits for the host. One whose screen was kept
+    /// when it went off screen paints at once.
+    #[gpui_kit::test]
+    fn a_terminal_paints_first_only_when_its_screen_is_kept(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        // %3 is shown and given its screen, then the tab is left.
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
+        shell.settle();
+        shell.publish(vec![snapshot_frame(300, &world("@2"))]);
+        shell.publish(vec![seed_frame("%3", 1, "agent screen")]);
+        assert!(!holds(&mut shell, "%3"), "on screen, not kept aside");
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@1", cx)));
+        shell.settle();
+        shell.publish(vec![snapshot_frame(400, &world("@1"))]);
+        assert_eq!(guard(&mut shell), None, "both switches caught up");
+        assert!(holds(&mut shell, "%3"));
+        assert!(!holds(&mut shell, "%4"), "never shown");
+
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%4");
+        assert_eq!(
+            shell.place(),
+            at("$1", "@1", "%1"),
+            "no screen for %4 yet: the switch waits"
+        );
+        assert_eq!(guard(&mut shell), None);
+        shell.release();
+        assert_eq!(shell.place(), at("$2", "@3", "%4"));
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%4");
+
+        open(&mut shell, "local", "%3");
+        assert_eq!(
+            shell.place(),
+            at("$1", "@2", "%3"),
+            "its kept screen paints before the host answers"
+        );
+        shell.release();
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%3");
+    }
+
+    /// A notification's pane paints at once, and is acknowledged only once
+    /// the host says that exact pane is focused.
+    #[gpui_kit::test]
+    fn a_notification_click_paints_its_pane_first_and_acknowledges_on_arrival(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        let requests = start_agents(
+            &mut shell,
+            HashMap::from([(
+                "client-1",
+                vec![agent("waiting", "local", ("$1", "main", "@1", "%2"))],
+            )]),
+        );
+        let route = Route {
+            host_profile: "local".into(),
+            server_identity: "tmux".into(),
+            session_id: "$1".into(),
+            session_name: "main".into(),
+            window_id: "@1".into(),
+            window_name: "editor".into(),
+            pane_id: "%2".into(),
+            agent_id: "waiting".into(),
+            attention_generation: 7,
+        };
+        shell.host.state().hold = true;
+        shell
+            .visual
+            .update(|_, cx| activation::activate(route, false, cx));
+        shell.settle();
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        let seen = |requests: &Requests| {
+            requests
+                .borrow()
+                .iter()
+                .filter(|(_, command)| command.operation == "markSeen")
+                .count()
+        };
+        shell.release();
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+        assert_eq!(
+            seen(&requests),
+            0,
+            "not before the host has the pane focused"
+        );
+        shell.publish(vec![snapshot_frame(500, &focused_on("@1", "%2"))]);
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+        assert_eq!(seen(&requests), 1);
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
     }
 }
 
