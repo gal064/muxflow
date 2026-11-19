@@ -206,6 +206,17 @@ export interface TerminalRenderer {
   readonly grid: TerminalSize;
   /** The visible rows as text and the cursor, as a test reads the screen. */
   screenText(): { rows: string[]; cursor: [number, number] };
+  /**
+   * The screen as plain text, with as much scrollback above it as the buffer
+   * holds — what the assistant's `read_pane` tool returns.
+   *
+   * Rows come out oldest first, trailing blank rows dropped, capped to the
+   * `maxRows` closest to the bottom: a reader of a screenful wants the end of
+   * what scrolled, not the top of a 10 000-row buffer. On the alternate screen
+   * there is no scrollback and this is the frame the program is drawing, which
+   * is exactly what a TUI shows its user.
+   */
+  bufferText(maxRows: number): string;
   /** The visible cells' background mode and value, as a parity test reads them. */
   screenBackgrounds(): string[][];
   /**
@@ -902,6 +913,17 @@ export class XtermRenderer implements TerminalRenderer {
       rows.push(buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "");
     }
     return { rows, cursor: [buffer.cursorX, buffer.cursorY] };
+  }
+
+  bufferText(maxRows: number): string {
+    const buffer = this.#terminal.buffer.active;
+    const start = Math.max(0, buffer.length - Math.max(1, maxRows));
+    const rows: string[] = [];
+    for (let y = start; y < buffer.length; y += 1) {
+      rows.push(buffer.getLine(y)?.translateToString(true) ?? "");
+    }
+    while (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
+    return rows.join("\n");
   }
 
   screenBackgrounds(): string[][] {

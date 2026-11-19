@@ -1392,6 +1392,69 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .automation-editor .dialog-actions { margin: 0; }
 .automation-editor-delete { margin-right: auto; }
 
+/* ── AI assistant panel ───────────────────────────────────────────────── */
+.ai-panel { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.ai-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 7px 12px; border-bottom: 1px solid var(--chrome-hairline); }
+.ai-head-label { color: var(--chrome-faint); font-size: var(--type-meta); }
+.ai-sources { display: flex; flex-wrap: wrap; gap: 2px 8px; }
+.ai-source { display: inline-flex; align-items: center; gap: 4px; color: var(--chrome-dim); font-size: var(--type-meta); cursor: pointer; }
+.ai-clear { margin-left: auto; padding: 1px 7px; border: 1px solid var(--chrome-border); border-radius: 4px; background: transparent; color: var(--chrome-dim); font-size: var(--type-meta); }
+.ai-clear:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
+.ai-setup {
+  display: grid; gap: 6px; margin: 10px 12px; padding: 10px 12px;
+  border: 1px solid var(--chrome-border); border-radius: 6px;
+  color: var(--chrome-dim); font-size: var(--type-secondary); line-height: 1.5;
+}
+.ai-setup strong { color: var(--chrome-ink-strong); }
+.ai-setup p { margin: 0; }
+.ai-empty { margin: 12px; }
+.ai-turns { flex: 1; min-height: 0; display: grid; align-content: start; gap: 10px; margin: 0; padding: 10px 12px; overflow: auto; list-style: none; }
+.ai-turn { display: grid; gap: 2px; font-size: var(--type-secondary); }
+.ai-turn-user { color: var(--chrome-ink-strong); font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Under the bubble: the question's stamp sits right, the answer's left. */
+.ai-turn-meta { display: flex; gap: 6px; align-items: baseline; }
+.ai-turn-time, .ai-turn-tokens { font-size: var(--type-meta); color: var(--chrome-faint); }
+.ai-turn-user .ai-turn-meta { justify-self: end; }
+.ai-turn-assistant .ai-turn-meta { justify-self: start; }
+.ai-answer { color: var(--chrome-ink); overflow-wrap: anywhere; user-select: text; }
+.ai-answer > :first-child { margin-top: 0; }
+.ai-answer > :last-child { margin-bottom: 0; }
+.ai-answer p { margin: .4em 0; }
+.ai-answer :is(h1, h2, h3, h4, h5, h6) { margin: .6em 0 .3em; font-size: 1.05em; color: var(--chrome-ink-strong); }
+.ai-answer :is(ul, ol) { margin: .4em 0; padding-inline-start: 1.4em; }
+.ai-answer code { padding: 1px 4px; border-radius: 3px; background: var(--chrome-raised); font-family: var(--font-mono); font-size: var(--type-meta); }
+.ai-answer pre { margin: .5em 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised); }
+.ai-answer pre code { padding: 0; background: transparent; }
+.ai-answer blockquote { margin: .4em 0; padding-left: 10px; border-left: 2px solid var(--chrome-border); color: var(--chrome-dim); }
+.ai-answer table { border-collapse: collapse; }
+.ai-answer :is(th, td) { padding: 3px 8px; border: 1px solid var(--chrome-border); text-align: left; }
+.ai-answer a { color: var(--accent); }
+.ai-thinking { color: var(--chrome-faint); font-size: var(--type-secondary); }
+.ai-action {
+  justify-self: start; padding: 1px 7px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  color: var(--chrome-dim); font-size: var(--type-meta); overflow-wrap: anywhere;
+}
+.ai-action-done { border-color: color-mix(in srgb, var(--state-done) 55%, var(--chrome-border)); }
+.ai-action-denied, .ai-action-failed { border-color: var(--danger); color: var(--danger-ink); background: var(--danger-wash); }
+.ai-approval {
+  display: grid; gap: 6px; margin: 0 12px 8px; padding: 10px 12px;
+  border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-wash);
+  color: var(--chrome-ink); font-size: var(--type-secondary);
+}
+.ai-approval strong { color: var(--chrome-ink-strong); }
+.ai-approval-detail { margin: 0; overflow-wrap: anywhere; user-select: text; white-space: pre-wrap; }
+.ai-approval-actions { display: flex; gap: 8px; }
+.ai-approval-actions button { padding: 3px 12px; border: 1px solid var(--chrome-border); border-radius: 4px; background: transparent; color: var(--chrome-ink); font-size: 11px; }
+.ai-approval-actions button.primary { border-color: var(--accent); }
+/* The ellipsis that swaps the summary for the whole command. */
+.ai-approval-expand { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.ai-approval-expand:hover { text-decoration: underline; }
+/* The continuation card is not a risk prompt — it is a status question. */
+.ai-continuation { border-color: var(--chrome-border); background: var(--chrome-raised); }
+.ai-activity { padding: 0 12px 6px; color: var(--chrome-faint); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.ai-compose { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; padding: 8px 12px 10px; border-top: 1px solid var(--chrome-hairline); }
+.ai-compose textarea { min-width: 0; font: inherit; font-size: var(--type-secondary); resize: none; }
+
 /* ── Document surfaces ─────────────────────────────────────────────────── */
 
 /* Every document surface paints its own background. They are drawn over a
@@ -1829,6 +1892,18 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    destructive control is not a misclick away from the control above it. */
 .settings-host-actions { display: grid; gap: 4px; justify-items: start; }
 .settings-host-actions .settings-hint { margin: 0; }
+/* The assistant's model field, once a fetch has given it a datalist: a
+   disclosure caret in the field, the same two-halves caret the selects draw,
+   so a fetched list announces itself instead of waiting to be discovered by
+   clicking the input. It appears only with options behind it — a caret on an
+   input with nothing to pick is a lie. */
+.settings-model-field { position: relative; display: grid; }
+.settings-model-field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { padding-right: 28px; }
+.settings-model-caret {
+  position: absolute; right: 12px; top: 50%; width: 5px; height: 5px;
+  border-right: 1.5px solid var(--chrome-dim); border-bottom: 1.5px solid var(--chrome-dim);
+  transform: translateY(-70%) rotate(45deg); pointer-events: none;
+}
 /* The panel's two ways of naming a group of controls, kept identical on
    purpose: a fieldset's legend, and a heading over a block that is not one. */
 .settings-modes legend, .settings-fieldset legend, .settings-body .settings-heading {

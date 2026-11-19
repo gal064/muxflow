@@ -1936,6 +1936,29 @@ export function App() {
           hosts: panelHosts,
           onMessage: setStatus,
           onOpenPane: openPaneOnHost,
+          // What the shell is showing, for the extensions that answer questions
+          // about it: the AI tab snapshots these at the moment of asking.
+          session: {
+            activePaneId: activePane?.id,
+            activeRootPath: workspaceFiles.root?.path,
+            activeSessionId,
+            activeWindowId,
+            agents: agentRuntime.agents,
+            assistant: {
+              apiKey: appState.shell.aiApiKey,
+              baseUrl: appState.shell.aiBaseUrl,
+              model: appState.shell.aiModel,
+            },
+            connected: hostState.phase === "connected",
+            gitError: workspaceGit.error,
+            gitStatus: workspaceGit.status,
+            hostLabel,
+            openTabs: workspaceAppTabs.map((tab) => ({ kind: tab.kind, resource: tab.resource, title: tab.title })),
+            portForwards: portForwards.filter((forward) => forward.profileId === currentHostProfileId),
+            snapshot,
+            sshConnection: connection.mode === "ssh" ? connection : undefined,
+            transport: connection.mode,
+          },
         }}
         portForwards={portForwards}
         portHosts={portHosts}

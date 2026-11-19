@@ -16,6 +16,7 @@ import {
   type TerminalViewportState,
 } from "./TerminalRenderer";
 import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
+import { registerPaneScreenReader } from "./screenReaderRegistry";
 import { readAtlasInvalidationCount } from "./atlasStaleProbe";
 import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { createGridMismatchProbe, type GridMismatchProbe } from "./gridMismatchProbe";
@@ -1126,11 +1127,19 @@ export function TerminalPane({
       scrollToBottom: () => resumeLive("Returning to live terminal output requires a current screen"),
     };
     controllerRef.current(pane.id, controller);
+    // The assistant's read_pane tool reads this pane's buffer while it is
+    // mounted; the key is the screen cache's, because pane ids repeat across
+    // hosts and `%1` on one host must not answer for `%1` on another.
+    const unregisterScreenReader = registerPaneScreenReader(
+      cacheKey,
+      (maxRows) => renderer.bufferText(maxRows),
+    );
     reportMeasurements();
     if (pane.active) renderer.focus();
 
     return () => {
       rendererActive = false;
+      unregisterScreenReader();
       clearTimeout(revealFallback);
       // This teardown is also the hide half of the visibility protocol (the
       // `setTerminalVisibility(false)` below), and a pane on its way to hidden

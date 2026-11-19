@@ -165,6 +165,19 @@ export interface ShellState {
    * the setting is the starting point, not a mirror of the last tab touched.
    */
   defaultMarkdownView: AppTabViewMode;
+  /**
+   * The assistant's OpenAI-compatible endpoint, as a base URL (`…/v1`), and
+   * the model to ask. Both empty-by-default: the AI tab says "not configured"
+   * rather than guessing a server.
+   */
+  aiBaseUrl: string;
+  aiModel: string;
+  /**
+   * Sent as a bearer token to `aiBaseUrl` and nowhere else. It rides in the
+   * app-state file, which is written owner-only; a local model server — the
+   * common case at home — needs no key at all.
+   */
+  aiApiKey: string;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -211,7 +224,7 @@ export interface PersistedAppState {
 
 export const defaultShellState: ShellState = {
   panelSurface: "files",
-  enabledPanelExtensions: ["automations"],
+  enabledPanelExtensions: ["automations", "ai"],
   sidebarCollapsed: false,
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
@@ -234,6 +247,9 @@ export const defaultShellState: ShellState = {
   markdownAppearance: "default",
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
+  aiBaseUrl: "",
+  aiModel: "",
+  aiApiKey: "",
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -312,6 +328,9 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         ? shell.newWorkspaceHostProfileId
         : undefined,
       defaultMarkdownView: normalizedViewMode(shell?.defaultMarkdownView),
+      aiBaseUrl: savedAssistantSetting(shell?.aiBaseUrl),
+      aiModel: savedAssistantSetting(shell?.aiModel),
+      aiApiKey: savedAssistantSetting(shell?.aiApiKey),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },
@@ -324,6 +343,18 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
 /** An unrecognised mode is the default, not a tab that renders nothing. */
 function normalizedViewMode(value: unknown): AppTabViewMode {
   return value === "source" || value === "live" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
+}
+
+/**
+ * One assistant setting, trimmed and bounded.
+ *
+ * Bounded because the storage side validates *every* text field against 16 KiB
+ * and refuses the whole save on one over-long field — the same trap
+ * `MAX_WORKSPACE_DEFAULT_LENGTH` exists for. Far past any URL, model name or
+ * key, and small enough that one stray paste cannot freeze the rest.
+ */
+function savedAssistantSetting(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, 512) : "";
 }
 
 /**
