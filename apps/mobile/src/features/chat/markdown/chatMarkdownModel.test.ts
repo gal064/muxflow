@@ -235,7 +235,7 @@ describe("chat Markdown blocks", () => {
 
 describe("chat Markdown links", () => {
   it("keeps the links the phone may open", () => {
-    expect(only("[docs](https://example.com/a_(b)) <https://auto.example> https://bare.example/x?y=1&z=2. www.example.org me@example.com [mail](mailto:a@b.co) [**bold** ref][r]\n\n[r]: http://ref.example\n")).toEqual({
+    expect(only("[docs](https://example.com/a_(b)) <https://auto.example> https://bare.example/x?y=1&z=2. www.example.org me@example.com [mail](mailto:a@example.test) [**bold** ref][r]\n\n[r]: http://ref.example\n")).toEqual({
       kind: "paragraph",
       content: [
         { text: "docs", href: "https://example.com/a_(b)" },
@@ -248,7 +248,7 @@ describe("chat Markdown links", () => {
         { text: " " },
         { text: "me@example.com", href: "mailto:me@example.com" },
         { text: " " },
-        { text: "mail", href: "mailto:a@b.co" },
+        { text: "mail", href: "mailto:a@example.test" },
         { text: " " },
         { text: "bold", strong: true, href: "http://ref.example" },
         { text: " ref", href: "http://ref.example" },
