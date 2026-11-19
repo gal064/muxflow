@@ -136,10 +136,6 @@ impl<T> Coordinator<T> {
         self.flight.is_some()
     }
 
-    pub fn has_queued(&self) -> bool {
-        self.desired.is_some()
-    }
-
     /// Whether flight `id` still goes where the user wants, so a two-step
     /// move may take its next step: it is the latest intent, or the one
     /// waiting behind it is for the same destination and will take its result
@@ -154,18 +150,14 @@ impl<T> Coordinator<T> {
         })
     }
 
-    /// Flight `id` landed, `complete` if it reached all of its destination.
-    /// One that stopped short hands its destination on to fly again.
-    pub fn finish(&mut self, id: u64, complete: bool) -> Finish<T> {
+    pub fn finish(&mut self, id: u64) -> Finish<T> {
         let Some((flight, key)) = self.flight.take_if(|(flight, _)| *flight == id) else {
             return Finish::Detached;
         };
         debug_assert_eq!(flight, id);
         match self.desired.take() {
             None => Finish::Latest,
-            Some((desired, intent)) if desired == key && complete => {
-                Finish::SameDestination(intent)
-            }
+            Some((desired, intent)) if desired == key => Finish::SameDestination(intent),
             Some((desired, intent)) => Finish::Next(self.begin(desired), intent),
         }
     }
@@ -399,11 +391,11 @@ mod tests {
         assert!(coordinator.navigate("B".into(), "b").is_none());
         assert!(coordinator.navigate("C".into(), "c").is_none());
         assert!(!coordinator.still_wanted(a));
-        let Finish::Next(c, "c") = coordinator.finish(a, true) else {
+        let Finish::Next(c, "c") = coordinator.finish(a) else {
             panic!("C starts once A lands");
         };
         assert!(coordinator.still_wanted(c));
-        assert_eq!(coordinator.finish(c, true), Finish::Latest);
+        assert_eq!(coordinator.finish(c), Finish::Latest);
         assert!(!coordinator.has_flight());
     }
 
@@ -416,14 +408,7 @@ mod tests {
             coordinator.still_wanted(first),
             "the flight takes every step: its duplicate will not fly"
         );
-        assert_eq!(coordinator.finish(first, true), Finish::SameDestination(2));
-        // One that stopped short hands the same destination on to fly again.
-        let (short, _) = coordinator.navigate("same".into(), 3).unwrap();
-        assert!(coordinator.navigate("same".into(), 4).is_none());
-        assert!(matches!(
-            coordinator.finish(short, false),
-            Finish::Next(_, 4)
-        ));
+        assert_eq!(coordinator.finish(first), Finish::SameDestination(2));
     }
 
     #[test]
@@ -432,8 +417,8 @@ mod tests {
         let (old, _) = coordinator.navigate("old".into(), "old").unwrap();
         coordinator.invalidate();
         let (replacement, _) = coordinator.navigate("new".into(), "new").unwrap();
-        assert_eq!(coordinator.finish(old, true), Finish::Detached);
-        assert_eq!(coordinator.finish(replacement, true), Finish::Latest);
+        assert_eq!(coordinator.finish(old), Finish::Detached);
+        assert_eq!(coordinator.finish(replacement), Finish::Latest);
     }
 
     #[test]
