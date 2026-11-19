@@ -4071,7 +4071,7 @@ mod attachments {
             shell.press("shift-tab");
         }
         shell.press("enter");
-        assert_eq!(shell.host.state().files, [path.clone()]);
+        assert_eq!(shell.host.state().files, std::slice::from_ref(&path));
         shell.press("space");
         assert_eq!(shell.host.state().files, [path.clone(), path]);
     }

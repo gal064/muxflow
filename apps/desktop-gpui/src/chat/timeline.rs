@@ -861,7 +861,7 @@ mod tests {
         // Text after it: whatever ran before is not what happens now.
         assert_eq!(doing(&[test, says("a")]).label, "Working…");
         let agent = running(tool("g", ChatToolKind::Subagent, "Explore the git module"));
-        assert_eq!(doing(&[agent.clone()]).label, "Waiting on 1 subagent…");
+        assert_eq!(doing(std::slice::from_ref(&agent)).label, "Waiting on 1 subagent…");
         assert_eq!(
             doing(&[agent.clone(), agent]).label,
             "Waiting on 2 subagents…"
