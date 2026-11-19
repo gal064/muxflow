@@ -11,6 +11,7 @@ import {
   slashMatches,
   usageFraction,
   usageLabel,
+  withDictation,
   withPickedCommand,
   type ChatPane,
 } from "./chatModel";
@@ -204,6 +205,14 @@ describe("voice mode", () => {
     // Tools after the reply do not hide it.
     const tooled = { ...idle, items: [...idle.items, tool("t9", { detail: "ls" })] };
     expect(replyToSpeak(ChatTurnState.WAITING, tooled, undefined)?.id).toBe("a1");
+  });
+});
+
+describe("dictation", () => {
+  it("is what was typed, then what was said", () => {
+    expect(withDictation("Also check the README", "and run the tests")).toBe("Also check the README and run the tests");
+    expect(withDictation("  ", "run the tests")).toBe("run the tests");
+    expect(withDictation("/btw why ", "is it slow")).toBe("/btw why is it slow");
   });
 });
 

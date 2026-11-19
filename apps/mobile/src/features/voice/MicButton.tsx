@@ -15,11 +15,6 @@ export interface MicButtonProps {
   onSubmit: () => void;
   onLock: () => void;
   onCancel: () => void;
-  /**
-   * `pane` (default) fills the Voice screen's talk pane. `bar` is the chat's
-   * voice bar: one row, a small disc and the gesture spelled out beside it.
-   */
-  variant?: "pane" | "bar";
 }
 
 const SIZE = 96;
@@ -31,8 +26,7 @@ const DRAG_PREVIEW_LIMIT = VOICE_GESTURE_THRESHOLD - 8;
  * screen works without looking at it. The disc is the visual anchor (pulsing
  * ring while recording, spinner while the host works), not the hit area.
  */
-export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, onCancel, variant = "pane" }: MicButtonProps) {
-  const bar = variant === "bar";
+export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, onCancel }: MicButtonProps) {
   const pulse = useRef(new Animated.Value(0)).current;
   const dragX = useRef(new Animated.Value(0)).current;
   const [gestureDirection, setGestureDirection] = useState<VoiceGestureDirection>();
@@ -66,8 +60,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, 
     opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
     transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
   };
-  const idleLabel = bar ? "Hold to talk. Swipe left to lock, right to cancel." : "Hold anywhere here to talk";
-  const label = locked ? "Locked · tap here to send" : recording ? "Listening…" : phase === "canceling" ? "Canceling…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : idleLabel;
+  const label = locked ? "Locked · tap here to send" : recording ? "Listening…" : phase === "canceling" ? "Canceling…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
 
   const resetGesturePreview = () => {
     dragX.setValue(0);
@@ -123,19 +116,19 @@ export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, 
       onTouchMove={classify}
       // A thumb drifting well outside the pane mid-sentence must not count as a release.
       pressRetentionOffset={160}
-      style={({ pressed }) => [bar ? styles.barRoot : styles.root, pressed && !disabled && !busy && styles.rootPressed]}
+      style={({ pressed }) => [styles.root, pressed && !disabled && !busy && styles.rootPressed]}
     >
-      <View style={bar ? styles.barStage : styles.stage}>
-        {phase === "recording" && !bar ? (
+      <View style={styles.stage}>
+        {phase === "recording" ? (
           <>
             <GestureTarget active={gestureDirection === "lock"} action="lock" />
             <GestureTarget active={gestureDirection === "cancel"} action="cancel" />
           </>
         ) : null}
-        <Animated.View style={[bar ? styles.barAnchor : styles.micAnchor, { transform: [{ translateX: dragX }] }]}>
-          {recording ? <Animated.View pointerEvents="none" style={[bar ? styles.barRing : styles.ring, ringStyle]} /> : null}
-          <View style={[bar ? styles.barDisc : styles.disc, recording && styles.discRecording, disabled && styles.discDisabled]}>
-            {busy ? <ActivityIndicator color={colors.accentInk} size={bar ? "small" : "large"} /> : <MicIcon color={colors.accentInk} size={bar ? 22 : 44} />}
+        <Animated.View style={[styles.micAnchor, { transform: [{ translateX: dragX }] }]}>
+          {recording ? <Animated.View pointerEvents="none" style={[styles.ring, ringStyle]} /> : null}
+          <View style={[styles.disc, recording && styles.discRecording, disabled && styles.discDisabled]}>
+            {busy ? <ActivityIndicator color={colors.accentInk} size="large" /> : <MicIcon color={colors.accentInk} size={44} />}
           </View>
           {locked ? (
             <View style={styles.lockBadge}>
@@ -144,18 +137,9 @@ export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, 
           ) : null}
         </Animated.View>
       </View>
-      {bar ? (
-        <View style={styles.barCopy}>
-          <Text accessibilityLiveRegion="polite" style={styles.barLabel}>{disabled && hint ? hint : label}</Text>
-          {phase === "recording" ? <Text style={[styles.gestureHint, styles.barGestureHint]}>Swipe left to lock · right to cancel</Text> : null}
-        </View>
-      ) : (
-        <>
-          <Text accessibilityLiveRegion="polite" style={styles.label}>{label}</Text>
-          {phase === "recording" ? <Text style={styles.gestureHint}>Swipe left to lock · right to discard</Text> : null}
-          {disabled && hint ? <Text style={styles.hint}>{hint}</Text> : null}
-        </>
-      )}
+      <Text accessibilityLiveRegion="polite" style={styles.label}>{label}</Text>
+      {phase === "recording" ? <Text style={styles.gestureHint}>Swipe left to lock · right to discard</Text> : null}
+      {disabled && hint ? <Text style={styles.hint}>{hint}</Text> : null}
     </Pressable>
   );
 }
@@ -200,15 +184,6 @@ const styles = StyleSheet.create({
   lockTargetLabel: { color: colors.accent },
   cancelTargetLabel: { color: colors.dangerInk },
   label: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle, fontWeight: "600" },
-  /** The chat's voice bar (chat-mock.html, "Voice mode, inside the chat"): accent edge and wash, the disc at the left. */
-  barRoot: { alignItems: "center", backgroundColor: colors.accentWash, borderColor: colors.accent, borderRadius: 16, borderWidth: 1, flexDirection: "row", gap: 12, marginBottom: 12, marginHorizontal: 10, minHeight: 64, paddingHorizontal: 12, paddingVertical: 8 },
-  barStage: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  barAnchor: { alignItems: "center", height: 48, justifyContent: "center", width: 48, zIndex: 1 },
-  barRing: { backgroundColor: colors.danger, borderRadius: 24, height: 48, position: "absolute", width: 48 },
-  barDisc: { alignItems: "center", backgroundColor: colors.accent, borderRadius: 24, height: 48, justifyContent: "center", width: 48 },
-  barCopy: { flex: 1, gap: 2 },
-  barGestureHint: { textAlign: "left" },
-  barLabel: { color: colors.chromeInk, fontSize: typeScale.rowSecondary, lineHeight: 18 },
   gestureHint: { color: colors.chromeDim, fontSize: typeScale.meta, textAlign: "center" },
   hint: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, paddingHorizontal: 24, textAlign: "center" },
 });

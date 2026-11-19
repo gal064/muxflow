@@ -19,6 +19,7 @@ function harness() {
   const store = createVoiceStore();
   const player = new FakePlayer();
   const sent: string[] = [];
+  const toasts: string[] = [];
   const controller = new VoiceController({
     serverIdentity: "server-a",
     sessionKey: "%7",
@@ -34,8 +35,9 @@ function harness() {
     tailHoldMs: 0,
     submit: async (text) => { sent.push(text); },
     registerWithHost: false,
+    toast: (message) => toasts.push(message),
   });
-  return { connection, store, player, sent, controller };
+  return { connection, store, player, sent, toasts, controller };
 }
 
 describe("voice mode inside a chat", () => {
@@ -58,6 +60,16 @@ describe("voice mode inside a chat", () => {
     controller.onConnected();
     await vi.advanceTimersByTimeAsync(0);
     expect(connection.of(Operation.VOICE_SESSION)).toHaveLength(0);
+    controller.dispose();
+  });
+
+  it("a status check nobody asked for fails quietly, where one on screen says so", async () => {
+    const { connection, controller, toasts } = harness();
+    connection.answer(Operation.VOICE_STATUS, () => { throw new HostError("internal", "The host could not check voice."); });
+    await controller.refreshStatus(false, true);
+    expect(toasts).toEqual([]);
+    await controller.refreshStatus(false);
+    expect(toasts).toHaveLength(1);
     controller.dispose();
   });
 

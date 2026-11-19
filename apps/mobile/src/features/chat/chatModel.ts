@@ -367,6 +367,11 @@ export function withPickedCommand(draft: string, command: ChatCommand): string {
   return `${draft.slice(0, draft.length - skill[1]!.length - 1)}$${command.name} `;
 }
 
+/** A dictation's message: what was typed, then what was said after it. */
+export function withDictation(draft: string, spoken: string): string {
+  return [draft.trim(), spoken.trim()].filter((part) => part !== "").join(" ");
+}
+
 /**
  * `/btw why?` and `/side why?` are Muxflow's own: a side question in a fork.
  * Answers the question, or undefined when the draft is anything else or the

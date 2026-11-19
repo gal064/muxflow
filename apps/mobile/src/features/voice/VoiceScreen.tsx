@@ -26,8 +26,8 @@ import { MicButton } from "./MicButton";
 import { bigPaneHeight } from "./paneLayout";
 import { ReplyPlayer } from "./ReplyPlayer";
 import { sharedAudio } from "./sharedAudio";
-import { SpeedButton } from "./SpeedButton";
 import { voiceHint } from "./voiceHint";
+import { VoiceSettingsControls } from "./VoiceSettingsControls";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { muxflowSsh } from "../../ssh/MuxflowSsh";
@@ -186,20 +186,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
       <View style={[styles.pane, bigPane && { height: bigPaneHeight(windowHeight, insets.top, insets.bottom, metrics.terminalHeaderHeight) }]}>
         <View accessibilityElementsHidden={locked} importantForAccessibility={locked ? "no-hide-descendants" : "auto"} style={styles.paneControls}>
-          <View style={styles.speedGroup}>
-            <Text {...fixedChromeText} numberOfLines={1} style={styles.speedCaption}>Speed</Text>
-            <SpeedButton onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
-          </View>
-          <Pressable
-            accessibilityLabel="Autoplay replies"
-            accessibilityRole="switch"
-            accessibilityState={{ checked: autoPlay }}
-            hitSlop={{ top: 6, bottom: 6 }}
-            onPress={() => prefsStore.getState().setVoiceAutoPlay(!autoPlay)}
-            style={({ pressed }) => [styles.autoPlayToggle, autoPlay && styles.autoPlayToggleOn, pressed && styles.pressed]}
-          >
-            <Text {...fixedChromeText} numberOfLines={1} style={[styles.paneToggleLabel, autoPlay && styles.autoPlayToggleLabelOn]}>Autoplay {autoPlay ? "On" : "Off"}</Text>
-          </Pressable>
+          <VoiceSettingsControls />
           <Pressable
             accessibilityLabel={bigPane ? "Smaller talk pane" : "Larger talk pane"}
             accessibilityRole="button"
@@ -318,11 +305,6 @@ const styles = StyleSheet.create({
   /** The talk pane: a hairline above, the controls row, then the hold surface filling the rest. */
   pane: { borderTopColor: colors.chromeBorder, borderTopWidth: metrics.hairlineWidth },
   paneControls: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", paddingBottom: 8, paddingHorizontal: 12, paddingTop: 8 },
-  speedGroup: { alignItems: "center", flexDirection: "row", gap: 8 },
-  speedCaption: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
-  autoPlayToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 98, paddingHorizontal: 10 },
-  autoPlayToggleOn: { backgroundColor: colors.accent },
-  autoPlayToggleLabelOn: { color: colors.accentInk },
   /** Wide enough for "Smaller", so the pill's left edge does not jump when the label changes. */
   paneToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 96, paddingHorizontal: 14 },
   paneToggleLabel: { color: colors.chromeInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },

@@ -53,13 +53,13 @@ function order(view: ReactTestRenderer): string[] {
 
 describe("the plus button", () => {
   it("is not there when nothing can be attached", () => {
-    const view = composer(undefined, { onMic: () => undefined });
+    const view = composer(undefined, { mic: { on: false, onTap: () => undefined, dictation: undefined } });
     expect(order(view)).toEqual(["Message", "Talk", "Send"]);
   });
 
   it("sits left of the field, drawn, and opens the attach sheet", () => {
     const calls = { sent: 0, opened: 0 };
-    const view = composer("none", { onMic: () => undefined }, calls);
+    const view = composer("none", { mic: { on: false, onTap: () => undefined, dictation: undefined } }, calls);
     expect(order(view)).toEqual(["Attach", "Message", "Talk", "Send"]);
     const plus = byLabel(view, "Attach");
     expect(plus.findAll((node) => isHost(node, "Svg"))).toHaveLength(1);

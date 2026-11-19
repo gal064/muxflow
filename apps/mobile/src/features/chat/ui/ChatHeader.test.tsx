@@ -1,7 +1,7 @@
 // The chat's header (docs/design/mobile-chat-mock.html, S8) in each state it
 // can be in, rendered from scripted chat events.
 
-import type { ReactTestInstance, ReactTestRenderer } from "react-test-renderer";
+import type { ReactTestRenderer } from "react-test-renderer";
 import { describe, expect, it } from "vitest";
 
 import { ChatConnection, ChatTurnState } from "../../../protocol/gen/chat_pb";
@@ -12,19 +12,17 @@ import { newChatPane, type ChatPane } from "../chatModel";
 import { chatItems, PANE, paneFrom, questionRequest, SERVER, snapshotEvent, state } from "../testing";
 import { ChatHeader } from "./ChatHeader";
 
-type Calls = { back: number; details: number; voice: boolean[] };
+type Calls = { back: number; details: number };
 
-function header(pane: ChatPane | undefined, fields: { connected?: boolean; voiceMode?: boolean; calls?: Calls; title?: string } = {}): ReactTestRenderer {
-  const calls = fields.calls ?? { back: 0, details: 0, voice: [] };
+function header(pane: ChatPane | undefined, fields: { connected?: boolean; calls?: Calls; title?: string } = {}): ReactTestRenderer {
+  const calls = fields.calls ?? { back: 0, details: 0 };
   return render(
     <ChatHeader
       connected={fields.connected ?? true}
       onBack={() => { calls.back += 1; }}
       onDetails={() => { calls.details += 1; }}
-      onVoiceMode={(on) => calls.voice.push(on)}
       pane={pane}
       title={fields.title ?? "Wrapped links"}
-      voiceMode={fields.voiceMode ?? false}
     />,
   );
 }
@@ -41,12 +39,6 @@ function flat(style: unknown): Record<string, unknown> {
 function dotColor(view: ReactTestRenderer): unknown {
   const dots = view.root.findAll((node) => isHost(node, "View") && flat(node.props.style).width === 7 && flat(node.props.style).height === 7);
   return dots.length === 0 ? undefined : flat(dots[0]!.props.style).backgroundColor;
-}
-
-/** The colour the icon inside `button` is drawn in. */
-function iconColor(button: ReactTestInstance): unknown {
-  const shape = button.findAll((node) => typeof node.type === "string" && typeof node.props.stroke === "string")[0];
-  return shape?.props.stroke;
 }
 
 describe("the chat header", () => {
@@ -94,7 +86,7 @@ describe("the chat header", () => {
   });
 
   it("opens Details from the title and from its button, which are not labelled alike", () => {
-    const calls: Calls = { back: 0, details: 0, voice: [] };
+    const calls: Calls = { back: 0, details: 0 };
     const view = header(paneWith({ turn: ChatTurnState.WORKING }), { calls });
     const title = byLabel(view, "Chat details");
     expect(title.props.accessibilityRole).toBe("button");
@@ -111,32 +103,13 @@ describe("the chat header", () => {
     expect(byLabel(header(undefined), "Chat details").props.accessibilityValue).toEqual({ text: "Wrapped links" });
   });
 
-  it("draws its buttons, with no text glyph", () => {
+  it("draws its buttons, with no text glyph; voice mode is the reply field's mic, not a button here", () => {
     const view = header(paneWith());
-    for (const label of ["Back", "Voice mode: read replies aloud", "Details"]) {
+    for (const label of ["Back", "Details"]) {
       const button = byLabel(view, label);
       expect(button.findAll((node) => isHost(node, "Svg"))).toHaveLength(1);
       expect(button.findAll((node) => isHost(node, "Text"))).toHaveLength(0);
     }
-    expect(allByLabel(view, /./)).toHaveLength(4);
-  });
-
-  it("Voice mode: a switch, accent on the accent wash while on", () => {
-    const calls: Calls = { back: 0, details: 0, voice: [] };
-    const off = header(paneWith(), { calls });
-    const offSwitch = byLabel(off, "Voice mode: read replies aloud");
-    expect(offSwitch.props.accessibilityRole).toBe("switch");
-    expect(offSwitch.props.accessibilityState).toEqual({ checked: false });
-    expect(iconColor(offSwitch)).toBe(colors.chromeDim);
-    press(offSwitch);
-
-    const on = header(paneWith(), { calls, voiceMode: true });
-    const onSwitch = byLabel(on, "Voice mode: read replies aloud");
-    expect(onSwitch.props.accessibilityState).toEqual({ checked: true });
-    expect(iconColor(onSwitch)).toBe(colors.accent);
-    expect(onSwitch.findAll((node) => isHost(node, "View") && flat(node.props.style).backgroundColor === colors.accentWash)).toHaveLength(1);
-    press(onSwitch);
-    expect(calls.voice).toEqual([true, false]);
-    writeRender("header-voice-on", on.toJSON(), 80);
+    expect(allByLabel(view, /./)).toHaveLength(3);
   });
 });

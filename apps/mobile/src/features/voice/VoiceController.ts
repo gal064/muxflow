@@ -318,7 +318,8 @@ export class VoiceController {
 
   // ---- host readiness ---------------------------------------------------------
 
-  async refreshStatus(warm = false): Promise<void> {
+  /** `quiet`: a failure is logged, not said, for a check nobody asked for (a chat opening). */
+  async refreshStatus(warm = false, quiet = false): Promise<void> {
     const connection = this.liveConnection();
     if (!connection) {
       // Nothing to ask yet; `onConnected` asks again once the lane is live.
@@ -336,7 +337,8 @@ export class VoiceController {
       if (this.options.store.getState().hostStatus.readiness === "ready" && this.refreshTimer === undefined && !this.registering) this.reregister();
     } catch (error) {
       if (this.applyReadinessRefusal(error)) return;
-      this.fail("status", error);
+      if (quiet) this.log(`status.failed ${diagnosticError(error)}`);
+      else this.fail("status", error);
     }
   }
 

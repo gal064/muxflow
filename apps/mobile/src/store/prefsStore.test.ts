@@ -33,7 +33,7 @@ describe("parsePersistedPrefs", () => {
     ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
-    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13 });
+    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13, chatMicTipDone: false });
   });
 
   it.each<[string, number, boolean]>([
@@ -81,7 +81,7 @@ describe("prefsStore", () => {
     store.getState().setAgentListMode("workspace");
     expect(store.getState().agentListMode).toBe("workspace");
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13 });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13, chatMicTipDone: false });
 
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
@@ -106,7 +106,7 @@ describe("prefsStore", () => {
     // Setting the value already held writes nothing.
     store.getState().setVoiceBigPane(true);
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(5));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false, terminalFontSize: 13 });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false, terminalFontSize: 13, chatMicTipDone: false });
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
     expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false });

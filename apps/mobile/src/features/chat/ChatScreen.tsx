@@ -19,7 +19,7 @@ import { attachDeps, chatImages } from "./attach/attachRuntime";
 import { filesRefusal, filesState } from "./attach/attachState";
 import { ChatImagesContext } from "./attach/chatImages";
 import { sendWithFiles, useAttachments } from "./attach/useAttachments";
-import { sideQuestion, slashMatches, turnOf, withPickedCommand } from "./chatModel";
+import { sideQuestion, slashMatches, turnOf, withDictation, withPickedCommand } from "./chatModel";
 import { chatClient, chatStore, setVoiceMode } from "./chatRuntime";
 import { refusalText } from "./refusals";
 import { ChatView } from "./ui/ChatView";
@@ -87,7 +87,6 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const [busy, setBusy] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const commands = useMemo(() => slashMatches(pane?.catalog, draft), [draft, pane?.catalog]);
-  const voice = useChatVoice({ paneId, sessionId, serverIdentity, pane, enabled: voiceMode, connected });
   const git = useGitDetails({ paneId, serverIdentity, folder, turn: turnOf(pane), open: detailsOpen, connected });
 
   const focused = useIsFocused();
@@ -110,17 +109,20 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     }
   }, []);
 
-  const send = useCallback(() => {
-    const text = draft.trim();
+  /** Sends `text` as the message, with the files on the reply field; the draft is cleared. Settles when it has gone or been refused. */
+  const sendText = useCallback((text: string): Promise<void> => {
     const target = editing;
     const question = target ? undefined : sideQuestion(pane?.catalog, text);
     // A side question goes alone: the files wait for the next message.
     const waiting = question === undefined ? filesState(files.entries) : "none";
-    if (!text && waiting === "none") return;
+    if (!text && waiting === "none") return Promise.resolve();
     // Send is off while a file uploads or after one failed; said here too, should a send get past that.
     const held = filesRefusal(waiting);
-    if (held !== undefined) return toast(held);
-    void run(async () => {
+    if (held !== undefined) {
+      toast(held);
+      return Promise.resolve();
+    }
+    return run(async () => {
       if (target) {
         await sendWithFiles(files, (attached) => chatClient.rewindAndSend(paneId, target.id, text, attached));
         sentEdit();
@@ -144,7 +146,22 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
         throw error;
       }
     });
-  }, [draft, editing, files, pane?.catalog, paneId, router, run]);
+  }, [editing, files, pane?.catalog, paneId, router, run, setDraft, sentEdit]);
+  const send = useCallback(() => void sendText(draft.trim()), [draft, sendText]);
+  // A dictation is what was typed with what was said after it, sent as Send
+  // sends it. While the files cannot go yet it waits in the field instead.
+  const dictate = useCallback(async (spoken: string) => {
+    const text = withDictation(draft, spoken);
+    // As in sendText: a side question goes alone, so only other messages wait for the files.
+    const question = editing ? undefined : sideQuestion(pane?.catalog, text);
+    const held = question === undefined ? filesRefusal(filesState(files.entries)) : undefined;
+    if (held !== undefined) {
+      setDraft(text);
+      toast(held);
+      return;
+    }
+    await sendText(text);
+  }, [draft, editing, files.entries, pane?.catalog, sendText, setDraft]);
 
   const answer = useCallback((given: PendingAnswer) => {
     const requestId = pane?.state?.pending?.requestId;
@@ -185,6 +202,9 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
       }
     });
   }, [paneId, run, stopping]);
+
+  const leaveVoiceMode = useCallback(() => setVoiceMode(paneId, false), [paneId]);
+  const voice = useChatVoice({ paneId, sessionId, serverIdentity, pane, voiceMode, connected, stopping, onStop: stop, onKeyboard: leaveVoiceMode, dictate });
 
   // A refusal is said as a toast, and passed on so the task's row can be stopped again.
   const stopTask = useCallback(async (taskId: string) => {
