@@ -302,6 +302,16 @@ fn frame(kind: u8, label: &str, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// The generation a [`snapshot_frame`] carries.
+fn snapshot_generation(frame: &[u8]) -> Option<u64> {
+    if frame.first() != Some(&7) {
+        return None;
+    }
+    let label = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let body: Value = serde_json::from_slice(&frame[3 + label + 8..]).ok()?;
+    body["generation"].as_u64()
+}
+
 fn snapshot_frame(generation: u64, snapshot: &TmuxSnapshot) -> Vec<u8> {
     let body = json!({
         "sequence": 0, "generation": generation, "serverIdentity": "tmux",
@@ -359,9 +369,22 @@ impl Shell {
     fn publish_to(&mut self, bridge: usize, frames: Vec<Vec<u8>>) {
         let sink = self.host.state().sinks[bridge].clone();
         for frame in frames {
+            // The host answers an action at a generation past every snapshot
+            // it has sent, as tmux's generations only grow.
+            if let Some(generation) = snapshot_generation(&frame) {
+                let mut host = self.host.state();
+                host.generation = host.generation.max(generation);
+            }
             sink.send(EventBody::Raw(frame)).unwrap();
         }
         self.settle();
+    }
+
+    /// A snapshot sent after everything the host has answered: it has seen
+    /// every move, and the guards their paints put up are released.
+    fn publish_caught_up(&mut self, snapshot: &TmuxSnapshot) {
+        let generation = 101 + self.host.state().generation;
+        self.publish(vec![snapshot_frame(generation, snapshot)]);
     }
 
     fn settle(&mut self) {
@@ -1730,7 +1753,7 @@ mod agent_seams {
         assert_eq!(shell.place(), at("$1", "@1", "%1"));
         // Held until a snapshot at the answer's generation, then tmux's stands.
         assert!(guard(&mut shell).is_some());
-        shell.publish(vec![snapshot_frame(500, &focused_on("@1", "%1"))]);
+        shell.publish_caught_up(&focused_on("@1", "%1"));
         assert_eq!(guard(&mut shell), None);
         assert_eq!(shell.place(), at("$1", "@1", "%1"));
     }
@@ -1739,12 +1762,16 @@ mod agent_seams {
     fn a_refused_agent_switch_is_put_back(cx: &mut TestAppContext) {
         let mut shell = two_hosts(cx);
         start_agents(&mut shell, HashMap::new());
-        shell
-            .host
-            .state()
-            .answers
-            .push_back(Err("tmux refused the switch".into()));
+        {
+            let mut host = shell.host.state();
+            host.hold = true;
+            host.answers
+                .push_back(Err("tmux refused the switch".into()));
+        }
         open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"), "painted first");
+        assert!(guard(&mut shell).is_some());
+        shell.release();
         assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
         // Nothing changed on the host, so no snapshot comes to correct it.
         assert_eq!(shell.place(), at("$1", "@1", "%1"));
@@ -1783,14 +1810,14 @@ mod agent_seams {
             .visual
             .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
         shell.settle();
-        shell.publish(vec![snapshot_frame(300, &world("@2"))]);
+        shell.publish_caught_up(&world("@2"));
         shell.publish(vec![seed_frame("%3", 1, "agent screen")]);
         assert!(!holds(&mut shell, "%3"), "on screen, not kept aside");
         shell
             .visual
             .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@1", cx)));
         shell.settle();
-        shell.publish(vec![snapshot_frame(400, &world("@1"))]);
+        shell.publish_caught_up(&world("@1"));
         assert_eq!(guard(&mut shell), None, "both switches caught up");
         assert!(holds(&mut shell, "%3"));
         assert!(!holds(&mut shell, "%4"), "never shown");
@@ -1814,8 +1841,15 @@ mod agent_seams {
             "its kept screen paints before the host answers"
         );
         shell.release();
-        assert_eq!(shell.place(), at("$1", "@2", "%3"));
         assert_eq!(shell.host.last("focusPane")["pane_id"], "%3");
+        assert!(
+            guard(&mut shell).is_some(),
+            "held until the host's snapshot"
+        );
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
     }
 
     /// A notification's pane paints at once, and is acknowledged only once
@@ -1867,7 +1901,7 @@ mod agent_seams {
             0,
             "not before the host has the pane focused"
         );
-        shell.publish(vec![snapshot_frame(500, &focused_on("@1", "%2"))]);
+        shell.publish_caught_up(&focused_on("@1", "%2"));
         shell
             .visual
             .executor()
@@ -1906,7 +1940,7 @@ mod agent_seams {
             .visual
             .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$1", cx)));
         shell.settle();
-        shell.publish(vec![snapshot_frame(400, &world("@1"))]);
+        shell.publish_caught_up(&world("@1"));
         assert_eq!(guard(shell), None);
         assert!(holds(shell, "%4"));
     }
@@ -1942,12 +1976,7 @@ mod agent_seams {
         let mut shell = two_hosts(cx);
         let requests = notes_agent(&mut shell);
         keep_the_notes_screen(&mut shell);
-        {
-            // Its answers come after the snapshots seen so far, as a host's do.
-            let mut host = shell.host.state();
-            host.hold = true;
-            host.generation = 1_000;
-        }
+        shell.host.state().hold = true;
         shell
             .visual
             .update(|_, cx| activation::activate(notes_route(), false, cx));
@@ -1962,7 +1991,7 @@ mod agent_seams {
             0,
             "nor before a snapshot has the move"
         );
-        shell.publish(vec![snapshot_frame(2_000, &world("@1"))]);
+        shell.publish_caught_up(&world("@1"));
         wait_a_poll(&mut shell);
         assert_eq!(mark_seen_count(&requests), 1);
     }
@@ -2001,7 +2030,7 @@ mod agent_seams {
             .visual
             .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
         shell.settle();
-        shell.publish(vec![snapshot_frame(300, &world("@2"))]);
+        shell.publish_caught_up(&world("@2"));
         assert_eq!(guard(shell), None);
         assert!(holds(shell, "%1") && holds(shell, "%2"));
     }
@@ -2019,7 +2048,70 @@ mod agent_seams {
         assert_eq!(shell.place(), at("$1", "@1", "%2"));
         shell.release();
         assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
-        shell.publish(vec![snapshot_frame(500, &focused_on("@1", "%2"))]);
+        assert!(
+            guard(&mut shell).is_some(),
+            "held until the host's snapshot"
+        );
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// A move painted while another flies waits behind it; replaced there by
+    /// one that cannot paint, nothing would release its guard, and the shell
+    /// would keep going back to its window.
+    #[gpui_kit::test]
+    fn a_painted_move_replaced_while_waiting_lets_go_of_its_guard(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        // %3 given its screen and left; %1 and %2 never had one.
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        shell.publish(vec![seed_frame("%3", 1, "agent screen")]);
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(guard(&mut shell), None);
+        assert!(holds(&mut shell, "%3") && !holds(&mut shell, "%2"));
+
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%4");
+        open(&mut shell, "local", "%3");
+        assert_eq!(shell.place(), at("$1", "@2", "%3"), "painted, and waiting");
+        open(&mut shell, "local", "%2");
+        assert_eq!(guard(&mut shell), None, "the replaced move's guard goes");
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// A, B, then A again before the first move has landed: the first move is
+    /// the one the user wants again, and still focuses its pane.
+    #[gpui_kit::test]
+    fn a_move_away_and_back_while_in_flight_focuses_the_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        keep_the_editor_screens(&mut shell);
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        open(&mut shell, "local", "%3");
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        assert!(
+            guard(&mut shell).is_some(),
+            "held until the host's snapshot"
+        );
+        shell.publish_caught_up(&focused_on("@1", "%2"));
         assert_eq!(guard(&mut shell), None);
         assert_eq!(shell.place(), at("$1", "@1", "%2"));
     }
@@ -2036,7 +2128,7 @@ mod agent_seams {
         ]);
         let mut zoomed = world("@1");
         zoomed.windows[0].zoomed = true;
-        shell.publish(vec![snapshot_frame(300, &zoomed)]);
+        shell.publish_caught_up(&zoomed);
         assert!(holds(&mut shell, "%2"), "off screen behind the zoom");
         shell.host.state().hold = true;
         open(&mut shell, "local", "%2");
