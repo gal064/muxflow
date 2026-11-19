@@ -2087,6 +2087,11 @@ mod agent_seams {
         assert_eq!(shell.place(), at("$1", "@2", "%3"), "painted, and waiting");
         open(&mut shell, "local", "%2");
         assert_eq!(guard(&mut shell), None, "the replaced move's guard goes");
+        assert_eq!(
+            shell.place(),
+            at("$2", "@3", "%4"),
+            "and the shell is back where it was until %2 is reached"
+        );
         shell.release();
         assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
         shell.publish_caught_up(&focused_on("@1", "%2"));
@@ -2111,6 +2116,34 @@ mod agent_seams {
             guard(&mut shell).is_some(),
             "held until the host's snapshot"
         );
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// A move that could not paint flies; asked for again once it could, the
+    /// repeat joins the flight rather than put up a guard its landing would
+    /// never release.
+    #[gpui_kit::test]
+    fn a_repeat_of_an_unpainted_move_joins_its_flight(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell.publish(vec![
+            seed_frame("%1", 1, "left"),
+            seed_frame("%2", 2, "right"),
+        ]);
+        let mut zoomed = world("@1");
+        zoomed.windows[0].zoomed = true;
+        shell.publish_caught_up(&zoomed);
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(guard(&mut shell), None, "zoomed on %1: not painted");
+        // Unzoomed while the move flies: %2 could paint now.
+        shell.publish_caught_up(&world("@1"));
+        open(&mut shell, "local", "%2");
+        assert_eq!(guard(&mut shell), None, "the repeat joins the flight");
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
         shell.publish_caught_up(&focused_on("@1", "%2"));
         assert_eq!(guard(&mut shell), None);
         assert_eq!(shell.place(), at("$1", "@1", "%2"));
