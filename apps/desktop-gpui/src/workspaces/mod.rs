@@ -1028,7 +1028,17 @@ impl Workspaces {
             self.commit_local(&view.host, session_id, Some(window_id), None, cx);
             return;
         }
-        let painted = self.shows_at_once(view, pane_id, session_id, window_id, cx);
+        let key = format!("pane:{session_id}:{window_id}:{pane_id}");
+        // A repeat of a move flying unpainted joins that flight: its landing
+        // would release no guard put up now.
+        let joins_unpainted = self.coordinator.flight_key() == Some(key.as_str())
+            && !self.link(&view.host, cx).is_some_and(|link| {
+                link.optimistic_window
+                    .as_ref()
+                    .is_some_and(|held| held.pane_id.as_deref() == Some(pane_id))
+            });
+        let painted =
+            !joins_unpainted && self.shows_at_once(view, pane_id, session_id, window_id, cx);
         crate::perf::agent_switch_planned(painted);
         let optimistic = painted.then(|| OptimisticWindow {
             session_id: session_id.to_owned(),
@@ -1044,7 +1054,7 @@ impl Workspaces {
                 window_id: view.window.as_ref().map(|window| window.id.clone()),
             });
         let intent = Intent {
-            key: format!("pane:{session_id}:{window_id}:{pane_id}"),
+            key,
             host: view.host.clone(),
             scope,
             destination: Location {
@@ -1261,7 +1271,32 @@ impl Workspaces {
             && !keep.is_some_and(|keep| keep.same_move(guard))
             && self.holds_guard(&queued.host, guard, cx)
         {
-            self.set_guard(&queued.host, None, cx);
+            // Not shown where it was going: nobody asks for that any more.
+            self.put_back(&queued, cx);
+        }
+    }
+
+    /// Takes down the guard `intent` painted and shows where the host was
+    /// when it began, on the connection it was asked on.
+    fn put_back(&self, intent: &Intent, cx: &mut App) {
+        self.set_guard(&intent.host, None, cx);
+        let Some(origin) = intent
+            .origin
+            .clone()
+            .filter(|_| self.scope_current(&intent.host, &intent.scope, cx))
+        else {
+            return;
+        };
+        let windows = self
+            .link(&intent.host, cx)
+            .map(|link| link.host_state.snapshot.windows.clone())
+            .unwrap_or_default();
+        let window = window_for_session(&windows, &origin.session_id, origin.window_id.as_deref());
+        if let Some(controller) = self.controller.clone() {
+            controller.update(cx, |controller, cx| {
+                controller.set_active_session(&intent.host, Some(origin.session_id.clone()), cx);
+                controller.set_active_window(&intent.host, window, cx);
+            });
         }
     }
 
@@ -1451,32 +1486,7 @@ impl Workspaces {
                 None if owned => {
                     // Put back actively: a refused switch changes nothing on the
                     // host, so no snapshot may come to correct the shell.
-                    self.set_guard(&intent.host, None, cx);
-                    if let Some(origin) = intent
-                        .origin
-                        .clone()
-                        .filter(|_| self.scope_current(&intent.host, &intent.scope, cx))
-                    {
-                        let windows = self
-                            .link(&intent.host, cx)
-                            .map(|link| link.host_state.snapshot.windows.clone())
-                            .unwrap_or_default();
-                        let window = window_for_session(
-                            &windows,
-                            &origin.session_id,
-                            origin.window_id.as_deref(),
-                        );
-                        if let Some(controller) = self.controller.clone() {
-                            controller.update(cx, |controller, cx| {
-                                controller.set_active_session(
-                                    &intent.host,
-                                    Some(origin.session_id.clone()),
-                                    cx,
-                                );
-                                controller.set_active_window(&intent.host, window, cx);
-                            });
-                        }
-                    }
+                    self.put_back(&intent, cx);
                 }
                 None => {}
             }

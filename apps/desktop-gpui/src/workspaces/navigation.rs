@@ -136,6 +136,11 @@ impl<T> Coordinator<T> {
         self.flight.is_some()
     }
 
+    /// The destination of the move in flight.
+    pub fn flight_key(&self) -> Option<&str> {
+        self.flight.as_ref().map(|(_, key)| key.as_str())
+    }
+
     /// Whether flight `id` still goes where the user wants, so a two-step
     /// move may take its next step: it is the latest intent, or the one
     /// waiting behind it is for the same destination and will take its result
