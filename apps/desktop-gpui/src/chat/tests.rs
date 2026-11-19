@@ -3545,7 +3545,7 @@ mod attachments {
         }
 
         fn paste(&mut self) {
-            self.press("ctrl-v");
+            self.press("secondary-v");
             self.uploads_settle();
         }
 
@@ -3995,7 +3995,7 @@ mod attachments {
         shell.input("The card covers the composer.");
         // Enter sends while the clipboard is still read.
         shell.visual.update(|window, cx| {
-            window.press("ctrl-v", cx);
+            window.press("secondary-v", cx);
             window.press("enter", cx);
         });
         shell.uploads_settle();
