@@ -457,7 +457,7 @@ impl Element for TerminalElement {
         }
         // An agent switch ends on the pane's screen: one it kept, at once, or
         // the host's, once revealed.
-        if crate::perf::enabled() {
+        if crate::perf::agent_switch_pending() {
             let pane = self.pane.read(cx);
             if pane.revealed() || pane.restored() {
                 let host = pane.link().read(cx).profile_id().to_owned();

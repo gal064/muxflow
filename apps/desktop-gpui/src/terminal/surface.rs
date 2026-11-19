@@ -285,7 +285,7 @@ impl TerminalSurface {
                     });
                 let panes = window_id.as_deref().map_or(Vec::new(), |id| {
                     // A pane move painted ahead of the host shows its pane
-                    // focused, and a zoomed window shows that pane.
+                    // focused.
                     let mut in_window: Vec<Pane> = snapshot
                         .panes
                         .iter()
@@ -1152,7 +1152,7 @@ impl Render for TerminalSurface {
         // An agent switch to a chat ends on this frame; a terminal's ends
         // where its screen paints.
         if self.terminal_visible
-            && crate::perf::enabled()
+            && crate::perf::agent_switch_pending()
             && let Some(target) = &self.target
         {
             for mounted in &self.panes {
