@@ -1358,7 +1358,7 @@ impl Workspaces {
         };
         if already_there {
             self.commit(&intent, cx);
-            self.coordinator.finish(id, true);
+            self.coordinator.finish(id);
             return;
         }
         self.start(id, intent, None, cx);
@@ -1434,15 +1434,9 @@ impl Workspaces {
         // A flight from a connection since replaced must not touch a guard or
         // a protection with the same ids on the new one.
         let current = self.scope_current(&intent.host, &intent.scope, cx);
-        let reached = matches!(outcome, Outcome::Reached { .. });
-        // Stopped short, with the same move waiting: it flies the rest, and
-        // the guard, which is its too, holds until it lands.
-        let short = matches!(outcome, Outcome::Partial { .. });
-        let refly = short && self.coordinator.has_queued() && self.coordinator.still_wanted(id);
         if let Some(guard) = intent.optimistic.as_ref().filter(|_| current) {
             let owned = self.holds_guard(&intent.host, guard, cx);
             match outcome.generation() {
-                Some(_) if refly => {}
                 // Held until a snapshot has caught up: the ack is not the
                 // snapshot.
                 Some(generation) if owned => self.set_guard(
@@ -1496,7 +1490,8 @@ impl Workspaces {
                 _ => self.protected_app_tab = None,
             }
         }
-        match self.coordinator.finish(id, !short) {
+        let reached = matches!(outcome, Outcome::Reached { .. });
+        match self.coordinator.finish(id) {
             Finish::Latest if reached && intent.seq == self.intents => self.commit(&intent, cx),
             Finish::SameDestination(newer) if reached && newer.seq == self.intents => {
                 self.commit(&newer, cx)
@@ -2109,9 +2104,7 @@ async fn fly(
             })
             .unwrap_or(0),
     };
-    // A pane step skipped for a newer move leaves this one short of its pane.
-    let skipped_pane = !current && intent.pane.is_some();
-    if skipped_pane || !current && applied.as_ref().is_some_and(|applied| applied != target) {
+    if !current && applied.as_ref().is_some_and(|applied| applied != target) {
         return Outcome::Partial {
             location: applied.unwrap_or_else(|| target.clone()),
             generation,
