@@ -53,7 +53,7 @@ use crate::{
         ConnectionUi,
         connection_reducer::ConnectionPhase,
         controller::ConnectionController,
-        host_links::{HostLink, OptimisticWindow, session_windows},
+        host_links::{HostLink, OptimisticWindow, session_windows, show_focus},
         host_profiles::host_letter,
         host_scope::{HostScopeToken, same_host_connection},
     },
@@ -376,6 +376,13 @@ impl Workspaces {
                 .collect()
         });
         panes.sort_by_key(|pane| pane.index);
+        // A pane move painted ahead of the host shows its pane focused.
+        if let Some(focused) = window
+            .as_ref()
+            .and_then(|window| link.optimistic_pane(&window.id))
+        {
+            show_focus(&mut panes, focused);
+        }
         let active_pane = panes
             .iter()
             .find(|pane| pane.active)
@@ -855,6 +862,7 @@ impl Workspaces {
         let optimistic = (!already_there).then(|| OptimisticWindow {
             session_id: session_id.to_owned(),
             window_id: window_id.clone(),
+            pane_id: None,
             through_generation: None,
         });
         let intent = Intent {
@@ -919,6 +927,7 @@ impl Workspaces {
         let optimistic = (!already_there).then(|| OptimisticWindow {
             session_id: target.session_id.clone(),
             window_id: Some(target.id.clone()),
+            pane_id: None,
             through_generation: None,
         });
         let intent = Intent {
@@ -943,8 +952,9 @@ impl Workspaces {
         self.navigate(intent, already_there, cx);
     }
 
-    /// Goes to a pane's workspace and window and focuses it, committed once the
-    /// host has moved. On another host, that host is activated first.
+    /// Goes to a pane's workspace and window and focuses it: painted at once
+    /// when what the pane's window shows is already here, otherwise committed
+    /// once the host has moved. On another host, that host is activated first.
     pub fn select_pane(&mut self, host: &str, pane_id: &str, cx: &mut Context<Self>) {
         let seq = self.begin_intent(true);
         let view = self.view(cx);
@@ -1018,6 +1028,21 @@ impl Workspaces {
             self.commit_local(&view.host, session_id, Some(window_id), None, cx);
             return;
         }
+        let painted = self.shows_at_once(view, pane_id, session_id, window_id, cx);
+        crate::perf::agent_switch_planned(painted);
+        let optimistic = painted.then(|| OptimisticWindow {
+            session_id: session_id.to_owned(),
+            window_id: Some(window_id.to_owned()),
+            pane_id: Some(pane_id.to_owned()),
+            through_generation: None,
+        });
+        let origin = optimistic
+            .as_ref()
+            .and(view.session.as_ref())
+            .map(|session| Location {
+                session_id: session.id.clone(),
+                window_id: view.window.as_ref().map(|window| window.id.clone()),
+            });
         let intent = Intent {
             key: format!("pane:{session_id}:{window_id}:{pane_id}"),
             host: view.host.clone(),
@@ -1028,12 +1053,65 @@ impl Workspaces {
             },
             whole_workspace: false,
             pane: Some(pane_id.to_owned()),
-            optimistic: None,
-            origin: None,
+            optimistic: optimistic.clone(),
+            origin,
             app_tab: None,
             seq,
         };
+        // Painted first, as a workspace or window switch is: the workspace,
+        // its window and the pane's focus, held against the snapshots that
+        // have not seen the move. The host is told after.
+        if let Some(guard) = optimistic {
+            self.commit_local(&view.host, session_id, Some(window_id), None, cx);
+            self.set_guard(&view.host, Some(guard), cx);
+        }
         self.navigate(intent, false, cx);
+    }
+
+    /// Whether a move to `pane_id` can paint before the host answers: the
+    /// snapshot already has the pane in that window, and every pane the
+    /// window would show is a chat, or a terminal on screen or whose last
+    /// screen is kept. A terminal with no screen here would show an empty
+    /// grid for a round trip, so that move waits for the host as it always
+    /// did, and its screen is asked for once the window is reached.
+    fn shows_at_once(
+        &self,
+        view: &ShellView,
+        pane_id: &str,
+        session_id: &str,
+        window_id: &str,
+        cx: &App,
+    ) -> bool {
+        let snapshot = &view.snapshot;
+        let Some(window) = snapshot
+            .windows
+            .iter()
+            .find(|window| window.id == window_id && window.session_id == session_id)
+        else {
+            return false;
+        };
+        let mut panes: Vec<Pane> = snapshot
+            .panes
+            .iter()
+            .filter(|pane| pane.window_id == window_id)
+            .cloned()
+            .collect();
+        if !panes.iter().any(|pane| pane.id == pane_id) {
+            return false;
+        }
+        show_focus(&mut panes, pane_id);
+        let terminal = self
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.read(cx).terminal_link(&view.host));
+        crate::terminal::layout::mounted_panes(&panes, window_id, window.zoomed)
+            .into_iter()
+            .all(|pane| {
+                crate::chat::is_chat(pane)
+                    || terminal
+                        .as_ref()
+                        .is_some_and(|link| link.read(cx).shows_at_once(&pane.id))
+            })
     }
 
     /// Puts a document over the terminal, or the terminal back with `None`.
@@ -1167,16 +1245,20 @@ impl Workspaces {
     fn supersede_queued(&mut self, cx: &mut App) {
         if let Some(queued) = self.coordinator.drop_queued()
             && let Some(guard) = &queued.optimistic
+            && self.holds_guard(&queued.host, guard, cx)
         {
-            let held = self.link(&queued.host, cx).is_some_and(|link| {
-                link.optimistic_window.as_ref().is_some_and(|held| {
-                    held.session_id == guard.session_id && held.window_id == guard.window_id
-                })
-            });
-            if held {
-                self.set_guard(&queued.host, None, cx);
-            }
+            self.set_guard(&queued.host, None, cx);
         }
+    }
+
+    /// Whether the guard up on `host` is still the one `guard`'s move put up,
+    /// and not a later move's.
+    fn holds_guard(&self, host: &str, guard: &OptimisticWindow, cx: &App) -> bool {
+        self.link(host, cx).is_some_and(|link| {
+            link.optimistic_window
+                .as_ref()
+                .is_some_and(|held| held.same_move(guard))
+        })
     }
 
     fn set_guard(&self, host: &str, guard: Option<OptimisticWindow>, cx: &mut App) {
@@ -1336,11 +1418,7 @@ impl Workspaces {
         // a protection with the same ids on the new one.
         let current = self.scope_current(&intent.host, &intent.scope, cx);
         if let Some(guard) = intent.optimistic.as_ref().filter(|_| current) {
-            let owned = self.link(&intent.host, cx).is_some_and(|link| {
-                link.optimistic_window.as_ref().is_some_and(|held| {
-                    held.session_id == guard.session_id && held.window_id == guard.window_id
-                })
-            });
+            let owned = self.holds_guard(&intent.host, guard, cx);
             match outcome.generation() {
                 // Held until a snapshot has caught up: the ack is not the
                 // snapshot.

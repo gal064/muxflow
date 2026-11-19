@@ -11,7 +11,7 @@
 //! still reads every byte into the terminal, and showing the window drains at
 //! once and redraws from there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -76,6 +76,8 @@ pub struct TerminalLink {
     /// Whose host-epoch counts as the current bridge's.
     connection_epoch: u64,
     panes: HashMap<String, WeakEntity<TerminalPane>>,
+    /// The hidden panes whose last screen the engine keeps, as it last said.
+    held: HashSet<String>,
     active_until: Instant,
     /// The last drain handed back much of the host's credit.
     busy: bool,
@@ -106,6 +108,7 @@ impl TerminalLink {
             client_id: None,
             connection_epoch: 0,
             panes: HashMap::new(),
+            held: HashSet::new(),
             active_until: Instant::now(),
             busy: false,
             probes: Arc::default(),
@@ -133,6 +136,22 @@ impl TerminalLink {
 
     pub fn connection_epoch(&self) -> u64 {
         self.connection_epoch
+    }
+
+    /// Whether mounting `pane_id` would show its screen at once: it is on
+    /// screen now, or hidden with its last screen kept. Otherwise a mount
+    /// starts from an empty grid and waits a round trip for the host's.
+    pub fn shows_at_once(&self, pane_id: &str) -> bool {
+        self.held.contains(pane_id)
+            || self
+                .panes
+                .get(pane_id)
+                .is_some_and(|pane| pane.upgrade().is_some())
+    }
+
+    /// Whether the engine keeps `pane_id`'s last screen while it is hidden.
+    pub fn holds(&self, pane_id: &str) -> bool {
+        self.held.contains(pane_id)
     }
 
     pub fn send(&self, command: Command) {
@@ -170,6 +189,9 @@ impl TerminalLink {
         cx.default_global::<PanePaintGate>()
             .arm(&self.scoped_key(pane_id));
         self.panes.insert(pane_id.to_owned(), pane.downgrade());
+        // Its kept screen is the mounted one now; the engine says so shortly.
+        let restored = self.held.remove(pane_id);
+        pane.update(cx, |pane, _| pane.set_restored(restored));
         self.send(Command::Mount {
             pane_id: pane_id.to_owned(),
             size,
@@ -338,6 +360,7 @@ impl TerminalLink {
                 })
                 .detach();
             }
+            EngineOutput::Held(held) => self.held = held.into_iter().collect(),
             EngineOutput::Epoch(_)
             | EngineOutput::Dirty { .. }
             | EngineOutput::FrameConsumed { .. } => {}

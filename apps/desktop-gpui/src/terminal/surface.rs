@@ -19,7 +19,9 @@ use tmux_control::{Pane, TmuxSnapshot, Window as TmuxWindow};
 use crate::{
     chat::{self, ChatPane},
     connection_ui::{
-        connection_reducer::ConnectionPhase, controller::ConnectionController, host_links::HostLink,
+        connection_reducer::ConnectionPhase,
+        controller::ConnectionController,
+        host_links::{HostLink, show_focus},
     },
     fonts,
     theme::{self, metrics::ui},
@@ -83,6 +85,8 @@ struct Mounted {
     geometry: Pane,
     /// The right and bottom dividers, which take arrow keys.
     dividers: [FocusHandle; 2],
+    /// A chat this window kept open came back, rather than one opened cold.
+    kept: bool,
     _focused: Subscription,
 }
 
@@ -280,7 +284,18 @@ impl TerminalSurface {
                         )
                     });
                 let panes = window_id.as_deref().map_or(Vec::new(), |id| {
-                    mounted_panes(&snapshot.panes, id, zoomed)
+                    // A pane move painted ahead of the host shows its pane
+                    // focused, and a zoomed window shows that pane.
+                    let mut in_window: Vec<Pane> = snapshot
+                        .panes
+                        .iter()
+                        .filter(|pane| pane.window_id == id)
+                        .cloned()
+                        .collect();
+                    if let Some(focused) = link.optimistic_pane(id) {
+                        show_focus(&mut in_window, focused);
+                    }
+                    mounted_panes(&in_window, id, zoomed)
                         .into_iter()
                         .cloned()
                         .collect()
@@ -477,7 +492,9 @@ impl TerminalSurface {
         // A chat this window kept comes back as it was left, with no `OPEN`.
         // Mounted under an app tab, it is on screen once the tab goes.
         let shown = self.terminal_visible;
-        let pane = match self.chats.show(&key) {
+        let kept = self.chats.show(&key);
+        let was_kept = kept.is_some();
+        let pane = match kept {
             Some(pane) => {
                 pane.update(cx, |pane, cx| {
                     pane.set_tmux_pane(&geometry, cx);
@@ -514,6 +531,7 @@ impl TerminalSurface {
                 cx.focus_handle().tab_stop(true),
                 cx.focus_handle().tab_stop(true),
             ],
+            kept: was_kept,
             _focused: focused,
         });
     }
@@ -626,6 +644,7 @@ impl TerminalSurface {
                     cx.focus_handle().tab_stop(true),
                     cx.focus_handle().tab_stop(true),
                 ],
+                kept: false,
                 _focused: focused,
             });
         }
@@ -1128,6 +1147,24 @@ impl Render for TerminalSurface {
                     window.focus(&mounted.pane.focus_handle(cx), cx);
                 }
                 self.pending_focus = false;
+            }
+        }
+        // An agent switch to a chat ends on this frame; a terminal's ends
+        // where its screen paints.
+        if self.terminal_visible
+            && crate::perf::enabled()
+            && let Some(target) = &self.target
+        {
+            for mounted in &self.panes {
+                if let Mount::Chat(_) = &mounted.pane {
+                    crate::perf::agent_switch_shown(
+                        &target.profile_id,
+                        &mounted.id,
+                        "chat",
+                        mounted.kept,
+                        window,
+                    );
+                }
             }
         }
         let palette = theme::palette(cx);
