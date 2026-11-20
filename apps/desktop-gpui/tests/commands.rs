@@ -79,8 +79,12 @@ fn the_registry_matches_registry_ts() {
             Some(command.group),
             "{id} group"
         );
-        assert_eq!(field(line, "mac").as_deref(), command.mac, "{id} mac");
-        assert_eq!(field(line, "linux").as_deref(), command.linux, "{id} linux");
+        // The palette moved to ⌘⇧P / Ctrl+Shift+P here and gave ⌘K / Ctrl+K
+        // to Session history, which only this app has.
+        if id != "commands.show" {
+            assert_eq!(field(line, "mac").as_deref(), command.mac, "{id} mac");
+            assert_eq!(field(line, "linux").as_deref(), command.linux, "{id} linux");
+        }
         assert_eq!(
             line.contains("mutates: true"),
             command.mutates,
@@ -147,7 +151,7 @@ fn the_registry_matches_registry_ts() {
 /// id, macOS key, Linux key, `-` for none. Pins the defaults independently of
 /// the TypeScript source, which goes away at cutover.
 const DEFAULT_KEYMAP: &str = "\
-commands.show Meta+K Ctrl+K
+commands.show Meta+Shift+P Ctrl+Shift+P
 workspaces.switch Meta+P Ctrl+P
 settings.show Meta+, Ctrl+,
 view.toggleSidebar Meta+B Ctrl+B
@@ -157,7 +161,7 @@ view.showGit Meta+Shift+G Ctrl+Shift+G
 focus.back Meta+[ Ctrl+[
 focus.forward Meta+] Ctrl+]
 agents.jumpUnread Meta+Shift+U Ctrl+Shift+U
-agents.history Meta+Y Ctrl+Shift+H
+agents.history Meta+K Ctrl+K
 session.new Meta+N Ctrl+N
 tab.previous Meta+Shift+[ Ctrl+Shift+[
 tab.next Meta+Shift+] Ctrl+Shift+]
@@ -315,7 +319,7 @@ fn fully_available_context(cx: &mut App) {
 #[gpui_kit::test]
 fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     assert!(dialog_open(handle, cx));
     with_window(handle, cx, |window, _| {
         assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 66);
@@ -339,7 +343,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     type_text(handle, "Toggle file beside the terminal", cx);
     press(handle, "enter", cx);
     assert!(
@@ -398,7 +402,7 @@ fn arrows_move_the_selection_and_enter_runs_the_row(cx: &mut TestAppContext) {
         implement_all(log, cx);
         fully_available_context(cx);
     });
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     for _ in 0..4 {
         press(handle, "down", cx);
     }
@@ -417,7 +421,7 @@ fn typing_ranks_by_fuzzy_score_and_click_runs_the_row(cx: &mut TestAppContext) {
         implement_all(log, cx);
         fully_available_context(cx);
     });
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     type_text(handle, "sright", cx);
     with_window(handle, cx, |window, cx| {
         window.find_by_label("Split pane right");
@@ -431,7 +435,7 @@ fn typing_ranks_by_fuzzy_score_and_click_runs_the_row(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn escape_closes_and_returns_focus(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     press(handle, "escape", cx);
     assert!(!dialog_open(handle, cx));
 }
@@ -548,7 +552,7 @@ fn selected_prose_keeps_copy_and_select_all_but_not_the_apps_shortcuts(cx: &mut 
 fn the_backdrop_closes_the_palette_but_not_a_prompt(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
     let corner = point(px(500.), px(790.));
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     with_window(handle, cx, |window, cx| {
         window.pointer_down(corner, MouseButton::Left, cx);
         window.pointer_up(corner, MouseButton::Left, cx);
@@ -574,7 +578,7 @@ fn shortcuts_are_ignored_while_an_overlay_is_open(cx: &mut TestAppContext) {
         implement_all(log, cx);
         fully_available_context(cx);
     });
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     press(handle, "secondary-t", cx);
     press(handle, "secondary-3", cx);
     assert!(ran.borrow().is_empty());
@@ -586,7 +590,7 @@ fn a_saved_override_takes_effect_and_the_old_binding_stops(cx: &mut TestAppConte
     let chord = format!("{PRIMARY}+J");
     let path = write_state(dir.path(), serde_json::json!({ "commands.show": chord }));
     let handle = open_app(&path, cx);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     assert!(!dialog_open(handle, cx), "the old default is replaced");
     press(handle, "secondary-j", cx);
     assert!(dialog_open(handle, cx));
@@ -607,7 +611,7 @@ fn setting_overrides_persists_and_applies_at_once(cx: &mut TestAppContext) {
         commands::set_overrides(overrides, window, cx);
     });
     wait_for_overrides(&path, &expected);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     assert!(!dialog_open(handle, cx));
     press(handle, "secondary-j", cx);
     assert!(dialog_open(handle, cx));
@@ -647,7 +651,7 @@ fn shortcut_editor_edits_conflicts_and_saves(cx: &mut TestAppContext) {
     with_window(handle, cx, |window, _| {
         assert_eq!(window.find_all_by_role(Role::TextInput).len(), 84);
         let value = window.find_by_label(field).value().map(str::to_owned);
-        assert_eq!(value.as_deref(), Some(&*format!("{PRIMARY}+K")));
+        assert_eq!(value.as_deref(), Some(&*format!("{PRIMARY}+Shift+P")));
     });
     assert!(!done_disabled(handle, cx));
 
@@ -869,7 +873,7 @@ fn a_composition_keeps_arrows_and_enter_from_the_palette(cx: &mut TestAppContext
         implement_all(log, cx);
         fully_available_context(cx);
     });
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     with_window(handle, cx, composing_input);
     press(handle, "down", cx);
     press(handle, "enter", cx);
@@ -1142,7 +1146,7 @@ fn palette_rows(handle: AnyWindowHandle, cx: &mut TestAppContext) -> Vec<(f32, O
 #[gpui_kit::test]
 fn the_palette_groups_only_an_empty_query_and_says_when_nothing_matches(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     // A heading sits between two groups' rows, so a gap taller than a row
     // marks one. A ranked list would be lying with them, so it has none.
     let headings = |cx: &mut TestAppContext| {
@@ -1175,7 +1179,7 @@ fn an_unavailable_palette_row_says_so_and_a_click_does_nothing(cx: &mut TestAppC
     let ran = Rc::new(RefCell::new(Vec::new()));
     let log = ran.clone();
     cx.update(|cx| implement_all(log, cx));
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     with_window(handle, cx, |window, cx| {
         let row = window.find_by_label("Toggle file beside the terminal");
         assert_eq!(row.description(), Some("Unavailable"));
@@ -1195,7 +1199,7 @@ fn an_unavailable_palette_row_says_so_and_a_click_does_nothing(cx: &mut TestAppC
 #[gpui_kit::test]
 fn typing_moves_the_palette_selection_back_to_the_first_row(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     for _ in 0..3 {
         press(handle, "down", cx);
     }
@@ -1257,7 +1261,7 @@ fn clearing_a_shortcut_field_saves_the_binding_removed(cx: &mut TestAppContext) 
     cx.run_until_parked();
     let expected: ShortcutOverrides = HashMap::from([("commands.show".to_owned(), None)]);
     wait_for_overrides(&path, &expected);
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     assert!(!dialog_open(handle, cx), "the palette has no shortcut now");
 }
 
@@ -1279,7 +1283,7 @@ fn escape_closes_the_shortcut_editor_without_saving(cx: &mut TestAppContext) {
     assert_eq!(saved_overrides(&path), ShortcutOverrides::new());
     press(handle, "secondary-j", cx);
     assert!(!dialog_open(handle, cx));
-    press(handle, "secondary-k", cx);
+    press(handle, "secondary-shift-p", cx);
     assert!(
         dialog_open(handle, cx),
         "the old binding still opens the palette"

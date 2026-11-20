@@ -14,7 +14,8 @@ still in the palette and can be given one there.
 
 | Command | macOS | Linux |
 |---|---|---|
-| Command palette | ⌘K | Ctrl+K |
+| Command palette | ⌘⇧P | Ctrl+Shift+P |
+| Session history | ⌘K | Ctrl+K |
 | Quick Open (files, workspaces, tabs) | ⌘P | Ctrl+P |
 | Settings | ⌘, | Ctrl+, |
 | Toggle sidebar | ⌘B | Ctrl+B |

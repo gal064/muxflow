@@ -817,7 +817,7 @@ What differs from the mock:
   ends a snooze (`woke` names those, for the notification), and when a woke
   session runs again. Not for titles or activity: clients list on open.
 - **Desktop.** History opens from the Agents header's History button, the
-  palette (`agents.history`) and ⌘Y / Ctrl+Shift+H, on the host on screen. It
+  palette (`agents.history`) and ⌘K / Ctrl+K, on the host on screen. It
   follows Quick Open: one field, fuzzy search over title, workspace and
   provider, Snoozed first by wake time with Wake now, then Sessions newest
   first. Enter focuses a running session or resumes it. Woke placeholders sit

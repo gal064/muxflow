@@ -592,7 +592,7 @@ fn a_reset_of_saved_state_makes_its_defaults_live(cx: &mut TestAppContext) {
     );
     let handle = open_app(&state, cx);
     let palette_opens = |cx: &mut TestAppContext| {
-        press(handle, "secondary-k", cx);
+        press(handle, "secondary-shift-p", cx);
         let open = with_window(handle, cx, |window, cx| window.has_active_dialog(cx));
         if open {
             press(handle, "escape", cx);

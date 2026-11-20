@@ -66,6 +66,8 @@ gpui_kit::assets::icon_assets!(
         // Background tasks and compacting.
         Layers,
         Shrink,
+        // The Agents header's History button.
+        Clock,
     ]
 );
 
@@ -169,6 +171,7 @@ mod tests {
             IconName::Image,
             IconName::Layers,
             IconName::Shrink,
+            IconName::Clock,
         ];
         assert_eq!(extras.len(), listed_above.len());
         for name in listed_above {
