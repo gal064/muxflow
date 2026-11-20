@@ -167,6 +167,25 @@ pub(crate) async fn handle_request(
         }
 
         (Handler::Chat, Some(_)) => {
+            // A terminal agent's commands are read by starting the agent, which
+            // takes a second or more: answered off the ordered lane, which
+            // drops a connection whose request runs that long.
+            if super::chat_dispatch::lists_terminal_commands(&request) {
+                let control_tx = control_tx.clone();
+                let pending = Arc::clone(pending);
+                let topology_baseline = Arc::clone(topology_baseline);
+                tokio::spawn(async move {
+                    super::chat_dispatch::terminal_commands(
+                        request_id,
+                        request,
+                        &control_tx,
+                        topology_baseline,
+                    )
+                    .await;
+                    pending.lock().unwrap().remove(&request_id);
+                });
+                return;
+            }
             super::chat_dispatch::handle(
                 request_id,
                 request,

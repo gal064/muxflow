@@ -10,7 +10,7 @@ import type { VoicePhase } from "../../voice/voiceStore";
 export const DICTATION_HOLD_MS = 250;
 /**
  * How far a swipe goes to lock or discard. The reply field's row is narrower
- * than the Voice screen's pane: its Discard sits about this far right of the
+ * than the talk pane: its Discard sits about this far right of the
  * mic, by the screen's edge, so reaching it is the swipe.
  */
 export const DICTATION_SWIPE = 40;
@@ -55,7 +55,7 @@ export interface ComposerMicProps {
  * row while a take is on (rendered as the row's children, so the strip can
  * cover the row and the mic stays the element the finger is on). A tap opens
  * voice mode; a hold dictates: let go to send, swipe left to lock, right to
- * discard, as on the Voice screen. A finger that leaves the mic mid-take
+ * discard, as in the talk pane. A finger that leaves the mic mid-take
  * locks it, so the take is never left recording with nothing to end it.
  */
 export function ComposerMic({ on, onTap, dictation, sendRefusal, disabled }: ComposerMicProps) {

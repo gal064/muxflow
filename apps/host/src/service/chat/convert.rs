@@ -696,23 +696,34 @@ fn hook_installed(adapter_id: &str) -> bool {
 
 /// The agent's own arguments, and what runs it: the program, or an
 /// interpreter and the script it was given.
-fn split_program(argv: &[String]) -> Option<(&[String], &[String])> {
+pub(super) fn split_program(argv: &[String]) -> Option<(&[String], &[String])> {
     let interpreted = matches!(argv.first()?.rsplit('/').next()?, "node" | "nodejs" | "bun");
     argv.split_at_checked(if interpreted { 2 } else { 1 })
 }
 
-struct Agent {
-    pid: u32,
-    argv: Vec<String>,
+pub(super) struct Agent {
+    pub(super) pid: u32,
+    pub(super) argv: Vec<String>,
     /// How long ago it started, when that could be read.
     age: Option<Duration>,
     start_stamp: Option<u64>,
 }
 
 /// The pane's agent: the process nearest the pane's own that is one of
-/// `adapter_id`'s. Looking stops at the first agent of any adapter, since
-/// what runs beneath an agent is that agent's business.
+/// `adapter_id`'s.
 fn find_agent(processes: &impl Processes, root_pid: u32, adapter_id: &str) -> Option<Agent> {
+    find_any_agent(processes, root_pid)
+        .filter(|(kind, _)| *kind == adapter_id)
+        .map(|(_, agent)| agent)
+}
+
+/// The pane's agent, whichever adapter's it is, with that adapter's id: the
+/// process nearest the pane's own that is an agent. Looking stops at the
+/// first one, since what runs beneath an agent is that agent's business.
+pub(super) fn find_any_agent(
+    processes: &impl Processes,
+    root_pid: u32,
+) -> Option<(&'static str, Agent)> {
     if root_pid == 0 {
         return None;
     }
@@ -725,12 +736,13 @@ fn find_agent(processes: &impl Processes, root_pid: u32, adapter_id: &str) -> Op
         if let Some(argv) = processes.argv(pid)
             && let Some(adapter) = adapters::detect_argv(&argv)
         {
-            return (adapter.kind() == adapter_id).then(|| Agent {
+            let agent = Agent {
                 pid,
                 age: processes.age(pid),
                 start_stamp: processes.start_stamp(pid),
                 argv,
-            });
+            };
+            return Some((adapter.kind(), agent));
         }
         if depth >= MAX_DEPTH {
             continue;

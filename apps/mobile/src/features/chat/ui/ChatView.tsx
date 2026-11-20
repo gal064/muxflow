@@ -25,6 +25,10 @@ import { useMessageActions } from "./useMessageActions";
 
 export interface ChatViewProps {
   title: string;
+  /** The chat's agent, for the header's mark. */
+  agent?: { adapterId: string; finished: boolean } | undefined;
+  /** Opens the pane's files from the header; absent hides the button. */
+  onFiles?: (() => void) | undefined;
   pane: ChatPane | undefined;
   connected: boolean;
   hostLabel: string;
@@ -150,8 +154,10 @@ export function ChatView(props: ChatViewProps) {
     <View style={styles.root}>
       <ChatHeader
         connected={connected}
+        agent={props.agent}
         onBack={messages.back}
         onDetails={() => props.onDetails(true)}
+        onFiles={props.onFiles}
         pane={pane}
         title={title}
       />

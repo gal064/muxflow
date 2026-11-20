@@ -46,8 +46,8 @@ describe("voice mode inside a chat", () => {
 
   it("registers nothing with the host and sends a transcript as a chat message", async () => {
     const { connection, controller, sent } = harness();
-    // useChatVoice replaces a Voice screen's controller that lacks this.
-    expect(controller.submitsToChat).toBe(true);
+    // The shared voice mode replaces a terminal's controller for a pane that became a chat.
+    expect(controller.forChat).toBe(true);
     controller.focus();
     await vi.advanceTimersByTimeAsync(0);
     expect(connection.of(Operation.VOICE_SESSION)).toHaveLength(0);

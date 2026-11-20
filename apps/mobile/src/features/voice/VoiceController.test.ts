@@ -7,7 +7,7 @@ import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
 import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
-import { MAX_UTTERANCE_MS, MIN_UTTERANCE_MS, SCREEN_OFF_CHECK_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
+import { MAX_UTTERANCE_MS, MIN_UTTERANCE_MS, SCREEN_OFF_CHECK_MS, SESSION_REFRESH_MS, VoiceController, type VoiceControllerOptions } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -1605,5 +1605,78 @@ describe("VoiceController acknowledgements and playback speed", () => {
     expect(h.player.calls.filter((call) => call.startsWith("rate"))).toEqual(["rate 1.5", "rate 2"]);
     h.controller.onVoiceReply(reply("agent-a", "Second.", MP3, 2n));
     expect(h.player.calls.filter((call) => call.startsWith("rate"))).toEqual(["rate 1.5", "rate 2", "rate 2"]);
+  });
+});
+
+describe("VoiceController on a terminal's screen (voice mode and dictation)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function terminal(submit?: VoiceControllerOptions["submit"]) {
+    const h = harness();
+    const haptics = new FakeHaptics();
+    const controller = new VoiceController({
+      serverIdentity: "server-a",
+      sessionKey: "agent-t",
+      paneId: "%3",
+      sessionId: "$1",
+      store: h.store,
+      getConnection: () => h.connection.asHostConnection(),
+      recorder: h.recorder,
+      recorderCoordinator: h.recorderCoordinator,
+      player: h.player,
+      files: h.files,
+      appInForeground: () => true,
+      submitDelayMs: 0,
+      tailHoldMs: 0,
+      canSubmit: () => present,
+      haptics,
+      ...(submit ? { submit } : {}),
+    });
+    let present = true;
+    return { ...h, controller, haptics, leave: () => { present = false; } };
+  }
+
+  it("registers for pushed replies only when focused for voice mode, and release clears it", async () => {
+    const t = terminal();
+    t.controller.focus(false);
+    await settle();
+    expect(t.connection.of(Operation.VOICE_SESSION)).toHaveLength(0);
+    t.controller.focus(true);
+    await settle();
+    expect(t.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%3"]);
+    await t.controller.release();
+    expect(t.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%3", ""]);
+    // Nothing refreshes or re-registers it after: a reconnect does not either.
+    await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS * 2);
+    t.controller.reregister();
+    await settle();
+    expect(t.connection.of(Operation.VOICE_SESSION)).toHaveLength(2);
+  });
+
+  it("types a dictation with what the screen adds, and says nothing was sent when the agent left before the Enter", async () => {
+    const t = terminal((text, typeIntoPane) => typeIntoPane(`draft ${text}`));
+    t.controller.focus(false);
+    await settle();
+    t.controller.beginUtterance();
+    await settle();
+    await t.controller.endUtterance();
+    const typed = t.connection.of(Operation.TERMINAL_INPUT).map((r) => new TextDecoder().decode(r.data));
+    expect(typed).toEqual(["draft list the files in this directory", "\r"]);
+    expect(t.haptics.calls).toEqual(["listening", "sent"]);
+
+    t.haptics.calls.length = 0;
+    const t2 = terminal(async (text, typeIntoPane) => {
+      t2.leave();
+      return typeIntoPane(text);
+    });
+    t2.controller.focus(false);
+    await settle();
+    t2.controller.beginUtterance();
+    await settle();
+    await t2.controller.endUtterance();
+    // The paste went, the Enter did not, and no "sent" is played for it.
+    expect(t2.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(1);
+    expect(t2.haptics.calls).toEqual(["listening"]);
   });
 });

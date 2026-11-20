@@ -75,11 +75,11 @@ export default function SettingsScreen() {
       </View>
       <View style={styles.settingRow}>
         <View style={styles.settingCopy}>
-          <Text {...fixedChromeText} style={styles.label}>Keep screen awake in Voice</Text>
-          <Text style={styles.help}>Prevents screen sleep only while the Voice screen is open.</Text>
+          <Text {...fixedChromeText} style={styles.label}>Keep screen awake in voice mode</Text>
+          <Text style={styles.help}>Prevents screen sleep only while voice mode is on.</Text>
         </View>
         <Switch
-          accessibilityLabel="Keep screen awake in Voice"
+          accessibilityLabel="Keep screen awake in voice mode"
           onValueChange={(value) => prefsStore.getState().setVoiceKeepAwake(value)}
           thumbColor={voiceKeepAwake ? colors.accent : colors.chromeDim}
           trackColor={{ false: colors.chromeBorder, true: colors.accentWash }}
@@ -90,7 +90,7 @@ export default function SettingsScreen() {
         <View style={styles.settingRow}>
           <View style={styles.settingCopy}>
             <Text {...fixedChromeText} style={styles.label}>Play replies with screen off</Text>
-            <Text style={styles.help}>Keeps playing replies when you turn the phone off on the Voice screen.</Text>
+            <Text style={styles.help}>Keeps playing replies when you turn the phone off in voice mode.</Text>
           </View>
           <Switch
             accessibilityLabel="Play replies with screen off"

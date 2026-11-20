@@ -40,6 +40,14 @@ export interface ComposerProps {
   mic?: { on: boolean; onTap: () => void; dictation: ComposerDictation | undefined } | undefined;
   /** Attaching files. Absent hides the plus button: the agent takes none. */
   attach?: ComposerAttach | undefined;
+  /** A row over the box: the terminal's key chips. The slash list takes its place while it shows. */
+  above?: ReactNode;
+  /** Said in the empty field instead of the chat's words. */
+  placeholder?: string | undefined;
+  /** Typed as is: no capitals or corrections, as a shell wants. */
+  plain?: boolean | undefined;
+  /** The field lost the focus. */
+  onBlur?: (() => void) | undefined;
 }
 
 export interface ComposerAttach {
@@ -67,14 +75,14 @@ export function Composer(props: ComposerProps) {
   const sendDisabled = disabled || sending || (blocked && !sideQuestion) || !hasMessage || filesHeld !== undefined;
   // Nothing to send yet, or not all of it on the host yet.
   const sendPlain = !hasMessage || files === "uploading";
-  const placeholder = blocked ? "Answer the card above" : working && canSendMidTurn ? "Send a follow-up while it works" : "Reply";
+  const placeholder = props.placeholder ?? (blocked ? "Answer the card above" : working && canSendMidTurn ? "Send a follow-up while it works" : "Reply");
   // A dictation is sent as Send would send it, so it waits for what Send waits for.
   const dictationRefusal = blocked && !sideQuestion ? "Answer the card above first" : working && !canSendMidTurn && !sideQuestion && !editing ? "The agent takes a message once it stops" : "";
   const dictation = mic?.dictation;
   return (
     <View style={styles.wrap}>
       {dictation?.tip && dictation.phase === "idle" && !disabled ? <MicTip /> : null}
-      {commands.length > 0 ? <SlashList groups={commands} onPick={onPickCommand} /> : null}
+      {commands.length > 0 ? <SlashList groups={commands} onPick={onPickCommand} /> : props.above}
       <View style={[styles.box, disabled && styles.boxDisabled]}>
         {editing ? (
           <View style={styles.banner}>
@@ -93,8 +101,11 @@ export function Composer(props: ComposerProps) {
           ) : null}
           <TextInput
             accessibilityLabel="Message"
+            autoCapitalize={props.plain ? "none" : undefined}
+            autoCorrect={props.plain ? false : undefined}
             editable={!disabled}
             multiline
+            onBlur={props.onBlur}
             onChangeText={onDraft}
             onFocus={onFocus}
             placeholder={placeholder}

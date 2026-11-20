@@ -1,8 +1,7 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
-
-import { BackIcon } from "../../../ui/components/MediaIcons";
-import { colors, fixedChromeText, metrics, stateColors, typeScale } from "../../../ui/tokens";
-import { headerLine, type HeaderTone } from "../chatHeader";
+import { FolderIcon } from "../../../ui/components/MediaIcons";
+import { colors } from "../../../ui/tokens";
+import { AgentHeader, HeaderButton } from "../../agents/ui/AgentHeader";
+import { headerLine } from "../chatHeader";
 import type { ChatPane } from "../chatModel";
 import { InfoIcon } from "./HeaderIcons";
 
@@ -10,61 +9,37 @@ export interface ChatHeaderProps {
   title: string;
   pane: ChatPane | undefined;
   connected: boolean;
+  /**
+   * The chat's agent: its mark, and whether its last turn is an unseen
+   * completion. The mark draws the chat's own state, as the line says it.
+   */
+  agent?: { adapterId: string; finished: boolean } | undefined;
   onDetails: () => void;
+  /** Opens the pane's files; absent hides the button. */
+  onFiles?: (() => void) | undefined;
   onBack: () => void;
 }
 
-const DOT: Record<HeaderTone, string> = {
-  working: stateColors.working,
-  waiting: colors.danger,
-  quiet: colors.chromeFaint,
-};
-
 /**
- * The chat's header (mobile-chat-mock.html, S8): Back, the title over a line
- * with the state, model and effort, then Details. The title block opens
- * Details too. Voice mode is the reply field's mic (mobile-voice-mock.html).
+ * The chat's header (mobile-chat-mock.html, S8), the agent screens' shared
+ * one: Back, the agent's mark, the title over a line with the state, model
+ * and effort, then Files and Details. The title block opens Details too.
+ * Voice mode is the reply field's mic (mobile-voice-mock.html).
  */
-export function ChatHeader({ title, pane, connected, onDetails, onBack }: ChatHeaderProps) {
-  const line = headerLine(pane, connected);
+export function ChatHeader({ title, pane, connected, agent, onDetails, onFiles, onBack }: ChatHeaderProps) {
+  const line = headerLine(pane, connected, agent?.finished === true);
+  // No state known yet (opening, connecting, not connected): the mark draws none, as for an idle agent.
+  const mark = agent ? { adapterId: agent.adapterId, state: line?.state?.mark ?? "idle" } : undefined;
   return (
-    <View style={styles.header}>
-      <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={onBack} style={styles.iconButton}>
-        <BackIcon color={colors.chromeInkStrong} />
-      </Pressable>
-      <Pressable
-        accessibilityLabel="Chat details"
-        accessibilityRole="button"
-        // The label replaces what the block reads as, so the title and the line are its value.
-        accessibilityValue={{ text: line ? `${title}, ${line.text}` : title }}
-        onPress={onDetails}
-        style={({ pressed }) => [styles.titleBlock, pressed && styles.pressed]}
-      >
-        <Text {...fixedChromeText} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
-        {line ? (
-          <View style={styles.line}>
-            {line.state ? <View style={[styles.dot, { backgroundColor: DOT[line.state.tone] }]} /> : null}
-            <Text {...fixedChromeText} numberOfLines={1} style={styles.lineText}>{line.text}</Text>
-          </View>
-        ) : null}
-      </Pressable>
-      <Pressable accessibilityLabel="Details" accessibilityRole="button" onPress={onDetails} style={styles.iconButton}>
-        <View style={styles.round}>
-          <InfoIcon color={colors.chromeDim} />
-        </View>
-      </Pressable>
-    </View>
+    <AgentHeader line={line?.text} mark={mark} onBack={onBack} onTitle={{ label: "Chat details", onPress: onDetails }} title={title}>
+      {onFiles ? (
+        <HeaderButton label="Files" onPress={onFiles}>
+          <FolderIcon color={colors.chromeDim} size={20} />
+        </HeaderButton>
+      ) : null}
+      <HeaderButton label="Details" onPress={onDetails}>
+        <InfoIcon color={colors.chromeDim} />
+      </HeaderButton>
+    </AgentHeader>
   );
 }
-
-const styles = StyleSheet.create({
-  header: { alignItems: "center", backgroundColor: colors.chromeBg, borderBottomColor: colors.chromeHairline, borderBottomWidth: 1, flexDirection: "row", height: metrics.terminalHeaderHeight + 4, paddingHorizontal: 4 },
-  iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 44 },
-  titleBlock: { alignSelf: "stretch", flex: 1, gap: 1, justifyContent: "center", minWidth: 0, paddingHorizontal: 4 },
-  pressed: { opacity: 0.75 },
-  title: { color: colors.chromeInkStrong, fontSize: typeScale.appBarTitle, fontWeight: "600" },
-  line: { alignItems: "center", flexDirection: "row", gap: 6 },
-  dot: { borderRadius: 4, height: 7, width: 7 },
-  lineText: { color: colors.chromeDim, flexShrink: 1, fontSize: typeScale.meta },
-  round: { alignItems: "center", borderRadius: 16, height: 32, justifyContent: "center", width: 32 },
-});

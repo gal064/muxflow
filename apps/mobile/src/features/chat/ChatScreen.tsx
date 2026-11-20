@@ -11,6 +11,7 @@ import { toRouteParam } from "../../navigation/routeParams";
 import { toast } from "../../session/connectionManager";
 import { colors } from "../../ui/tokens";
 import { useSession } from "../../ui/hooks";
+import { markState } from "../agents/agentListModel";
 import { agentForPane, agentTitle } from "../agents/agentViews";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { notificationAttention } from "../notifications/attention";
@@ -282,6 +283,8 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
           pane={pane}
           stopping={stopping}
           title={title}
+          agent={agent ? { adapterId: agent.adapterId, finished: markState(agent) === "done" } : undefined}
+          onFiles={() => router.push({ pathname: "/files/[paneId]", params: { paneId: toRouteParam(paneId) } })}
           voice={voice}
           voiceMode={voiceMode}
           focused={focused}

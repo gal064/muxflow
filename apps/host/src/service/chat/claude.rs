@@ -2040,7 +2040,7 @@ fn default_label(entry: &Value, models: &[Value]) -> String {
     }
 }
 
-fn command(command: &Value) -> v1::ChatCommand {
+pub(super) fn command(command: &Value) -> v1::ChatCommand {
     v1::ChatCommand {
         name: string(command, "name").to_owned(),
         description: string(command, "description").to_owned(),

@@ -538,11 +538,11 @@ refusal is retried once after waiting up to 1 s for the newer snapshot
 | `resolveTerminalFile(paneId, path, route)` | `operation: RESOLVE_TERMINAL_FILE, file: { operationId: uuid, paneId, path, expectedServerIdentity, expectedTopologyGeneration, expectedSessionId, expectedWindowId, expectedCwd }`; `route` is captured from the terminal's current pane before the request and revalidated before navigation | `file.activeRoot`, `file.metadata`; the returned token is an exact-file capability and does not replace the Files browser root |
 | `listDirectory(root, rootToken, path, pageToken?)` | `operation: LIST_DIRECTORY, file: { operationId: uuid, root, rootToken, path, pageSize: 500, pageToken, expectedServerIdentity }` | `file.directory` |
 | `openFileStream(root, rootToken, path)` | `operation: OPEN_FILE_STREAM, file: { operationId: uuid, root, rootToken, path, expectedServerIdentity }` — **on the bulk connection only** (§11.1); the control connection answers `bulk_connection_required` | one `fileStream` header frame, N body frames, then the `response` (§11.1) |
-| `voiceStatus(operationId, warm)` | `operation: VOICE_STATUS, voice: { operationId, warm }` — readiness probe; `warm` on Voice screen open asks a READY host to load the speech model in the background (voice-mode-plan.md §4.4) | `voice.status` |
+| `voiceStatus(operationId, warm)` | `operation: VOICE_STATUS, voice: { operationId, warm }` — readiness probe; `warm` when voice comes into use asks a READY host to load the speech model in the background (voice-mode-plan.md §4.4) | `voice.status` |
 | `voiceProvision(operationId)` | `operation: VOICE_PROVISION, voice: { operationId, confirmed: true }` — the consent dialog's confirm; progress arrives as `EVENT_KIND_VOICE_PROVISION`; `timeoutMs` 60 min | `voice.status` (READY) |
 | `voiceTranscribe(operationId, audio, "audio/mp4")` | `operation: VOICE_TRANSCRIBE, voice: { operationId, audio, audioMime }` — the whole `.m4a` recording; `timeoutMs` 70 s | `voice.transcript.text` (single line; empty = nothing heard) |
 | `voiceSpeak(operationId, text)` | `operation: VOICE_SPEAK, voice: { operationId, text }` — Retry on a reply whose pushed audio failed; `timeoutMs` 60 s | `voice.speech.audio` |
-| `voiceSession(agentId \| "")` | `operation: VOICE_SESSION, voice: { agentId }` — per connection: sent on Voice screen open, every 5 min while the session exists, after every reconnect; `""` on End session | `ok` |
+| `voiceSession(agentId \| "")` | `operation: VOICE_SESSION, voice: { agentId }` — per connection: sent when a terminal turns voice mode on, every 5 min while it stays on, after every reconnect; `""` when voice mode is left (a chat never sends it) | `ok` |
 
 `expectedServerIdentity` is always the `serverIdentity` from the current
 `ServerHello`. `path` values are the exact strings returned in
@@ -1108,6 +1108,17 @@ new process up and it appears on the Agents tab.
 
 ### 9.5 Terminal — `app/terminal/[paneId].tsx`
 
+> **Since the agent screens were unified:** the Terminal is built from the
+> chat's parts. Its header is the agent screens' `AgentHeader` (Back, the
+> agent mark, the title over the state, Files). Its input is the chat's
+> `Composer`: the key chips ride over it, `/` and `$` list the agent's
+> commands and skills (CHAT_ACTION_TERMINAL_COMMANDS), + attaches files whose
+> paths are typed after the text, the mic taps into voice mode and holds to
+> dictate, and Stop sends Esc. Voice mode replaces the composer with the talk
+> pane, as in a chat (§9.11 is gone). `?voice=1` opens in voice mode. The
+> layout below is the earlier one and is kept for the chips and the terminal
+> area, which are unchanged.
+
 The one screen without the standard app bar. Layout:
 
 1. **Header** (48 dp, `--chrome-raised`): centred SVG back arrow; the agent
@@ -1280,6 +1291,12 @@ Title `"Trust this host?"`. Body: `"{host} presented an {algorithm} key with fin
 A later mismatch shows a full-screen error on `/home`: `"The host key for {host} has changed. This can mean the machine was reinstalled — or that something is intercepting the connection. Connection refused."` with `"Forget host key"` (then the user can reconnect and re-trust).
 
 ### 9.11 Voice — `app/voice/[paneId].tsx?sessionId=&agentId=`
+
+> **Removed.** Voice is the agent screens' voice mode
+> (`src/features/voice/useVoiceMode.tsx`): the chat's and the terminal's mic
+> turns it on, and the Agents row's Talk opens the terminal with `?voice=1`.
+> What follows describes the old screen; the controller, store and talk pane
+> parts it names are still the ones voice mode uses.
 
 Walkie-talkie mode with one agent (docs/mobile/voice-mode-plan.md). Entered
 from the mic glyph on the Agents row or Terminal header (shown only when an

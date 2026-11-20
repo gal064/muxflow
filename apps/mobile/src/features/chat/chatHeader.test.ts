@@ -9,11 +9,11 @@ const paneWith = (overrides: Parameters<typeof state>[0] = {}): ChatPane => pane
 
 describe("the header's state word", () => {
   it("says Working, Waiting for you, Idle or Ended, each with its dot", () => {
-    expect(headerState(paneWith({ turn: ChatTurnState.WORKING }), true)).toEqual({ word: "Working", tone: "working" });
-    expect(headerState(paneWith({ turn: ChatTurnState.WAITING, pending: questionRequest() }), true)).toEqual({ word: "Waiting for you", tone: "waiting" });
-    expect(headerState(paneWith(), true)).toEqual({ word: "Idle", tone: "quiet" });
-    expect(headerState(paneWith({ connection: ChatConnection.ENDED }), true)).toEqual({ word: "Ended", tone: "quiet" });
-    expect(headerState(paneWith({ connection: ChatConnection.FAILED, failure: "The agent crashed." }), true)).toEqual({ word: "Ended", tone: "quiet" });
+    expect(headerState(paneWith({ turn: ChatTurnState.WORKING }), true)).toEqual({ word: "Working", mark: "working" });
+    expect(headerState(paneWith({ turn: ChatTurnState.WAITING, pending: questionRequest() }), true)).toEqual({ word: "Waiting for you", mark: "blocked" });
+    expect(headerState(paneWith(), true)).toEqual({ word: "Idle", mark: "idle" });
+    expect(headerState(paneWith({ connection: ChatConnection.ENDED }), true)).toEqual({ word: "Ended", mark: "idle" });
+    expect(headerState(paneWith({ connection: ChatConnection.FAILED, failure: "The agent crashed." }), true)).toEqual({ word: "Ended", mark: "idle" });
   });
 
   it("says Ended for an agent that stopped mid-turn, and for a pane that has closed", () => {
@@ -33,7 +33,7 @@ describe("the header's state word", () => {
 
 describe("the header's second line", () => {
   it("is the state, the model and the effort", () => {
-    expect(headerLine(paneWith({ turn: ChatTurnState.WORKING }), true)).toEqual({ state: { word: "Working", tone: "working" }, text: "Working · Opus 5.5 · High" });
+    expect(headerLine(paneWith({ turn: ChatTurnState.WORKING }), true)).toEqual({ state: { word: "Working", mark: "working" }, text: "Working · Opus 5.5 · High" });
     expect(headerLine(paneWith(), true)?.text).toBe("Idle · Opus 5.5 · High");
   });
 

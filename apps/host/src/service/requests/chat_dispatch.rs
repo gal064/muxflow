@@ -11,6 +11,7 @@ use tmux_agent_protocol::v1;
 use super::super::SequencerControl;
 use super::super::chat::{
     Attached, ChatError, ChatRuntime, PaneKey, SessionCommand, admit_attachments, open_fork,
+    terminal_commands as commands_of,
 };
 use super::super::snapshot::tmux_command;
 use super::super::terminal::validate_tmux_id;
@@ -25,12 +26,15 @@ const MAX_SERVER_IDENTITY_BYTES: usize = 1024;
 /// line, and tmux takes no command much longer than this.
 const MAX_SIDE_QUESTION_BYTES: usize = 8 * 1024;
 
+/// The topology a connection last saw, and the identity of its server.
+type Baseline = Option<(tmux_control::TmuxSnapshot, String)>;
+
 pub(super) async fn handle(
     request_id: u64,
     request: v1::Request,
     control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
     connection_id: u64,
-    topology_baseline: &Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
+    topology_baseline: &Arc<Mutex<Baseline>>,
 ) {
     let outcome = match request.chat {
         None => Err(invalid("A chat operation needs a chat payload.")),
@@ -81,6 +85,14 @@ pub(super) async fn handle(
             }
         }
     };
+    respond(control_tx, request_id, outcome).await;
+}
+
+async fn respond(
+    control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
+    request_id: u64,
+    outcome: Result<v1::ChatResponse, ChatError>,
+) {
     let response = match outcome {
         Ok(chat) => v1::Response {
             ok: true,
@@ -92,17 +104,105 @@ pub(super) async fn handle(
     send_response(control_tx, request_id, response).await;
 }
 
+/// The request is TERMINAL_COMMANDS, which [`terminal_commands`] answers.
+pub(super) fn lists_terminal_commands(request: &v1::Request) -> bool {
+    request
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.action == i32::from(v1::ChatAction::TerminalCommands))
+}
+
+/// Answers TERMINAL_COMMANDS, on the blocking pool: the pane's agent may be
+/// started to ask it.
+pub(super) async fn terminal_commands(
+    request_id: u64,
+    request: v1::Request,
+    control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
+    topology_baseline: Arc<Mutex<Baseline>>,
+) {
+    let outcome = match request.chat {
+        None => Err(invalid("A chat operation needs a chat payload.")),
+        Some(chat) => {
+            tokio::task::spawn_blocking(move || terminal_commands_of(&chat, &topology_baseline))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ChatError::new(
+                        "chat_request_failed",
+                        "The request could not be run.",
+                    ))
+                })
+        }
+    };
+    let outcome = outcome.map(|commands| v1::ChatResponse {
+        commands,
+        ..Default::default()
+    });
+    respond(control_tx, request_id, outcome).await;
+}
+
+/// The commands of the agent in the terminal pane `request` names, which is
+/// checked as any pane action's is. Blocks for as long as asking the agent
+/// takes.
+fn terminal_commands_of(
+    request: &v1::ChatRequest,
+    topology_baseline: &Mutex<Baseline>,
+) -> Result<Vec<v1::ChatCommand>, ChatError> {
+    check_pane(request)?;
+    let (pane_pid, current_path) = match topology_baseline.lock().unwrap().as_ref() {
+        Some((_, identity)) if *identity != request.expected_server_identity => {
+            return Err(server_changed());
+        }
+        Some((snapshot, _)) => {
+            let pane = snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.id == request.pane_id)
+                .ok_or_else(pane_closed)?;
+            (pane.pane_pid, pane.current_path.clone())
+        }
+        // A connection with no topology has no pane to look in.
+        None => return Ok(Vec::new()),
+    };
+    Ok(commands_of(pane_pid, &current_path))
+}
+
+/// Every action but SET_MODE names a pane of the tmux server the caller saw
+/// it on. Both name the chat, so neither is taken at any length.
+fn check_pane(request: &v1::ChatRequest) -> Result<(), ChatError> {
+    if validate_tmux_id(&request.pane_id, '%').is_err() || request.pane_id.len() > MAX_PANE_ID_BYTES
+    {
+        return Err(invalid("A chat action needs a pane."));
+    }
+    if request.expected_server_identity.len() > MAX_SERVER_IDENTITY_BYTES {
+        return Err(invalid("That is not a tmux server."));
+    }
+    Ok(())
+}
+
+fn server_changed() -> ChatError {
+    ChatError::new(
+        "chat_server_changed",
+        "The tmux server changed. Reopen the chat.",
+    )
+}
+
+fn pane_closed() -> ChatError {
+    ChatError::new("chat_unavailable", "That pane has closed.")
+}
+
 fn dispatch(
     request: v1::ChatRequest,
     attachments: Vec<Attached>,
     connection_id: u64,
-    topology_baseline: &Mutex<Option<(tmux_control::TmuxSnapshot, String)>>,
+    topology_baseline: &Mutex<Baseline>,
 ) -> Result<v1::ChatResponse, ChatError> {
     use v1::ChatAction as Action;
     let runtime = ChatRuntime::global();
     let action = Action::try_from(request.action).unwrap_or_default();
     match action {
         Action::Unspecified => return Err(invalid("Unknown chat action.")),
+        // Answered by `terminal_commands`, off the ordered lane.
+        Action::TerminalCommands => return Err(invalid("That is not a chat action.")),
         Action::SetMode => {
             let mode = v1::ChatAgentMode::try_from(request.mode).unwrap_or_default();
             let mode = if request.initialize_if_unset {
@@ -119,15 +219,7 @@ fn dispatch(
         _ => {}
     }
 
-    // Every other action names a pane of the tmux server the caller saw it on.
-    // Both name the chat from here on, so neither is taken at any length.
-    if validate_tmux_id(&request.pane_id, '%').is_err() || request.pane_id.len() > MAX_PANE_ID_BYTES
-    {
-        return Err(invalid("A chat action needs a pane."));
-    }
-    if request.expected_server_identity.len() > MAX_SERVER_IDENTITY_BYTES {
-        return Err(invalid("That is not a tmux server."));
-    }
+    check_pane(&request)?;
     let key = PaneKey {
         server_identity: request.expected_server_identity,
         pane_id: request.pane_id,
@@ -153,14 +245,10 @@ fn dispatch(
     // one that has just launched an agent and not yet heard the result.
     let (tagged, title) = match baseline.as_ref() {
         Some((_, identity)) if *identity != key.server_identity => {
-            return Err(ChatError::new(
-                "chat_server_changed",
-                "The tmux server changed. Reopen the chat.",
-            ));
+            return Err(server_changed());
         }
         Some((snapshot, _)) => {
-            let pane = pane(&key.pane_id)
-                .ok_or_else(|| ChatError::new("chat_unavailable", "That pane has closed."))?;
+            let pane = pane(&key.pane_id).ok_or_else(pane_closed)?;
             // A tab with a locked name publishes no pane title: that name is
             // the one its agent goes by.
             let title = if pane.title.is_empty() {
@@ -236,7 +324,9 @@ fn dispatch(
                 ..Default::default()
             })
         }
-        Action::Unspecified | Action::SetMode | Action::Close => unreachable!("answered above"),
+        Action::Unspecified | Action::SetMode | Action::Close | Action::TerminalCommands => {
+            unreachable!("answered above")
+        }
     }
 }
 
@@ -309,8 +399,6 @@ mod tests {
 
     use super::*;
     use crate::service::events::register_control_event_sink;
-
-    type Baseline = Option<(tmux_control::TmuxSnapshot, String)>;
 
     fn baseline(server_identity: &str, pane_ids: &[&str]) -> Baseline {
         let pane = |id: &&str| tmux_control::Pane {
@@ -488,5 +576,55 @@ mod tests {
             assert_eq!(response.error_code, expected);
         }
         assert!(seen.lock().unwrap().is_some(), "nothing was opened");
+    }
+
+    /// The pane is checked as a chat's is; one with no agent in it, here
+    /// one with no process at all, lists nothing.
+    #[tokio::test]
+    async fn a_terminals_commands_are_for_a_pane_of_the_server_the_connection_saw() {
+        const SERVER: &str = "dispatch-test-terminal-commands-server";
+        const PANE: &str = "%9131";
+        let seen = Arc::new(Mutex::new(baseline(SERVER, &[PANE])));
+        let commands = |server_identity: &str, pane_id: &str| {
+            terminal_commands_of(
+                &request(Action::TerminalCommands, server_identity, pane_id),
+                &seen,
+            )
+            .map_err(|error| error.code)
+        };
+        assert_eq!(commands(SERVER, PANE), Ok(Vec::new()));
+        assert_eq!(commands("another-server", PANE), Err("chat_server_changed"));
+        assert_eq!(commands(SERVER, "%9132"), Err("chat_unavailable"));
+        assert_eq!(commands(SERVER, ""), Err("chat_invalid_request"));
+        // Not a chat's action.
+        assert_eq!(
+            dispatch(
+                request(Action::TerminalCommands, SERVER, PANE),
+                Vec::new(),
+                0,
+                &seen
+            )
+            .map_err(|error| error.code),
+            Err("chat_invalid_request")
+        );
+
+        let wanted = v1::Request {
+            chat: Some(request(Action::TerminalCommands, SERVER, PANE)),
+            ..Default::default()
+        };
+        assert!(lists_terminal_commands(&wanted));
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(4);
+        terminal_commands(9, wanted, &control_tx, Arc::clone(&seen)).await;
+        let Some(SequencerControl::Response {
+            request_id,
+            response,
+            ..
+        }) = control_rx.recv().await
+        else {
+            panic!("no response");
+        };
+        assert_eq!(request_id, 9);
+        assert!(response.ok);
+        assert!(response.chat.unwrap().commands.is_empty());
     }
 }

@@ -46,6 +46,11 @@ enum ChatAction {
   CHAT_ACTION_FORK = 11;
   // Stops the background task `task_id`, one of `ChatState.background`.
   CHAT_ACTION_STOP_TASK = 12;
+  // Answers with the slash commands and skills of the agent running in the
+  // terminal pane `pane_id`, as a chat lists them: `ChatResponse.commands`.
+  // For a terminal pane, not a chat; an empty list when the pane runs no agent
+  // whose commands the host can read.
+  CHAT_ACTION_TERMINAL_COMMANDS = 13;
 }
 
 enum ChatPermissionMode {
@@ -400,6 +405,8 @@ message ChatResponse {
   // the page again if, past this revision, it ignored an `updated` or a
   // `delta` for an item it did not hold.
   uint64 revision = 5;
+  // TERMINAL_COMMANDS: the agent's commands and skills, without Muxflow's own.
+  repeated ChatCommand commands = 6;
 }
 
 // Text appended to a `streaming` item.
