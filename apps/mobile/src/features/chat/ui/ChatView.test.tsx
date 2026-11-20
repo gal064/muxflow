@@ -425,7 +425,7 @@ describe("phone chat mocks", () => {
       const voice = {
         status: null,
         reply: <ChatReplyRow controller={controller} message={message} />,
-        pane: <ChatVoicePane controller={controller} hint="" onKeyboard={() => stops.push("keyboard")} onStop={() => stops.push("stop")} phase="idle" stopping={false} working />,
+        pane: <ChatVoicePane controller={controller} hint="" onKeyboard={() => stops.push("keyboard")} onStop={() => stops.push("stop")} onTipDone={() => stops.push("tipDone")} phase="idle" stopping={false} tip working />,
         ready: true,
         dictation: dictation(),
       };
@@ -433,6 +433,11 @@ describe("phone chat mocks", () => {
       const shown = textOf(view.toJSON());
       // The Voice screen's hold surface, with its Speed and Autoplay above it.
       expect(shown).toContain("Hold anywhere here to talk");
+      // The reply field's hold is taught here: a line always, and a card until Got it.
+      expect(shown).toContain("Just one message? Hold the mic in the reply field.");
+      expect(shown).toContain("Tip: dictate without voice mode");
+      press(byText(view, "Got it"));
+      expect(stops).toContain("tipDone");
       byLabel(view, /^Playback speed /);
       expect(byLabel(view, "Autoplay replies").props.accessibilityRole).toBe("switch");
       // The reply's player is the conversation's last row, without a speed of its own.
@@ -445,7 +450,7 @@ describe("phone chat mocks", () => {
       writeRender("voice", view.toJSON());
       press(byLabel(view, "Stop the agent"));
       press(byLabel(view, "Keyboard"));
-      expect(stops).toEqual(["stop", "keyboard"]);
+      expect(stops).toEqual(["tipDone", "stop", "keyboard"]);
       controller.dispose();
     } finally {
       vi.useRealTimers();

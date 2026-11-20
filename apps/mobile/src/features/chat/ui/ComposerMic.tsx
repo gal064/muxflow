@@ -22,8 +22,6 @@ export interface ComposerDictation {
   phase: VoicePhase;
   /** Why a hold records nothing now; empty when it can. */
   refusal: string;
-  /** Shows the "Hold to dictate" tip above the mic. */
-  tip: boolean;
   /** The finger went down on the mic: the microphone gets ready. */
   onPressIn: () => void;
   /** The finger came up, whatever the press did. */
@@ -157,16 +155,6 @@ export function ComposerMic({ on, onTap, dictation, sendRefusal, disabled }: Com
   );
 }
 
-/** Says what the mic does until it has been held once. Drawn above the reply field, outside its clipped box. */
-export function MicTip() {
-  return (
-    <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" pointerEvents="none" style={styles.tip}>
-      <Text style={styles.tipTitle}>Hold to dictate a message</Text>
-      <Text style={styles.tipLine}>Tap for voice mode</Text>
-    </View>
-  );
-}
-
 /** Laid over the reply field's row while a take is on. */
 function DictationStrip({ dictation, direction }: { dictation: ComposerDictation; direction: VoiceGestureDirection | undefined }) {
   const { phase } = dictation;
@@ -234,10 +222,6 @@ const styles = StyleSheet.create({
   discOn: { backgroundColor: colors.accentWash, borderColor: colors.accent },
   discRecording: { backgroundColor: colors.danger, borderColor: colors.danger },
   pressed: { opacity: 0.75 },
-  /** Over the mic: right of the field, above its box. */
-  tip: { backgroundColor: colors.chromeRaised, borderColor: colors.accent, borderRadius: 9, borderWidth: 1, bottom: "100%", marginBottom: 4, paddingHorizontal: 10, paddingVertical: 6, position: "absolute", right: 40 },
-  tipTitle: { color: colors.chromeInkStrong, fontSize: typeScale.meta, fontWeight: "600" },
-  tipLine: { color: colors.chromeDim, fontSize: typeScale.meta },
   strip: { alignItems: "center", bottom: 0, flexDirection: "row", gap: 8, left: 0, paddingHorizontal: 8, position: "absolute", right: 0, top: 0, zIndex: 1 },
   stripRecording: { backgroundColor: colors.dangerWash },
   stripPlain: { backgroundColor: colors.chromeBg },

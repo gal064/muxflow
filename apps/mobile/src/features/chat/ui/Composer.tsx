@@ -7,7 +7,7 @@ import { colors, fixedChromeText, fonts, typeScale } from "../../../ui/tokens";
 import { filesRefusal, type FilesState } from "../attach/attachState";
 import type { CommandGroup } from "../chatModel";
 import { PlusIcon } from "./AttachIcons";
-import { ComposerMic, MicTip, type ComposerDictation } from "./ComposerMic";
+import { ComposerMic, type ComposerDictation } from "./ComposerMic";
 
 export interface ComposerProps {
   draft: string;
@@ -81,7 +81,6 @@ export function Composer(props: ComposerProps) {
   const dictation = mic?.dictation;
   return (
     <View style={styles.wrap}>
-      {dictation?.tip && dictation.phase === "idle" && !disabled ? <MicTip /> : null}
       {commands.length > 0 ? <SlashList groups={commands} onPick={onPickCommand} /> : props.above}
       <View style={[styles.box, disabled && styles.boxDisabled]}>
         {editing ? (

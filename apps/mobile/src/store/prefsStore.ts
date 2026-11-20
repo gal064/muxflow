@@ -32,7 +32,7 @@ export interface PrefsPersisted {
   /** Android: keep playing voice replies when the phone is turned off on the Voice screen. */
   voicePlayScreenOff: boolean;
   terminalFontSize: TerminalFontSize;
-  /** A chat's mic has been held once, so its "Hold to dictate" tip is no longer shown. */
+  /** Voice mode's card on dictating from the reply field is done: Got it, or a first dictation. */
   chatMicTipDone: boolean;
 }
 

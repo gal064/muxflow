@@ -6,7 +6,7 @@ import type { ReactTestInstance, ReactTestRenderer } from "react-test-renderer";
 import { act } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { allByLabel, byLabel, press, render, rerender } from "../../../testing/render";
+import { byLabel, press, render, rerender } from "../../../testing/render";
 import { textOf } from "../../../testing/renderTree";
 import { dictation } from "../testing";
 import { Composer, type ComposerProps } from "./Composer";
@@ -178,12 +178,6 @@ describe("the reply field's mic", () => {
     expect(byLabel(view, "Talk").props.disabled).toBe(true);
   });
 
-  it("the tip says what the mic does, until it is not asked for", () => {
-    expect(textOf(composer({ tip: true }, []).toJSON())).toContain("Hold to dictate a message Tap for voice mode");
-    expect(textOf(composer({ tip: false }, []).toJSON())).not.toContain("Hold to dictate");
-    expect(allByLabel(composer({ tip: true }, [], { disabled: true }), "Talk")).toHaveLength(1);
-    expect(textOf(composer({ tip: true }, [], { disabled: true }).toJSON())).not.toContain("Hold to dictate");
-  });
 });
 
 function composerElement(fields: Partial<ComposerDictation>, calls: string[], props: Partial<ComposerProps> = {}) {

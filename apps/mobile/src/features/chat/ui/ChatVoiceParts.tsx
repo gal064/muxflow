@@ -28,15 +28,23 @@ export interface ChatVoicePaneProps {
   onStop: () => void;
   /** Leaves voice mode for the reply field. */
   onKeyboard: () => void;
+  /** Shows the card on dictating from the reply field, until Got it or a first dictation. */
+  tip: boolean;
+  onTipDone: () => void;
 }
+
+/** Under the hold label, always: the reply field's mic dictates one message without voice mode. */
+export const DICTATION_NOTE = "Just one message? Hold the mic in the reply field.";
 
 /**
  * Voice mode's talk pane in the reply field's place (mobile-voice-mock.html):
  * Speed and Autoplay, Stop while the agent works, and the way back to the
  * keyboard, over the Voice screen's hold surface. A locked take is sent by a
- * tap anywhere on the surface.
+ * tap anywhere on the surface. Voice mode is where the reply field's other
+ * gesture, a hold to dictate, is taught (mic-tip-mock.html): a card until
+ * Got it or a first dictation, and a line under the hold label always.
  */
-export function ChatVoicePane({ controller, phase, hint, working, stopping, onStop, onKeyboard }: ChatVoicePaneProps) {
+export function ChatVoicePane({ controller, phase, hint, working, stopping, onStop, onKeyboard, tip, onTipDone }: ChatVoicePaneProps) {
   const locked = phase === "recordingLocked";
   return (
     <View style={styles.pane}>
@@ -69,10 +77,21 @@ export function ChatVoicePane({ controller, phase, hint, working, stopping, onSt
           <KeyboardIcon color={colors.chromeInk} size={20} />
         </Pressable>
       </View>
+      {/* Kept while a take is locked, as the row above is: a pane that changed height would resize the terminal over it. */}
+      {tip && hint === "" ? (
+        <View accessibilityElementsHidden={locked} importantForAccessibility={locked ? "no-hide-descendants" : "auto"} style={styles.tip}>
+          <Text style={styles.tipTitle}>Tip: dictate without voice mode</Text>
+          <Text style={styles.tipText}>Hold the mic in the reply field to dictate one message. It's sent when you let go.</Text>
+          <Pressable accessibilityRole="button" hitSlop={6} onPress={onTipDone} style={({ pressed }) => [styles.tipDone, pressed && styles.pressed]}>
+            <Text {...fixedChromeText} style={styles.tipDoneLabel}>Got it</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <View>
         <MicButton
           disabled={hint !== ""}
           hint={hint}
+          note={DICTATION_NOTE}
           onCancel={() => void controller.cancelUtterance()}
           onLock={() => controller.lockUtterance()}
           onPressIn={() => controller.beginUtterance()}
@@ -102,6 +121,11 @@ const styles = StyleSheet.create({
   stop: { alignItems: "center", borderColor: colors.danger, borderRadius: radii.card, borderWidth: 1, height: 40, justifyContent: "center", paddingHorizontal: 14 },
   stopLabel: { color: colors.dangerInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   keyboard: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", width: 44 },
+  tip: { backgroundColor: colors.chromeHairline, borderColor: colors.chromeBorder, borderRadius: radii.card, borderWidth: 1, gap: 2, marginBottom: 10, marginHorizontal: 12, paddingBottom: 8, paddingHorizontal: 12, paddingTop: 10 },
+  tipTitle: { color: colors.chromeInkStrong, fontSize: typeScale.rowSecondary, fontWeight: "600" },
+  tipText: { color: colors.chromeInk, fontSize: typeScale.meta },
+  tipDone: { alignItems: "center", alignSelf: "flex-end", backgroundColor: colors.accent, borderRadius: radii.card, height: 36, justifyContent: "center", marginTop: 6, paddingHorizontal: 14 },
+  tipDoneLabel: { color: colors.accentInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   disabled: { opacity: 0.4 },
   pressed: { opacity: 0.75 },
 });
