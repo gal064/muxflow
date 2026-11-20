@@ -2098,6 +2098,47 @@ mod agent_seams {
         assert_eq!(shell.place(), at("$1", "@1", "%2"));
     }
 
+    /// A painted move to another workspace, cut short after its workspace
+    /// step for a click that has to wait: the host stops on that workspace's
+    /// own window, which nobody clicked, and the screen must not show it.
+    #[gpui_kit::test]
+    fn a_painted_move_cut_short_keeps_the_screen_until_the_next_lands(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        keep_the_editor_screens(&mut shell);
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(shell.place(), at("$2", "@3", "%4"));
+        assert!(!holds(&mut shell, "%3"), "%3 has to wait");
+
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"), "painted");
+        open(&mut shell, "local", "%3");
+        // Only the workspace step answers; the host is now on $1's @1, with
+        // %1 focused.
+        let (reply, answer) = shell.host.state().held.remove(0);
+        let _ = reply.send(answer);
+        shell.settle();
+        shell.publish_caught_up(&world("@1"));
+        assert_eq!(
+            shell.place(),
+            at("$1", "@1", "%2"),
+            "the screen stays as painted while %3 is on its way"
+        );
+        assert!(guard(&mut shell).is_some());
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%3");
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+    }
+
     /// A, B, then A again before the first move has landed: the first move is
     /// the one the user wants again, and still focuses its pane.
     #[gpui_kit::test]
