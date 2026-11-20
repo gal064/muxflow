@@ -26,7 +26,7 @@ done
 # build so Cargo cannot replace that executable between a daemon launch and a
 # hook launch, which is now correctly detected as an exact-build mismatch.
 cargo test -p muxflow-host --test hook_cli >"$evidence/hook-cli.log" 2>&1
-cargo clippy -p tmux-control -p muxflow-host -p tmux-agent-protocol -p desktop-core -p muxflow \
+cargo clippy -p tmux-control -p muxflow-host -p tmux-agent-protocol -p desktop-core -p muxflow-gpui \
   --all-targets -- -D warnings >"$evidence/clippy.log" 2>&1 & clippy_pid=$!
 wait "$clippy_pid"
 printf '%s\n' "phase6 backend evidence: $evidence"

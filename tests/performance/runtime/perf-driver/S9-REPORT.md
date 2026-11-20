@@ -1,6 +1,6 @@
 # S9: does `alacritty_terminal` agree with tmux?
 
-Spike S9 of the GPUI migration (`docs/gpui-migration.md`). Produced by
+Spike S9 of the GPUI migration (`docs/history/gpui-migration/gpui-migration.md`). Produced by
 `tests/performance/runtime/run-vt-parity.sh` with `alacritty_terminal = "=0.26.0"`
 against tmux 3.8. Every number below is from one run of the lane on this tree,
 except the `variation-selector-always-wide off` probe, which was run separately.
@@ -181,7 +181,7 @@ The decision for the owner is how to close it:
 3. **Accept the limit** and change the S9 criterion. Not recommended on its own,
    because the seed path erases content.
 
-Measured afterwards, in `docs/gpui-phase0-report.md`: today's xterm, on its default
+Measured afterwards, in `docs/history/gpui-migration/gpui-phase0-report.md`: today's xterm, on its default
 Unicode 6 width table, is wrong on VS16 and the family ZWJ too, and right on
 `👩‍💻` and `🏳️‍🌈`, where the engine is too wide.
 

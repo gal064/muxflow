@@ -184,15 +184,10 @@ fn wait_for_close(mut pipe: impl std::io::Read) {
     let _ = std::io::copy(&mut pipe, &mut std::io::sink());
 }
 
-/// The release this build is. Read where the Tauri app reads its own, so
-/// `release/set-version.sh` stays the one writer of the number.
+/// The release this build is: this crate's version, which
+/// `release/set-version.sh` writes.
 fn app_version() -> String {
-    serde_json::from_str::<serde_json::Value>(include_str!(
-        "../../desktop/src-tauri/tauri.conf.json"
-    ))
-    .ok()
-    .and_then(|config| Some(config.get("version")?.as_str()?.to_owned()))
-    .unwrap_or_default()
+    env!("CARGO_PKG_VERSION").to_owned()
 }
 
 /// `X.Y.Z` as the check compares it. An unversioned build reads as 0.0.0, so

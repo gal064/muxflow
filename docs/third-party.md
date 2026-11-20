@@ -29,15 +29,15 @@ notice generator rejects a shipped graph that brings those bindings back.
 
 The bundled JetBrains Mono fonts are licensed under the SIL Open Font License
 1.1. Their license texts are in `apps/desktop-gpui/assets/fonts/LICENSE-JetBrainsMono.txt`,
-`apps/desktop/src/assets/fonts/LICENSE.txt` and `apps/mobile/assets/fonts/LICENSE.txt`.
+`assets/fonts/LICENSE.txt` and `apps/mobile/assets/fonts/LICENSE.txt`.
 
-The desktop apps also bundle the Inter fonts, licensed under the SIL
+The desktop app also bundles the Inter fonts, licensed under the SIL
 Open Font License 1.1. Their license text is in
 `apps/desktop-gpui/assets/fonts/LICENSE-Inter.txt` and
-`apps/desktop/src/assets/fonts/LICENSE-Inter.txt`.
+`assets/fonts/LICENSE-Inter.txt`.
 
-The patches under `patches/` modify `@xterm/xterm` and `@xterm/addon-webgl`.
-Both packages use MIT licenses; their copyright notices and license texts are
+The xterm patch under `patches/` modifies `@xterm/xterm`, which uses the MIT
+license; its copyright notice and license text are
 retained under `patches/licenses/`.
 
 Voice setup downloads the `parakeet-unified-en-0.6b-Q8_0.gguf` model from the

@@ -79,7 +79,7 @@ ADE_HOST_RUNTIME_DIR="$host_runtime" ADE_TMUX_SOCKET_NAME="$socket_name" \
 jq -e '.authoritativeStatus and .repositoryStableAcrossReconnect and .rawPathSafe and .ignored and .stage and .stagedDiff and .hookErrorSurfaced and .discardTokenEnforced and .pathEscapeRejected and .staleConnectionRejected and .literalPathspecSafe and .transportLossCancelledHook' \
   "$runtime/local.json" >/dev/null
 
-cargo clippy -p muxflow-host -p tmux-agent-protocol -p desktop-core -p muxflow --all-targets -- -D warnings \
+cargo clippy -p muxflow-host -p tmux-agent-protocol -p desktop-core -p muxflow-gpui --all-targets -- -D warnings \
   >"$runtime/clippy.log" 2>&1 &
 clippy_pid=$!
 wait "$clippy_pid"
