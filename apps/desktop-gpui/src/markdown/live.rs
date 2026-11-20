@@ -132,9 +132,9 @@ impl Surface {
             cx.subscribe_in(
                 &view,
                 window,
-                |this, _, event: &LiveEvent, window, cx| match event {
+                |this, _, event: &LiveEvent, _window, cx| match event {
                     LiveEvent::Edited => this.push(cx),
-                    LiveEvent::Link(href) => this.follow(href, window, cx),
+                    LiveEvent::Link(href) => this.follow(href, cx),
                 },
             ),
         ];
@@ -178,7 +178,7 @@ impl Surface {
     }
 
     /// A ⌘-clicked link (Ctrl on Linux), opened as the preview opens one.
-    fn follow(&mut self, href: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn follow(&mut self, href: &str, cx: &mut Context<Self>) {
         let Some(document) = self.document.upgrade() else {
             return;
         };
@@ -189,7 +189,7 @@ impl Surface {
             server: document.server.clone(),
             session_id: self.session_id.clone(),
         };
-        super::view::follow(&origin, href, window, cx);
+        super::view::follow(&origin, href, cx);
     }
 
     /// The view's edits, into the buffer: the span the view changed since it

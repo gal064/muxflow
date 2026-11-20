@@ -558,12 +558,14 @@ impl ChatPane {
                             Some(Err(ImageCacheError::Asset("image not allowed".into())))
                         }))
                     })
-                    .on_link_click(move |href: &SharedString, event: &ClickEvent, window, cx| {
-                        let pressed = *pressed.lock().expect("the press is never poisoned");
-                        if is_click(event, pressed) {
-                            open::link(&pane_id, href, window, cx);
-                        }
-                    }),
+                    .on_link_click(
+                        move |href: &SharedString, event: &ClickEvent, _window, cx| {
+                            let pressed = *pressed.lock().expect("the press is never poisoned");
+                            if is_click(event, pressed) {
+                                open::link(&pane_id, href, cx);
+                            }
+                        },
+                    ),
             )
             .children(buttons)
             .into_any_element()

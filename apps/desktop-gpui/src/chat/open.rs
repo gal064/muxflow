@@ -1,15 +1,10 @@
 //! Where a click in a chat leads: a file edit to its Git diff tab, a link to
-//! its file or, once confirmed, to the browser.
+//! its file or to the browser.
 
-use std::rc::Rc;
-
-use gpui_kit::{App, Window};
+use gpui_kit::App;
 use tmux_control::Pane;
 
-use crate::{
-    commands::dialogs::{Confirmation, open_confirmation},
-    editor, git,
-};
+use crate::{editor, git};
 
 use super::links;
 
@@ -52,8 +47,8 @@ fn diff(pane: &Pane, path: &str, cx: &mut App) -> bool {
 }
 
 /// Follows a link in an agent's text. A file opens resolved for `pane`; any
-/// other address is shown first and opened in the browser only once confirmed.
-pub(super) fn link(pane_id: &str, href: &str, window: &mut Window, cx: &mut App) {
+/// web address opens in the browser: the click is the user's deliberate gesture.
+pub(super) fn link(pane_id: &str, href: &str, cx: &mut App) {
     if let Some(path) = links::file_target(href) {
         editor::open_terminal_path(pane_id, &links::resolvable(&path), None, cx);
         return;
@@ -68,23 +63,9 @@ pub(super) fn link(pane_id: &str, href: &str, window: &mut Window, cx: &mut App)
         editor::report(format!("This link cannot be opened: {url}"), cx);
         return;
     }
-    open_confirmation(
-        Confirmation {
-            title: "Open external link?".into(),
-            detail: url.clone().into(),
-            confirm_label: "Open link".into(),
-            destructive: false,
-            on_confirm: Rc::new(move |_, cx| {
-                if let Err(error) =
-                    desktop_core::external_links::open_external_link(url.clone(), true)
-                {
-                    editor::report(error, cx);
-                }
-            }),
-        },
-        window,
-        cx,
-    );
+    if let Err(error) = desktop_core::external_links::open_external_link(url, true) {
+        editor::report(error, cx);
+    }
 }
 
 #[cfg(test)]
