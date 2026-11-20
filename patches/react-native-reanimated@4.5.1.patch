@@ -1,0 +1,122 @@
+diff --git a/android/src/main/java/com/swmansion/reanimated/keyboard/Keyboard.kt b/android/src/main/java/com/swmansion/reanimated/keyboard/Keyboard.kt
+index 53e300b4c8f2429c595759ae39dabec42956c5b4..52260dff4146ea56e07e3742c6a633443921b556 100644
+--- a/android/src/main/java/com/swmansion/reanimated/keyboard/Keyboard.kt
++++ b/android/src/main/java/com/swmansion/reanimated/keyboard/Keyboard.kt
+@@ -21,11 +21,7 @@ class Keyboard {
+         insets: WindowInsetsCompat,
+         isNavigationBarTranslucent: Boolean,
+     ) {
+-        val contentBottomInset = insets.getInsets(CONTENT_TYPE_MASK).bottom
+-        val systemBarBottomInset =
+-            if (isNavigationBarTranslucent) 0 else insets.getInsets(SYSTEM_BAR_TYPE_MASK).bottom
+-        val keyboardHeightDip = contentBottomInset - systemBarBottomInset
+-        val keyboardHeight = PixelUtil.toDIPFromPixel(Math.max(0, keyboardHeightDip).toFloat()).toInt()
++        val keyboardHeight = heightOf(insets, isNavigationBarTranslucent)
+         if (keyboardHeight <= 0 && mState == KeyboardState.OPEN) {
+       /*
+       When the keyboard is being canceling, for one frame the insets show a keyboard height of 0,
+@@ -37,6 +33,31 @@ class Keyboard {
+         mHeight = keyboardHeight
+     }
+ 
++    /*
++    Muxflow patch: take the keyboard as the window's insets have it now. Callbacks
++    attached after a keyboard change, or detached during one, would otherwise start
++    from a stale height and a transition count that never returns to zero.
++     */
++    fun sync(
++        insets: WindowInsetsCompat,
++        isNavigationBarTranslucent: Boolean,
++    ) {
++        mActiveTransitionCounter = 0
++        mHeight = heightOf(insets, isNavigationBarTranslucent)
++        mState = if (mHeight <= 0) KeyboardState.CLOSED else KeyboardState.OPEN
++    }
++
++    private fun heightOf(
++        insets: WindowInsetsCompat,
++        isNavigationBarTranslucent: Boolean,
++    ): Int {
++        val contentBottomInset = insets.getInsets(CONTENT_TYPE_MASK).bottom
++        val systemBarBottomInset =
++            if (isNavigationBarTranslucent) 0 else insets.getInsets(SYSTEM_BAR_TYPE_MASK).bottom
++        val keyboardHeightDip = contentBottomInset - systemBarBottomInset
++        return PixelUtil.toDIPFromPixel(Math.max(0, keyboardHeightDip).toFloat()).toInt()
++    }
++
+     fun onAnimationStart() {
+         if (mActiveTransitionCounter > 0) {
+             mState = if (mState == KeyboardState.OPENING) KeyboardState.CLOSING else KeyboardState.OPENING
+@@ -46,9 +67,18 @@ class Keyboard {
+         mActiveTransitionCounter++
+     }
+ 
+-    fun onAnimationEnd() {
+-        mActiveTransitionCounter--
++    fun onAnimationEnd(
++        insets: WindowInsetsCompat?,
++        isNavigationBarTranslucent: Boolean,
++    ) {
++        mActiveTransitionCounter = Math.max(0, mActiveTransitionCounter - 1)
+         if (mActiveTransitionCounter == 0) {
++            /*
++            Muxflow patch: end where the window's insets say the keyboard is. An
++            animation that ran while the window was hidden reports stale progress, so
++            the keyboard it hid would otherwise stay open at its old height.
++             */
++            if (insets != null) mHeight = heightOf(insets, isNavigationBarTranslucent)
+             mState = if (mHeight <= 0) KeyboardState.CLOSED else KeyboardState.OPEN
+         }
+     }
+diff --git a/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationCallback.kt b/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationCallback.kt
+index a47d33b72cbdd8e12154c8e8c869144b25893d6a..a6fdce17869d440f0df1d3f832c83717d2b947d9 100644
+--- a/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationCallback.kt
++++ b/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationCallback.kt
+@@ -7,6 +7,7 @@ class KeyboardAnimationCallback(
+     private val mKeyboard: Keyboard,
+     private val mNotifyAboutKeyboardChange: NotifyAboutKeyboardChangeFunction,
+     private val mIsNavigationBarTranslucent: Boolean,
++    private val mCurrentInsets: () -> WindowInsetsCompat?,
+ ) : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+     companion object {
+         private val CONTENT_TYPE_MASK = WindowInsetsCompat.Type.ime()
+@@ -51,7 +52,7 @@ class KeyboardAnimationCallback(
+                 mNotifyAboutKeyboardChange.call()
+             }
+             mPendingStartDispatch = false
+-            mKeyboard.onAnimationEnd()
++            mKeyboard.onAnimationEnd(mCurrentInsets(), mIsNavigationBarTranslucent)
+             mNotifyAboutKeyboardChange.call()
+         }
+     }
+diff --git a/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationManager.kt b/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationManager.kt
+index bd9c2d198781032a1321c6e139630945b054b640..6536191c7f4fbf5ff55f05ced9bc989a6c59ba1f 100644
+--- a/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationManager.kt
++++ b/android/src/main/java/com/swmansion/reanimated/keyboard/KeyboardAnimationManager.kt
+@@ -25,7 +25,7 @@ class KeyboardAnimationManager(
+         val listenerId = mNextListenerId++
+         if (mListeners.isEmpty()) {
+             val keyboardAnimationCallback =
+-                KeyboardAnimationCallback(mKeyboard, ::notifyAboutKeyboardChange, isNavigationBarTranslucent)
++                KeyboardAnimationCallback(mKeyboard, ::notifyAboutKeyboardChange, isNavigationBarTranslucent, mWindowsInsetsManager::currentInsets)
+             mWindowsInsetsManager.startObservingChanges(keyboardAnimationCallback, isStatusBarTranslucent, isNavigationBarTranslucent)
+         }
+         mListeners[listenerId] = callback
+diff --git a/android/src/main/java/com/swmansion/reanimated/keyboard/WindowsInsetsManager.kt b/android/src/main/java/com/swmansion/reanimated/keyboard/WindowsInsetsManager.kt
+index b0b8cfb838146d61daecf2342b74fddb73b4bded..16c57b02f0ba9212fbb3e9510ed14ac02b575010 100644
+--- a/android/src/main/java/com/swmansion/reanimated/keyboard/WindowsInsetsManager.kt
++++ b/android/src/main/java/com/swmansion/reanimated/keyboard/WindowsInsetsManager.kt
+@@ -42,8 +42,13 @@ class WindowsInsetsManager(
+         val rootView = currentActivity.window.decorView
+         ViewCompat.setOnApplyWindowInsetsListener(rootView, ::onApplyWindowInsetsListener)
+         ViewCompat.setWindowInsetsAnimationCallback(rootView, keyboardAnimationCallback)
++        Handler(Looper.getMainLooper()).post {
++            ViewCompat.getRootWindowInsets(rootView)?.let { mKeyboard.sync(it, isNavigationBarTranslucent) }
++        }
+     }
+ 
++    fun currentInsets(): WindowInsetsCompat? = getCurrentActivity()?.window?.decorView?.let { ViewCompat.getRootWindowInsets(it) }
++
+     fun stopObservingChanges() {
+         updateWindowDecor(!mIsStatusBarTranslucent && !mIsNavigationBarTranslucent)
+         updateInsets(0, 0)
