@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Agent } from "../../store/sessionStore";
 import { colors } from "../../ui/tokens";
-import { agentDisplayName, agentStateLabel, agentTitle, waitingColor, waitingInSession, waitingLabel, windowSubtitle } from "./agentViews";
+import { agentDisplayName, agentStateLabel, agentStateWord, agentTitle, waitingColor, waitingInSession, waitingLabel, windowSubtitle } from "./agentViews";
 
 function agent(overrides: Partial<Agent> & { id: string; sessionId: string }): Agent {
   const { sessionId, ...rest } = overrides;
@@ -110,5 +110,16 @@ describe("agentStateLabel", () => {
     expect(agentStateLabel(agent({ id: "idle", sessionId: "$1", lifecycle: "idle" }))).toBe("idle");
     expect(agentStateLabel(agent({ id: "unknown", sessionId: "$1", lifecycle: "unknown" }))).toBe("status unknown");
     expect(agentStateLabel(agent({ id: "gone", sessionId: "$1", lifecycle: "working", present: false }))).toBe("gone");
+  });
+});
+
+describe("agentStateWord", () => {
+  it("says the state under an agent screen's title in the chat header's words", () => {
+    expect(agentStateWord(agent({ id: "blocked", sessionId: "$1", lifecycle: "blocked" }))).toBe("Waiting for you");
+    expect(agentStateWord(agent({ id: "working", sessionId: "$1", lifecycle: "working" }))).toBe("Working");
+    expect(agentStateWord(agent({ id: "done", sessionId: "$1", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2n, seenGeneration: 1n }))).toBe("Finished");
+    expect(agentStateWord(agent({ id: "idle", sessionId: "$1", lifecycle: "idle" }))).toBe("Idle");
+    expect(agentStateWord(agent({ id: "unknown", sessionId: "$1", lifecycle: "unknown" }))).toBe("");
+    expect(agentStateWord(agent({ id: "gone", sessionId: "$1", lifecycle: "working", present: false }))).toBe("Ended");
   });
 });

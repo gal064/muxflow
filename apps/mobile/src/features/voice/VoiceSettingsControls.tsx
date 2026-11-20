@@ -7,7 +7,7 @@ import { SpeedButton } from "./SpeedButton";
 
 /**
  * The talk pane's Speed and Autoplay (design.md §9.11). One setting each,
- * shared by the Voice screen and a chat's voice mode.
+ * shared by the chat's and the terminal's voice mode.
  */
 export function VoiceSettingsControls() {
   const playbackRate = useStore(prefsStore, (s) => s.voicePlaybackRate);

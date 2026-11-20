@@ -66,10 +66,12 @@ export interface VoiceControllerOptions {
   /** iOS: holds off suspension while an utterance is on its way to the pane. The answer ends the hold. */
   keepAlive?: () => () => void;
   /**
-   * Delivers a transcript instead of typing it into the terminal. A chat
-   * sends it as a message (docs/design/chat-plan.md §5 F).
+   * Delivers a transcript instead of typing it into the terminal as it is. A
+   * chat sends it as a message (docs/design/chat-plan.md §5 F); a terminal's
+   * hold to dictate types it with the reply field's text, through
+   * `typeIntoPane`, the way a transcript is typed without `submit`.
    */
-  submit?: (text: string) => Promise<void>;
+  submit?: (text: string, typeIntoPane: (text: string) => Promise<boolean>) => Promise<boolean | void>;
   /**
    * Whether the host pushes this pane's replies (VOICE_SESSION). Default true.
    * A chat reads its own replies aloud with `speakReply`, so it registers nothing.
@@ -178,12 +180,12 @@ export class VoiceController {
     return this.disposed;
   }
 
-  /** Transcripts go to `options.submit` (a chat) rather than into the terminal. */
-  get submitsToChat(): boolean {
-    return this.options.submit !== undefined;
+  /** A chat's: it reads its own replies aloud, so the host pushes none (`registerWithHost` false). */
+  get forChat(): boolean {
+    return this.options.registerWithHost === false;
   }
 
-  /** Its Voice screen is on display. */
+  /** Its screen is on display with voice in use. */
   get isFocused(): boolean {
     return this.focused;
   }
@@ -207,17 +209,20 @@ export class VoiceController {
   // ---- lifecycle ------------------------------------------------------------
 
   /**
-   * The Voice screen for this agent gained focus: probe (and pre-warm) the
-   * host, register the session, prepare the microphone, and play a reply
-   * that arrived while nobody was listening.
+   * Voice came into use on this agent's screen: probe (and pre-warm) the
+   * host, register the session unless `register` is false (a dictation has
+   * no reply read aloud), prepare the microphone, and play a reply that
+   * arrived while nobody was listening.
    */
-  focus(): void {
+  focus(register = true): void {
     if (this.disposed) return;
     this.focused = true;
     this.log("screen.focus");
-    this.wantRegistered = this.options.registerWithHost !== false;
     void this.refreshStatus(true);
-    if (this.wantRegistered) void this.registerSession();
+    if (register && this.options.registerWithHost !== false) {
+      this.wantRegistered = true;
+      void this.registerSession();
+    }
     this.arm();
     this.playUnplayedIfListening();
   }
@@ -279,6 +284,30 @@ export class VoiceController {
   reregister(): void {
     if (this.disposed || !this.wantRegistered) return;
     void this.registerSession();
+  }
+
+  /**
+   * Voice mode was left: the host stops pushing this pane's replies. The
+   * session and its kept reply stay, for the next time. True when the
+   * connection's registrations were cleared, which is all of them: release
+   * through `voiceRegistry.release`, which registers the others again.
+   */
+  async release(): Promise<boolean> {
+    if (this.disposed || !this.wantRegistered) return false;
+    this.wantRegistered = false;
+    this.registerAgain = false;
+    this.stopRefreshTimer();
+    const connection = this.liveConnection();
+    const registered = this.everRegistered || this.registering;
+    this.everRegistered = false;
+    if (!connection || !registered) return false;
+    try {
+      await connection.request(voiceSession(""));
+      this.log("session.released");
+    } catch (error) {
+      this.log(`session.release.failed ${diagnosticError(error)}`);
+    }
+    return true;
   }
 
   /** Clears the host registration, deletes the kept MP3 and forgets the session. */
@@ -555,45 +584,50 @@ export class VoiceController {
     const outgoing = this.message("you", text);
     live.appendMessage(this.sessionKey, outgoing);
     try {
-      if (this.options.submit) {
-        await this.options.submit(text);
+      // False when the Enter was held back: nothing was sent.
+      const sent = this.options.submit
+        ? await this.options.submit(text, (typed) => this.typeIntoPane(typed))
+        : await this.typeIntoPane(text);
+      if (sent !== false) {
         this.log(`submission.ack message=${outgoing.id} chars=${text.length} elapsedMs=${this.now() - startedAt}`);
         this.options.haptics?.sent();
         this.options.tones?.sent();
-        this.setPhaseIfAlive("idle");
-        return;
       }
-      const connection = this.liveConnection();
-      if (!connection) throw new Error("Not connected.");
-      // The terminal Send's shape (`TerminalController.submitText`): the text as
-      // one paste, which the host never coalesces with its neighbours and tmux
-      // brackets when the composer asked for it, then the CR as a keystroke after
-      // a gap. Claude Code and Codex both read an Enter inside a fast burst as a
-      // pasted newline; on its own it submits. A refused paste sends no CR.
-      const body = utf8Encode(text);
-      await connection.request(terminalInput(this.paneId, body, {
-        paste: true,
-        voice: true,
-        expectedServerIdentity: this.options.serverIdentity,
-      }));
-      // On the background clock: locking the phone right after sending must not hold back the Enter.
-      if (this.submitDelayMs > 0) await new Promise<void>((resolve) => this.backgroundTimer.set(this.submitDelayMs, resolve));
-      if (this.disposed || this.options.canSubmit?.(this.paneId) === false) {
-        this.log("input.submit.skipped pane-agent-departed");
-        this.setPhaseIfAlive("idle");
-        return;
-      }
-      await connection.request(terminalInput(this.paneId, CR, {
-        voice: true,
-        expectedServerIdentity: this.options.serverIdentity,
-      }));
-      this.log(`submission.ack message=${outgoing.id} bytes=${body.byteLength} elapsedMs=${this.now() - startedAt}`);
-      this.options.haptics?.sent();
-      this.options.tones?.sent();
     } catch (error) {
       this.fail("input", error);
     }
     this.setPhaseIfAlive("idle");
+  }
+
+  /**
+   * Types `text` into the pane and submits it. False when the agent left the
+   * pane before the Enter, which is then not sent.
+   */
+  private async typeIntoPane(text: string): Promise<boolean> {
+    const connection = this.liveConnection();
+    if (!connection) throw new Error("Not connected.");
+    // The terminal Send's shape (`TerminalController.submitText`): the text as
+    // one paste, which the host never coalesces with its neighbours and tmux
+    // brackets when the composer asked for it, then the CR as a keystroke after
+    // a gap. Claude Code and Codex both read an Enter inside a fast burst as a
+    // pasted newline; on its own it submits. A refused paste sends no CR.
+    const body = utf8Encode(text);
+    await connection.request(terminalInput(this.paneId, body, {
+      paste: true,
+      voice: true,
+      expectedServerIdentity: this.options.serverIdentity,
+    }));
+    // On the background clock: locking the phone right after sending must not hold back the Enter.
+    if (this.submitDelayMs > 0) await new Promise<void>((resolve) => this.backgroundTimer.set(this.submitDelayMs, resolve));
+    if (this.disposed || this.options.canSubmit?.(this.paneId) === false) {
+      this.log("input.submit.skipped pane-agent-departed");
+      return false;
+    }
+    await connection.request(terminalInput(this.paneId, CR, {
+      voice: true,
+      expectedServerIdentity: this.options.serverIdentity,
+    }));
+    return true;
   }
 
   /**
@@ -602,8 +636,8 @@ export class VoiceController {
    * one haptic per utterance, none when the agent was already working (it has
    * not reached this message yet) and none for a screen that opens onto an
    * agent mid-turn (each mount re-baselines, see `blur`). Delivered only while
-   * a Voice screen for this agent is mounted: that is where lifecycles are
-   * reported from, and where the user is waiting without looking.
+   * the terminal's voice mode is on: that is where lifecycles are reported
+   * from, and where the user is waiting without looking.
    */
   onAgentLifecycle(lifecycle: AgentLifecycle): void {
     const previous = this.lastLifecycle;
@@ -967,7 +1001,8 @@ export class VoiceController {
     this.registering = true;
     try {
       await connection.request(voiceSession(this.paneId, this.options.serverIdentity));
-      if (this.disposed) return;
+      // Released meanwhile: the release's clear went after this, so nothing is held.
+      if (this.disposed || !this.wantRegistered) return;
       this.everRegistered = true;
       this.log("session.registered");
       this.startRefreshTimer();

@@ -2,14 +2,13 @@
 // chat's state, then the model and effort it runs with.
 
 import { ChatConnection, ChatTurnState } from "../../protocol/gen/chat_pb";
+import type { AgentDisplayState } from "../../store/selectors";
 import { effortLabel, modelLabel, turnOf, type ChatPane } from "./chatModel";
-
-/** The dot's colour: the working ink, the one that asks for you, or the faint one. */
-export type HeaderTone = "working" | "waiting" | "quiet";
 
 export interface HeaderState {
   word: string;
-  tone: HeaderTone;
+  /** What the agent's mark draws for it, as the agent list does. */
+  mark: AgentDisplayState;
 }
 
 export interface HeaderLine {
@@ -24,25 +23,30 @@ export interface HeaderLine {
  * chat is still opening (the banner says that), nor for a chat the host
  * refused to open or an agent that is still connecting.
  */
-export function headerState(pane: ChatPane | undefined, connected: boolean): HeaderState | undefined {
+export function headerState(pane: ChatPane | undefined, connected: boolean, finished = false): HeaderState | undefined {
   if (!connected || !pane || pane.status === "opening" || pane.status === "error") return undefined;
   const connection = pane.state?.connection;
-  if (pane.status === "gone" || connection === ChatConnection.ENDED || connection === ChatConnection.FAILED) return { word: "Ended", tone: "quiet" };
+  if (pane.status === "gone" || connection === ChatConnection.ENDED || connection === ChatConnection.FAILED) return { word: "Ended", mark: "idle" };
   switch (turnOf(pane)) {
     case ChatTurnState.WORKING:
-      return { word: "Working", tone: "working" };
+      return { word: "Working", mark: "working" };
     case ChatTurnState.WAITING:
-      return { word: "Waiting for you", tone: "waiting" };
+      return { word: "Waiting for you", mark: "blocked" };
     case ChatTurnState.IDLE:
-      return connection === ChatConnection.READY ? { word: "Idle", tone: "quiet" } : undefined;
+      if (connection !== ChatConnection.READY) return undefined;
+      return finished ? { word: "Finished", mark: "done" } : { word: "Idle", mark: "idle" };
     default:
       return undefined;
   }
 }
 
-/** The second line, or undefined with nothing to say. */
-export function headerLine(pane: ChatPane | undefined, connected: boolean): HeaderLine | undefined {
-  const state = headerState(pane, connected);
+/**
+ * The second line, or undefined with nothing to say. `finished` is the
+ * agent's unseen completion, which the agent list marks too: an idle chat
+ * says Finished until it is seen.
+ */
+export function headerLine(pane: ChatPane | undefined, connected: boolean, finished = false): HeaderLine | undefined {
+  const state = headerState(pane, connected, finished);
   const parts = [state?.word ?? "", modelLabel(pane), effortLabel(pane?.state?.options?.effort ?? "")].filter((part) => part !== "");
   if (parts.length === 0) return undefined;
   const text = parts.join(" · ");

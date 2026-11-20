@@ -1,6 +1,6 @@
 // Voice sessions belong to tmux panes. A controller lives here from the first
-// Voice screen open until End session, so navigation, reconnects, and root
-// agent identity changes do not replace it.
+// use of voice on an agent's screen for as long as the host is, so
+// navigation, reconnects, and root agent identity changes do not replace it.
 
 import { EventKind, type HostEvent } from "../../protocol/gen/envelope_pb";
 import { log } from "../../session/log";
@@ -50,6 +50,12 @@ export class VoiceRegistry {
     await controller.endSession();
     // Clearing is connection-wide, so every surviving pane registers again.
     for (const survivor of this.controllers.values()) survivor.reregister();
+  }
+
+  /** Voice mode was left on one pane. Clearing is connection-wide, so every other pane registers again. */
+  async release(controller: VoiceController): Promise<void> {
+    if (!(await controller.release())) return;
+    for (const other of this.controllers.values()) if (other !== controller) other.reregister();
   }
 
   /**

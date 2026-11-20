@@ -94,7 +94,7 @@ export default function AgentsScreen() {
       return;
     }
     markSeenIfNeeded(agent);
-    router.push({ pathname: "/voice/[paneId]", params: { paneId: toRouteParam(agent.route.paneId), sessionId: toRouteParam(agent.route.sessionId), agentId: toRouteParam(agent.id) } });
+    router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(agent.route.paneId), sessionId: toRouteParam(agent.route.sessionId), voice: "1" } });
   }, [router]);
 
   const snooze = useCallback(async (agent: Agent, untilMs: number) => {

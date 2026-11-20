@@ -10,6 +10,18 @@ export function agentPillState(agent: Agent): PillState {
   return agent.present ? displayState(agent) : "gone";
 }
 
+/** The state under an agent screen's title, in the chat header's words. */
+export function agentStateWord(agent: Agent): string {
+  switch (agentPillState(agent)) {
+    case "blocked": return "Waiting for you";
+    case "working": return "Working";
+    case "done": return "Finished";
+    case "idle": return "Idle";
+    case "gone": return "Ended";
+    case "unknown": return "";
+  }
+}
+
 /** The state word paired with a decorative agent mark for assistive technology. */
 export function agentStateLabel(agent: Agent): string {
   const state = agentPillState(agent);

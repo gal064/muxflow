@@ -541,6 +541,15 @@ export function chatStopTask(target: ChatTarget, taskId: string): Request {
   return chat(ChatAction.STOP_TASK, target, { taskId });
 }
 
+/**
+ * CHAT_ACTION_TERMINAL_COMMANDS: the slash commands and skills of the agent
+ * in a terminal pane, in `Response.chat.commands`. A host from before it
+ * refuses the action, and the terminal then lists none.
+ */
+export function chatTerminalCommands(target: ChatTarget): Request {
+  return chat(ChatAction.TERMINAL_COMMANDS, target);
+}
+
 // Session history and snooze (docs/design/chat-plan.md §4), in
 // `Request.history`. The phone lists on open and after every SESSION_HISTORY
 // event; search is local.

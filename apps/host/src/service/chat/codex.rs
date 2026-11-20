@@ -341,6 +341,32 @@ pub(super) struct Codex {
 
 type Output = Out<Job>;
 
+/// The enabled skills a `skills/list` answered with: each one's name, its
+/// description and where it is.
+pub(super) fn skills(result: &Value) -> Vec<(String, String, String)> {
+    result["data"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .flat_map(|folder| folder["skills"].as_array().map_or(&[][..], Vec::as_slice))
+        .filter(|skill| skill["enabled"].as_bool() != Some(false))
+        .map(|skill| {
+            let field = |name: &str| string(skill, name).to_owned();
+            (field("name"), field("description"), field("path"))
+        })
+        .collect()
+}
+
+/// A skill as the composer lists it.
+pub(super) fn skill_command(name: &str, description: &str) -> v1::ChatCommand {
+    v1::ChatCommand {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        argument_hint: String::new(),
+        kind: v1::ChatCommandKind::Skill.into(),
+    }
+}
+
 /// One item of a thread as a timeline item. `None` for one that is not
 /// shown.
 fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
@@ -648,14 +674,11 @@ impl Codex {
         // Muxflow's own come first: a list too long to send whole is cut at
         // its end.
         let mut commands = Vec::from(super::muxflow_commands());
-        commands.extend(naming::with_command(self.skills.iter().map(
-            |(name, description, _)| v1::ChatCommand {
-                name: name.clone(),
-                description: description.clone(),
-                argument_hint: String::new(),
-                kind: v1::ChatCommandKind::Skill.into(),
-            },
-        )));
+        commands.extend(naming::with_command(
+            self.skills
+                .iter()
+                .map(|(name, description, _)| skill_command(name, description)),
+        ));
         out.publish(Change::Catalog(v1::ChatCatalog {
             capabilities: None,
             models: self.models.clone(),
@@ -1333,15 +1356,7 @@ impl Codex {
                 self.publish_catalog(out);
             }
             Asked::Skills if !failed => {
-                self.skills = list("data")
-                    .iter()
-                    .flat_map(|folder| folder["skills"].as_array().map_or(&[][..], Vec::as_slice))
-                    .filter(|skill| skill["enabled"].as_bool() != Some(false))
-                    .map(|skill| {
-                        let field = |name: &str| string(skill, name).to_owned();
-                        (field("name"), field("description"), field("path"))
-                    })
-                    .collect();
+                self.skills = skills(result);
                 self.publish_catalog(out);
             }
             Asked::Latest => match string(&result["data"][0], "id") {

@@ -39,6 +39,7 @@ mod processes;
 mod provider;
 mod scripted;
 mod session;
+mod terminal_commands;
 #[cfg(test)]
 mod tests;
 mod websocket;
@@ -48,6 +49,7 @@ pub(crate) use convert::{agent_hooked, agents_detected, open_fork};
 pub(crate) use pane::{ADAPTER as CHAT_OPTION, SIDE as SIDE_OPTION};
 use provider::{Change, ChatProvider, ChatSession, ChatSink};
 pub(crate) use provider::{ChatError, SessionCommand};
+pub(crate) use terminal_commands::terminal_commands;
 
 /// The most items one snapshot or one older page carries.
 const MAX_PAGE_ITEMS: usize = 200;
@@ -1346,8 +1348,12 @@ fn bound_catalog(catalog: &mut v1::ChatCatalog) {
             cut(effort, MAX_LABEL_BYTES);
         }
     }
-    catalog.commands.truncate(MAX_COMMANDS);
-    for command in &mut catalog.commands {
+    bound_commands(&mut catalog.commands);
+}
+
+fn bound_commands(commands: &mut Vec<v1::ChatCommand>) {
+    commands.truncate(MAX_COMMANDS);
+    for command in commands {
         cut_labels([
             &mut command.name,
             &mut command.description,
