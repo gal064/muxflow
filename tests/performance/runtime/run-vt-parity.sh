@@ -10,7 +10,7 @@
 # tmux grid and diffs the resulting screen against `capture-pane -p -e` rendered
 # through a second parser of the same size. Text and attribute parity are both gates.
 #
-# S9 (docs/gpui-migration.md): the same delivered bytes also go through
+# S9 (docs/history/gpui-migration/gpui-migration.md): the same delivered bytes also go through
 # `alacritty_terminal`, the planned terminal engine, and are compared against
 # `capture-pane` read without any parser. A third pane, in its own window so the
 # geometry of the first two is untouched, paints wide characters, emoji, ZWJ and

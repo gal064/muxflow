@@ -88,7 +88,7 @@ jobs:
         timeout-minutes: 14
         # Build files for the GPUI app: X11 and xkb input, ALSA sounds, fontconfig.
         run: .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev
-      # The package scripts read the version with `node`.
+      # The package scripts run their release helpers with `node`.
       - uses: actions/setup-node@v4
         with:
           node-version: 24

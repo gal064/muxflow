@@ -12,9 +12,6 @@ out/
 .svelte-kit/
 coverage/
 target/
-**/src-tauri/gen/
-apps/desktop/src-tauri/binaries/linux-helpers/muxflow-host-linux-*
-apps/desktop/src-tauri/binaries/muxflow-host-*
 
 # Tool caches
 .cache/
@@ -59,7 +56,5 @@ Thumbs.db
 __pycache__/
 
 # GPUI measurement output.
-tests/performance/runtime/renderer-baseline/s11-macos/
-tests/performance/runtime/renderer-baseline/phase0/
 spikes/gpui/terminal/results/
 spikes/gpui/markdown/qa-frames/

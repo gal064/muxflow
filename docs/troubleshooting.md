@@ -126,9 +126,8 @@ notification does not arrive.
   Notifications → Muxflow.
 - *"macOS did not answer"* — the running binary is not a bundle the system will
   register, so the permission query never comes back. There is no framework
-  status for this; the silence *is* the symptom. `pnpm tauri dev` runs an
-  unbundled binary, and a plain `tauri build` bundle can also be rejected when
-  its signature seal is broken (M10-E016). **Only the output of
+  status for this; the silence *is* the symptom. `cargo run -p muxflow-gpui`
+  runs an unbundled binary. **Only the output of
   `release/macos/build-package.sh` is expected to deliver notifications**; that
   script is what removes `LSRequiresCarbon` and re-signs the bundle. Verify a
   bundle with `release/macos/verify-package.sh`.
