@@ -661,13 +661,7 @@ pub(super) fn agent_variables(
     adapter_id: &str,
     names: &[&str],
 ) -> Vec<Option<std::ffi::OsString>> {
-    let processes = processes::system();
-    let environment = pane::read(pane_id)
-        .and_then(|tag| find_agent(&processes, tag.pid, adapter_id))
-        .and_then(|agent| processes.environment(agent.pid).ok())
-        .filter(|bytes| bytes.len() <= MAX_ENVIRONMENT_BYTES)
-        .map(|bytes| crate::chat_pipe::parse_environment(&bytes))
-        .unwrap_or_default();
+    let environment = agent_environment(pane_id, adapter_id).unwrap_or_default();
     names
         .iter()
         .map(|name| {
@@ -677,6 +671,21 @@ pub(super) fn agent_variables(
                 .map(|(_, value)| value.clone())
         })
         .collect()
+}
+
+/// The whole environment of the pane's agent, for running the agent's own
+/// command line as it would run: where it keeps its settings and its login.
+/// `None` when the agent is not running.
+pub(super) fn agent_environment(
+    pane_id: &str,
+    adapter_id: &str,
+) -> Option<Vec<(std::ffi::OsString, std::ffi::OsString)>> {
+    let processes = processes::system();
+    pane::read(pane_id)
+        .and_then(|tag| find_agent(&processes, tag.pid, adapter_id))
+        .and_then(|agent| processes.environment(agent.pid).ok())
+        .filter(|bytes| bytes.len() <= MAX_ENVIRONMENT_BYTES)
+        .map(|bytes| crate::chat_pipe::parse_environment(&bytes))
 }
 
 fn hook_installed(adapter_id: &str) -> bool {

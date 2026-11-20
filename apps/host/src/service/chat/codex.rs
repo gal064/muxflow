@@ -22,6 +22,7 @@ use super::{
     attach::{self, Attached},
     convert::{Arguments, Takes},
     items::{self, string},
+    naming::{self, Naming},
     pane::{self, Tag},
     provider::{
         Change, ChatError, ChatProvider, ChatSession, ChatSink, ForkAt, ForkPlan, Launch,
@@ -39,6 +40,28 @@ const FAST_TIER: &str = "priority";
 /// server warns that the feature is unfinished; without it there are no
 /// questions to show at all.
 const QUESTIONS_FEATURE: &str = "features.default_mode_request_user_input=true";
+/// What has the agent answer one prompt, given on its stdin, with a title:
+/// with nothing it may change, leaving no session behind, thinking little,
+/// and running none of the user's hooks or `notify` program (both taken by
+/// 0.169.0). They follow `exec` and what the chat passes through of its own
+/// start, so that they win over it; the thread's model and the file to write
+/// the answer to follow them.
+const TITLE_ARGUMENTS: &[&str] = &[
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "-s",
+    "read-only",
+    "-c",
+    "model_reasoning_effort=low",
+    "--disable",
+    "hooks",
+    "-c",
+    "notify=[]",
+];
+/// How long one ask for a title may take. Longer than Claude's: on 0.169.0 a
+/// run that answers in seconds can spend half a minute first, refreshing its
+/// list of models and starting the MCP servers it is configured with.
+const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) struct CodexProvider;
 
@@ -257,6 +280,13 @@ impl Held {
 pub(super) enum Job {
     /// Note the thread's id on the pane, for the daemon that comes next.
     Tag { pane_id: String, thread: String },
+    /// Ask the agent for a title, beside the chat.
+    Title(naming::Ask),
+}
+
+pub(super) enum Done {
+    Tagged,
+    Titled(naming::Titled),
 }
 
 #[derive(Default)]
@@ -304,6 +334,9 @@ pub(super) struct Codex {
     /// The row of each subagent spawned in the thread, by its thread, for
     /// the collab calls that say how it is.
     agents: BTreeMap<String, v1::ChatItem>,
+    naming: Naming,
+    /// The thread being opened is a new one: started, or a copy.
+    new_thread: bool,
 }
 
 type Output = Out<Job>;
@@ -615,16 +648,14 @@ impl Codex {
         // Muxflow's own come first: a list too long to send whole is cut at
         // its end.
         let mut commands = Vec::from(super::muxflow_commands());
-        commands.extend(
-            self.skills
-                .iter()
-                .map(|(name, description, _)| v1::ChatCommand {
-                    name: name.clone(),
-                    description: description.clone(),
-                    argument_hint: String::new(),
-                    kind: v1::ChatCommandKind::Skill.into(),
-                }),
-        );
+        commands.extend(naming::with_command(self.skills.iter().map(
+            |(name, description, _)| v1::ChatCommand {
+                name: name.clone(),
+                description: description.clone(),
+                argument_hint: String::new(),
+                kind: v1::ChatCommandKind::Skill.into(),
+            },
+        )));
         out.publish(Change::Catalog(v1::ChatCatalog {
             capabilities: None,
             models: self.models.clone(),
@@ -632,8 +663,75 @@ impl Codex {
         }));
     }
 
+    /// Asks for a title for a chat that has no name yet, from its first
+    /// message. Once per session: a chat whose agent could not give one
+    /// keeps the first line of that message.
+    fn ask_title(&mut self, out: &mut Output) {
+        // Until the thread is open, what the chat holds may not be all of
+        // it: it asks once it is.
+        if !self.ready {
+            return;
+        }
+        let first = out.first_message();
+        if let Some(ticket) = self.naming.wants_title(first.as_deref()) {
+            self.title_job(ticket, first.unwrap_or_default(), false, out);
+        }
+    }
+
+    fn title_job(&self, ticket: u64, first: String, asked_by_user: bool, out: &mut Output) {
+        let mut argv = self.launch.program.clone();
+        if argv.is_empty() {
+            argv.push("codex".to_owned());
+        }
+        argv.push("exec".to_owned());
+        argv.extend(title_passthrough(&self.launch.passthrough));
+        argv.extend(TITLE_ARGUMENTS.iter().map(|word| (*word).to_owned()));
+        let model = self
+            .state
+            .options
+            .as_ref()
+            .map_or("", |options| options.model.as_str());
+        if !model.is_empty() {
+            argv.extend(["--model".to_owned(), model.to_owned()]);
+        }
+        out.background(Job::Title(naming::Ask {
+            pane_id: out.pane_id().to_owned(),
+            adapter_id: ADAPTER_ID,
+            argv,
+            answer_to: Some("-o"),
+            more_arguments: mcp_servers_off,
+            timeout: TITLE_TIMEOUT,
+            first,
+            ticket,
+            given: self.naming.given(),
+            asked_by_user,
+        }));
+    }
+
+    /// The chat goes by `name` from now on, and the server is told: it keeps
+    /// the name with the thread, and says `thread/name/updated`.
+    fn rename(&mut self, name: String, out: &mut Output) {
+        self.naming.heard(&name);
+        out.name(&name);
+        if self.ready && !self.thread.is_empty() {
+            self.tell_name(name, out);
+        } else {
+            self.naming.unsent = Some(name);
+        }
+    }
+
+    /// `ThreadSetNameParams` in the 0.169.0 schema.
+    fn tell_name(&mut self, name: String, out: &mut Output) {
+        let params = json!({"threadId": self.thread, "name": name});
+        self.request("thread/name/set", params, Asked::Other, out);
+    }
+
     /// Starts on the thread the pane is for, or the one its launch names.
     fn open_thread(&mut self, out: &mut Output) {
+        self.new_thread = matches!(
+            (&self.launch.resume, self.thread.is_empty()),
+            (Resume::Fresh | Resume::Session { fork: true, .. }, true)
+        );
         let mut params = json!({});
         if !self.launch.model.is_empty() {
             params["model"] = json!(self.launch.model);
@@ -690,13 +788,27 @@ impl Codex {
             self.thread = id.to_owned();
             self.noted = false;
         }
-        // A reply's fork goes by its source's name and "(fork)", whatever
-        // the copied thread was called.
-        let name = match self.launch.name.as_str() {
-            "" => string(thread, "name"),
-            name => name,
+        // The thread's own name comes before the one the chat was started
+        // under: the user may have renamed it since. A new thread is the
+        // exception, as a copy may carry its source's name, which is not
+        // its own: it goes by the one it was started under, and the server
+        // is told so.
+        let theirs = string(thread, "name");
+        let name = if self.new_thread && !self.launch.name.is_empty() {
+            self.naming
+                .unsent
+                .get_or_insert_with(|| self.launch.name.clone());
+            self.launch.name.clone()
+        } else if theirs.is_empty() && self.naming.name.is_empty() {
+            self.launch.name.clone()
+        } else if theirs.is_empty() {
+            // Given in this session, and not yet heard back from the server.
+            self.naming.name.clone()
+        } else {
+            theirs.to_owned()
         };
-        out.name(name);
+        self.naming.heard(&name);
+        out.name(&name);
         let options = self.state.options.get_or_insert_default();
         if !self.permission_chosen {
             options.permission = permission(&result["approvalPolicy"], &result["sandbox"]).into();
@@ -798,7 +910,13 @@ impl Codex {
         if !self.turns.is_empty() && self.turn.is_none() {
             out.report(json!({"hook_event_name": "SessionStart", "session_id": self.thread}));
         }
+        // A name chosen while nothing listened.
+        if let Some(name) = self.naming.unsent.take() {
+            self.tell_name(name, out);
+        }
         self.send_held(out);
+        // A thread resumed with no name is named too.
+        self.ask_title(out);
     }
 
     /// Notes the thread on the pane, for the daemon that comes next. Only a
@@ -1356,7 +1474,12 @@ impl Codex {
                     self.notice(id, reason, out);
                 }
             }
-            "thread/name/updated" => out.name(string(params, "threadName")),
+            "thread/name/updated" => {
+                let name = string(params, "threadName");
+                if self.naming.heard(name) {
+                    out.name(name);
+                }
+            }
             "skills/changed" => {
                 let params = json!({"cwds": [self.cwd]});
                 self.request("skills/list", params, Asked::Skills, out);
@@ -1364,6 +1487,98 @@ impl Codex {
             _ => {}
         }
     }
+}
+
+/// Settings no ask for a title takes from the chat's start: they could
+/// have it write, keep a session, or run what the user set to run.
+const NOT_FOR_A_TITLE: &[&str] = &[
+    "approval",
+    "ephemeral",
+    "features",
+    "history",
+    "hooks",
+    "mcp_servers",
+    "notify",
+    "permissions",
+    "sandbox",
+];
+
+/// What of the chat's start an ask for a title is started with too: its
+/// `-c` settings, such as the model provider or a profile, and
+/// `--strict-config`. Not its features, nor a setting under one of
+/// [`NOT_FOR_A_TITLE`].
+fn title_passthrough(passthrough: &[String]) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut words = passthrough.iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--strict-config" => kept.push(word.clone()),
+            "--config" => {
+                let Some(setting) = words.next() else { break };
+                let key = setting.split('=').next().unwrap_or_default().trim();
+                let refused = NOT_FOR_A_TITLE
+                    .iter()
+                    .any(|refused| key.trim_start_matches('"').starts_with(refused));
+                if !refused {
+                    kept.extend(["-c".to_owned(), setting.clone()]);
+                }
+            }
+            // `--enable`, `--disable` and their feature.
+            _ => {
+                words.next();
+            }
+        }
+    }
+    kept
+}
+
+/// The most of a `config.toml` read for the MCP servers it names.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// What turns off, for one run, each MCP server the agent's `config.toml`
+/// names: `exec` has no option for none, and `-c mcp_servers={}` adds to
+/// the table rather than replacing it (0.169.0, as `codex mcp list` shows
+/// it). A server whose name `-c` could not say is left on.
+fn mcp_servers_off(environment: &[(std::ffi::OsString, std::ffi::OsString)]) -> Vec<String> {
+    use std::io::Read;
+    let variable = |name: &str| {
+        environment
+            .iter()
+            .find(|(given, _)| given == name)
+            .map(|(_, value)| std::path::PathBuf::from(value))
+            .filter(|value| !value.as_os_str().is_empty())
+    };
+    let Some(home) =
+        variable("CODEX_HOME").or_else(|| variable("HOME").map(|home| home.join(".codex")))
+    else {
+        return Vec::new();
+    };
+    let mut text = String::new();
+    let read = std::fs::File::open(home.join("config.toml"))
+        .and_then(|file| file.take(MAX_CONFIG_BYTES).read_to_string(&mut text));
+    let Ok(config) = read
+        .map_err(drop)
+        .and_then(|_| text.parse::<toml_edit::DocumentMut>().map_err(drop))
+    else {
+        return Vec::new();
+    };
+    let Some(servers) = config
+        .get("mcp_servers")
+        .and_then(toml_edit::Item::as_table_like)
+    else {
+        return Vec::new();
+    };
+    servers
+        .iter()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .flat_map(|name| ["-c".to_owned(), format!("mcp_servers.{name}.enabled=false")])
+        .collect()
 }
 
 /// A JSON-RPC id as the chat names the request: the id may be a number or
@@ -1433,14 +1648,34 @@ fn pending_request(pending: &Pending) -> v1::ChatPendingRequest {
 impl Dialect for Codex {
     const FRAMING: Framing = Framing::WebSocket;
     type Job = Job;
-    type Done = ();
+    type Done = Done;
 
-    fn run(job: Job) {
-        let Job::Tag { pane_id, thread } = job;
-        let _ = pane::set(&pane_id, &[(pane::SESSION, &thread)]);
+    fn run(job: Job) -> Done {
+        match job {
+            Job::Tag { pane_id, thread } => {
+                let _ = pane::set(&pane_id, &[(pane::SESSION, &thread)]);
+                Done::Tagged
+            }
+            Job::Title(ask) => Done::Titled(naming::run(ask)),
+        }
     }
 
-    fn done(&mut self, (): (), _out: &mut Output) {}
+    fn done(&mut self, done: Done, out: &mut Output) {
+        let Done::Titled(titled) = done else {
+            return;
+        };
+        if self.ended || !self.naming.still_wanted(titled.ticket) {
+            return;
+        }
+        match titled.title {
+            Some(title) => self.rename(title, out),
+            None if titled.asked_by_user => {
+                let id = format!("rename-{}", super::now_unix_millis());
+                self.notice(id, naming::NOT_NAMED, out);
+            }
+            None => {}
+        }
+    }
 
     fn connected(&mut self, tag: &Tag, out: &mut Output) {
         self.launch = tag.launch.clone();
@@ -1527,6 +1762,7 @@ impl Dialect for Codex {
                 } else {
                     self.send(held, out);
                 }
+                self.ask_title(out);
                 Ok(())
             }
             SessionCommand::Interrupt => {
@@ -1599,6 +1835,20 @@ impl Dialect for Codex {
             // The commands it lists in the background have no stop here: the
             // server's is an experimental API this chat does not take.
             SessionCommand::StopTask { .. } => Err(super::cannot_stop()),
+            SessionCommand::Rename { item_id, name } => {
+                out.publish(Change::Item(naming::notice(
+                    item_id,
+                    &naming::renamed(&name),
+                )));
+                if name.is_empty() {
+                    let ticket = self.naming.retitle();
+                    let first = out.first_message().unwrap_or_default();
+                    self.title_job(ticket, first, true, out);
+                } else {
+                    self.rename(name, out);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1657,6 +1907,8 @@ impl Dialect for Codex {
 
     fn ended(&mut self, failure: &str, out: &mut Output) {
         self.ended = true;
+        // A title asked for would name a chat that is over.
+        self.naming.stop();
         self.ready = false;
         self.turn = None;
         self.starting = false;

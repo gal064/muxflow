@@ -30,6 +30,7 @@ use super::{
     attach::{self, Attached},
     convert::{self, Arguments, Takes},
     items::{self, string},
+    naming::{self, Naming},
     pane::{self, Tag},
     provider::{
         Change, ChatError, ChatProvider, ChatSession, ChatSink, ForkAt, ForkPlan, Launch,
@@ -53,6 +54,27 @@ const COMPACT_SUMMARY: &str = "This session is being continued from a previous c
 /// Tasks the agent has said started and not yet said ended, remembered for
 /// when they started and which row they belong to.
 const MAX_TASKS: usize = 256;
+/// What has the agent answer one prompt, given on its stdin, with a title:
+/// in plan mode, so that it changes nothing, leaving no session behind, and
+/// running none of the user's hooks (with hooks, 2.1.326 runs `SessionStart`
+/// even for this; without, it does not). The small model is named by its
+/// alias, which every account has.
+const TITLE_ARGUMENTS: &[&str] = &[
+    "-p",
+    "--output-format",
+    "text",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "plan",
+    "--no-session-persistence",
+    "--settings",
+    r#"{"disableAllHooks":true}"#,
+    // Given no MCP configuration, it starts none of the user's servers.
+    "--strict-mcp-config",
+];
+/// How long one ask for a title may take. Mostly the agent starting.
+const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(super) struct ClaudeProvider;
 
@@ -399,12 +421,15 @@ pub(super) enum Job {
         uuid: String,
         launch: Box<Launch>,
     },
+    /// Ask the agent for a title, beside the chat.
+    Title(naming::Ask),
 }
 
 pub(super) enum Done {
     History(history::History),
     Tagged,
     Rewound(Result<(), String>),
+    Titled(naming::Titled),
 }
 
 /// The message whose blocks are arriving, and how far it has got.
@@ -965,6 +990,10 @@ pub(super) struct Claude {
     /// call returned, by its id, until their task says it has ended: their
     /// task's lines go on changing them.
     detached: BTreeMap<String, v1::ChatItem>,
+    naming: Naming,
+    /// The conversation is being read for this link: until it has been, the
+    /// first message the chat holds may not be the conversation's.
+    history_pending: bool,
 }
 
 /// A task the agent has said started, or listed as running.
@@ -1052,17 +1081,86 @@ impl Claude {
         // Muxflow's own come first: a list too long to send whole is cut at
         // its end.
         let mut commands = Vec::from(super::muxflow_commands());
-        commands.extend(self.commands.iter().cloned().map(|mut command| {
-            if self.skills.contains(&command.name) {
-                command.kind = v1::ChatCommandKind::Skill.into();
-            }
-            command
-        }));
+        commands.extend(naming::with_command(self.commands.iter().cloned().map(
+            |mut command| {
+                if self.skills.contains(&command.name) {
+                    command.kind = v1::ChatCommandKind::Skill.into();
+                }
+                command
+            },
+        )));
         out.publish(Change::Catalog(v1::ChatCatalog {
             capabilities: None,
             models: self.listed_models.clone(),
             commands,
         }));
+    }
+
+    /// Asks for a title for a chat that has no name yet, from its first
+    /// message. Once per session: a chat whose agent could not give one
+    /// keeps the first line of that message. Not before the conversation has
+    /// been read, nor when only its end could be: the first message held is
+    /// then not its first.
+    fn ask_title(&mut self, out: &mut Output) {
+        if self.history_pending || !self.state.history_complete || !self.can_title() {
+            return;
+        }
+        let first = out.first_message();
+        if let Some(ticket) = self.naming.wants_title(first.as_deref()) {
+            self.title_job(ticket, first.unwrap_or_default(), false, out);
+        }
+    }
+
+    /// Whether the agent can be asked for a title as the chat's runs. One
+    /// started with settings of its own may reach another account or
+    /// endpoint than the agent's defaults would, and is not asked rather
+    /// than asked elsewhere.
+    fn can_title(&self) -> bool {
+        !self
+            .launch
+            .passthrough
+            .iter()
+            .any(|word| word == "--settings" || word == "--setting-sources")
+    }
+
+    fn title_job(&self, ticket: u64, first: String, asked_by_user: bool, out: &mut Output) {
+        let mut argv = self.launch.program.clone();
+        if argv.is_empty() {
+            argv.push("claude".to_owned());
+        }
+        argv.extend(TITLE_ARGUMENTS.iter().map(|word| (*word).to_owned()));
+        out.background(Job::Title(naming::Ask {
+            pane_id: out.pane_id().to_owned(),
+            adapter_id: ADAPTER_ID,
+            argv,
+            answer_to: None,
+            more_arguments: naming::no_more_arguments,
+            timeout: TITLE_TIMEOUT,
+            first,
+            ticket,
+            given: self.naming.given(),
+            asked_by_user,
+        }));
+    }
+
+    /// The chat goes by `name` from now on, and the agent is told, as a
+    /// rename of the user's: it writes the name into the session's file,
+    /// where the chat finds it the next time it opens.
+    fn rename(&mut self, name: String, out: &mut Output) {
+        self.naming.heard(&name);
+        out.name(&name);
+        if self.ready {
+            self.tell_name(name, out);
+        } else {
+            self.naming.unsent = Some(name);
+        }
+    }
+
+    /// Verified on 2.1.326: the agent answers `success`, says
+    /// `session_title_changed`, and records a `custom-title` entry.
+    fn tell_name(&mut self, name: String, out: &mut Output) {
+        let request = json!({"subtype": "rename_session", "title": name});
+        self.request(request, Asked::Other, out);
     }
 
     fn initialized(&mut self, response: &Value, out: &mut Output) {
@@ -1122,6 +1220,10 @@ impl Claude {
                 string(response, "session_state"),
                 "running" | "requires_action"
             );
+            // A name chosen while nothing listened.
+            if let Some(name) = self.naming.unsent.take() {
+                self.tell_name(name, out);
+            }
         }
         // What the agent was waiting on before this link, as it first asked.
         for name in [
@@ -1509,6 +1611,13 @@ impl Claude {
                 if let Some(commands) = message["commands"].as_array() {
                     self.commands = commands.iter().map(command).collect();
                     self.publish_catalog(out);
+                }
+            }
+            // Said when the session is renamed, by this chat or another.
+            "session_title_changed" if !nested => {
+                let title = string(message, "title");
+                if !title.is_empty() && self.naming.heard(title) {
+                    out.name(title);
                 }
             }
             "compact_boundary" => {
@@ -2040,6 +2149,7 @@ impl Dialect for Claude {
                 let _ = pane::set(&pane_id, &[(pane::SESSION, &session)]);
                 Done::Tagged
             }
+            Job::Title(ask) => Done::Titled(naming::run(ask)),
             Job::Rewind {
                 pane_id,
                 session,
@@ -2074,9 +2184,31 @@ impl Dialect for Claude {
                 }
                 self.reader = history.reader;
                 self.state.history_complete = history.complete;
+                self.history_pending = false;
+                // The name the session's file has is the agent's own, and
+                // comes before the one it was started under: the user may
+                // have renamed it since. A fork's file has only its own name
+                // (2.1.326 records `--name` as `custom-title`), and one with
+                // nothing said in it yet is read without its source's.
+                if !history.name.is_empty() && self.naming.heard(&history.name) {
+                    out.name(&history.name);
+                }
                 out.reset(history.items, history.complete);
+                self.ask_title(out);
             }
             Done::Tagged => {}
+            Done::Titled(titled) => {
+                if self.ended || !self.naming.still_wanted(titled.ticket) {
+                    return;
+                }
+                match titled.title {
+                    Some(title) => self.rename(title, out),
+                    None if titled.asked_by_user => {
+                        self.notice(naming::NOT_NAMED, out);
+                    }
+                    None => {}
+                }
+            }
             Done::Rewound(outcome) => {
                 let Some(rewind) = self.rewind.take() else {
                     return;
@@ -2140,8 +2272,14 @@ impl Dialect for Claude {
         // again with the rest.
         self.stop_detached(out);
         self.turn_text.clear();
-        // A session started under a name goes by it.
-        out.name(&self.launch.name);
+        // A session started under a name goes by it until it has a name of
+        // its own; one it has keeps it over a new link.
+        if self.naming.name.is_empty() && !self.launch.name.is_empty() {
+            let name = self.launch.name.clone();
+            self.naming.heard(&name);
+        }
+        out.name(&self.naming.name);
+        self.history_pending = true;
         // A request the agent waited on is asked again when it answers:
         // losing the link is no word that the agent stopped waiting.
         self.reported_blocked = false;
@@ -2287,6 +2425,7 @@ impl Dialect for Claude {
                 } else {
                     out.send(message);
                 }
+                self.ask_title(out);
                 Ok(())
             }
             SessionCommand::Interrupt => {
@@ -2340,6 +2479,24 @@ impl Dialect for Claude {
                 self.request(request, Asked::StopTask, out);
                 Ok(())
             }
+            SessionCommand::Rename { item_id, name } => {
+                if name.is_empty() && !self.can_title() {
+                    out.publish(Change::Item(naming::notice(item_id, naming::NOT_NAMED)));
+                    return Ok(());
+                }
+                out.publish(Change::Item(naming::notice(
+                    item_id,
+                    &naming::renamed(&name),
+                )));
+                if name.is_empty() {
+                    let ticket = self.naming.retitle();
+                    let first = out.first_message().unwrap_or_default();
+                    self.title_job(ticket, first, true, out);
+                } else {
+                    self.rename(name, out);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2391,6 +2548,8 @@ impl Dialect for Claude {
 
     fn ended(&mut self, failure: &str, out: &mut Output) {
         self.ended = true;
+        // A title asked for would name a chat that is over.
+        self.naming.stop();
         self.ready = false;
         self.busy = false;
         self.outstanding.clear();

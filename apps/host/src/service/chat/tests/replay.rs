@@ -343,6 +343,9 @@ pub(in crate::service::chat) struct Replay<D: Dialect> {
     answered: Vec<bool>,
     /// The jobs it asked for, which nobody runs here.
     pub(in crate::service::chat) jobs: Vec<D::Job>,
+    /// The jobs it asked to run beside the chat, which nobody runs here
+    /// either.
+    pub(in crate::service::chat) background: Vec<D::Job>,
     /// What it told the agent runtime of the agent's state.
     pub(in crate::service::chat) reports: Vec<Value>,
     pub(in crate::service::chat) reconnects: usize,
@@ -384,6 +387,7 @@ impl<D: Dialect + Wire> Replay<D> {
             written: Vec::new(),
             answered: Vec::new(),
             jobs: Vec::new(),
+            background: Vec::new(),
             reports: Vec::new(),
             reconnects: 0,
             titles: Vec::new(),
@@ -413,6 +417,7 @@ impl<D: Dialect + Wire> Replay<D> {
                     self.answered.push(false);
                 }
                 Action::Job(job) => self.jobs.push(job),
+                Action::Background(job) => self.background.push(job),
                 Action::Report(payload) => self.reports.push(payload),
                 Action::Reconnect => self.reconnects += 1,
                 Action::Title(title) => self.titles.push(title),

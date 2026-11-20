@@ -7,6 +7,8 @@
 //! agent, a message to it, or a job (a file read, a tmux call) that must not
 //! run under a lock. Nothing is read from the agent while a job runs, so a
 //! job that loads the conversation cannot be overtaken by what follows it.
+//! A job that takes long, and that nothing waits on, runs beside the session
+//! instead, and its result comes back whenever it is ready.
 
 use std::{
     path::PathBuf,
@@ -98,6 +100,8 @@ pub(super) trait Dialect: Sized + Send + 'static {
 pub(super) enum Action<J> {
     Write(String),
     Job(J),
+    /// A job that runs beside the session rather than in its turn.
+    Background(J),
     /// Tell the agent runtime what the chat knows about the agent's state.
     Report(serde_json::Value),
     /// The pane's process was replaced: connect to the new one.
@@ -188,6 +192,21 @@ impl<J> Out<J> {
 
     pub(super) fn job(&mut self, job: J) {
         let _ = self.actions.send(Action::Job(job));
+    }
+
+    /// Runs a job beside the session: the agent goes on being heard while it
+    /// runs, and what comes of it is handed to `done` whenever it is ready,
+    /// unless the session has gone by then. For work too slow to hold the
+    /// chat up, such as asking a model for a title.
+    pub(super) fn background(&mut self, job: J) {
+        let _ = self.actions.send(Action::Background(job));
+    }
+
+    /// The text of the first message of the pane's conversation, as the
+    /// pane holds it. `None` while it holds none, and once its oldest items
+    /// were dropped.
+    pub(super) fn first_message(&self) -> Option<String> {
+        self.sink.first_message()
     }
 
     pub(super) fn reconnect(&mut self) {
@@ -426,7 +445,7 @@ enum Wait {
 /// been dropped.
 async fn without_link<D: Dialect>(
     action: Action<D::Job>,
-    shared: &Mutex<Shared<D>>,
+    shared: &Arc<Mutex<Shared<D>>>,
     key: &PaneKey,
     adapter_id: &'static str,
 ) -> Option<()> {
@@ -436,6 +455,7 @@ async fn without_link<D: Dialect>(
                 with(shared, |dialect, out| dialect.done(done, out))?;
             }
         }
+        Action::Background(job) => beside(shared, job),
         Action::Report(payload) => {
             let key = key.clone();
             blocking(move || report(&key, adapter_id, &payload)).await;
@@ -444,6 +464,24 @@ async fn without_link<D: Dialect>(
         Action::Write(_) | Action::Reconnect => {}
     }
     Some(())
+}
+
+/// Runs a job on a task of its own, and hands what comes of it to the
+/// dialect under the session's lock, as a message from the agent is. The
+/// job does not keep the session: one that is dropped meanwhile goes, with
+/// its dialect, and hears nothing of it.
+fn beside<D: Dialect>(shared: &Arc<Mutex<Shared<D>>>, job: D::Job) {
+    let shared = Arc::downgrade(shared);
+    tokio::spawn(async move {
+        if let Some(done) = blocking(move || D::run(job)).await
+            && let Some(shared) = shared.upgrade()
+        {
+            with(&shared, |dialect, out| {
+                dialect.done(done, out);
+                out.flush();
+            });
+        }
+    });
 }
 
 /// Titles the pane, and has every connection look at tmux again: a title
@@ -566,6 +604,10 @@ async fn drive<D: Dialect>(
                         Some(done) => with(&shared, |dialect, out| dialect.done(done, out)),
                         None => Some(((), false)),
                     },
+                    Some(Action::Background(job)) => {
+                        beside(&shared, job);
+                        Some(((), false))
+                    }
                     Some(Action::Report(payload)) => {
                         let key = key.clone();
                         blocking(move || report(&key, adapter_id, &payload)).await;

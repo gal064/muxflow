@@ -42,6 +42,9 @@ pub(in crate::service::chat) struct History {
     /// Where the conversation stands: the tools still running, and the
     /// message its last block belongs to.
     pub(super) reader: Reader,
+    /// The name the session goes by in its file: the newest the user gave
+    /// it, else the newest the agent gave it. Empty when it has none.
+    pub(super) name: String,
 }
 
 impl History {
@@ -50,7 +53,38 @@ impl History {
             items: Vec::new(),
             complete: false,
             reader: Reader::default(),
+            name: String::new(),
         }
+    }
+}
+
+/// The newest name of each kind the end of a session's file holds. The
+/// agent writes them again with every turn, so the end of the file has them.
+#[derive(Default)]
+struct Names {
+    /// The user's: a rename, `--name`.
+    custom: String,
+    /// The one the agent made up.
+    ai: String,
+    agent: String,
+}
+
+impl Names {
+    fn read(&mut self, entry: &Value) {
+        let (name, field) = match string(entry, "type") {
+            "custom-title" => (&mut self.custom, "customTitle"),
+            "ai-title" => (&mut self.ai, "aiTitle"),
+            "agent-name" => (&mut self.agent, "agentName"),
+            _ => return,
+        };
+        string(entry, field).trim().clone_into(name);
+    }
+
+    fn best(self) -> String {
+        [self.custom, self.ai, self.agent]
+            .into_iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or_default()
     }
 }
 
@@ -83,22 +117,22 @@ type Entries = BTreeMap<String, Entry>;
 /// The entries of the end of the file, read far enough back to hold the
 /// chain from `leaf`, or from the newest entry when there is none: the
 /// window grows while the chain runs off its start, up to `max_window`.
-/// Answers the entries and the leaf, which is `None` when the file holds no
-/// entry.
+/// Answers the entries, the leaf, which is `None` when the file holds no
+/// entry, and the name the window gives the session.
 fn read_back(
     file: &Path,
     leaf: Option<&str>,
     max_window: u64,
-) -> Option<(Entries, Option<String>)> {
+) -> Option<(Entries, Option<String>, String)> {
     let mut window = TAIL_BYTES;
     loop {
-        let (entries, newest, whole) = read_entries(file, window)?;
+        let (entries, newest, whole, name) = read_entries(file, window)?;
         let leaf = leaf.map(str::to_owned).or(newest);
         let short = !whole
             && window < max_window
             && leaf.as_ref().is_none_or(|leaf| runs_off(&entries, leaf));
         if !short {
-            return Some((entries, leaf));
+            return Some((entries, leaf, name));
         }
         window *= 2;
     }
@@ -119,8 +153,9 @@ fn runs_off(entries: &Entries, leaf: &str) -> bool {
 }
 
 /// The entries of the last `window` bytes of the file by their id, the id of
-/// the newest, and whether that was the whole file.
-fn read_entries(file: &Path, window: u64) -> Option<(Entries, Option<String>, bool)> {
+/// the newest, whether that was the whole file, and the name they give the
+/// session.
+fn read_entries(file: &Path, window: u64) -> Option<(Entries, Option<String>, bool, String)> {
     let mut file = std::fs::File::open(file).ok()?;
     let length = file.metadata().ok()?.len();
     let cut = length > window;
@@ -135,6 +170,7 @@ fn read_entries(file: &Path, window: u64) -> Option<(Entries, Option<String>, bo
     }
     let mut entries = BTreeMap::new();
     let mut newest = None;
+    let mut names = Names::default();
     loop {
         line.clear();
         if reader.read_until(b'\n', &mut line).ok()? == 0 {
@@ -143,6 +179,7 @@ fn read_entries(file: &Path, window: u64) -> Option<(Entries, Option<String>, bo
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
+        names.read(&value);
         // A subagent's entries are a conversation of its own.
         let uuid = string(&value, "uuid");
         if uuid.is_empty() || value["isSidechain"].as_bool() == Some(true) {
@@ -157,7 +194,7 @@ fn read_entries(file: &Path, window: u64) -> Option<(Entries, Option<String>, bo
             },
         );
     }
-    Some((entries, newest, !cut))
+    Some((entries, newest, !cut, names.best()))
 }
 
 /// The ids from `leaf` back to the root, newest first, and whether the root
@@ -214,10 +251,15 @@ pub(super) fn load_within(
         }
         Err(()) => return History::unavailable(),
     };
-    let Some((entries, Some(newest))) = read_back(&file, None, max_window) else {
+    let Some((entries, Some(newest), name)) = read_back(&file, None, max_window) else {
         return History::unavailable();
     };
-    read_chain(&entries, &newest, rewound)
+    // A rewind does not take the name back: it is the session's, not part
+    // of its conversation.
+    History {
+        name,
+        ..read_chain(&entries, &newest, rewound)
+    }
 }
 
 /// Reads the conversation of `session` as it was up to and including the
@@ -231,7 +273,8 @@ pub(in crate::service::chat) fn load_through(
         return History::unavailable();
     };
     match read_back(&file, Some(through), MAX_TAIL_BYTES) {
-        Some((entries, _)) if entries.contains_key(through) => read_chain(&entries, through, ""),
+        // Without the source's name: the copy is not called that.
+        Some((entries, _, _)) if entries.contains_key(through) => read_chain(&entries, through, ""),
         _ => History::unavailable(),
     }
 }
@@ -244,7 +287,7 @@ pub(in crate::service::chat) fn last_message(
 ) -> Option<String> {
     let file = session_file(configuration, session).ok()??;
     // Only the newest message is wanted: the first window has it.
-    let (entries, newest, _) = read_entries(&file, TAIL_BYTES)?;
+    let (entries, newest, _, _) = read_entries(&file, TAIL_BYTES)?;
     let (ids, _) = chain(&entries, &newest?);
     ids.into_iter()
         .find(|id| matches!(string(&entries[id].value, "type"), "assistant" | "user"))
@@ -307,6 +350,7 @@ fn read_chain(entries: &BTreeMap<String, Entry>, leaf: &str, rewound: &str) -> H
         }
     }
     History {
+        name: String::new(),
         items,
         // A chain that ran off the part of the file that was read has more.
         complete: rooted,
