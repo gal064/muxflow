@@ -189,6 +189,9 @@ struct Intent {
     pane: Option<String>,
     /// The guard this move put up, if it was painted before the host answered.
     optimistic: Option<OptimisticWindow>,
+    /// A painted move's guard, handed on when that move was cut short for
+    /// this one: the screen stays as painted until this one lands.
+    carried: Option<OptimisticWindow>,
     /// Where the host was when the move began, for planning an optimistic move
     /// and for putting a refused one back.
     origin: Option<Location>,
@@ -876,6 +879,7 @@ impl Workspaces {
             whole_workspace: true,
             pane: None,
             optimistic: optimistic.clone(),
+            carried: None,
             origin,
             app_tab: None,
             seq,
@@ -941,6 +945,7 @@ impl Workspaces {
             whole_workspace: false,
             pane: None,
             optimistic: optimistic.clone(),
+            carried: None,
             origin,
             app_tab: None,
             seq,
@@ -1064,6 +1069,7 @@ impl Workspaces {
             whole_workspace: false,
             pane: Some(pane_id.to_owned()),
             optimistic: optimistic.clone(),
+            carried: None,
             origin,
             app_tab: None,
             seq,
@@ -1201,6 +1207,7 @@ impl Workspaces {
             whole_workspace: false,
             pane: None,
             optimistic: None,
+            carried: None,
             origin: None,
             app_tab: tab.or(Some(String::new())),
             seq,
@@ -1469,9 +1476,21 @@ impl Workspaces {
         // A flight from a connection since replaced must not touch a guard or
         // a protection with the same ids on the new one.
         let current = self.scope_current(&intent.host, &intent.scope, cx);
+        let reached = matches!(outcome, Outcome::Reached { .. });
+        let mut finish = self.coordinator.finish(id);
+        let continues = matches!(finish, Finish::Next(..));
+        // A guard handed down from a move cut short, still up.
+        let mut carried = intent
+            .carried
+            .clone()
+            .filter(|guard| current && self.holds_guard(&intent.host, guard, cx));
         if let Some(guard) = intent.optimistic.as_ref().filter(|_| current) {
             let owned = self.holds_guard(&intent.host, guard, cx);
             match outcome.generation() {
+                // Cut short for a newer move: the host stopped somewhere in
+                // between that nobody asked to see, so the screen stays as
+                // painted until the newer move lands.
+                Some(_) if owned && !reached && continues => carried = Some(guard.clone()),
                 // Held until a snapshot has caught up: the ack is not the
                 // snapshot.
                 Some(generation) if owned => self.set_guard(
@@ -1500,8 +1519,13 @@ impl Workspaces {
                 _ => self.protected_app_tab = None,
             }
         }
-        let reached = matches!(outcome, Outcome::Reached { .. });
-        match self.coordinator.finish(id) {
+        match &mut finish {
+            Finish::Next(_, next) => next.carried = carried,
+            // The last of the run: what it reached, or the host, stands now.
+            _ if carried.is_some() => self.set_guard(&intent.host, None, cx),
+            _ => {}
+        }
+        match finish {
             Finish::Latest if reached && intent.seq == self.intents => self.commit(&intent, cx),
             Finish::SameDestination(newer) if reached && newer.seq == self.intents => {
                 self.commit(&newer, cx)
