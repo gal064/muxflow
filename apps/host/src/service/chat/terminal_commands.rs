@@ -428,7 +428,7 @@ mod tests {
             &["node", "/opt/claude-code/cli.js", "--model", "opus"],
             &[],
         );
-        std::fs::write(root.path().join("11/environ"), b"HOME=/home/a\0PATH=/bin\0").unwrap();
+        std::fs::write(root.path().join("11/environ"), b"HOME=/home/alice\0PATH=/bin\0").unwrap();
         std::os::unix::fs::symlink("/work", root.path().join("11/cwd")).unwrap();
         let target = target(&proc, 10, "/elsewhere").unwrap();
         assert_eq!(
@@ -438,7 +438,7 @@ mod tests {
                 program: vec!["node".into(), "/opt/claude-code/cli.js".into()],
                 folder: "/work".into(),
                 environment: Some(vec![
-                    ("HOME".into(), "/home/a".into()),
+                    ("HOME".into(), "/home/alice".into()),
                     ("PATH".into(), "/bin".into()),
                 ]),
             }
