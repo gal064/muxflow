@@ -28,9 +28,6 @@ the differences below.
   directly, never through `cargo run`. With only `locked` on `PATH`, cargo
   picks the system Rust, whose newer clippy fails on `fetch_update`; that is
   not a real failure and must not be suppressed.
-- Workspace-wide clippy and tests also need
-  `TAURI_CONFIG='{"bundle":{"externalBin":[]}}'` and a built desktop frontend
-  (`pnpm install --frozen-lockfile && pnpm build`), as CI does.
 - Its own tmux socket (`tmux -L muxflow-qa-<task>`), its own `ADE_HOST_RUNTIME_DIR`
   and a private `HOME` for anything that starts the helper or the app. Never
   touch the owner's live daemon, tmux server, `~/.claude` or `~/.codex`.

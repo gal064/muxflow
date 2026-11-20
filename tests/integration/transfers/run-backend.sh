@@ -31,11 +31,6 @@ cargo test -p desktop-core transfer_event::tests \
   >"$evidence/typed-transfer-contract.log" 2>&1 & event_pid=$!
 cargo test -p desktop-core scheduler::tests -- --test-threads=1 \
   >"$evidence/canonical-engine.log" 2>&1 & engine_pid=$!
-pnpm --dir apps/desktop test -- \
-  src/features/terminal/terminalTransfers.test.ts \
-  src/features/terminal/TerminalTransferSurface.test.tsx \
-  src/features/terminal/terminalTransferApi.test.ts \
-  >"$evidence/frontend-transfer.log" 2>&1 & frontend_pid=$!
 cargo check --manifest-path tests/integration/Cargo.toml --workspace \
   >"$evidence/driver-check.log" 2>&1 & driver_pid=$!
 bash tests/integration/transfers/package-scripts.sh \
@@ -43,7 +38,7 @@ bash tests/integration/transfers/package-scripts.sh \
 
 phase7_wait_all "$fmt_pid" "$driver_fmt_pid" "$protocol_pid" "$host_pid" "$host_staging_pid" \
   "$desktop_pid" "$clipboard_pid" "$destination_pid" "$event_pid" \
-  "$engine_pid" "$frontend_pid" "$driver_pid" "$package_scripts_pid"
+  "$engine_pid" "$driver_pid" "$package_scripts_pid"
 rg -Fq \
   'test service::filesystem::terminal_upload::tests::crash::sigkill_restart_matrix_converges_every_upload_transaction_boundary ...' \
   "$evidence/host-upload.log"
@@ -58,7 +53,7 @@ else
   expected_upload_tests=24
 fi
 rg -Fq "test result: ok. $expected_upload_tests passed; 0 failed" "$evidence/host-upload.log"
-cargo clippy -p tmux-agent-protocol -p muxflow-host -p desktop-core -p muxflow \
+cargo clippy -p tmux-agent-protocol -p muxflow-host -p desktop-core -p muxflow-gpui \
   --all-targets -- -D warnings >"$evidence/clippy.log" 2>&1 & clippy_pid=$!
 cargo clippy --manifest-path tests/integration/Cargo.toml --workspace -- -D warnings \
   >"$evidence/driver-clippy.log" 2>&1 & driver_clippy_pid=$!

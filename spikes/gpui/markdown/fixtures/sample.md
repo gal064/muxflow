@@ -12,7 +12,7 @@ boundary. GPUI repaints at most *once per frame*; 日本語 and café keep their
 1. Parse in the `terminal-engine` thread
 2. Coalesce damage and notify
    - hidden panes keep their grids
-   - a [ledger](docs/gpui-migration-ledger.md) tracks every module
+   - a [ledger](docs/history/gpui-migration/gpui-migration-ledger.md) tracks every module
 3. Paint with **TerminalElement**
 
 - [x] Pin `gpui-kit` exactly

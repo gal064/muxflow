@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [features]
 # Compiles the perf_log measurement implementation into release builds for an
-# A/B measurement campaign (`cargo build --release -p muxflow --features perf-log`).
+# A/B measurement campaign (`cargo build --release -p muxflow-gpui --features perf-log`).
 # Debug builds always include it via debug_assertions; see src/perf_log.rs.
 perf-log = []
 

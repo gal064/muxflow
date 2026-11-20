@@ -1,6 +1,6 @@
 # T0.4 spike-terminal: can a custom GPUI element fed by Muxflow's real tmux parser match xterm?
 
-Answers S1, S2 and the terminal half of S5 in `docs/gpui-migration.md`, with numbers.
+Answers S1, S2 and the terminal half of S5 in `docs/history/gpui-migration/gpui-migration.md`, with numbers.
 
 **Recommendation: continue with this architecture to the T0.7 comparison and a real-GPU
 rerun. Nothing here rules it out, and nothing here proves it: S1 and S2 are not passed.**

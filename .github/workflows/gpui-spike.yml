@@ -1,4 +1,4 @@
-# CI for the disposable GPUI feasibility spike (spikes/gpui, docs/gpui-migration.md
+# CI for the disposable GPUI feasibility spike (spikes/gpui, docs/history/gpui-migration/gpui-migration.md
 # S6 and S7). Kept apart from ci.yml so the shipping checks are untouched and
 # this file can be deleted together with the spike.
 name: gpui-spike
@@ -83,7 +83,7 @@ jobs:
           path: spike-frames/
           if-no-files-found: warn
 
-  # Compile check only: macOS is deferred in Phase 0 (docs/gpui-migration-agents.md).
+  # Compile check only: macOS is deferred in Phase 0 (docs/history/gpui-migration/gpui-migration-agents.md).
   macos:
     runs-on: macos-15
     timeout-minutes: 45
