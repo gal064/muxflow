@@ -1,4 +1,4 @@
-# Disposable GPUI feasibility workspace (docs/gpui-migration.md, Phase 0).
+# Disposable GPUI feasibility workspace (docs/history/gpui-migration/gpui-migration.md, Phase 0).
 # Deliberately NOT a member of the root workspace: it has its own Cargo.lock and
 # `target`, and the root `[workspace] members` list does not name it.
 [workspace]

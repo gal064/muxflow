@@ -184,7 +184,7 @@ apps/mobile/
   scripts/
     build-webview.mjs           bundles the two WebView pages into assets
   assets/
-    fonts/JetBrainsMono-Regular.ttf, JetBrainsMono-Bold.ttf (copy from apps/desktop/src/assets/fonts, convert woff2→ttf)
+    fonts/JetBrainsMono-Regular.ttf, JetBrainsMono-Bold.ttf (copy from assets/fonts, convert woff2→ttf)
 ```
 
 Add `apps/mobile` to `pnpm-workspace.yaml`. Do **not** add it to the root
@@ -947,7 +947,7 @@ failed) which opens the Connection sheet (§9.8). Settings opens the phone's
     desktop's `AgentMark`): a 36 dp `--chrome-raised` rounded square holding
     the adapter's real icon at 20 dp in `--chrome-ink` — the desktop's exact
     SVG geometry (`agentIconPaths.ts`, pinned to
-    `apps/desktop/src/features/agents/AgentIdentity.tsx` by a test: Claude
+    `apps/desktop-gpui/src/agents/view.rs` by a test: Claude
     Code's four-stroke mark, the official OpenAI blossom for Codex with its
     optical-inset transform, a stroked face for any other adapter) — with
     the agent's state **docked** over the avatar's bottom-right corner,

@@ -174,14 +174,16 @@ More in the [troubleshooting guide](./docs/troubleshooting.md).
 
 ## Build from source
 
-Requirements: Rust 1.97.1, Node.js 24, pnpm 11, tmux 3.3+, and the
-[Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requirements: Rust 1.97.1, Node.js 24, pnpm 11 and tmux 3.3+. On Linux, the
+desktop also needs the xkbcommon-x11, Wayland, fontconfig, Vulkan and ALSA
+development packages (see [Setup](./docs/setup.md)).
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm test:transport:local
 tmux new-session -s work
-pnpm tauri dev
+cargo build -p muxflow-host
+cargo run -p muxflow-gpui
 ```
 
 Package builds: `pnpm release:linux -- x86_64`, `pnpm release:macos`, and

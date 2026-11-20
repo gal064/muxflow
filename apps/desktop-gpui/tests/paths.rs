@@ -1,7 +1,6 @@
-//! The native app resolves the same directories as Tauri. These expected values
-//! are the golden ones in `apps/desktop/src-tauri/src/golden_paths.rs`. As
-//! there, the environment is set on a child test process, since other tests
-//! read `HOME`.
+//! The native app resolves the same directories the Tauri app did, so an
+//! upgrade keeps its settings and logs. These are the golden values. The
+//! environment is set on a child test process, since other tests read `HOME`.
 
 use std::process::Command;
 

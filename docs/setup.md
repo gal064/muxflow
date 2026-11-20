@@ -16,21 +16,21 @@ or stores SSH credentials.
 
 ## Build from source
 
-Install the pinned Rust 1.97.1 toolchain, Node.js 24, pnpm 11.18, tmux, Git, and the Tauri 2
-Linux prerequisites. On Debian/Ubuntu the GUI development packages include
-`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, and `librsvg2-dev`.
+Install the pinned Rust 1.97.1 toolchain, Node.js 24, pnpm 11.18, tmux and Git.
+On Debian/Ubuntu the desktop's development packages are `libxkbcommon-x11-dev`,
+`libwayland-dev`, `libfontconfig-dev`, `libvulkan1` and `libasound2-dev`.
 
 ```sh
 pnpm install --frozen-lockfile
 cargo fmt --all -- --check
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo clippy --workspace --all-targets -- -D warnings
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --workspace --all-targets
-pnpm check
-pnpm test
-pnpm build
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+pnpm mobile:check
+pnpm mobile:test
 ```
 
-Run a development build with `pnpm tauri dev`. tmux remains authoritative; the
+Run a development build with `cargo build -p muxflow-host` and then
+`cargo run -p muxflow-gpui`. tmux remains authoritative; the
 application attaches to an existing server and closing the window detaches.
 
 ## Install the internal package

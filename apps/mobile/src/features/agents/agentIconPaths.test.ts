@@ -4,68 +4,64 @@ import { describe, expect, it } from "vitest";
 
 import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isPiAdapter, PI_ICON, PIN_ICON } from "./agentIconPaths";
 
-const desktopSrc = resolve(__dirname, "../../../../desktop/src");
-const identity = readFileSync(resolve(desktopSrc, "features/agents/AgentIdentity.tsx"), "utf8");
-const icon = readFileSync(resolve(desktopSrc, "ui/Icon.tsx"), "utf8");
-const css = readFileSync(resolve(desktopSrc, "styles.css"), "utf8");
+const desktopSrc = resolve(__dirname, "../../../../desktop-gpui/src");
+const view = readFileSync(resolve(desktopSrc, "agents/view.rs"), "utf8");
+const icons = readFileSync(resolve(desktopSrc, "ui/icons.rs"), "utf8");
 
-/** Every `attr="..."` value in the file, in source order. */
+/** The SVG in `const NAME: &[u8] = br##"…"##;`. */
+function mark(name: string): string {
+  const svg = view.match(new RegExp(`^const ${name}: &\\[u8\\] = br##"(.*)"##;$`, "m"))?.[1];
+  if (svg === undefined) throw new Error(`${name} is not in agents/view.rs`);
+  return svg;
+}
+
+/** Every `attr="..."` value in the source, in order. */
 function attrs(source: string, name: string): string[] {
   return [...source.matchAll(new RegExp(`\\b${name}="([^"]*)"`, "g"))].map((m) => m[1]!);
 }
 
-describe("agent icon geometry matches the desktop's AgentIdentity.tsx byte-for-byte", () => {
-  const paths = attrs(identity, "d");
-  const viewBoxes = attrs(identity, "viewBox");
-
-  it("Claude: the four-stroke mark and its viewBox", () => {
-    expect(paths[0]).toBe(CLAUDE_ICON.path);
-    expect(viewBoxes[0]).toBe(CLAUDE_ICON.viewBox);
-    expect(css).toContain(".agent-icon.claude { stroke-width: 2; }");
-    expect(CLAUDE_ICON.strokeWidth).toBe(2);
+describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte", () => {
+  it("Claude: the four-stroke mark, its viewBox and stroke width", () => {
+    const svg = mark("CLAUDE");
+    expect(attrs(svg, "d")).toEqual([CLAUDE_ICON.path]);
+    expect(attrs(svg, "viewBox")).toEqual([CLAUDE_ICON.viewBox]);
+    expect(attrs(svg, "stroke-width")).toEqual([String(CLAUDE_ICON.strokeWidth)]);
   });
 
   it("Codex: the OpenAI blossom path, its viewBox and the optical-inset transform", () => {
-    expect(paths[1]).toBe(CODEX_ICON.path);
-    expect(viewBoxes[1]).toBe(CODEX_ICON.viewBox);
-    expect(attrs(identity, "transform")[0]).toBe(CODEX_ICON.transform);
-    expect(identity).toContain('data-icon-source="openai-blossom"');
+    const svg = mark("CODEX");
+    expect(attrs(svg, "d")).toEqual([CODEX_ICON.path]);
+    expect(attrs(svg, "viewBox")).toEqual([CODEX_ICON.viewBox]);
+    expect(attrs(svg, "transform")).toEqual([CODEX_ICON.transform]);
   });
 
   it("pi: pi.dev's mark, its viewBox and its inset", () => {
-    expect(paths[2]).toBe(PI_ICON.path);
-    expect(viewBoxes[2]).toBe(PI_ICON.viewBox);
-    expect(attrs(identity, "transform")).toEqual([CODEX_ICON.transform, PI_ICON.transform]);
-    expect(identity).toContain('data-icon-source="pi-favicon"');
+    const svg = mark("PI");
+    expect(attrs(svg, "d")).toEqual([PI_ICON.path]);
+    expect(attrs(svg, "viewBox")).toEqual([PI_ICON.viewBox]);
+    expect(attrs(svg, "transform")).toEqual([PI_ICON.transform]);
   });
 
   it("generic: the face", () => {
-    expect(paths[3]).toBe(GENERIC_ICON.mouth);
-    expect(viewBoxes[3]).toBe(GENERIC_ICON.viewBox);
-    const circles = [...identity.matchAll(/<circle cx="([^"]*)" cy="([^"]*)" r="([^"]*)" \/>/g)].map((m) => ({ cx: Number(m[1]), cy: Number(m[2]), r: Number(m[3]) }));
+    const svg = mark("GENERIC");
+    expect(attrs(svg, "d")).toEqual([GENERIC_ICON.mouth]);
+    expect(attrs(svg, "viewBox")).toEqual([GENERIC_ICON.viewBox]);
+    const circles = [...svg.matchAll(/<circle cx="([^"]*)" cy="([^"]*)" r="([^"]*)"/g)].map((m) => ({ cx: Number(m[1]), cy: Number(m[2]), r: Number(m[3]) }));
     expect(circles).toEqual([GENERIC_ICON.face, ...GENERIC_ICON.eyes]);
-    expect(css).toMatch(/\.agent-icon\.claude, \.agent-icon\.generic \{[^}]*stroke-width: 1\.35/);
-    expect(GENERIC_ICON.strokeWidth).toBe(1.35);
+    expect(attrs(svg, "stroke-width")).toEqual([String(GENERIC_ICON.strokeWidth)]);
   });
 
-  it("the desktop file has exactly these four icons", () => {
-    expect(paths).toHaveLength(4);
-    expect(viewBoxes).toHaveLength(4);
-  });
-
-  it("pin: the desktop Icon set's pin, at its stroke width", () => {
-    const pin = icon.slice(icon.indexOf("  pin: <>"), icon.indexOf("</>", icon.indexOf("  pin: <>")));
+  it("pin: the desktop glyph set's pin, at its stroke width", () => {
+    const start = icons.indexOf("Self::Pin => glyph!(");
+    const pin = icons.slice(start, icons.indexOf("),", start));
     expect(attrs(pin, "d")).toEqual([...PIN_ICON.paths]);
-    expect(icon).toContain("strokeWidth={1.4}");
-    expect(PIN_ICON.strokeWidth).toBe(1.4);
-    expect(icon).toContain('viewBox="0 0 16 16"');
+    expect(icons).toContain(`viewBox="${PIN_ICON.viewBox}" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="${PIN_ICON.strokeWidth}"`);
   });
 
-  it("adapter ids resolve the way the desktop's AgentIcon branches do", () => {
-    expect(identity).toContain('adapterId === "claude-code"');
-    expect(identity).not.toContain('adapterId === "claude"');
-    expect(identity).toContain('adapterId === "codex"');
-    expect(identity).toContain('adapterId === "pi"');
+  it("adapter ids resolve the way the desktop's mark lookup does", () => {
+    expect(view).toContain('"claude-code" => CLAUDE,');
+    expect(view).toContain('"codex" => CODEX,');
+    expect(view).toContain('"pi" => PI,');
     expect(isClaudeAdapter("claude-code")).toBe(true);
     expect(isClaudeAdapter("claude")).toBe(false);
     expect(isClaudeAdapter("codex")).toBe(false);

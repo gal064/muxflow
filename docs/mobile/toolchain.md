@@ -94,7 +94,7 @@ banner on every invocation. The `13114758` filename still serves revision
 ## Fonts
 
 `apps/mobile/assets/fonts` needs TTF; the desktop only ships woff2
-(`apps/desktop/src/assets/fonts/*.woff2`) and this machine has no woff2→ttf
+(`assets/fonts/*.woff2`) and this machine has no woff2→ttf
 converter (`fonttools`/`woff2_decompress` are not installed and installing
 either would need a system package). The TTFs were therefore taken straight
 from the upstream release, which is the same source the desktop's woff2 files

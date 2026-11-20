@@ -641,5 +641,5 @@ command (`curl -sI https://example.com`) without asking.
   connects. A minute that came due during the restart is skipped.
 - **Saved settings across builds:** a desktop build from before the
   panel-extension change can't read a saved extension panel. Builds ship in
-  lockstep, but a developer running `pnpm tauri dev` beside an installed older
+  lockstep, but a developer running `cargo run -p muxflow-gpui` beside an installed older
   build should back up the app state first.
