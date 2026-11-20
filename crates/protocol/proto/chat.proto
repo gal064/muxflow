@@ -328,6 +328,10 @@ message ChatState {
   repeated ChatBackgroundTask background = 11;
   // The agent is compacting the conversation's context.
   bool compacting = 12;
+  // How many turns have ended since the host began following the chat. A
+  // turn stopped while a message waits behind it ends with `turn` still
+  // WORKING, for that message's own turn; this still counts it.
+  uint64 turns_ended = 13;
 }
 
 // Everything a client needs to draw a chat it has just opened. It replaces

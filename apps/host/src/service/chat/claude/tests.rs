@@ -1499,6 +1499,32 @@ fn a_fork_with_nothing_said_in_it_is_rewound_and_forked_from_its_source() {
 }
 
 #[tokio::test]
+async fn a_turn_stopped_with_a_message_behind_it_is_counted_as_ended() {
+    let mut replay = ready();
+    replay.send(M5, "count to 400");
+    replay.send("m6", "one more thing");
+    let queued = json!({"type": "command_lifecycle", "state": "queued",
+                        "command_uuid": message_uuid("m6")});
+    replay.agent(&queued.to_string());
+    assert_eq!(replay.client.state.turns_ended, 0);
+    let stopped = json!({"type": "result", "subtype": "error_during_execution",
+                         "is_error": true, "terminal_reason": "aborted_streaming"});
+    replay.agent(&stopped.to_string());
+    // The message behind it keeps the agent working, on a turn of its own.
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Working));
+    assert_eq!(replay.client.state.turns_ended, 1);
+    let done = json!({"type": "result", "subtype": "success", "is_error": false});
+    replay.agent(
+        &json!({"type": "command_lifecycle", "state": "completed",
+                         "command_uuid": message_uuid("m6")})
+        .to_string(),
+    );
+    replay.agent(&done.to_string());
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Idle));
+    assert_eq!(replay.client.state.turns_ended, 2);
+}
+
+#[tokio::test]
 async fn a_reply_is_not_forked_while_its_turn_can_still_add_to_it() {
     let home = home();
     let mut replay = ready();

@@ -997,7 +997,7 @@ impl ChatPane {
             label: label.into(),
             preview: None,
         };
-        let doing = if self.stopping {
+        let doing = if self.stopping.is_some() {
             said("Stopping…")
         } else if self.compacting() {
             // Whatever else the turn is doing.
@@ -1006,7 +1006,7 @@ impl ChatPane {
             timeline::doing(&self.chat.items)
         };
         let label: SharedString = doing.label.into();
-        let escape = self.stoppable() && !self.stopping;
+        let escape = self.stoppable() && self.stopping.is_none();
         let time = timeline::elapsed(self.elapsed(cx));
         v_flex()
             .id("chat-working")
@@ -1038,7 +1038,7 @@ impl ChatPane {
                             .child(label),
                     )
                     // "Stopping…" alone, with no time (S7).
-                    .when(!self.stopping, |line| {
+                    .when(self.stopping.is_none(), |line| {
                         line.child(
                             div()
                                 .id("chat-working-time")
