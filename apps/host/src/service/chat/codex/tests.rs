@@ -1333,3 +1333,217 @@ async fn an_image_goes_as_a_local_image_and_a_file_as_its_path_under_the_text() 
         .collect();
     assert_eq!(names, [("crash.log", ""), ("shot.png", "image/png")]);
 }
+
+// --- names ------------------------------------------------------------------
+
+fn asked_title(replay: &Replay<Codex>) -> naming::Ask {
+    match replay.background.last() {
+        Some(Job::Title(ask)) => ask.clone(),
+        _ => panic!("no title was asked for"),
+    }
+}
+
+/// The thread's first message has a title asked for beside the chat, of the
+/// thread's model, and the server is asked to name the thread with it.
+#[tokio::test]
+async fn a_thread_with_no_name_is_named_after_its_first_message() {
+    let (mut replay, _lines) = opened(Launch::default());
+    assert!(replay.background.is_empty());
+    replay.send("m1", "Fix the agents bar");
+    let ask = asked_title(&replay);
+    let model = replay.client.state.options.clone().unwrap().model;
+    assert!(!model.is_empty());
+    assert_eq!(ask.answer_to, Some("-o"));
+    assert_eq!(ask.first, "Fix the agents bar");
+    let mut argv = strings(&[
+        "codex",
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "-s",
+        "read-only",
+        "-c",
+        "model_reasoning_effort=low",
+        "--disable",
+        "hooks",
+        "-c",
+        "notify=[]",
+        "--model",
+    ]);
+    argv.push(model);
+    assert_eq!(ask.argv, argv);
+
+    replay.done(Done::Titled(naming::Titled {
+        ticket: ask.ticket,
+        asked_by_user: false,
+        title: Some("Agents bar".into()),
+    }));
+    assert_eq!(replay.titles.last().unwrap(), "Agents bar");
+    assert_eq!(
+        replay.last_asked("thread/name/set")["params"],
+        json!({"threadId": THREAD, "name": "Agents bar"})
+    );
+    let titled = replay.titles.len();
+    let updated = json!({"method": "thread/name/updated", "params": {
+        "threadId": THREAD, "threadName": "Agents bar"}});
+    replay.agent(&updated.to_string());
+    assert_eq!(replay.titles.len(), titled);
+}
+
+/// `/rename` names the thread and sends nothing to the agent's turn.
+#[tokio::test]
+async fn rename_names_the_thread_without_a_turn() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("r1", "/rename Agents bar");
+    assert_eq!(
+        replay.client.item("r1").unwrap().kind,
+        i32::from(Kind::Notice)
+    );
+    assert_eq!(
+        replay.last_asked("thread/name/set")["params"],
+        json!({"threadId": THREAD, "name": "Agents bar"})
+    );
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["method"] != "turn/start")
+    );
+    assert_eq!(replay.titles, ["Agents bar"]);
+    // The server renaming it later is heard.
+    let updated = json!({"method": "thread/name/updated", "params": {
+        "threadId": THREAD, "threadName": "Renamed elsewhere"}});
+    replay.agent(&updated.to_string());
+    assert_eq!(replay.titles.last().unwrap(), "Renamed elsewhere");
+    let rename = replay
+        .client
+        .catalog
+        .commands
+        .iter()
+        .find(|command| command.name == "rename");
+    assert_eq!(
+        rename.map(|command| command.kind),
+        Some(i32::from(v1::ChatCommandKind::Command))
+    );
+}
+
+/// Every MCP server the agent's configuration names is turned off for an ask
+/// for a title, by a `-c` the agent takes.
+#[test]
+fn an_ask_for_a_title_turns_off_the_configured_mcp_servers() {
+    let home = tempfile::tempdir().unwrap();
+    let codex = home.path().join("codex-home");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::write(
+        codex.join("config.toml"),
+        "model = \"m\"\n[mcp_servers.cua-driver]\ncommand = \"x\"\n\
+         [mcp_servers.slack]\ncommand = \"y\"\n[mcp_servers.slack.env]\nA = \"1\"\n\
+         [mcp_servers.\"odd name\"]\ncommand = \"z\"\n",
+    )
+    .unwrap();
+    let environment = |name: &str, value: &Path| vec![(name.into(), value.as_os_str().to_owned())];
+    let off = strings(&[
+        "-c",
+        "mcp_servers.cua-driver.enabled=false",
+        "-c",
+        "mcp_servers.slack.enabled=false",
+    ]);
+    assert_eq!(mcp_servers_off(&environment("CODEX_HOME", &codex)), off);
+    // Without CODEX_HOME, where the agent looks under its home.
+    std::fs::rename(&codex, home.path().join(".codex")).unwrap();
+    assert_eq!(mcp_servers_off(&environment("HOME", home.path())), off);
+    assert!(mcp_servers_off(&environment("HOME", &home.path().join("none"))).is_empty());
+    assert!(mcp_servers_off(&[]).is_empty());
+}
+
+/// The answer that opens `thread` on the server, with `name`.
+fn thread_open(asked: &str, name: Value) -> String {
+    json!({"id": format!("@{asked}"), "result": {
+        "thread": {"id": THREAD, "name": name, "turns": []}, "model": "m"}})
+    .to_string()
+}
+
+fn initialized(replay: &mut Replay<Codex>) {
+    replay.agent(&json!({"id": "@initialize", "result": {}}).to_string());
+}
+
+/// The thread's own name comes before the one the chat was started under,
+/// but a new thread, a copy among them, goes by the one it was started
+/// under: a copy may carry its source's name.
+#[tokio::test]
+async fn a_thread_goes_by_its_own_name_and_a_new_one_by_its_start() {
+    let named = Launch {
+        name: "Fix tests (fork)".into(),
+        resume: Resume::Session {
+            id: "0c0de000-0000-7000-8000-00000000aaaa".into(),
+            fork: true,
+        },
+        ..Launch::default()
+    };
+    let mut copy = replay();
+    copy.connect(&tag("", named.clone()));
+    initialized(&mut copy);
+    copy.agent(&thread_open("thread/fork", json!("Source name")));
+    assert_eq!(copy.titles, ["Fix tests (fork)"]);
+    assert_eq!(
+        copy.last_asked("thread/name/set")["params"],
+        json!({"threadId": THREAD, "name": "Fix tests (fork)"})
+    );
+
+    let mut resumed = replay();
+    resumed.connect(&tag(THREAD, named));
+    initialized(&mut resumed);
+    resumed.agent(&thread_open("thread/resume", json!("Mine")));
+    assert_eq!(resumed.titles, ["Mine"]);
+    assert!(
+        resumed
+            .written
+            .iter()
+            .all(|written| written["method"] != "thread/name/set")
+    );
+}
+
+/// A message sent before the thread is open is named from once it is.
+#[tokio::test]
+async fn a_title_waits_for_the_thread_to_open() {
+    let mut replay = replay();
+    replay.connect(&tag("", Launch::default()));
+    replay.send("m1", "Fix the agents bar");
+    assert!(replay.background.is_empty());
+    initialized(&mut replay);
+    replay.agent(&thread_open("thread/start", Value::Null));
+    assert_eq!(asked_title(&replay).first, "Fix the agents bar");
+}
+
+/// An ask for a title is started with the chat's own settings, before its
+/// own, which win; not with what could have it write or keep a session.
+#[test]
+fn an_ask_for_a_title_keeps_the_chats_settings_but_not_its_risky_ones() {
+    let launch = launch(&[
+        "-c",
+        "model_provider=work",
+        "--enable",
+        "web_search",
+        "-c",
+        "sandbox_mode=danger-full-access",
+        "--config=features.hooks=true",
+        "-c",
+        "notify=[\"x\"]",
+        "-c",
+        "profile=work",
+        "--disable",
+        "hooks",
+        "--strict-config",
+    ])
+    .unwrap();
+    assert_eq!(
+        title_passthrough(&launch.passthrough),
+        strings(&[
+            "-c",
+            "model_provider=work",
+            "-c",
+            "profile=work",
+            "--strict-config",
+        ])
+    );
+}

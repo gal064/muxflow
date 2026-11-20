@@ -33,6 +33,7 @@ mod claude;
 mod codex;
 mod convert;
 mod items;
+mod naming;
 mod pane;
 mod processes;
 mod provider;
@@ -770,27 +771,33 @@ impl Pane {
     /// session history come to name the conversation: a chat's agent writes
     /// no title of its own to the pane. Until there is either, the pane
     /// keeps the title it has, which is the agent's name from when it became
-    /// a chat.
+    /// a chat. The first line stands in until the provider has a name: one
+    /// it is asked for (`naming.rs`) takes a few seconds to come.
     fn retitle(&mut self) -> Option<String> {
         let title = if !self.name.is_empty() {
             self.name.clone()
-        } else if self.trimmed {
-            // The first message is no longer held.
-            return None;
         } else {
-            let user = i32::from(v1::ChatItemKind::User);
-            // A message of files alone names nothing.
-            let first = self
-                .items
-                .iter()
-                .find(|item| item.kind == user && !item.text.trim().is_empty())?;
-            title_line(&first.text, MAX_TITLE_CHARS)?
+            title_line(self.first_message()?, MAX_TITLE_CHARS)?
         };
         if title == self.title {
             return None;
         }
         self.title.clone_from(&title);
         Some(title)
+    }
+
+    /// The text of the conversation's first message. A message of files
+    /// alone names nothing, and once the timeline has dropped its oldest
+    /// items the first message is no longer held.
+    fn first_message(&self) -> Option<&str> {
+        if self.trimmed {
+            return None;
+        }
+        let user = i32::from(v1::ChatItemKind::User);
+        self.items
+            .iter()
+            .find(|item| item.kind == user && !item.text.trim().is_empty())
+            .map(|item| item.text.as_str())
     }
 
     /// Numbers a change that has been applied and sends it to every
@@ -987,6 +994,16 @@ impl Pane {
                         "That message is too long to send.",
                     ));
                 }
+                self.admit_item_id(item_id)?;
+                // Not the agent's, so it may come whatever the agent does.
+                if let Some(name) = naming::rename(text) {
+                    let rename = self.admit_rename(name, attachments)?;
+                    *command = SessionCommand::Rename {
+                        item_id: std::mem::take(item_id),
+                        name: rename,
+                    };
+                    return Ok(());
+                }
                 if self.state.turn != i32::from(v1::ChatTurnState::Idle)
                     && !capabilities.send_mid_turn
                 {
@@ -995,19 +1012,9 @@ impl Pane {
                         "The agent is still working. Stop it, or wait for it to finish.",
                     ));
                 }
-                if item_id.is_empty() {
-                    *item_id = format!("user-{}", uuid::Uuid::new_v4());
-                } else if item_id.len() > MAX_ID_BYTES {
-                    return Err(invalid("That message id is too long."));
-                } else if self.items.iter().any(|item| item.id == *item_id) {
-                    // Its own code: a client that lost the answer to a SEND
-                    // and sends it again learns the first one arrived.
-                    return Err(ChatError::new(
-                        "chat_message_duplicate",
-                        "That message was already sent.",
-                    ));
-                }
             }
+            // Made here, from a SEND.
+            SessionCommand::Rename { .. } => {}
             SessionCommand::Answer { request_id, answer } => {
                 let pending = self.state.pending.as_ref();
                 if !pending.is_some_and(|pending| pending.request_id == *request_id) {
@@ -1063,6 +1070,49 @@ impl Pane {
             }
         }
         Ok(())
+    }
+
+    /// Gives a message with no id one, and refuses one the timeline holds.
+    fn admit_item_id(&self, item_id: &mut String) -> Result<(), ChatError> {
+        if item_id.is_empty() {
+            *item_id = format!("user-{}", uuid::Uuid::new_v4());
+        } else if item_id.len() > MAX_ID_BYTES {
+            return Err(invalid("That message id is too long."));
+        } else if self.items.iter().any(|item| item.id == *item_id) {
+            // Its own code: a client that lost the answer to a SEND and sends
+            // it again learns the first one arrived.
+            return Err(ChatError::new(
+                "chat_message_duplicate",
+                "That message was already sent.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The name a `/rename` gives the chat, as it is to be shown: empty for
+    /// one that names it again from its first message.
+    fn admit_rename(&self, name: &str, attachments: &[Attached]) -> Result<String, ChatError> {
+        if !attachments.is_empty() {
+            return Err(invalid("A rename takes no files."));
+        }
+        if !name.is_empty() {
+            return naming::typed(name, MAX_NAME_CHARS)
+                .ok_or_else(|| invalid("That name cannot be used."));
+        }
+        if self.first_message().is_none() {
+            return Err(ChatError::new(
+                "chat_rename_unavailable",
+                "There is no message to name this chat from yet. Give it a name: /rename <name>.",
+            ));
+        }
+        // The first message held is not the conversation's.
+        if !self.state.history_complete {
+            return Err(ChatError::new(
+                "chat_rename_unavailable",
+                "Only the end of this chat could be read. Give it a name: /rename <name>.",
+            ));
+        }
+        Ok(String::new())
     }
 
     /// Where a fork of the reply `item_id` is part of is cut: after the last

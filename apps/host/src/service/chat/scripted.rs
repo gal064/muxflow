@@ -504,6 +504,23 @@ impl Script {
                 }
                 self.publish_state();
             }
+            // There is no agent to ask for a title: one named again from its
+            // first message takes that message's first words.
+            SessionCommand::Rename { item_id, name } => {
+                let notice = super::naming::notice(item_id, &super::naming::renamed(&name));
+                self.sink.publish(Change::Item(notice));
+                let name = match name.as_str() {
+                    "" => self
+                        .sink
+                        .first_message()
+                        .and_then(|first| {
+                            super::naming::sanitize(&first, super::naming::MAX_TITLE_CHARS)
+                        })
+                        .unwrap_or_default(),
+                    _ => name,
+                };
+                self.sink.name(&name);
+            }
         }
         Ok(())
     }
@@ -581,6 +598,7 @@ fn catalog() -> v1::ChatCatalog {
                 "<question>",
                 Muxflow,
             ),
+            super::naming::command(),
         ],
     }
 }

@@ -2191,3 +2191,403 @@ fn token_counts_and_the_compaction_notice_read_as_the_chat_says_them() {
         "content": "This session is being continued from a previous conversation that ran out of context."}});
     assert_eq!(said(&summary), Said::Nothing);
 }
+
+// --- names ------------------------------------------------------------------
+
+/// A chat that has reached its agent and read its conversation, in which
+/// nothing has been said yet.
+fn read() -> Replay<Claude> {
+    let mut replay = ready();
+    let nothing = tempfile::tempdir().unwrap();
+    replay.done(Done::History(history::load(nothing.path(), SESSION, "")));
+    replay
+}
+
+/// A home whose recorded session also has the names given as lines, appended
+/// after its conversation as the agent appends them.
+fn named_home(names: &[Value]) -> tempfile::TempDir {
+    let home = home();
+    let file = home.path().join(format!("projects/-work/{SESSION}.jsonl"));
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    for name in names {
+        text.push_str(&format!("{name}\n"));
+    }
+    std::fs::write(&file, text).unwrap();
+    home
+}
+
+#[test]
+fn the_session_goes_by_the_users_name_else_the_agents() {
+    let custom =
+        |name: &str| json!({"type": "custom-title", "customTitle": name, "sessionId": SESSION});
+    let ai = |name: &str| json!({"type": "ai-title", "aiTitle": name, "sessionId": SESSION});
+    let agent = |name: &str| json!({"type": "agent-name", "agentName": name, "sessionId": SESSION});
+    let name = |names: &[Value]| history::load(named_home(names).path(), SESSION, "").name;
+
+    assert_eq!(name(&[]), "");
+    assert_eq!(name(&[agent("Worker")]), "Worker");
+    assert_eq!(name(&[agent("Worker"), ai("Fix the bar")]), "Fix the bar");
+    assert_eq!(
+        name(&[
+            custom("Old"),
+            ai("Fix the bar"),
+            custom("Mine"),
+            agent("Worker")
+        ]),
+        "Mine"
+    );
+    // The newest of each kind counts; a cleared one gives way to the next.
+    assert_eq!(name(&[ai("First"), ai("Second")]), "Second");
+    assert_eq!(
+        name(&[custom("Mine"), custom(""), ai("Fix the bar")]),
+        "Fix the bar"
+    );
+    // A rewind does not take the name back.
+    let home = named_home(&[custom("Mine")]);
+    assert_eq!(history::load(home.path(), SESSION, M3).name, "Mine");
+    // A copy with nothing said in it is read from its source, without the
+    // source's name.
+    let copy = history::load_through(home.path(), SESSION, M3);
+    assert!(!copy.items.is_empty());
+    assert_eq!(copy.name, "");
+    // Nor is the conversation read any differently.
+    assert_eq!(
+        history::load(home.path(), SESSION, "").items,
+        history::load(named_home(&[]).path(), SESSION, "").items
+    );
+}
+
+/// A resumed session takes the name its file gives it, also over the one
+/// it was started under, which stands in until the file is read.
+#[tokio::test]
+async fn a_resumed_session_is_named_from_its_file_and_asks_for_no_title() {
+    let home =
+        named_home(&[json!({"type": "ai-title", "aiTitle": "Arithmetic", "sessionId": SESSION})]);
+    let mut replay = ready();
+    replay.done(read_history(home.path(), ""));
+    assert_eq!(replay.titles.last().map(String::as_str), Some("Arithmetic"));
+    replay.send("m-new", "And 3+3?");
+    assert!(replay.background.is_empty());
+
+    let mut started = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    started.connect(&Tag {
+        launch: launch(&["--name", "Fix tests (fork)"], None).unwrap(),
+        ..tag(SESSION, "")
+    });
+    started.done(read_history(home.path(), ""));
+    assert_eq!(started.titles, ["Fix tests (fork)", "Arithmetic"]);
+}
+
+fn asked_title(replay: &Replay<Claude>) -> &naming::Ask {
+    match replay.background.last() {
+        Some(Job::Title(ask)) => ask,
+        _ => panic!("no title was asked for"),
+    }
+}
+
+/// The chat's first message has a title asked for beside the chat; the
+/// title becomes the chat's name, which the agent is told as a rename.
+#[tokio::test]
+async fn a_chat_with_no_name_is_named_after_its_first_message() {
+    let mut replay = read();
+    replay.send(M1, "I dont love how this bar looks.\nCan we fix it?");
+    // The first line stands in until then.
+    assert_eq!(replay.titles, ["I dont love how this bar looks."]);
+    let ask = asked_title(&replay).clone();
+    assert_eq!(ask.pane_id, "%1");
+    assert_eq!(ask.adapter_id, ADAPTER_ID);
+    assert_eq!(ask.first, "I dont love how this bar looks.\nCan we fix it?");
+    assert_eq!(ask.answer_to, None);
+    assert!(!ask.asked_by_user);
+    assert_eq!(
+        ask.argv,
+        strings(&[
+            "claude",
+            "-p",
+            "--output-format",
+            "text",
+            "--model",
+            "haiku",
+            "--permission-mode",
+            "plan",
+            "--no-session-persistence",
+            "--settings",
+            r#"{"disableAllHooks":true}"#,
+            "--strict-mcp-config",
+        ])
+    );
+    // Once only.
+    replay.send(M2, "And the colours?");
+    assert_eq!(replay.background.len(), 1);
+
+    replay.done(Done::Titled(naming::Titled {
+        ticket: ask.ticket,
+        asked_by_user: false,
+        title: Some("Fix the agents bar".into()),
+    }));
+    assert_eq!(replay.titles.last().unwrap(), "Fix the agents bar");
+    assert_eq!(
+        replay.last_asked("rename_session")["request"],
+        json!({"subtype": "rename_session", "title": "Fix the agents bar"})
+    );
+    // The pane's start does not carry it: the agent keeps it.
+    assert!(
+        replay
+            .jobs
+            .iter()
+            .all(|job| matches!(job, Job::History { .. } | Job::Tag { .. }))
+    );
+    // The agent saying so changes nothing more.
+    let changed = json!({"type": "system", "subtype": "session_title_changed",
+        "title": "Fix the agents bar", "session_id": SESSION});
+    let titled = replay.titles.len();
+    replay.agent(&changed.to_string());
+    assert_eq!(replay.titles.len(), titled);
+    // A later rename of the agent's own counts, and outlives a new link.
+    let renamed = json!({"type": "system", "subtype": "session_title_changed",
+        "title": "Renamed in a terminal", "session_id": SESSION});
+    replay.agent(&renamed.to_string());
+    replay.disconnect();
+    replay.connect(&tag(SESSION, ""));
+    assert_eq!(replay.titles.last().unwrap(), "Renamed in a terminal");
+}
+
+/// A session read only from the end of its file has no first message to
+/// name it from: it keeps the first line it has, and asks for no title.
+#[tokio::test]
+async fn a_session_read_only_in_part_asks_for_no_title() {
+    let home = home();
+    let mut replay = ready();
+    let mut history = history::load(home.path(), SESSION, "");
+    history.complete = false;
+    replay.done(Done::History(history));
+    assert!(!replay.client.state.history_complete);
+    assert!(replay.background.is_empty());
+    replay.send("m-new", "And 3+3?");
+    assert!(replay.background.is_empty());
+}
+
+/// A title that comes after the chat was named otherwise is dropped, and one
+/// that could not be had leaves the first line, saying nothing.
+#[tokio::test]
+async fn a_title_is_dropped_once_the_chat_has_a_name_or_when_there_is_none() {
+    let mut replay = read();
+    replay.send(M1, "What is 2+2?");
+    let ticket = asked_title(&replay).ticket;
+    let renamed = json!({"type": "system", "subtype": "session_title_changed",
+        "title": "Named in a terminal", "session_id": SESSION});
+    replay.agent(&renamed.to_string());
+    replay.done(Done::Titled(naming::Titled {
+        ticket,
+        asked_by_user: false,
+        title: Some("Arithmetic".into()),
+    }));
+    assert_eq!(replay.titles.last().unwrap(), "Named in a terminal");
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["request"]["subtype"] != "rename_session")
+    );
+
+    let mut failed = read();
+    failed.send(M1, "What is 2+2?");
+    let items = failed.client.items.len();
+    let ticket = asked_title(&failed).ticket;
+    failed.done(Done::Titled(naming::Titled {
+        ticket,
+        asked_by_user: false,
+        title: None,
+    }));
+    assert_eq!(failed.titles, ["What is 2+2?"]);
+    assert_eq!(failed.client.items.len(), items);
+}
+
+/// `/rename` is not sent to the agent: the chat is renamed, and a notice
+/// stands where the message would have been.
+#[tokio::test]
+async fn rename_names_the_chat_without_a_message_to_the_agent() {
+    let mut replay = read();
+    // Nothing to name it from yet.
+    let refused = replay
+        .command(SessionCommand::Send {
+            text: "/rename".into(),
+            item_id: "r0".into(),
+            attachments: Vec::new(),
+        })
+        .unwrap_err();
+    assert_eq!(refused.code, "chat_rename_unavailable");
+
+    replay.send("r1", "/rename   #123  login\tbug  ");
+    let notice = replay.client.item("r1").unwrap();
+    assert_eq!(notice.kind, i32::from(Kind::Notice));
+    assert_eq!(notice.text, "Renamed to \u{201c}#123 login bug\u{201d}.");
+    assert_eq!(replay.titles, ["#123 login bug"]);
+    assert_eq!(
+        replay.last_asked("rename_session")["request"]["title"],
+        "#123 login bug"
+    );
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["type"] != "user")
+    );
+    // Named, the chat asks for no title of its own.
+    replay.send(M1, "What is 2+2?");
+    assert!(replay.background.is_empty());
+    assert_eq!(replay.titles, ["#123 login bug"]);
+
+    // With no name, it is named again from its first message, even mid-turn.
+    replay.send("r2", "/rename");
+    assert_eq!(
+        replay.client.item("r2").unwrap().text,
+        "Naming this chat from its first message."
+    );
+    let ask = asked_title(&replay).clone();
+    assert!(ask.asked_by_user);
+    assert_eq!(ask.first, "What is 2+2?");
+    replay.done(Done::Titled(naming::Titled {
+        ticket: ask.ticket,
+        asked_by_user: true,
+        title: Some("Arithmetic".into()),
+    }));
+    assert_eq!(replay.titles.last().unwrap(), "Arithmetic");
+
+    // One that fails says so.
+    replay.send("r3", "/rename");
+    let ticket = asked_title(&replay).ticket;
+    replay.done(Done::Titled(naming::Titled {
+        ticket,
+        asked_by_user: true,
+        title: None,
+    }));
+    let said = replay.client.items.last().unwrap();
+    assert_eq!(said.kind, i32::from(Kind::Notice));
+    assert!(said.text.starts_with("This chat could not be named."));
+    assert_eq!(replay.titles.last().unwrap(), "Arithmetic");
+
+    // A rename carries no files.
+    let refused = replay
+        .command(SessionCommand::Send {
+            text: "/rename Files".into(),
+            item_id: "r4".into(),
+            attachments: vec![attached("/tmp/a.txt", "", None)],
+        })
+        .unwrap_err();
+    assert_eq!(refused.code, "chat_invalid_request");
+}
+
+/// A name chosen before the agent listens is told it once it does.
+#[tokio::test]
+async fn a_name_chosen_before_the_agent_is_ready_is_told_when_it_is() {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&tag(SESSION, ""));
+    replay.send(M1, "What is 2+2?");
+    replay.send("r1", "/rename Arithmetic");
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["request"]["subtype"] != "rename_session")
+    );
+    replay.agent(
+        &json!({"type": "control_response", "response": {
+            "subtype": "success", "request_id": "@initialize", "response": {}}})
+        .to_string(),
+    );
+    assert_eq!(
+        replay.last_asked("rename_session")["request"]["title"],
+        "Arithmetic"
+    );
+}
+
+#[tokio::test]
+async fn the_composer_lists_rename_as_a_command() {
+    let replay = ready();
+    let rename = replay
+        .client
+        .catalog
+        .commands
+        .iter()
+        .find(|command| command.name == "rename")
+        .expect("rename is listed");
+    assert_eq!(rename.kind, i32::from(v1::ChatCommandKind::Command));
+}
+
+/// A name the session has of its own, given since it started or read from
+/// its file, comes before the one it was started under, over a new link and
+/// a new daemon alike.
+#[tokio::test]
+async fn a_name_given_since_comes_before_the_one_started_under() {
+    let started = Tag {
+        launch: launch(&["--name", "Fix tests (fork)"], None).unwrap(),
+        ..tag(SESSION, "")
+    };
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&started);
+    replay.send("r1", "/rename Mine");
+    assert_eq!(replay.titles, ["Fix tests (fork)", "Mine"]);
+    replay.disconnect();
+    replay.connect(&started);
+    let nothing = tempfile::tempdir().unwrap();
+    replay.done(Done::History(history::load(nothing.path(), SESSION, "")));
+    assert_eq!(replay.titles, ["Fix tests (fork)", "Mine"]);
+
+    // A daemon started since reads the name from the session's file.
+    let home =
+        named_home(&[json!({"type": "custom-title", "customTitle": "Mine", "sessionId": SESSION})]);
+    let mut restarted = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    restarted.connect(&started);
+    restarted.done(read_history(home.path(), ""));
+    assert_eq!(restarted.titles.last().unwrap(), "Mine");
+}
+
+/// A message sent before the conversation has been read is named from once
+/// it has been, from the conversation's own first message.
+#[tokio::test]
+async fn a_title_waits_for_the_conversation_to_be_read() {
+    let mut replay = ready();
+    replay.send(M1, "Fix the agents bar");
+    assert!(replay.background.is_empty());
+    let nothing = tempfile::tempdir().unwrap();
+    replay.done(Done::History(history::load(nothing.path(), SESSION, "")));
+    assert_eq!(asked_title(&replay).first, "Fix the agents bar");
+
+    // Read from the end of its file only, it is not named from its first
+    // message, by the user either.
+    let home = home();
+    let mut partial = ready();
+    let mut history = history::load(home.path(), SESSION, "");
+    history.complete = false;
+    partial.done(Done::History(history));
+    let refused = partial
+        .command(SessionCommand::Send {
+            text: "/rename".into(),
+            item_id: "r1".into(),
+            attachments: Vec::new(),
+        })
+        .unwrap_err();
+    assert_eq!(refused.code, "chat_rename_unavailable");
+    // A name typed is still taken.
+    partial.send("r2", "/rename Arithmetic");
+    assert_eq!(partial.titles.last().unwrap(), "Arithmetic");
+}
+
+/// A chat started with settings of its own may reach another account or
+/// endpoint: it is not asked for a title, and says so when the user asks.
+#[tokio::test]
+async fn a_chat_started_with_its_own_settings_asks_for_no_title() {
+    let mut replay = Replay::new(Claude::default(), ClaudeProvider.capabilities());
+    replay.connect(&Tag {
+        launch: launch(&["--settings", "/work/other.json"], None).unwrap(),
+        ..tag(SESSION, "")
+    });
+    let nothing = tempfile::tempdir().unwrap();
+    replay.done(Done::History(history::load(nothing.path(), SESSION, "")));
+    replay.send(M1, "Fix the agents bar");
+    replay.send("r1", "/rename");
+    assert!(replay.background.is_empty());
+    assert_eq!(replay.client.item("r1").unwrap().text, naming::NOT_NAMED);
+    assert_eq!(replay.titles, ["Fix the agents bar"]);
+}

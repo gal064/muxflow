@@ -223,6 +223,15 @@ pub(crate) enum SessionCommand {
     StopTask {
         task_id: String,
     },
+    /// A message that was `/rename`, which is not the agent's: the chat goes
+    /// by `name` from now on, and the agent is told so. An empty name has
+    /// the chat named again from its first message, which the runtime has
+    /// checked there is. The session publishes a notice under `item_id` in
+    /// place of the message.
+    Rename {
+        item_id: String,
+        name: String,
+    },
 }
 
 /// Where a session reports what changed in its pane. `Change::Item` is a new
@@ -274,6 +283,15 @@ impl ChatSink {
         let panes = self.panes.upgrade()?;
         let mut panes = panes.lock().unwrap_or_else(PoisonError::into_inner);
         panes.name(&self.key, name)
+    }
+
+    /// The text of the first message of the pane's conversation: what the
+    /// pane is titled after while it has no name. `None` while there is
+    /// none, and once the timeline has dropped it.
+    pub(crate) fn first_message(&self) -> Option<String> {
+        let panes = self.panes.upgrade()?;
+        let panes = panes.lock().unwrap_or_else(PoisonError::into_inner);
+        panes.0.get(&self.key)?.first_message().map(str::to_owned)
     }
 
     /// The pane this sink reports for.
