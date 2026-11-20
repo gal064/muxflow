@@ -297,7 +297,7 @@ export function newClientMessageId(): string {
 
 /** The host's agent mode as Settings shows it. */
 export function agentModeLabel(mode: "terminal" | "chat" | "unknown"): string {
-  return mode === "chat" ? "Chat" : mode === "terminal" ? "Terminal" : "Unknown";
+  return mode === "chat" ? "Chat (experimental)" : mode === "terminal" ? "Terminal" : "Unknown";
 }
 
 // ---- the slash list ------------------------------------------------------------

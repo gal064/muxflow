@@ -941,8 +941,8 @@ impl SettingsDialog {
             |controller| controller.read(cx).active_host_label(),
         );
         let off = mode.chat.is_none() || mode.changing || change.is_none();
-        let radio = |label: &'static str| {
-            Radio::new(SharedString::from(format!("settings-agent-mode-{label}")))
+        let radio = |key: &'static str, label: &'static str| {
+            Radio::new(SharedString::from(format!("settings-agent-mode-{key}")))
                 .label(label)
                 .disabled(off)
         };
@@ -992,7 +992,10 @@ impl SettingsDialog {
                             })
                             .child(
                                 RadioGroup::horizontal("settings-agent-mode")
-                                    .children([radio("Terminal"), radio("Chat")])
+                                    .children([
+                                        radio("Terminal", "Terminal"),
+                                        radio("Chat", "Chat (experimental)"),
+                                    ])
                                     .selected_index(mode.chat.map(usize::from))
                                     .disabled(off)
                                     .on_change(move |index, window, cx| {
