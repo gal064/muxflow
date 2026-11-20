@@ -178,12 +178,18 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const retry = useCallback(() => chatClient.retry(paneId), [paneId]);
 
   // Stop shows at once, until the turn stops working, the host refuses, the
-  // connection goes, or no answer comes.
+  // connection goes, or no answer comes. A turn that ends while a message
+  // waits behind it leaves the agent working, on that message's turn: the
+  // count of ended turns says the stopped one is over.
   const [stopping, setStopping] = useState(false);
   const working = turnOf(pane) === ChatTurnState.WORKING;
+  const turnsEnded = pane?.state?.turnsEnded ?? 0n;
   useEffect(() => {
     if (!working || !connected) setStopping(false);
   }, [connected, working]);
+  useEffect(() => {
+    setStopping(false);
+  }, [turnsEnded]);
   useEffect(() => {
     if (!stopping) return undefined;
     const timer = setTimeout(() => setStopping(false), STOP_WAIT_MS);

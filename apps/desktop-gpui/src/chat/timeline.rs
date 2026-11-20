@@ -444,12 +444,29 @@ pub(super) fn tokens(count: u64) -> String {
     }
 }
 
-/// "2 background tasks": the chip on the composer's top edge.
-pub(super) fn background_label(count: usize) -> String {
-    if count == 1 {
-        "1 background task".to_owned()
+/// "2 commands", or "2 background tasks" when not all of them are commands:
+/// the chip on the composer's top edge for what runs outside the turn and is
+/// not a subagent.
+pub(super) fn background_label(count: usize, commands: bool) -> String {
+    let noun = if commands {
+        "command"
     } else {
-        format!("{count} background tasks")
+        "background task"
+    };
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// "+2 agents": the subagents running in the background after the first,
+/// whose pill names it.
+pub(super) fn more_agents_label(count: usize) -> String {
+    if count == 1 {
+        "+1 agent".to_owned()
+    } else {
+        format!("+{count} agents")
     }
 }
 
@@ -979,8 +996,12 @@ mod tests {
         assert_eq!(tokens(61_000), "61k");
         assert_eq!(tokens(182_000), "182k");
         assert_eq!(tokens(1_250_000), "1.3M");
-        assert_eq!(background_label(1), "1 background task");
-        assert_eq!(background_label(2), "2 background tasks");
+        assert_eq!(background_label(1, true), "1 command");
+        assert_eq!(background_label(2, true), "2 commands");
+        assert_eq!(background_label(1, false), "1 background task");
+        assert_eq!(background_label(2, false), "2 background tasks");
+        assert_eq!(more_agents_label(1), "+1 agent");
+        assert_eq!(more_agents_label(2), "+2 agents");
     }
 
     #[test]

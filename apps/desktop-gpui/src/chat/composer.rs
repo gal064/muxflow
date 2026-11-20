@@ -16,7 +16,7 @@ use gpui_kit::{
     accesskit::Toggled,
     component::{
         Disableable, Icon, Sizable,
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
         input::{Enter, Escape, IndentInline, MoveDown, MoveUp, OutdentInline, Paste, Textarea},
         menu::DropdownMenu,
@@ -34,6 +34,7 @@ use crate::{
     context_menu::{Entry, Item, fill},
     fonts,
     theme::{Palette, metrics::ui},
+    ui::motion::WorkingIcon,
 };
 
 use super::{
@@ -550,7 +551,7 @@ impl ChatPane {
     fn send_button(&self, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let stop = self.stoppable();
         let off = if stop {
-            self.stopping
+            self.stopping.is_some()
         } else {
             self.send_refusal().is_some() || self.attachments_refusal().is_some()
         };
@@ -709,34 +710,115 @@ impl ChatPane {
             .into_any_element()
     }
 
-    /// `.pill.bgt` on the composer's top edge while anything runs outside the
+    /// `.edge` on the composer's top edge while anything runs outside the
     /// turn, working or idle (D15): it is all that tells an idle chat with a
-    /// command still running from a finished one. It opens the list of what
-    /// runs, as the model pill opens its own, with a stop button on a row the
-    /// agent can stop (D18).
+    /// command still running from a finished one. A subagent there has a
+    /// pill of its own, in accent, with the working mark, its description
+    /// and how long it has run; the ones after it are a count. Commands and
+    /// the rest share one chip. Each opens the list of what runs, as the
+    /// model pill opens its own, with a stop button on a row the agent can
+    /// stop (D18).
     fn background_chip(&self, p: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let tasks = &self.chat.state.background;
         if tasks.is_empty() || !self.chat.is_held() {
             return None;
         }
-        let label = timeline::background_label(tasks.len());
         let open = self.tasks_open;
-        let ink = if open { p.accent } else { p.chrome_dim };
+        let is_agent = |kind: i32| kind == i32::from(ChatTaskKind::Subagent);
+        let mut agents = tasks.iter().filter(|task| is_agent(task.kind));
+        let others: Vec<i32> = tasks
+            .iter()
+            .map(|task| task.kind)
+            .filter(|kind| !is_agent(*kind))
+            .collect();
+        let pill = |id: &'static str, accent: bool| {
+            h_flex()
+                .id(id)
+                .test_support()
+                .flex_none()
+                .min_w_0()
+                .px(ui(8.))
+                .py(ui(1.))
+                .gap(ui(5.))
+                .border_1()
+                .border_color(if accent || open {
+                    p.accent
+                } else {
+                    p.chrome_border
+                })
+                .rounded_full()
+                .bg(p.chrome_bg)
+                .text_size(ui(11.))
+                .text_color(if accent {
+                    p.chrome_ink_strong
+                } else {
+                    p.chrome_ink
+                })
+        };
+        let mut said = Vec::new();
+        let mut pills = Vec::new();
+        if let Some(first) = agents.next() {
+            let time = Self::since_unix_millis(first.started_at_unix_millis)
+                .map(|ran| SharedString::from(timeline::elapsed(ran)));
+            said.push(first.description.clone());
+            pills.push(
+                pill("chat-tasks-agent", true)
+                    .flex_shrink(1.)
+                    .max_w(ui(280.))
+                    .child(WorkingIcon::new(8., p.state_working))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(first.description.clone())),
+                    )
+                    .children(
+                        time.map(|time| div().flex_none().text_color(p.chrome_faint).child(time)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let more = agents.count();
+        if more > 0 {
+            let label = timeline::more_agents_label(more);
+            said.push(label.clone());
+            pills.push(
+                pill("chat-tasks-agents", true)
+                    .child(icon(IconName::Bot, 12., p.accent))
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
+        if !others.is_empty() {
+            let commands = others
+                .iter()
+                .all(|kind| *kind == i32::from(ChatTaskKind::Command));
+            let label = timeline::background_label(others.len(), commands);
+            let glyph = if commands {
+                IconName::SquareTerminal
+            } else {
+                IconName::Layers
+            };
+            said.push(label.clone());
+            pills.push(
+                pill("chat-tasks-others", false)
+                    .child(icon(glyph, 12., if open { p.accent } else { p.chrome_dim }))
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
+        // One button for the row, so the pills open one list and take one
+        // stop of Tab.
         let chip = Button::new("chat-tasks")
-            .icon(icon(IconName::Layers, 12., ink))
-            .label(label.clone())
-            .accessibility_label(label)
+            .custom(ButtonCustomVariant::new(cx))
+            .accessibility_label(said.join(", "))
             .xsmall()
             .h_auto()
-            .px(ui(8.))
-            .py(ui(1.))
-            .gap(ui(5.))
-            .border_1()
-            .border_color(if open { p.accent } else { p.chrome_border })
+            .p(px(0.))
+            .gap(ui(6.))
+            .max_w_full()
             .rounded_full()
-            .bg(p.chrome_bg)
-            .text_size(ui(11.))
-            .text_color(p.chrome_ink);
+            .children(pills);
         let off = self.agent_refusal().is_some();
         let rows: Vec<TaskRow> = tasks
             .iter()
@@ -767,6 +849,8 @@ impl ChatPane {
                     .ok();
             })
             .trigger(chip)
+            // Held to the composer's width: the agent's pill gives way first.
+            .trigger_style(gpui_kit::StyleRefinement::default().max_w_full())
             // `.pop`, as the model pill's list and the command list are.
             .w(ui(300.))
             .p(px(0.))
@@ -781,6 +865,7 @@ impl ChatPane {
                 .absolute()
                 .top(ui(-11.))
                 .left(ui(10.))
+                .right(ui(10.))
                 .child(popover)
                 .into_any_element(),
         )

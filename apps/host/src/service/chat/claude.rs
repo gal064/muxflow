@@ -1638,6 +1638,7 @@ impl Claude {
 
     fn result(&mut self, message: &Value, out: &mut Output) {
         self.busy = false;
+        self.state.turns_ended += 1;
         // A compaction is over with its turn, however it ended.
         self.state.compacting = false;
         // A turn has ended, and with it every message but the ones the agent

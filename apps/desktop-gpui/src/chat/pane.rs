@@ -22,7 +22,7 @@ use std::{
 use desktop_core::connection::chat::{
     ChatAction, ChatAnswer, ChatCapabilities, ChatCommand, ChatConnection, ChatEvent, ChatItem,
     ChatItemKind, ChatModel, ChatOptions, ChatPendingRequest, ChatRequest, ChatRequestKind,
-    ChatResponse, ChatSpeed, ChatToolKind, ChatTurnState,
+    ChatResponse, ChatSpeed, ChatTaskKind, ChatToolKind, ChatTurnState,
 };
 use futures::future::BoxFuture;
 use gpui_kit::{
@@ -318,8 +318,9 @@ pub struct ChatPane {
     pub(super) wanted: Wanted,
     /// Counts `SET_OPTIONS`, so each answer finds its own choice.
     choices: u64,
-    /// Stop was pressed and the turn has not ended yet.
-    pub(super) stopping: bool,
+    /// Stop was pressed when this many turns had ended, and the turn it
+    /// stopped has not ended yet.
+    pub(super) stopping: Option<u64>,
     stop_wait: Option<Task<()>>,
     pub(super) list: Entity<MessageScrollerState>,
     /// The items as laid out in rows, as the list was last told of them.
@@ -332,6 +333,8 @@ pub struct ChatPane {
     thoughts: HashMap<String, Thought>,
     /// When the turn in progress started, as near as this pane knows.
     turn_started: Option<Instant>,
+    /// How many turns had ended by the state this pane last followed.
+    turns_ended: u64,
     /// When the agent started compacting, as near as this pane knows.
     compacting_since: Option<Instant>,
     /// Ticks the working line's seconds, and the background list's, while
@@ -508,7 +511,7 @@ impl ChatPane {
             updating: false,
             wanted: Wanted::default(),
             choices: 0,
-            stopping: false,
+            stopping: None,
             stop_wait: None,
             list,
             entries: Vec::new(),
@@ -516,6 +519,7 @@ impl ChatPane {
             open_groups: HashSet::new(),
             thoughts: HashMap::new(),
             turn_started: None,
+            turns_ended: 0,
             compacting_since: None,
             ticker: None,
             tasks_open: false,
@@ -905,11 +909,18 @@ impl ChatPane {
     /// Keeps the turn's start: from when this pane saw it start, else from
     /// the user's newest message, never later than now.
     fn follow_turn(&mut self, reset: bool, now: Instant) {
+        let ended = self.chat.state.turns_ended;
+        let next = std::mem::replace(&mut self.turns_ended, ended) != ended;
         if !timeline::is_busy(self.turn()) {
             self.turn_started = None;
             return;
         }
         if !reset {
+            // A turn ended with a message waiting behind it, whose turn
+            // starts now.
+            if next {
+                self.turn_started = Some(now);
+            }
             self.turn_started.get_or_insert(now);
             return;
         }
@@ -1001,10 +1012,18 @@ impl ChatPane {
 
     /// Ticks the working line once a second while it is on screen, from the
     /// turn's start so the seconds turn over evenly, and the background
-    /// list's times while it is open. A pane kept off screen, or one with
-    /// neither, has no timer and draws nothing.
+    /// list's times while it is open or a subagent's pill shows one. A pane
+    /// kept off screen, or one with none of them, has no timer and draws
+    /// nothing.
     fn sync_ticker(&mut self, cx: &mut Context<Self>) {
-        if !(self.on_screen && (self.working() || self.tasks_open)) {
+        // A subagent's pill on the composer's edge says how long it has run.
+        let agent = self
+            .chat
+            .state
+            .background
+            .iter()
+            .any(|task| task.kind == i32::from(ChatTaskKind::Subagent));
+        if !(self.on_screen && (self.working() || self.tasks_open || agent)) {
             self.ticker = None;
             return;
         }
@@ -1149,7 +1168,12 @@ impl ChatPane {
         }
         if matches!(outcome, Outcome::Reset | Outcome::State) {
             self.wanted.settle(&self.confirmed_options());
-            if self.turn() != ChatTurnState::Working {
+            // The stopped turn has ended, though a message that waited
+            // behind it may keep the agent working on its own turn.
+            let ended = self
+                .stopping
+                .is_some_and(|from| self.chat.state.turns_ended != from);
+            if ended || self.turn() != ChatTurnState::Working {
                 self.stopped(cx);
             }
         }
@@ -1688,7 +1712,7 @@ impl ChatPane {
     /// Asks the agent to stop. Stop shows it at once and is off until the
     /// turn ends, so a press the host has not answered yet is not sent twice.
     pub(super) fn interrupt(&mut self, cx: &mut Context<Self>) {
-        if self.stopping {
+        if self.stopping.is_some() {
             return;
         }
         let stop = ChatRequest {
@@ -1696,7 +1720,7 @@ impl ChatPane {
             ..Default::default()
         };
         self.notice = None;
-        self.stopping = true;
+        self.stopping = Some(self.chat.state.turns_ended);
         let wait = cx.background_executor().timer(STOP_WAIT);
         self.stop_wait = Some(cx.spawn(async move |this, cx| {
             wait.await;
@@ -1714,7 +1738,7 @@ impl ChatPane {
     /// Stop is Stop again: the turn ended, the host refused, or no answer came.
     fn stopped(&mut self, cx: &mut Context<Self>) {
         self.stop_wait = None;
-        if std::mem::take(&mut self.stopping) {
+        if self.stopping.take().is_some() {
             cx.notify();
         }
     }

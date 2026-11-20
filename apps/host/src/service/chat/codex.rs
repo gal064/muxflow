@@ -1158,6 +1158,7 @@ impl Codex {
         self.starting = false;
         self.pending.clear();
         self.state.compacting = false;
+        self.state.turns_ended += 1;
         for (id, mut item) in std::mem::take(&mut self.open) {
             // A command still running was put in the background: listed
             // until its own end. Codex has no stop for one.

@@ -2739,6 +2739,39 @@ fn stop_shows_at_once_until_the_turn_ends(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_stopped_turn_with_a_message_behind_it_works_on_that_message(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(5));
+    shell.settle();
+    assert_eq!(shell.label("chat-working-time"), "5s");
+    shell.click("chat-send");
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+    // A change while the turn is still being stopped is not its end.
+    shell.chat(event(
+        12,
+        ChatChange::State(with_tasks(ChatTurnState::Working, vec![server()])),
+    ));
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+    // The stopped turn ends, and the message sent during it starts its own:
+    // the agent works, on a turn that has only just begun.
+    let next = ChatState {
+        turns_ended: 1,
+        ..state(ChatTurnState::Working)
+    };
+    shell.chat(event(13, ChatChange::State(next)));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.label("chat-working-time"), "0s");
+    assert!(shell.named("Stop"));
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+}
+
+#[gpui_kit::test]
 fn a_refused_or_unanswered_stop_is_stop_again(cx: &mut TestAppContext) {
     let mut shell = open(cx);
     shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
@@ -3310,7 +3343,8 @@ fn the_chip_comes_and_goes_with_the_list_and_stays_while_the_chat_is_idle(cx: &m
         11,
         ChatChange::State(with_tasks(ChatTurnState::Working, vec![server()])),
     ));
-    assert!(shell.named("1 background task"));
+    assert_eq!(shell.label("chat-tasks"), "1 command");
+    assert!(!shell.shows("chat-tasks-agent"));
     // On the composer's top edge, beside the composer and not in it: the
     // composer's border is drawn after its children, through the chip (S9).
     let (chip, composer) = shell
@@ -3330,22 +3364,76 @@ fn the_chip_comes_and_goes_with_the_list_and_stays_while_the_chat_is_idle(cx: &m
         12,
         ChatChange::State(with_tasks(ChatTurnState::Idle, vec![server()])),
     ));
-    assert!(shell.named("1 background task"));
+    assert_eq!(shell.label("chat-tasks"), "1 command");
     assert!(!shell.shows("chat-working"));
+    // A subagent has a pill of its own, named; the ones after it are a count.
     let audit = task(
         "b2",
         ChatTaskKind::Subagent,
         "Explore: audit the tests",
         true,
     );
+    let docs = task("b4", ChatTaskKind::Subagent, "Check the docs", true);
     shell.chat(event(
         13,
-        ChatChange::State(with_tasks(ChatTurnState::Idle, vec![server(), audit])),
+        ChatChange::State(with_tasks(
+            ChatTurnState::Idle,
+            vec![server(), audit.clone()],
+        )),
     ));
-    assert!(shell.named("2 background tasks"));
+    assert_eq!(
+        shell.label("chat-tasks"),
+        "Explore: audit the tests, 1 command"
+    );
+    assert!(shell.shows("chat-tasks-agent"));
+    assert!(!shell.shows("chat-tasks-agents"));
+    shell.chat(event(
+        14,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, vec![audit, docs])),
+    ));
+    assert_eq!(
+        shell.label("chat-tasks"),
+        "Explore: audit the tests, +1 agent"
+    );
+    assert!(!shell.shows("chat-tasks-others"));
+    // The agent's pill says how long it has run, so it ticks though no turn
+    // works and the list is closed.
+    assert!(ticking(&mut shell));
+    // In a narrow pane the row stays on the composer, the agent's pill
+    // giving way.
+    let long = task(
+        "b5",
+        ChatTaskKind::Subagent,
+        &"Review every crate in the workspace for unsafe code ".repeat(4),
+        true,
+    );
+    shell.chat(event(
+        15,
+        ChatChange::State(with_tasks(
+            ChatTurnState::Idle,
+            vec![
+                long,
+                task("b6", ChatTaskKind::Subagent, "Docs", true),
+                server(),
+            ],
+        )),
+    ));
+    shell.visual.simulate_resize(size(px(520.), px(700.)));
+    shell.settle();
+    let (row, composer) = shell
+        .visual
+        .update(|window, _| (window.find("chat-tasks"), window.find("chat-composer")));
+    assert!(
+        row.bounds().right() <= composer.bounds().right(),
+        "{:?} past {:?}",
+        row.bounds(),
+        composer.bounds()
+    );
+    assert!(shell.shows("chat-tasks-others"));
     // The last one ends: the chip goes with it.
-    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    shell.chat(event(16, ChatChange::State(state(ChatTurnState::Idle))));
     assert!(!shell.shows("chat-tasks"));
+    assert!(!ticking(&mut shell));
 }
 
 #[gpui_kit::test]
@@ -3364,7 +3452,8 @@ fn the_chip_opens_the_list_and_stop_asks_the_host_and_holds_its_row(cx: &mut Tes
         ChatChange::State(with_tasks(ChatTurnState::Idle, tasks.clone())),
     ));
     assert!(!shell.shows("chat-task-b1"));
-    assert!(!ticking(&mut shell));
+    // The agent's pill says how long it has run.
+    assert!(ticking(&mut shell));
     shell.click("chat-tasks");
     assert_eq!(shell.label("chat-task-b1"), "Run the dev server");
     assert_eq!(shell.label("chat-task-b2"), "Explore: audit the tests");
@@ -3393,7 +3482,10 @@ fn the_chip_opens_the_list_and_stop_asks_the_host_and_holds_its_row(cx: &mut Tes
         ChatChange::State(with_tasks(ChatTurnState::Idle, left.clone())),
     ));
     assert!(!shell.shows("chat-task-b1"));
-    assert!(shell.named("2 background tasks"));
+    assert_eq!(
+        shell.label("chat-tasks"),
+        "Explore: audit the tests, 1 background task"
+    );
 
     // A refusal says why, and the button can be pressed again.
     shell
