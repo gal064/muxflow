@@ -16,6 +16,8 @@ same window geometry, against identically seeded scratch state.
 | `frameprobe.py` | GPUI frame rate (Wayland commits) and per-thread CPU and GPU cost with 6 working agents and no output, against the static-dot variant |
 | `sizes.sh` | Scenario 1: binary and package sizes |
 | `workloads/` | Output generators, the typing probe, the remote sampler, the agent replay |
+| `bench_switch.py` | GPUI agent-switch latency: click an agent row, time to the target on screen (see Agent switch) |
+| `loopback-ssh.sh` | An SSH host on this machine without root: private sshd, separate bench account root, optional slow link |
 
 ## Build (same commit for both)
 
@@ -154,6 +156,65 @@ tmux -S <scratch>/rec.sock -f /dev/null new-session -d -s claude -x 84 -y 17 \
 Use `codex --sandbox read-only` for Codex. Use a directory both CLIs already
 trust (answering a trust prompt writes to their settings). Unset `TMUX` so the
 user's own agent hooks do not report into the user's real helper daemon.
+
+## Agent switch (GPUI only)
+
+`bench_switch.py` times a click on an agent row in the sidebar to the first
+compositor capture that shows the target. One tmux server holds four stand-in
+agents (`workloads/marker-agent.pl`, started as `claude`/`codex` so the helper
+lists them): `a1 | a2` in tab 1 and `a3` in tab 2 of workspace `w1`, `b1` in
+workspace `w2`. Each paints one block of its own colour and parks a steady
+block cursor below it.
+
+| Case | Switch | `painted` is |
+|---|---|---|
+| `switch-same-tab` | a1 <-> a2 | the target's cursor drawn focused |
+| `switch-other-tab` | a1 <-> a3 | the target's colour block on screen |
+| `switch-other-workspace` | a1 <-> b1 | the target's colour block on screen |
+
+Each switch also records `focused` (target cursor filled, or blank in a blink's
+off phase, against the hollow outline of an unfocused pane) and `row` (the
+clicked row drawn in the selection colour). Clicks come from
+`workloads/vpointer.c`, a `zwlr_virtual_pointer_v1` client run on the private
+compositor only; time zero is the button release it reports. Captures are
+~19 ms apart, so every time is quantized to that. Rows are found from the
+sidebar's pixels and mapped to targets by clicking each once, so nothing reads
+the app's state and any build is measured the same way. Switches alternate
+direction; the default is 3 launches x 10 switches per case.
+
+The SSH host is this machine: `loopback-ssh.sh <dir> start` runs a private
+sshd on 127.0.0.1 whose sessions get their own HOME, `TMUX_TMPDIR`,
+`ADE_TMUX_SOCKET_NAME` and `ADE_HOST_RUNTIME_DIR` under `<dir>` (never the
+user's tmux, helper or dotfiles). The app's alias `muxflow-bench` goes through
+`workloads/delay-proxy.pl` as a `ProxyCommand`, which holds every chunk
+`<dir>/delay_ms` in each direction (no bandwidth cap, no loss); the harness's
+own commands use `muxflow-bench-direct`. `--link-delay 500` is a ~1000 ms RTT
+(the app's status bar shows it).
+
+```sh
+unset TMUX TMUX_PANE        # from inside tmux, always
+tests/performance/app-bench/loopback-ssh.sh /dev/shm/mxl start
+bench=tests/performance/app-bench/bench_switch.py
+uv run --script $bench --root /dev/shm/mxb --bin-dir <dir with muxflow-gpui + muxflow-host> \
+  --results <results> --host local
+uv run --script $bench ... --host ssh --loopback /dev/shm/mxl --link-delay 0     # -> ssh/
+uv run --script $bench ... --host ssh --loopback /dev/shm/mxl --link-delay 500   # -> ssh-rtt1000/
+tests/performance/app-bench/loopback-ssh.sh /dev/shm/mxl stop
+```
+
+`bench_linux.py` takes the same loopback host (`--ssh-config <dir>/ssh_config
+--ssh-target muxflow-bench --ssh-control-target muxflow-bench-direct`) and
+`--bin-dir` for binaries outside `target/release`. It refuses an SSH host whose
+sessions do not set `ADE_HOST_RUNTIME_DIR` and a non-default
+`ADE_TMUX_SOCKET_NAME`, and drives the remote tmux only through that named
+socket. A scratch root on tmpfs (`/dev/shm`) keeps the app's and helper's
+writes out of the disk's writeback, which otherwise stalls the app's main
+thread when other builds saturate the disk.
+
+Limits: the stand-in agents are terminal agents; chat-mode agents are not
+measured (the scripted chat provider, `MUXFLOW_CHAT_SCRIPTED=1`, turns every
+untagged pane into a chat, so it cannot share a run with terminal agents).
+The loopback "remote" shares this machine's CPU with the app.
 
 ## Results layout
 
