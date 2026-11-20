@@ -204,14 +204,13 @@ export function useVoiceMode({ paneId, sessionId, serverIdentity, voiceMode, con
       pane: (
         <>
           {keepAwake && focused ? <VoiceWakeLock /> : null}
-          <ChatVoicePane controller={controller} hint={hint} onKeyboard={onKeyboard} onStop={onStop} phase={phase} stopping={stopping} working={working} />
+          <ChatVoicePane controller={controller} hint={hint} onKeyboard={onKeyboard} onStop={onStop} onTipDone={() => prefsStore.getState().setChatMicTipDone()} phase={phase} stopping={stopping} tip={!tipDone} working={working} />
         </>
       ),
       ready: readiness === "ready",
       dictation: {
         phase,
         refusal: hint,
-        tip: !tipDone && hint === "",
         onPressIn: () => setPressing(true),
         onRelease: () => setPressing(false),
         onBegin: () => {

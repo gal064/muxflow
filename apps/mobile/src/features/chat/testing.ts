@@ -239,7 +239,6 @@ export function dictation(fields: Partial<ComposerDictation> = {}, calls: string
   return {
     phase: "idle",
     refusal: "",
-    tip: false,
     onPressIn: () => calls.push("pressIn"),
     onRelease: () => calls.push("release"),
     onBegin: () => calls.push("begin"),
