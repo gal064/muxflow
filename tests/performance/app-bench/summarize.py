@@ -38,6 +38,9 @@ SCENARIOS = [
     ("editor", "Editor: Quick Open and open a 5 MB file (no scrolling)"),
     ("explorer", "Explorer: expand a 10,000-entry directory, 300 x Down"),
     ("typing", "Typing latency (keystroke to pixels)"),
+    ("switch-same-tab", "Agent switch, target in the same tab (click to target focused)"),
+    ("switch-other-tab", "Agent switch, target in another tab (click to target on screen)"),
+    ("switch-other-workspace", "Agent switch, target in another workspace (click to target on screen)"),
     ("compositor-baseline", "Compositor alone, no app window"),
 ]
 
@@ -87,6 +90,13 @@ METRICS = {
         ("App RSS (peak sample)", ("rss_mb", "app", "max"), "MB", 0),
         ("Remote helper CPU-seconds", ("remote", "cpu_s", "host"), "CPU-s", 2),
     ],
+    "switch": [
+        ("Painted, median", ("metrics", "painted_ms_median"), "ms", 0),
+        ("Painted, p95", ("metrics", "painted_ms_p95"), "ms", 0),
+        ("Target cursor focused, median", ("metrics", "focused_ms_median"), "ms", 0),
+        ("Row drawn selected, median", ("metrics", "row_ms_median"), "ms", 0),
+        ("Switches not painted within the timeout", ("metrics", "painted_missed"), "", 0),
+    ],
     "typing": [
         ("Median latency", ("metrics", "latency_ms_median"), "ms", 1),
         ("p95 latency", ("metrics", "latency_ms_p95"), "ms", 1),
@@ -103,6 +113,8 @@ def kind(scenario: str) -> str:
         return "heavy"
     if scenario == "typing":
         return "typing"
+    if scenario.startswith("switch-"):
+        return "switch"
     if scenario in ("editor", "explorer"):
         return "action"
     return "steady"
@@ -176,7 +188,8 @@ def main() -> int:
         lines += [(root / "fix.md").read_text().strip(), ""]
     if (root / "sizes.md").exists():
         lines += [(root / "sizes.md").read_text().strip(), ""]
-    for host in ("local", "ssh"):
+    links = sorted(d.name for d in root.glob("ssh-*") if d.is_dir())
+    for host in ("local", "ssh", *links):
         host_dir = root / host
         if not host_dir.exists():
             continue
@@ -211,6 +224,21 @@ def main() -> int:
                                  f"{cell(fixed, decimals)} | {ratio(tauri, fixed)} |")
                 else:
                     lines.append(f"| {name} | {cell(tauri, decimals)} | {cell(gpui, decimals)} | {ratio(tauri, gpui)} |")
+            if kind(scenario) == "switch":
+                # Every switch of every run in one pool, beside the per-run medians above.
+                def pooled(runs: list[dict]) -> str:
+                    v = sorted(x["painted_ms"] for r in runs for x in r.get("samples", [])
+                               if x.get("painted_ms") is not None)
+                    if not v:
+                        return "n/a"
+                    p95 = v[min(len(v) - 1, int(round(0.95 * (len(v) - 1))))]
+                    return f"{statistics.median(v):.0f} / {p95:.0f} (n={len(v)})"
+                if after:
+                    lines.append(f"| Painted, all switches pooled: median / p95 (ms) | n/a | "
+                                 f"{pooled(results.get('gpui', []))} | {pooled(after)} | |")
+                else:
+                    lines.append(f"| Painted, all switches pooled: median / p95 (ms) | n/a | "
+                                 f"{pooled(results.get('gpui', []))} | |")
             errors = [f"{r['app']} run {r['run']}: {r['metrics']['error']}"
                       for runs in [*results.values(), after] for r in runs if r.get("metrics", {}).get("error")]
             if errors:

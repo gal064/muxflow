@@ -44,6 +44,17 @@ PROMPT = r"\[\e[48;2;255;0;255m\]  BENCH  \[\e[0m\] "
 # A solid 40-cell bar: no workload output forms a 150 px run of saturated green.
 SENTINEL = r"printf '\e[48;2;0;255;0m%40s\e[0m\n' ''"
 TMUX_SOCKET = "b"  # short: the socket path must fit in sun_path
+# The SSH host's bench tmux server, always named: a bare `tmux` follows $TMUX
+# or the default socket, which on a shared account is the user's own server.
+# The bench account sets ADE_HOST_RUNTIME_DIR and ADE_TMUX_SOCKET_NAME (the
+# helper reads both); RemoteTerminal.prepare refuses a host without them.
+RTMUX = 'tmux -L "$ADE_TMUX_SOCKET_NAME"'
+# Kills the remote sampler by its pid file, and only if that pid still runs
+# remote-sampler.pl: on a loopback host the account is the user's own, and a
+# stale file could name a reused pid.
+SAMPLER_KILL = ('pid=$(cat ~/bench/sampler.pid 2>/dev/null); '
+                'if [ -n "$pid" ] && tr "\\0" " " < /proc/$pid/cmdline 2>/dev/null | grep -q remote-sampler.pl; '
+                'then kill "$pid" 2>/dev/null; fi')
 
 
 def log(message: str) -> None:
@@ -350,7 +361,7 @@ class RemoteTerminal:
     def ssh(self, command: str, check: bool = True, timeout: float = 120) -> str:
         args = ["ssh", "-F", str(self.ctx.ssh_config), "-o", "BatchMode=yes",
                 "-o", "ControlMaster=auto", "-o", f"ControlPath={self.ctx.control_path}",
-                "-o", "ControlPersist=900", self.ctx.ssh_target, command]
+                "-o", "ControlPersist=900", self.ctx.ssh_control_target, command]
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         if check and result.returncode != 0:
             raise RuntimeError(f"ssh {command!r}: {result.stderr.strip()}")
@@ -359,11 +370,23 @@ class RemoteTerminal:
     def scp(self, sources: list[Path], destination: str) -> None:
         subprocess.run(
             ["scp", "-q", "-F", str(self.ctx.ssh_config), "-o", f"ControlPath={self.ctx.control_path}",
-             *map(str, sources), f"{self.ctx.ssh_target}:{destination}"],
+             *map(str, sources), f"{self.ctx.ssh_control_target}:{destination}"],
             check=True,
         )
 
+    def check_isolated(self) -> None:
+        """The remote account must be a bench account: a private helper runtime
+        dir and a named tmux socket in its environment, and no $TMUX."""
+        out = self.ssh('printf "%s|%s|%s" "${ADE_HOST_RUNTIME_DIR:-}" "${ADE_TMUX_SOCKET_NAME:-}" "${TMUX:-}"',
+                       check=False)
+        runtime, socket_name, tmux = (out.split("|") + ["", "", ""])[:3]
+        if not runtime or not socket_name or socket_name == "default" or tmux:
+            raise SystemExit(
+                f"refusing the SSH host: its sessions need ADE_HOST_RUNTIME_DIR and a non-default "
+                f"ADE_TMUX_SOCKET_NAME, and no TMUX (got {out!r}); see loopback-ssh.sh")
+
     def prepare(self) -> None:
+        self.check_isolated()
         self.ssh("mkdir -p ~/bench ~/.local/bin")
         self.scp([HERE / "workloads" / name for name in
                   ("remote-sampler.pl", "stream.pl", "colored.pl", "keyprobe.pl")], "bench/")
@@ -390,23 +413,25 @@ class RemoteTerminal:
 
     def reset(self, layout: str | None) -> None:
         # Only the bench sessions, the bench user's helper daemon and our sampler.
-        self.ssh("tmux kill-session -t w1 2>/dev/null; ~/.local/bin/muxflow-host daemon-stop >/dev/null 2>&1; "
-                 "pkill -u $(id -u) -f remote-sampler.pl; rm -f ~/bench/stop; true", check=False)
+        self.check_isolated()
+        self.ssh(f"{RTMUX} kill-server 2>/dev/null; "
+                 "~/.local/bin/muxflow-host daemon-stop >/dev/null 2>&1; "
+                 f"{SAMPLER_KILL}; rm -f ~/bench/stop ~/bench/sampler.pid; true", check=False)
         if layout:
             self.create_layout(layout)
 
     def create_layout(self, layout: str) -> None:
-        self.ssh(layout_script(layout, "~", "tmux"))
+        self.ssh(layout_script(layout, "~", RTMUX))
 
     def send(self, text: str, enter: bool = True, pane: str | None = None) -> None:
-        target = shlex.quote(pane) if pane else "$(tmux list-panes -s -t w1 -F '#{pane_id}' | head -1)"
-        command = f"tmux send-keys -t {target} -l {shlex.quote(text)}"
+        target = shlex.quote(pane) if pane else f"$({RTMUX} list-panes -s -t w1 -F '#{{pane_id}}' | head -1)"
+        command = f"{RTMUX} send-keys -t {target} -l {shlex.quote(text)}"
         if enter:
-            command += f" && tmux send-keys -t {target} Enter"
+            command += f" && {RTMUX} send-keys -t {target} Enter"
         self.ssh(command)
 
     def panes(self) -> list[str]:
-        return self.ssh("tmux list-panes -s -t w1 -F '#{pane_id}'").split()
+        return self.ssh(f"{RTMUX} list-panes -s -t w1 -F '#{{pane_id}}'").split()
 
     def run(self, script: str) -> str:
         return self.ssh(script)
@@ -418,10 +443,11 @@ class RemoteTerminal:
     # remote sampler
     def sampler_start(self, tag: str, interval: float) -> None:
         self.ssh(f"rm -f ~/bench/stop; nohup perl ~/bench/remote-sampler.pl ~/bench/s-{tag}.txt "
-                 f"~/bench/stop {interval} >/dev/null 2>&1 &")
+                 f"~/bench/stop {interval} >/dev/null 2>&1 & echo $! > ~/bench/sampler.pid")
 
     def sampler_stop(self, tag: str) -> str:
-        return self.ssh(f"touch ~/bench/stop; sleep 1.2; cat ~/bench/s-{tag}.txt; rm -f ~/bench/s-{tag}.txt ~/bench/stop")
+        return self.ssh(f"touch ~/bench/stop; sleep 1.2; cat ~/bench/s-{tag}.txt; "
+                        f"rm -f ~/bench/s-{tag}.txt ~/bench/stop ~/bench/sampler.pid")
 
 
 def remote_ticks(text: str) -> list[dict]:
@@ -581,8 +607,12 @@ class Context:
         self.data = self.root / "data"
         self.ssh_config = Path(args.ssh_config).resolve() if args.ssh_config else None
         self.ssh_target = args.ssh_target
+        # The harness's own commands may take a different alias than the app
+        # (the switch bench sends them around its slow link).
+        self.ssh_control_target = getattr(args, "ssh_control_target", None) or args.ssh_target
         self.control_path = f"{os.environ.get('XDG_RUNTIME_DIR', '/tmp')}/app-bench-cm"
-        self.target_dir = self.repo / "target" / "release"
+        bin_dir = getattr(args, "bin_dir", None)
+        self.target_dir = Path(bin_dir).resolve() if bin_dir else self.repo / "target" / "release"
         self.host_binary = self.target_dir / "muxflow-host"
         self.compositor = Compositor(self.root, args.compositor, os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
         self.host = "local"
@@ -634,17 +664,23 @@ class Context:
     # state -----------------------------------------------------------------
 
     def stop_host_side(self) -> None:
+        # base_env() names our runtime dir and has no $TMUX: daemon-stop reaches
+        # only the bench daemon, kill-server only the bench socket (-L b).
         subprocess.run([str(self.host_binary), "daemon-stop"], env=self.base_env(), capture_output=True)
         self.local.kill_server()
-        # Anything still holding our runtime dir (a daemon that ignored the stop).
+        # Anything still holding our runtime dir (a daemon that ignored the stop),
+        # and only that: its environment must name our runtime dir. The user's
+        # own helper daemon and bridges run without it.
+        marker = f"ADE_HOST_RUNTIME_DIR={self.runtime}".encode()
         for pid, proc in bl.proc_table().items():
-            if proc.comm.startswith("muxflow-host"):
-                try:
-                    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-                except OSError:
-                    continue
-                if str(self.runtime).encode() in cmdline:
-                    os.kill(pid, signal.SIGKILL)
+            if not proc.comm.startswith("muxflow-host"):
+                continue
+            try:
+                environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if marker in environ:
+                os.kill(pid, signal.SIGKILL)
 
     def reset(self, layout: str | None, seeded: bool) -> None:
         self.stop_app()
@@ -947,7 +983,7 @@ ADAPTERS = {"claude": "claude-code", "codex": "codex"}
 
 def tmux_line(ctx: Context, args: str) -> str:
     if ctx.host == "ssh":
-        return ctx.remote.ssh(f"tmux {args}")
+        return ctx.remote.ssh(f"{RTMUX} {args}")
     return ctx.local.run(f"tmux -L {TMUX_SOCKET} {args}")
 
 
@@ -1124,6 +1160,27 @@ def block_files(ctx: Context, app: str, run: int, scenarios: set[str]) -> None:
         ctx.stop_app()
 
 
+def close_remote(ctx: Context) -> None:
+    """The SSH host's bench sessions and our ControlMaster, for a finally block:
+    a refused or unreachable host is logged, never raised, so the caller still
+    stops the compositor."""
+    if ctx.remote is None:
+        return
+    host = ctx.host
+    ctx.host = "ssh"
+    try:
+        ctx.remote.reset(None)
+    except BaseException as error:  # SystemExit from check_isolated, ssh timeouts
+        log(f"remote cleanup skipped: {error!r}")
+    finally:
+        ctx.host = host
+    try:
+        subprocess.run(["ssh", "-F", str(ctx.ssh_config), "-o", f"ControlPath={ctx.control_path}",
+                        "-O", "exit", ctx.ssh_control_target], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        log(f"closing the ssh control master failed: {error!r}")
+
+
 def compositor_baseline(ctx: Context) -> None:
     ctx.host = "local"
     result, ticks, _ = sample_window(ctx, ctx.window, 1.0, "baseline")
@@ -1191,6 +1248,8 @@ def main() -> int:
     parser.add_argument("--recordings", help="dir with claude/codex .data+.timing and bin/agent-replay")
     parser.add_argument("--ssh-config")
     parser.add_argument("--ssh-target", default="muxflow-bench")
+    parser.add_argument("--ssh-control-target", help="alias for the harness's own ssh commands (default: --ssh-target)")
+    parser.add_argument("--bin-dir", help="directory holding muxflow-gpui/muxflow and muxflow-host (default: <repo>/target/release)")
     parser.add_argument("--compositor", choices=("private", "session"), default="private")
     args = parser.parse_args()
 
@@ -1264,14 +1323,13 @@ def main() -> int:
             if host == "ssh":
                 ctx.remote.reset(None)
     finally:
-        ctx.stop_app()
-        ctx.host = "local"
-        ctx.stop_host_side()
-        if ctx.remote is not None:
-            ctx.remote.reset(None)
-            subprocess.run(["ssh", "-F", str(ctx.ssh_config), "-o", f"ControlPath={ctx.control_path}",
-                            "-O", "exit", ctx.ssh_target], capture_output=True)
-        ctx.compositor.stop()
+        try:
+            ctx.stop_app()
+            ctx.host = "local"
+            ctx.stop_host_side()
+            close_remote(ctx)
+        finally:
+            ctx.compositor.stop()
         log("stopped the app, its helper daemon, the bench tmux server, the remote sessions and the compositor")
     return 0
 
