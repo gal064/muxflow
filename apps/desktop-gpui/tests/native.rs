@@ -244,7 +244,7 @@ fn accelerators_follow_the_overrides_and_keep_the_other_bindings(cx: &mut TestAp
         "ctrl"
     };
     let palette = if cfg!(target_os = "macos") {
-        "shift-cmd-p"
+        "cmd-shift-p"
     } else {
         "ctrl-shift-p"
     };
