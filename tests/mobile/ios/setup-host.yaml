@@ -97,7 +97,7 @@ appId: dev.muxflow.mobile
 - tapOn: '^0: shell,.*'
 - extendedWaitUntil:
     visible:
-      text: Send
+      text: Esc
       enabled: true
     timeout: 30000
 - runFlow:
