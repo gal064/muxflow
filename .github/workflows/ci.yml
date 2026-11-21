@@ -8,7 +8,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'gpui/**']
   workflow_call:
 
 permissions:
@@ -20,12 +20,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The desktop crate's build script checks that externalBin sidecars exist;
-  # only the packaging scripts stage the host helper.
-  TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
-  # vite's production build of the desktop (Monaco included) can exceed
-  # Node's default heap on the 7 GB macOS runners.
-  NODE_OPTIONS: --max-old-space-size=6144
   # `cargo test` spends minutes compiling and seconds running. Keep backtraces,
   # drop the rest of the debug info. Opt level stays: at 0 test threads overflow.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -33,17 +27,17 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install system packages
         timeout-minutes: 14
-        run: .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
+        # The X11, xkb, Wayland and ALSA development files are for the GPUI app
+        # (ALSA for its agent sounds). Mesa's software Vulkan (lavapipe) is for its
+        # offscreen frame test.
+        run: >-
+          .github/scripts/apt-install.sh tmux
+          libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers libasound2-dev
       # Installs the toolchain pinned in rust-toolchain.toml.
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -58,17 +52,15 @@ jobs:
             tests/release/protocol-driver
             tests/performance/runtime/perf-driver
       - uses: astral-sh/setup-uv@v6
-      - run: pnpm install --frozen-lockfile
 
       - name: Rust formatting
         run: cargo fmt --all -- --check
-      # The desktop crate embeds the built frontend.
-      - name: Build the desktop frontend
-        run: pnpm build
       - name: Rust lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Point Vulkan at lavapipe only
+        run: echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)" >> "$GITHUB_ENV"
       - name: Rust tests
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets --no-fail-fast
 
       - name: Test-only crates outside the workspace
         run: |
@@ -90,7 +82,7 @@ jobs:
         run: uv run --python 3.12 --no-project --no-config python -m unittest apps/host/src/service/voice/test_sidecar.py
 
   # Apart from `linux` so the two run side by side. The live tests build and
-  # drive the host, which needs tmux and cargo but not the desktop's webkit.
+  # drive the host, which needs tmux and cargo but not the desktop's GPU stack.
   typescript:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -117,10 +109,9 @@ jobs:
           release/check-version.sh
           bash tests/release/test-tags.sh
           bash tests/release/test-build-apk.sh
+          node --test release/license-notices.test.mjs
       - name: TypeScript
         run: |
-          pnpm check
-          pnpm test
           pnpm mobile:check
           pnpm mobile:test
           pnpm --filter @muxflow/terminal-interactions check
@@ -133,27 +124,126 @@ jobs:
           pnpm --filter @muxflow/mobile protocol:check
           pnpm --filter @muxflow/mobile webview:check
 
+  # Keeps GPL and AGPL code out of the app; see deny.toml. Only the license
+  # check runs. It reads Cargo.lock and the registry, so no build is needed.
+  licenses:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check licenses
+
   # The macOS-only code paths (notifications, NSWorkspace, /private/var and
   # socket-path limits) have no other coverage.
   macos:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: brew install tmux
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: pnpm install --frozen-lockfile
-      - name: Build the desktop frontend
-        run: pnpm build
       - name: Rust lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Rust tests
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets --no-fail-fast
+
+  # The release's Linux x86_64 package, built and verified the way release.yml
+  # does it, with the same system packages. The glibc baseline check is why it
+  # runs on ubuntu-24.04.
+  linux-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space for the release build
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Install system packages
+        timeout-minutes: 14
+        run: .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb xauth x11-utils imagemagick dbus-x11 tmux
+      # The package scripts run their release helpers with `node`.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: rustup show active-toolchain || rustup toolchain install
+      # The packages' licence notices (release/third-party-licenses.mjs). Same pin
+      # there. The action is pinned to a commit (v2.88.0): it runs in the signing job.
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32
+        with:
+          tool: cargo-about@0.9.3
+      - name: Build and verify the package
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/desktop-gpui/Cargo.toml | head -n1)
+          release/linux/build-package.sh x86_64
+          release/linux/verify-package.sh "tmp/release/muxflow-$version-linux-x86_64.tar.gz"
+          MUXFLOW_NATIVE_SMOKE_ARTIFACT_DIR="$PWD/tmp/native-window-smoke" \
+            tests/release/native-window-smoke.sh "tmp/release/muxflow-$version-linux-x86_64.tar.gz"
+      - name: Native window evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-native-window-smoke
+          path: tmp/native-window-smoke
+          if-no-files-found: ignore
+
+  # Builds the ad-hoc GPUI package, launches it from the bundle and keeps the
+  # plist and logs: the only Mac the migration's agents can reach (T8.2).
+  macos-package:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        # pipefail, so the build's exit status survives `tee`.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install tmux
+      - run: rustup show active-toolchain || rustup toolchain install
+      # The packages' licence notices (release/third-party-licenses.mjs). Same pin
+      # there. The action is pinned to a commit (v2.88.0): it runs in the signing job.
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32
+        with:
+          tool: cargo-about@0.9.3
+      # build-package.sh lays out the DMG window with dmgbuild through uvx.
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Build and verify the package
+        run: |
+          out=$RUNNER_TEMP/package
+          mkdir -p "$out"
+          ADE_MACOS_PACKAGE_SMOKE=1 release/macos/build-package.sh 2>&1 | tee "$out/build.log"
+          app=$(sed -n 's/^MACOS_PACKAGE_READY .* app=\(.*\) dmg=.*/\1/p' "$out/build.log")
+          ADE_MACOS_PACKAGE_SMOKE=1 release/macos/verify-package.sh "$app"
+          cp "$app/Contents/Info.plist" "$out/"
+          echo "APP=$app" >> "$GITHUB_ENV"
+      - name: Launch the app from the bundle
+        run: |
+          out=$RUNNER_TEMP/package
+          open -n --stdout "$out/app.out" --stderr "$out/app.err" "$APP"
+          sleep 20
+          pgrep -fl "$APP/Contents/MacOS/muxflow" | tee "$out/processes.txt" || true
+          pgrep -qf "^$APP/Contents/MacOS/muxflow\$" || { echo 'the app did not stay up' >&2; cat "$out"/app.*; exit 1; }
+          cat "$out"/app.*
+          # The app installs no logger, so macOS's unified log is kept as well.
+          log show --last 5m --predicate 'process == "muxflow"' > "$out/unified.log" || true
+          ! grep -Ei 'panic|fatal|abort|segmentation' "$out"/app.* || { echo 'the app logged a failure' >&2; exit 1; }
+          if ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i muxflow; then
+            echo 'the app left a crash report' >&2
+            exit 1
+          fi
+      - name: Stop the app
+        if: always() && env.APP != ''
+        run: |
+          pkill -f "^$APP/Contents/MacOS/muxflow\$" || true
+          "$APP/Contents/MacOS/muxflow-host" daemon-stop || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-package
+          path: ${{ runner.temp }}/package

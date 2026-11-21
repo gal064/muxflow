@@ -18,3 +18,15 @@ compatibility arms for mobile either; a mismatch is refused, not supported.
 ## Cleanup
 
 Kill stale dev daemons once you are done.
+
+## Licenses
+
+The desktop app stays MIT. No GPL or AGPL code may enter it: `cargo deny check
+licenses` gates CI, and a dependency whose license is not on the permissive
+allowlist in `deny.toml` fails the build.
+
+Do not read, port or paraphrase Zed's `editor`, `terminal`, `terminal_view` or
+`workspace` crates, or any other GPL or AGPL source. Work from the public APIs of
+`gpui`, `gpui-kit` and `alacritty_terminal`.
+
+`gpui-kit` is pinned to an exact version. Bump it in its own PR.

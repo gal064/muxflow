@@ -2,7 +2,8 @@
 
 ## Supported environment
 
-The validated Linux V1 package is x86-64 with GTK 3 and WebKitGTK 4.1. An
+The validated Linux V1 package is x86-64 with glibc 2.39 or newer, xkbcommon
+(with its X11 library), ALSA and the Vulkan loader (`libvulkan.so.1`) installed. An
 ARM64-native build lane is defined, but no retained native runner artifact or
 ARM64 hardware result exists for this release, so ARM64 is not release-claimed.
 The attached host may be local Linux or a remote Linux machine reachable
@@ -15,21 +16,21 @@ or stores SSH credentials.
 
 ## Build from source
 
-Install the pinned Rust 1.97.1 toolchain, Node.js 24, pnpm 11.18, tmux, Git, and the Tauri 2
-Linux prerequisites. On Debian/Ubuntu the GUI development packages include
-`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, and `librsvg2-dev`.
+Install the pinned Rust 1.97.1 toolchain, Node.js 24, pnpm 11.18, tmux and Git.
+On Debian/Ubuntu the desktop's development packages are `libxkbcommon-x11-dev`,
+`libwayland-dev`, `libfontconfig-dev`, `libvulkan1` and `libasound2-dev`.
 
 ```sh
 pnpm install --frozen-lockfile
 cargo fmt --all -- --check
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo clippy --workspace --all-targets -- -D warnings
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --workspace --all-targets
-pnpm check
-pnpm test
-pnpm build
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+pnpm mobile:check
+pnpm mobile:test
 ```
 
-Run a development build with `pnpm tauri dev`. tmux remains authoritative; the
+Run a development build with `cargo build -p muxflow-host` and then
+`cargo run -p muxflow-gpui`. tmux remains authoritative; the
 application attaches to an existing server and closing the window detaches.
 
 ## Install the internal package
@@ -49,6 +50,22 @@ cd muxflow-*-linux-x86_64
 
 The desktop and `muxflow-host` helper are installed as siblings. Profiles and
 application state live outside the package directory and survive upgrades.
+
+### Blank window on an older software Vulkan driver
+
+The Debian 12 Mesa 22.3.6 software Vulkan driver can present a blank X11 window
+with the desktop's 32-bit visual, even when `vkcube` works. The same package
+renders correctly with Ubuntu 24.04's Mesa 25.2.8 Vulkan driver. Prefer an updated
+graphics stack. On a software-only test machine with Mesa OpenGL installed, this
+one-launch workaround was also verified:
+
+```sh
+VK_DRIVER_FILES=/dev/null LIBGL_ALWAYS_SOFTWARE=1 muxflow
+```
+
+This disables Vulkan for that process and requests software OpenGL; it is not a
+general hardware-rendering recommendation. OpenGL must be available. The app's
+normal renderer selection is unchanged.
 
 ## First connection
 

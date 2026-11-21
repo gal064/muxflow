@@ -40,6 +40,7 @@ run_gate() {
 
 : > "$run_root/results.tsv"
 run_gate repo-privacy bash tests/release/check-repo-privacy.sh
+run_gate helper-artifact node --test release/helper-artifact.test.mjs
 bookworm_helper="$PHASE8_WORK_DIR/muxflow-host-bookworm"
 run_gate bookworm-helper release/linux/build-compatible-host.sh "$target_arch" "$bookworm_helper"
 export ADE_TEST_BOOKWORM_HELPER="$bookworm_helper"
@@ -50,10 +51,6 @@ run_gate rust-tests cargo test --workspace --all-targets
 run_gate phase8-driver-fmt cargo fmt --manifest-path tests/release/protocol-driver/Cargo.toml -- --check
 run_gate phase8-driver-clippy cargo clippy --manifest-path tests/release/protocol-driver/Cargo.toml -- -D warnings
 run_gate phase8-driver-tests cargo test --manifest-path tests/release/protocol-driver/Cargo.toml
-run_gate frontend-check pnpm check
-run_gate frontend-tests pnpm test
-run_gate frontend-build pnpm build
-run_gate tauri-release pnpm tauri build --no-bundle
 run_gate parser-fuzz cargo run --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 10000
 run_gate phase0-local pnpm test:transport:local
 run_gate phase0-ssh pnpm test:transport:ssh
@@ -70,11 +67,11 @@ run_gate phase7 pnpm test:transfers
 run_gate phase7-parent pnpm test:transfers:parent-swap
 run_gate phase7-transfer-smoke bash tests/integration/transfers/run-smoke.sh
 if phase8_is_darwin; then
-  # Builds the Linux desktop package, which links WebKitGTK and cannot be built
-  # on macOS at any architecture. This lane is Linux-only by platform, so the
+  # Builds the Linux desktop package, which cannot be built on macOS at any
+  # architecture. This lane is Linux-only by platform, so the
   # Phase 0-8 matrix is not fully executable on a Mac and must not be reported
   # as if it were.
-  skip_gate phase8-package "Linux-only: builds a WebKitGTK desktop package"
+  skip_gate phase8-package "Linux-only: builds the Linux desktop package"
 else
   run_gate phase8-package pnpm test:package
 fi

@@ -1000,7 +1000,7 @@ fn codex_hook_superseded_line(
 // runtime directory (`/tmp/muxflow-<uid>/timing.log`). Nothing reads it but a
 // human with `jq`, and nothing in the daemon branches on it.
 //
-// Compile-out scheme, mirroring `apps/desktop/src-tauri/src/perf_log.rs`: the
+// Compile-out scheme, mirroring `crates/desktop-core/src/perf_log.rs`: the
 // real implementation is compiled whenever `debug_assertions` is on (plain
 // `cargo build` / `cargo test`) or the non-default `perf-log` cargo feature is
 // enabled. A plain release build therefore carries only the inert stubs below,
@@ -3011,6 +3011,13 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Key order is not part of these lines, and a workspace build can turn on
+    /// `serde_json/preserve_order` through another crate.
+    fn assert_same_json(actual: impl AsRef<str>, expected: &str) {
+        let parse = |line: &str| serde_json::from_str::<serde_json::Value>(line).unwrap();
+        assert_eq!(parse(actual.as_ref()), parse(expected));
+    }
+
     #[test]
     fn safe_log_has_only_a_fixed_class_and_never_raw_detail() {
         let serialized = serde_json::json!({
@@ -3028,9 +3035,9 @@ mod tests {
         ] {
             assert!(!serialized.contains(private));
         }
-        assert_eq!(
+        assert_same_json(
             serialized,
-            r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#
+            r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#,
         );
     }
 
@@ -3050,9 +3057,9 @@ mod tests {
         ] {
             assert!(!serialized.contains(private));
         }
-        assert_eq!(
+        assert_same_json(
             serialized,
-            r#"{"atUnixMillis":1700000000000,"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#
+            r#"{"atUnixMillis":1700000000000,"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#,
         );
     }
 
@@ -3078,9 +3085,9 @@ mod tests {
         ] {
             assert!(!serialized.contains(private));
         }
-        assert_eq!(
+        assert_same_json(
             serialized,
-            r#"{"atUnixMillis":1700000000000,"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#
+            r#"{"atUnixMillis":1700000000000,"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#,
         );
     }
 
@@ -3101,9 +3108,9 @@ mod tests {
         ] {
             assert!(!serialized.contains(private));
         }
-        assert_eq!(
+        assert_same_json(
             serialized,
-            r#"{"event":"codexHookSuperseded","hookEvent":"SessionEnd","incomingAgentId":"codex:incominghash","ownerAgentId":"codex:ownerhash","paneId":"%7","subsystem":"host_daemon"}"#
+            r#"{"event":"codexHookSuperseded","hookEvent":"SessionEnd","incomingAgentId":"codex:incominghash","ownerAgentId":"codex:ownerhash","paneId":"%7","subsystem":"host_daemon"}"#,
         );
         let unknown = codex_hook_superseded_line(
             "%7",

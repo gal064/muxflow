@@ -109,7 +109,7 @@ That is the whole product for v1.
 
 Facts about the host side the engineer must not re-derive (read
 `apps/host/src/main.rs`, `apps/host/src/bridge.rs`,
-`apps/desktop/src-tauri/src/connection/transport.rs` to confirm):
+`crates/desktop-core/src/connection/transport.rs` to confirm):
 
 - The desktop runs, over SSH, exactly the command string
   `$HOME/.local/bin/muxflow-host bridge --stdio`. The bridge connects to the
@@ -184,7 +184,7 @@ apps/mobile/
   scripts/
     build-webview.mjs           bundles the two WebView pages into assets
   assets/
-    fonts/JetBrainsMono-Regular.ttf, JetBrainsMono-Bold.ttf (copy from apps/desktop/src/assets/fonts, convert woff2→ttf)
+    fonts/JetBrainsMono-Regular.ttf, JetBrainsMono-Bold.ttf (copy from assets/fonts, convert woff2→ttf)
 ```
 
 Add `apps/mobile` to `pnpm-workspace.yaml`. Do **not** add it to the root
@@ -424,7 +424,7 @@ where a connection that stays up for 60 s has to count as stable, or a phone
 flapping in the background climbs to the 30 s cap and never comes down. The
 request timers stay on `setTimeout`: not worth a bridge call per request.
 
-### 7.3 Handshake (copied from `apps/desktop/src-tauri/src/connection/bridge.rs::handshake_and_snapshot`)
+### 7.3 Handshake (copied from `crates/desktop-core/src/connection/bridge.rs::handshake_and_snapshot`)
 
 Immediately after the SSH `connected` event, send two frames without
 waiting between them:
@@ -550,7 +550,7 @@ refusal is retried once after waiting up to 1 s for the newer snapshot
 root itself, which is `activeRoot.root`).
 
 Verify each request shape against the desktop's Rust bridge before
-implementing (`apps/desktop/src-tauri/src/connection/{bridge,agent,files}.rs`)
+implementing (`crates/desktop-core/src/connection/{bridge,agent,files}.rs`)
 — they are the working reference for field usage.
 
 ### 7.6 Terminal attach lifecycle
@@ -947,7 +947,7 @@ failed) which opens the Connection sheet (§9.8). Settings opens the phone's
     desktop's `AgentMark`): a 36 dp `--chrome-raised` rounded square holding
     the adapter's real icon at 20 dp in `--chrome-ink` — the desktop's exact
     SVG geometry (`agentIconPaths.ts`, pinned to
-    `apps/desktop/src/features/agents/AgentIdentity.tsx` by a test: Claude
+    `apps/desktop-gpui/src/agents/view.rs` by a test: Claude
     Code's four-stroke mark, the official OpenAI blossom for Codex with its
     optical-inset transform, a stroked face for any other adapter) — with
     the agent's state **docked** over the avatar's bottom-right corner,

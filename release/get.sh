@@ -178,23 +178,26 @@ install_linux() {
   esac
   # Last, so a missing dependency is the final thing on screen rather than
   # scrolled away by the lines above.
+  # The Vulkan loader is opened at run time, so ldd does not list it.
   local missing
   missing=$(ldd "$prefix/lib/muxflow/muxflow" 2>/dev/null | awk '/not found/ { print $1 }' || true)
+  if ! PATH="$PATH:/sbin:/usr/sbin" ldconfig -p 2>/dev/null | grep -F libvulkan.so.1 >/dev/null; then
+    missing+=$'\nlibvulkan.so.1'
+  fi
+  missing=${missing#$'\n'}
   if [[ -n "$missing" ]]; then
     printf '\nMissing system libraries:\n%s\n' "$missing" >&2
-    # WebKitGTK 4.1 pulls in GTK 3, libsoup 3 and JavaScriptCore itself, so one
-    # package is the whole fix. The command is printed, never run: this
-    # installer stays rootless.
+    # The command is printed, never run: this installer stays rootless.
     local fix=
-    if command -v apt-get >/dev/null; then fix='sudo apt-get install -y libwebkit2gtk-4.1-0'
-    elif command -v dnf >/dev/null; then fix='sudo dnf install -y webkit2gtk4.1'
-    elif command -v pacman >/dev/null; then fix='sudo pacman -S --needed webkit2gtk-4.1'
-    elif command -v zypper >/dev/null; then fix='sudo zypper install -y libwebkit2gtk-4_1-0'
+    if command -v apt-get >/dev/null; then fix='sudo apt-get install -y libxkbcommon-x11-0 libasound2t64 libvulkan1'
+    elif command -v dnf >/dev/null; then fix='sudo dnf install -y libxkbcommon-x11 alsa-lib vulkan-loader'
+    elif command -v pacman >/dev/null; then fix='sudo pacman -S --needed libxkbcommon-x11 alsa-lib vulkan-icd-loader'
+    elif command -v zypper >/dev/null; then fix='sudo zypper install -y libxkbcommon-x11-0 libasound2 libvulkan1'
     fi
     if [[ -n "$fix" ]]; then
       printf 'Install them with:\n  %s\n' "$fix" >&2
     else
-      printf 'Install GTK 3 and WebKitGTK 4.1 (Arch: webkit2gtk-4.1; Debian/Ubuntu: libwebkit2gtk-4.1-0).\n' >&2
+      printf 'Install xkbcommon (with its X11 library), ALSA and the Vulkan loader (Arch: libxkbcommon-x11 alsa-lib vulkan-icd-loader; Debian/Ubuntu: libxkbcommon-x11-0 libasound2t64 libvulkan1).\n' >&2
     fi
   fi
   check_tmux 'install tmux with your package manager'

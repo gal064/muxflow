@@ -34,7 +34,7 @@ target_root="${ADE_PHASE12_QA_TARGET:-$repo_root/target}"
 desktop="${ADE_PHASE12_QA_DESKTOP:-$target_root/release/bundle/macos/Muxflow.app/Contents/MacOS/muxflow}"
 helper="${ADE_PHASE12_QA_HELPER:-$target_root/release/muxflow-host}"
 
-[[ -x "$desktop" ]] || { echo "build the app bundle first: pnpm --filter @muxflow/desktop tauri build --bundles app" >&2; exit 1; }
+[[ -x "$desktop" ]] || { echo "build the app bundle first: release/macos/build-package.sh" >&2; exit 1; }
 [[ -x "$helper" ]] || { echo "build the release helper first: cargo build --release --bin muxflow-host" >&2; exit 1; }
 
 mkdir -p "$home" "$config" "$data" "$cache" "$runtime" "$tmux_runtime" "$repository" "$run_root/evidence"

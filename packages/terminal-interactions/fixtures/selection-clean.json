@@ -1,0 +1,372 @@
+[
+  {
+    "name": "ssh-command",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "crlf-clipboard-text",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\r\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\r\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "tab-shaped-continuation",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n\t-L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n\t55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"\t-L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":74,"firstTextCell":4,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"\t55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":55,"firstTextCell":4,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "codex-fenced-block",
+    "snapshot": {"text":"  ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L\n  5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":145,"metadataComplete":true,"rows":[{"text":"  ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L","isWrapped":false,"occupiedEndCell":130,"firstTextCell":2,"firstTokenCells":3,"selectedEndCell":145,"textCells":116,"styledTextCells":116},{"text":"  5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":79,"firstTextCell":2,"firstTokenCells":19,"selectedEndCell":145,"textCells":72,"styledTextCells":72}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "flagless-command-split-after-hyphen",
+    "snapshot": {"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-\n  debug.apk","columns":135,"metadataComplete":true,"rows":[{"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-","isWrapped":false,"occupiedEndCell":130,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":135,"textCells":128,"styledTextCells":128},{"text":"  debug.apk","isWrapped":false,"occupiedEndCell":11,"firstTextCell":2,"firstTokenCells":9,"selectedEndCell":135,"textCells":9,"styledTextCells":9}]},
+    "expected": "scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-debug.apk"
+  },
+  {
+    "name": "long-flag-split-after-hyphen",
+    "snapshot": {"text":"command --first value --dry-\n  run --second value","columns":30,"metadataComplete":true,"rows":[{"text":"command --first value --dry-","isWrapped":false,"occupiedEndCell":28,"firstTextCell":0,"firstTokenCells":7,"selectedEndCell":30,"textCells":25,"styledTextCells":25},{"text":"  run --second value","isWrapped":false,"occupiedEndCell":20,"firstTextCell":2,"firstTokenCells":3,"selectedEndCell":30,"textCells":16,"styledTextCells":16}]},
+    "expected": "command --first value --dry-run --second value"
+  },
+  {
+    "name": "hyphen-row-where-rest-would-fit",
+    "snapshot": {"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-\n  debug.apk","columns":140,"metadataComplete":true,"rows":[{"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-","isWrapped":false,"occupiedEndCell":130,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":140,"textCells":128,"styledTextCells":128},{"text":"  debug.apk","isWrapped":false,"occupiedEndCell":11,"firstTextCell":2,"firstTokenCells":9,"selectedEndCell":140,"textCells":9,"styledTextCells":9}]},
+    "expected": "scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-\n  debug.apk"
+  },
+  {
+    "name": "preserved-missing-metadata",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":false,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "preserved-native-soft-wrap",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":true,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "preserved-unstyled-prose",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":0},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":0},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":0}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "preserved-partial-selection",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":40,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "preserved-partial-final-row",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":70,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":56,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "preserved-stale-wide-geometry",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":120,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":120,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":120,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":120,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "preserved-inconsistent-gutters",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":1,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "not-rewritten-explicit-continuation",
+    "snapshot": {"text":"ssh -N -L first \\\n  -L second --flag value","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L first \\","isWrapped":false,"occupiedEndCell":17,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":13,"styledTextCells":13},{"text":"  -L second --flag value","isWrapped":false,"occupiedEndCell":24,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":19,"styledTextCells":19}]},
+    "expected": "ssh -N -L first \\\n  -L second --flag value"
+  },
+  {
+    "name": "not-rewritten-pipeline",
+    "snapshot": {"text":"curl --silent --fail https://example.test |\n  jq --raw-output .value","columns":80,"metadataComplete":true,"rows":[{"text":"curl --silent --fail https://example.test |","isWrapped":false,"occupiedEndCell":43,"firstTextCell":0,"firstTokenCells":4,"selectedEndCell":80,"textCells":39,"styledTextCells":39},{"text":"  jq --raw-output .value","isWrapped":false,"occupiedEndCell":24,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":20,"styledTextCells":20}]},
+    "expected": "curl --silent --fail https://example.test |\n  jq --raw-output .value"
+  },
+  {
+    "name": "not-rewritten-logical-commands",
+    "snapshot": {"text":"command --first value &&\n  other --second value","columns":80,"metadataComplete":true,"rows":[{"text":"command --first value &&","isWrapped":false,"occupiedEndCell":24,"firstTextCell":0,"firstTokenCells":7,"selectedEndCell":80,"textCells":21,"styledTextCells":21},{"text":"  other --second value","isWrapped":false,"occupiedEndCell":22,"firstTextCell":2,"firstTokenCells":5,"selectedEndCell":80,"textCells":18,"styledTextCells":18}]},
+    "expected": "command --first value &&\n  other --second value"
+  },
+  {
+    "name": "not-rewritten-heredoc",
+    "snapshot": {"text":"command --first value <<EOF\n  --second value","columns":80,"metadataComplete":true,"rows":[{"text":"command --first value <<EOF","isWrapped":false,"occupiedEndCell":27,"firstTextCell":0,"firstTokenCells":7,"selectedEndCell":80,"textCells":24,"styledTextCells":24},{"text":"  --second value","isWrapped":false,"occupiedEndCell":16,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":13,"styledTextCells":13}]},
+    "expected": "command --first value <<EOF\n  --second value"
+  },
+  {
+    "name": "not-rewritten-control-flow",
+    "snapshot": {"text":"for value --first item\n  do command --second item","columns":80,"metadataComplete":true,"rows":[{"text":"for value --first item","isWrapped":false,"occupiedEndCell":22,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":19,"styledTextCells":19},{"text":"  do command --second item","isWrapped":false,"occupiedEndCell":26,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":21,"styledTextCells":21}]},
+    "expected": "for value --first item\n  do command --second item"
+  },
+  {
+    "name": "not-rewritten-multiline-quote",
+    "snapshot": {"text":"printf --format '%s --first\n  value --second'","columns":80,"metadataComplete":true,"rows":[{"text":"printf --format '%s --first","isWrapped":false,"occupiedEndCell":27,"firstTextCell":0,"firstTokenCells":6,"selectedEndCell":80,"textCells":24,"styledTextCells":24},{"text":"  value --second'","isWrapped":false,"occupiedEndCell":17,"firstTextCell":2,"firstTokenCells":5,"selectedEndCell":80,"textCells":14,"styledTextCells":14}]},
+    "expected": "printf --format '%s --first\n  value --second'"
+  },
+  {
+    "name": "not-rewritten-command-substitution",
+    "snapshot": {"text":"command --first $(other\n  --second value)","columns":80,"metadataComplete":true,"rows":[{"text":"command --first $(other","isWrapped":false,"occupiedEndCell":23,"firstTextCell":0,"firstTokenCells":7,"selectedEndCell":80,"textCells":21,"styledTextCells":21},{"text":"  --second value)","isWrapped":false,"occupiedEndCell":17,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":14,"styledTextCells":14}]},
+    "expected": "command --first $(other\n  --second value)"
+  },
+  {
+    "name": "not-rewritten-usage-text",
+    "snapshot": {"text":"ssh [options] --first value --long filler\n  --second  Description of option","columns":80,"metadataComplete":true,"rows":[{"text":"ssh [options] --first value --long filler","isWrapped":false,"occupiedEndCell":41,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":36,"styledTextCells":36},{"text":"  --second  Description of option","isWrapped":false,"occupiedEndCell":33,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":27,"styledTextCells":27}]},
+    "expected": "ssh [options] --first value --long filler\n  --second  Description of option"
+  },
+  {
+    "name": "not-rewritten-angle-bracket-synopsis",
+    "snapshot": {"text":"ssh --verbose --identity-file\n  <key-path> <host>","columns":80,"metadataComplete":true,"rows":[{"text":"ssh --verbose --identity-file","isWrapped":false,"occupiedEndCell":29,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":27,"styledTextCells":27},{"text":"  <key-path> <host>","isWrapped":false,"occupiedEndCell":19,"firstTextCell":2,"firstTokenCells":10,"selectedEndCell":80,"textCells":16,"styledTextCells":16}]},
+    "expected": "ssh --verbose --identity-file\n  <key-path> <host>"
+  },
+  {
+    "name": "not-rewritten-uppercase-synopsis",
+    "snapshot": {"text":"ssh --verbose --identity-file\n  KEY_PATH HOST","columns":80,"metadataComplete":true,"rows":[{"text":"ssh --verbose --identity-file","isWrapped":false,"occupiedEndCell":29,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":27,"styledTextCells":27},{"text":"  KEY_PATH HOST","isWrapped":false,"occupiedEndCell":15,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":12,"styledTextCells":12}]},
+    "expected": "ssh --verbose --identity-file\n  KEY_PATH HOST"
+  },
+  {
+    "name": "not-rewritten-prose",
+    "snapshot": {"text":"Use ssh -N --first value --long filler\n  --second means something else","columns":80,"metadataComplete":true,"rows":[{"text":"Use ssh -N --first value --long filler","isWrapped":false,"occupiedEndCell":38,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":32,"styledTextCells":32},{"text":"  --second means something else","isWrapped":false,"occupiedEndCell":31,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":26,"styledTextCells":26}]},
+    "expected": "Use ssh -N --first value --long filler\n  --second means something else"
+  },
+  {
+    "name": "not-rewritten-two-commands",
+    "snapshot": {"text":"ssh --first value --long filler;\n  curl --second value","columns":80,"metadataComplete":true,"rows":[{"text":"ssh --first value --long filler;","isWrapped":false,"occupiedEndCell":32,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":28,"styledTextCells":28},{"text":"  curl --second value","isWrapped":false,"occupiedEndCell":21,"firstTextCell":2,"firstTokenCells":4,"selectedEndCell":80,"textCells":17,"styledTextCells":17}]},
+    "expected": "ssh --first value --long filler;\n  curl --second value"
+  },
+  {
+    "name": "not-rewritten-two-commands-without-separator",
+    "snapshot": {"text":"git status --short --branch\n  git log --oneline","columns":80,"metadataComplete":true,"rows":[{"text":"git status --short --branch","isWrapped":false,"occupiedEndCell":27,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":24,"styledTextCells":24},{"text":"  git log --oneline","isWrapped":false,"occupiedEndCell":19,"firstTextCell":2,"firstTokenCells":3,"selectedEndCell":80,"textCells":15,"styledTextCells":15}]},
+    "expected": "git status --short --branch\n  git log --oneline"
+  },
+  {
+    "name": "not-rewritten-flagless-command-wrapped-at-space",
+    "snapshot": {"text":"scp dev@host:/path/app-debug.apk ~/Downloads/\n  muxflow-debug.apk","columns":80,"metadataComplete":true,"rows":[{"text":"scp dev@host:/path/app-debug.apk ~/Downloads/","isWrapped":false,"occupiedEndCell":45,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":43,"styledTextCells":43},{"text":"  muxflow-debug.apk","isWrapped":false,"occupiedEndCell":19,"firstTextCell":2,"firstTokenCells":17,"selectedEndCell":80,"textCells":17,"styledTextCells":17}]},
+    "expected": "scp dev@host:/path/app-debug.apk ~/Downloads/\n  muxflow-debug.apk"
+  },
+  {
+    "name": "not-rewritten-lone-hyphen-argument",
+    "snapshot": {"text":"cat -\n  file.txt","columns":80,"metadataComplete":true,"rows":[{"text":"cat -","isWrapped":false,"occupiedEndCell":5,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":4,"styledTextCells":4},{"text":"  file.txt","isWrapped":false,"occupiedEndCell":10,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":8,"styledTextCells":8}]},
+    "expected": "cat -\n  file.txt"
+  },
+  {
+    "name": "not-rewritten-hyphen-split-then-flagless-space-boundary",
+    "snapshot": {"text":"scp dev@host:/a/b/app-\n  debug.apk ~/Downloads/\n  out.apk","columns":80,"metadataComplete":true,"rows":[{"text":"scp dev@host:/a/b/app-","isWrapped":false,"occupiedEndCell":22,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":21,"styledTextCells":21},{"text":"  debug.apk ~/Downloads/","isWrapped":false,"occupiedEndCell":24,"firstTextCell":2,"firstTokenCells":9,"selectedEndCell":80,"textCells":21,"styledTextCells":21},{"text":"  out.apk","isWrapped":false,"occupiedEndCell":9,"firstTextCell":2,"firstTokenCells":7,"selectedEndCell":80,"textCells":7,"styledTextCells":7}]},
+    "expected": "scp dev@host:/a/b/app-\n  debug.apk ~/Downloads/\n  out.apk"
+  },
+  {
+    "name": "not-rewritten-hyphen-ending-quote",
+    "snapshot": {"text":"printf --format 'foo-\n  bar' --second value","columns":80,"metadataComplete":true,"rows":[{"text":"printf --format 'foo-","isWrapped":false,"occupiedEndCell":21,"firstTextCell":0,"firstTokenCells":6,"selectedEndCell":80,"textCells":19,"styledTextCells":19},{"text":"  bar' --second value","isWrapped":false,"occupiedEndCell":21,"firstTextCell":2,"firstTokenCells":4,"selectedEndCell":80,"textCells":17,"styledTextCells":17}]},
+    "expected": "printf --format 'foo-\n  bar' --second value"
+  },
+  {
+    "name": "not-rewritten-blank-line",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  \n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  ","isWrapped":false,"occupiedEndCell":2,"firstTextCell":2,"firstTokenCells":0,"selectedEndCell":80,"textCells":0,"styledTextCells":0},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  \n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "not-rewritten-escaped-quote-then-space-flags",
+    "snapshot": {"text":"curl --header 'a\\'b' --url\n  https://example.test","columns":80,"metadataComplete":true,"rows":[{"text":"curl --header 'a\\'b' --url","isWrapped":false,"occupiedEndCell":26,"firstTextCell":0,"firstTokenCells":4,"selectedEndCell":80,"textCells":23,"styledTextCells":23},{"text":"  https://example.test","isWrapped":false,"occupiedEndCell":22,"firstTextCell":2,"firstTokenCells":20,"selectedEndCell":80,"textCells":20,"styledTextCells":20}]},
+    "expected": "curl --header 'a\\'b' --url\n  https://example.test"
+  },
+  {
+    "name": "not-rewritten-backtick",
+    "snapshot": {"text":"command --first `other`\n  --second value","columns":80,"metadataComplete":true,"rows":[{"text":"command --first `other`","isWrapped":false,"occupiedEndCell":23,"firstTextCell":0,"firstTokenCells":7,"selectedEndCell":80,"textCells":21,"styledTextCells":21},{"text":"  --second value","isWrapped":false,"occupiedEndCell":16,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":13,"styledTextCells":13}]},
+    "expected": "command --first `other`\n  --second value"
+  },
+  {
+    "name": "not-rewritten-control-keyword-word",
+    "snapshot": {"text":"tool --first value then\n  --second value","columns":80,"metadataComplete":true,"rows":[{"text":"tool --first value then","isWrapped":false,"occupiedEndCell":23,"firstTextCell":0,"firstTokenCells":4,"selectedEndCell":80,"textCells":20,"styledTextCells":20},{"text":"  --second value","isWrapped":false,"occupiedEndCell":16,"firstTextCell":2,"firstTokenCells":8,"selectedEndCell":80,"textCells":13,"styledTextCells":13}]},
+    "expected": "tool --first value then\n  --second value"
+  },
+  {
+    "name": "idempotent-cleaned-text",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":206,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":188,"styledTextCells":188}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-81",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":81,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":81,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":81,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":81,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-82",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":82,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":82,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":82,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":82,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-83",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":83,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":83,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":83,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":83,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-84",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":84,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":84,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":84,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":84,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-85",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":85,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":85,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":85,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":85,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-86",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":86,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":86,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":86,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":86,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-87",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":87,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":87,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":87,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":87,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-88",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":88,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":88,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":88,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":88,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-89",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":89,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":89,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":89,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":89,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-90",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":90,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":90,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":90,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":90,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-91",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":91,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":91,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":91,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":91,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-92",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":92,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":92,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":92,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":92,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-93",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":93,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":93,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":93,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":93,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-94",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":94,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":94,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":94,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":94,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-95",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":95,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":95,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":95,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":95,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-96",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":96,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":96,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":96,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":96,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-97",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":97,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":97,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":97,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":97,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-98",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":98,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":98,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":98,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":98,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-99",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":99,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":99,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":99,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":99,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-100",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":100,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":100,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":100,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":100,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-101",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":101,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":101,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":101,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":101,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-102",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":102,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":102,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":102,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":102,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-103",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":103,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":103,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":103,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":103,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-104",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":104,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":104,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":104,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":104,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-105",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":105,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":105,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":105,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":105,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-106",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":106,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":106,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":106,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":106,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-107",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":107,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":107,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":107,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":107,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-108",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":108,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":108,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":108,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":108,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-109",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":109,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":109,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":109,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":109,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "geometry-columns-110",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":110,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":110,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":110,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":110,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hazard-semicolon",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200;\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200;","isWrapped":false,"occupiedEndCell":78,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":71,"styledTextCells":71},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200;\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hazard-pipe",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200|\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200|","isWrapped":false,"occupiedEndCell":78,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":71,"styledTextCells":71},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200|\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hazard-and",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200&&\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200&&","isWrapped":false,"occupiedEndCell":79,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":72,"styledTextCells":72},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200&&\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hazard-backtick",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200`\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200`","isWrapped":false,"occupiedEndCell":78,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":71,"styledTextCells":71},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200`\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hazard-substitution",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200$(\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200$(","isWrapped":false,"occupiedEndCell":79,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":72,"styledTextCells":72},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200$(\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hazard-heredoc",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200<<\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200<<","isWrapped":false,"occupiedEndCell":79,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":72,"styledTextCells":72},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":80,"textCells":51,"styledTextCells":51}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200<<\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "single-row",
+    "snapshot": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70}]},
+    "expected": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200"
+  },
+  {
+    "name": "wide-glyph-first-token",
+    "snapshot": {"text":"curl --silent --url\n  https://例え.test/x","columns":60,"metadataComplete":true,"rows":[{"text":"curl --silent --url","isWrapped":false,"occupiedEndCell":19,"firstTextCell":0,"firstTokenCells":4,"selectedEndCell":60,"textCells":17,"styledTextCells":17},{"text":"  https://例え.test/x","isWrapped":false,"occupiedEndCell":19,"firstTextCell":2,"firstTokenCells":20,"selectedEndCell":60,"textCells":17,"styledTextCells":17}]},
+    "expected": "curl --silent --url\n  https://例え.test/x"
+  }
+]

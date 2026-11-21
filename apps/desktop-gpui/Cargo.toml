@@ -1,0 +1,72 @@
+[package]
+name = "muxflow-gpui"
+version = "0.1.32"
+license = "MIT"
+description = "Muxflow's native desktop app, built on GPUI"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "muxflow_gpui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muxflow-gpui"
+path = "src/main.rs"
+
+[features]
+# Compiles the perf-log probe's native sink into a release build for a
+# measurement campaign; debug builds always have it. See desktop-core's perf_log.
+perf-log = ["desktop-core/perf-log"]
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+desktop-core = { path = "../../crates/desktop-core" }
+dirs = "6"
+futures = "0.3"
+# Exact pin: gpui-kit pins the matching gpui-pre snapshot (0.3.11). `gpui-fast`
+# stays off (see docs/history/gpui-migration/gpui-migration.md).
+# The grammars the editor highlights, one feature each so `cargo deny` sees
+# every grammar crate. JSON comes with `tree-sitter` itself.
+gpui-kit = { version = "=0.9.0", default-features = true, features = [
+  "tree-sitter-bash",
+  "tree-sitter-css",
+  "tree-sitter-html",
+  "tree-sitter-javascript",
+  "tree-sitter-markdown",
+  "tree-sitter-python",
+  "tree-sitter-rust",
+  "tree-sitter-toml",
+  "tree-sitter-tsx",
+  "tree-sitter-typescript",
+  "tree-sitter-yaml",
+] }
+libc.workspace = true
+regex = "1"
+# Playback only: the agent cues are synthesized, so no decoder is built.
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+serde.workspace = true
+serde_json.workspace = true
+# The Git diff view draws a whole-file patch with Kit's `Diff`.
+similar = "2.7"
+tokio.workspace = true
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+terminal-engine = { path = "../../crates/terminal-engine" }
+terminal-interactions = { path = "../../crates/terminal-interactions" }
+live-markdown = { path = "../../crates/live-markdown" }
+tmux-control = { path = "../../crates/tmux-control" }
+uuid.workspace = true
+
+[dev-dependencies]
+gpui-kit = { version = "=0.9.0", default-features = true, features = ["test-support"] }
+tempfile = "3"
+
+# A real offscreen render through GPUI's headless renderer, so it needs a
+# Vulkan driver (lavapipe in CI) but no display. Not libtest: GPUI's offscreen
+# renderer wants the main thread, as in gpui-kit's own tests/rendering.rs.
+[[test]]
+name = "frames"
+path = "tests/frames.rs"
+harness = false

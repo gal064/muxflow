@@ -294,7 +294,7 @@ The parser is hand-written and adds no dependencies.
    (`resolved_start_directory`). If not, record the run as `failed`.
 2. Write the prompt to `automations/prompts/<id>-<n>.txt`.
 3. Create the tab in the background so it doesn't take focus:
-   `new-window -d -P -F "#{window_id} #{pane_id}" -t <session>: -c <cwd> <APP_SHELL>`.
+   `new-window -d -P -F "#{window_id} #{pane_id}" -t <session>: -c <cwd> /bin/sh -c 'exec "${SHELL:-/bin/sh}" -l'`.
 4. In one tmux call, name the tab `<name> #<n>` and set its window options:
    `@muxflow-automation <id>`, `@muxflow-automation-run <n>`,
    `@muxflow-name-locked 1`, `automatic-rename off`, `allow-rename off`.
@@ -462,7 +462,7 @@ client id, connected), the active host, `onOpenPane` and `onMessage`.
 
 The built-in places read this list:
 
-- **Saved settings.** `src-tauri/src/app_state.rs` stored the panel as
+- **Saved settings.** `crates/desktop-core/src/app_state.rs` stored the panel as
   `enum PanelSurface { Files, Git, Ports }`, where an unknown value failed the
   whole load. It is now a string defaulting to `"files"`, plus
   `enabled_panel_extensions`. The contract (`persistedAppState.contract.json`)
@@ -538,7 +538,7 @@ Compatibility:
 
 ### Desktop
 
-- Bridge: `src-tauri/src/connection/automation.rs`, an `automation_request`
+- Bridge: `crates/desktop-core/src/connection/automation.rs`, an `automation_request`
   command modeled on `connection/agent.rs`. The event goes through `bridge.rs`
   and `event_frame.rs` (kind byte 19, no payload), is decoded in
   `features/terminal/api.ts`, and `useAppConnectionController.ts` hands it to
@@ -586,7 +586,7 @@ If the feature isn't used:
    `crates/protocol/build.rs`. In `envelope.proto`, remove the import and the
    five additions, and reserve their numbers. Remove the `operation_policy`
    entry and the `dispatcher` arm.
-4. Delete `src-tauri/src/connection/automation.rs`, its `generate_handler!`
+4. Delete `crates/desktop-core/src/connection/automation.rs`, its shim in `commands/connection.rs`, its `generate_handler!`
    entry, the event mapping in `bridge.rs` and `event_frame.rs`, the decode in
    `features/terminal/api.ts` and its test, and the `automationChanged`
    branch in `useAppConnectionController.ts`.
@@ -641,5 +641,5 @@ command (`curl -sI https://example.com`) without asking.
   connects. A minute that came due during the restart is skipped.
 - **Saved settings across builds:** a desktop build from before the
   panel-extension change can't read a saved extension panel. Builds ship in
-  lockstep, but a developer running `pnpm tauri dev` beside an installed older
+  lockstep, but a developer running `cargo run -p muxflow-gpui` beside an installed older
   build should back up the app state first.

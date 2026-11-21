@@ -1,0 +1,999 @@
+//! The 240px rail: workspaces on top, agents below with a divider between them,
+//! and the host row at the bottom. Port of
+//! `features/workspaces/WorkspaceSidebar.tsx`; the Agents section is the
+//! agents feature's list ([`crate::agents::view::AgentsList`]).
+
+use std::rc::Rc;
+
+use desktop_core::app_state::AgentSortMode;
+use gpui_kit::{
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
+    assets::IconName,
+    base::{Disableable, HandleEdge, TestSupportExt},
+    component::{
+        Icon, Sizable,
+        button::{Button, ButtonVariants},
+        h_flex,
+        menu::{ContextMenuExt, DropdownMenu, PopupMenu},
+        v_flex,
+    },
+    div,
+    prelude::FluentBuilder,
+    relative,
+};
+
+use crate::{
+    agents::{
+        model::DisplayState,
+        view::{AgentsList, agent_mark, state_indicator},
+    },
+    commands,
+    connection_ui::{connection_reducer::ConnectionPhase, dialog::open_connection_dialog},
+    context_menu::{self, Entry, Item},
+    dragdrop::{self, DropTarget, WorkspaceRef},
+    fonts,
+    theme::{
+        self, Palette,
+        metrics::{RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, WEIGHT_ROW, ui},
+    },
+    tooltips::with_shortcut,
+    ui::{
+        chrome::{
+            Chrome,
+            divider::{Divider, divider},
+            layout,
+        },
+        icons::Glyph,
+        title_bar::{bar_button, disabled_ink},
+    },
+    workspaces::{RowKeys, Target, Workspaces, focus_terminal, rows::WorkspaceRow, run_command},
+};
+
+#[derive(IntoElement)]
+pub struct Sidebar {
+    pub chrome: WeakEntity<Chrome>,
+    pub width: f32,
+    pub agents_ratio: f32,
+    /// True while the title bar holds the tabs and has no room for New workspace.
+    pub new_workspace_here: bool,
+    pub pinned_only: bool,
+    pub agent_sort: AgentSortMode,
+    pub workspaces: Entity<Workspaces>,
+}
+
+fn section_label(id: &'static str, text: &'static str, cx: &App) -> impl IntoElement {
+    let palette = theme::palette(cx);
+    div()
+        .id(id)
+        .text_size(ui(TYPE_LABEL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(palette.chrome_faint)
+        .child(text.to_uppercase())
+}
+
+fn sort_toggle(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    text: impl Into<SharedString>,
+    accent: Rgba,
+) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .compact()
+        .h(ui(14.))
+        .accessibility_label(label)
+        .child(
+            div()
+                .text_size(ui(TYPE_LABEL))
+                .text_color(accent)
+                .child(text.into()),
+        )
+}
+
+/// A link's phase as a color.
+pub(crate) fn phase_color(phase: ConnectionPhase, cx: &App) -> Rgba {
+    let palette = theme::palette(cx);
+    match phase {
+        ConnectionPhase::Connected => palette.ok,
+        ConnectionPhase::Disconnected => palette.danger,
+        _ => palette.warn,
+    }
+}
+
+/// One workspace's row. `index` is its flat place in the list, which is the
+/// number beside it and what ⌘1–9 selects; `moves` says whether it can move up
+/// and down among its own host's rows. Its menu comes back with it, for the
+/// keyboard to open.
+fn workspace_row(
+    row: WorkspaceRow,
+    index: usize,
+    moves: (bool, bool),
+    keys: RowKeys,
+    workspaces: &Entity<Workspaces>,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let palette = theme::palette(cx);
+    let selected = row.active;
+    let ink = if selected {
+        palette.accent_ink
+    } else {
+        palette.chrome_ink
+    };
+    let meta = if selected {
+        palette.accent_ink
+    } else {
+        palette.chrome_faint
+    };
+    let weak = workspaces.downgrade();
+    let click = {
+        let (weak, row) = (weak.clone(), row.clone());
+        move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let Some(this) = weak.upgrade() else {
+                return;
+            };
+            // Shift pins rather than selects: the row moving to the top is
+            // often not the one you are working in.
+            if event.modifiers().shift {
+                this.update(cx, |this, cx| this.toggle_session_pin(&row, cx));
+            } else if event.click_count() == 2 {
+                if row.can_mutate {
+                    let target = Target::Session(row.scope.clone(), row.session.id.clone());
+                    run_command(&this, "session.rename", Some(target), window, cx);
+                }
+            } else {
+                this.update(cx, |this, cx| this.select_row(&row, cx));
+                focus_terminal(&this, window, cx);
+            }
+        }
+    };
+    let menu: context_menu::Builder = Rc::new({
+        let (weak, row) = (weak.clone(), row.clone());
+        move |menu: PopupMenu, window: &mut Window, cx: &mut gpui_kit::Context<PopupMenu>| {
+            let target = Target::Session(row.scope.clone(), row.session.id.clone());
+            let command = |id: &'static str| {
+                let (weak, target) = (weak.clone(), target.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    if let Some(this) = weak.upgrade() {
+                        run_command(&this, id, Some(target.clone()), window, cx);
+                    }
+                }
+            };
+            let pin = {
+                let (weak, row) = (weak.clone(), row.clone());
+                move |_: &mut Window, cx: &mut App| {
+                    weak.update(cx, |this, cx| this.toggle_session_pin(&row, cx))
+                        .ok();
+                }
+            };
+            let pin_label = if row.pinned {
+                "Unpin workspace"
+            } else {
+                "Pin workspace"
+            };
+            context_menu::fill(
+                menu,
+                &[
+                    Item::new("Rename workspace…", command("session.rename"))
+                        .disabled(!row.can_mutate)
+                        .into(),
+                    Item::new(pin_label, pin).into(),
+                    Item::new("Move up", command("session.moveLeft"))
+                        .disabled(!row.can_mutate || !moves.0)
+                        .into(),
+                    Item::new("Move down", command("session.moveRight"))
+                        .disabled(!row.can_mutate || !moves.1)
+                        .into(),
+                    Entry::Separator,
+                    Item::new("Close workspace…", command("session.close"))
+                        .destructive()
+                        .disabled(!row.can_mutate)
+                        .into(),
+                ],
+                window,
+                cx,
+            )
+        }
+    });
+    let pin_label = if row.pinned {
+        "Unpin workspace"
+    } else {
+        "Pin workspace"
+    };
+    let pin_toggle = {
+        let (weak, row) = (weak.clone(), row.clone());
+        Button::new(SharedString::from(format!("workspace-pin-{index}")))
+            .ghost()
+            .xsmall()
+            .compact()
+            .size(ui(20.))
+            .accessibility_label(pin_label)
+            .tooltip(pin_label)
+            // A pointer affordance: the menu is the keyboard's way to pin.
+            .tab_stop(false)
+            .child(Icon::new(Glyph::Pin).size(ui(12.)).text_color(meta))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                weak.update(cx, |this, cx| this.toggle_session_pin(&row, cx))
+                    .ok();
+            })
+    };
+    let agents = row.agents.clone();
+    let prefs = crate::settings::get(cx);
+    let (compact, glyphs) = (prefs.compact_workspaces, prefs.agent_state_glyphs);
+    // The row's own colour, which a mark's badge is ringed with.
+    let ring = if selected {
+        palette.accent
+    } else {
+        palette.chrome_bg
+    };
+    // One workspace-level indicator, in the same place in both modes. The
+    // agent lines already say blocked and done in words, so the full row shows
+    // working alone; a compact row has no lines and shows the loudest state.
+    // The slot stays while empty, so a state arriving cannot move the name.
+    let indicator = if compact {
+        let state = agents.state.filter(|state| {
+            matches!(
+                state,
+                DisplayState::Blocked | DisplayState::Done | DisplayState::Working
+            )
+        });
+        state_indicator(state.unwrap_or(DisplayState::Idle), glyphs, ink, cx)
+    } else {
+        // Working alone, and always as motion: the lines below carry the rest.
+        let state = if agents.working {
+            DisplayState::Working
+        } else {
+            DisplayState::Idle
+        };
+        state_indicator(state, false, ink, cx)
+    };
+    // Tauri rings the active row's state dot in accent ink: on the accent block
+    // a red or a green dot would dissolve. A working mark takes the ink itself.
+    let ringed = selected
+        && compact
+        && match agents.state {
+            Some(DisplayState::Blocked | DisplayState::Done) => true,
+            Some(DisplayState::Working) => glyphs,
+            _ => false,
+        };
+    let indicator = if ringed {
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .absolute()
+                    .top(ui(-1.5))
+                    .left(ui(-1.5))
+                    .right(ui(-1.5))
+                    .bottom(ui(-1.5))
+                    .rounded_full()
+                    .bg(palette.accent_ink),
+            )
+            .child(indicator)
+            .into_any_element()
+    } else {
+        indicator
+    };
+    // Waiting agents: inline after a compact row's marks, else at the right edge.
+    let unread = (agents.unread > 0).then(|| {
+        let count = if agents.unread > 99 {
+            "99+".to_owned()
+        } else {
+            agents.unread.to_string()
+        };
+        h_flex()
+            .flex_none()
+            .justify_center()
+            .min_w(ui(15.))
+            .h(ui(15.))
+            .px(ui(4.))
+            .rounded(ui(8.))
+            .bg(palette.accent)
+            .text_color(palette.accent_ink)
+            .text_size(ui(9.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(count)
+    });
+    let (inline_unread, edge_unread) = if compact {
+        (unread, None)
+    } else {
+        (None, unread)
+    };
+    let group: SharedString = format!("workspace-row-{index}").into();
+    // A dragged tab, document or pane would land in this workspace.
+    let this_workspace = WorkspaceRef {
+        host: row.host_profile_id.clone(),
+        session_id: row.session.id.clone(),
+    };
+    let drop_target = matches!(
+        dragdrop::marker(cx),
+        Some((_, DropTarget::Workspace(workspace))) if *workspace == this_workspace
+    );
+    h_flex()
+        .id(("workspace-row", index))
+        .on_mouse_move(move |_: &MouseMoveEvent, _, cx| {
+            dragdrop::offer(DropTarget::Workspace(this_workspace.clone()), cx);
+        })
+        .group(group.clone())
+        .test_support()
+        .role(Role::Button)
+        .aria_label(row.label())
+        .aria_selected(selected)
+        .track_focus(&keys.focus)
+        .on_key_down({
+            let (keys, menu) = (keys.clone(), menu.clone());
+            move |event: &KeyDownEvent, window, cx| {
+                if context_menu::is_menu_key(&event.keystroke) {
+                    let menu = menu.clone();
+                    context_menu::open(
+                        move |popup, window, cx| menu(popup, window, cx),
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                }
+                // A modified arrow belongs to a binding, not to the list.
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                // Enter and Space click it.
+                if keys.step(&event.keystroke.key, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+        })
+        .relative()
+        .min_h(ui(28.))
+        // Tauri's `.workspace-button`, and its one-line `.compact` form.
+        .px(ui(if compact { 8. } else { 10. }))
+        .pt(ui(if compact { 4. } else { 8. }))
+        .pb(ui(if compact { 4. } else { 9. }))
+        .mb(ui(if compact { 1. } else { 2. }))
+        .gap(ui(6.))
+        .items_start()
+        .rounded(ui(RADIUS_ROW))
+        .line_height(relative(1.25))
+        .when(row.offline(), |this| this.opacity(0.55))
+        .when(selected, |this| this.bg(palette.accent))
+        .when(!selected, |this| {
+            this.hover(|style| style.bg(palette.chrome_hover))
+        })
+        // Inside the row: Tauri's outline sits outside it, where the list's
+        // scroll clips it and the next row's fill covers it. On the accent
+        // fill, where an accent ring would vanish, it is in the ink colour and
+        // set in, with fill on both sides of it. Only for the keyboard, as
+        // `:focus-visible`.
+        .when(keys.focus.is_focused(window), |this| {
+            this.when(window.last_input_was_keyboard(), |this| {
+                let (inset, color) = if selected {
+                    (2., palette.accent_ink)
+                } else {
+                    (0., palette.accent)
+                };
+                this.child(
+                    div()
+                        .absolute()
+                        .top(ui(inset))
+                        .left(ui(inset))
+                        .right(ui(inset))
+                        .bottom(ui(inset))
+                        .border_2()
+                        .border_color(color)
+                        .rounded(ui(RADIUS_ROW - inset)),
+                )
+            })
+            .child(context_menu::anchor(&keys.focus))
+        })
+        // On the accent fill of the active row an inset border would vanish:
+        // the marker is an outline outside it.
+        .when(drop_target && !selected, |this| {
+            this.bg(palette.accent_wash)
+                .border_1()
+                .border_color(palette.accent)
+        })
+        .when(drop_target && selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(ui(-2.))
+                    .left(ui(-2.))
+                    .right(ui(-2.))
+                    .bottom(ui(-2.))
+                    .border_2()
+                    .border_color(palette.accent_ink)
+                    .rounded(ui(RADIUS_ROW + 2.)),
+            )
+        })
+        .on_click(click)
+        .child(
+            // The row's type is set here, not on the row: its context menu
+            // would inherit it.
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(ui(if compact { 2. } else { 4. }))
+                .text_size(ui(TYPE_ROW))
+                .font_weight(FontWeight(WEIGHT_ROW))
+                .text_color(ink)
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap(ui(6.))
+                        .when(index < 9, |this| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .w(ui(12.))
+                                    .text_center()
+                                    .font_family(fonts::MONO)
+                                    .text_size(ui(TYPE_META))
+                                    .text_color(meta)
+                                    .child((index + 1).to_string()),
+                            )
+                        })
+                        .when(!row.letter.is_empty(), |this| {
+                            this.child(host_letter(&row.letter, selected, &palette))
+                        })
+                        .child(indicator)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(row.session.name.clone()),
+                        )
+                        // A compact row trades the agent lines for their marks
+                        // on the name's line. Decorative: the row's name says it.
+                        .when(compact && !agents.agents.is_empty(), |this| {
+                            this.child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    // Each badge overhangs its mark by 3.5px.
+                                    .gap(ui(7.))
+                                    .children(agents.agents.iter().map(|agent| {
+                                        agent_mark(
+                                            &agent.adapter_id,
+                                            agent.state,
+                                            glyphs,
+                                            meta,
+                                            ring,
+                                            selected,
+                                            cx,
+                                        )
+                                    }))
+                                    .when(agents.overflow > 0, |this| {
+                                        this.child(
+                                            div()
+                                                .text_size(ui(TYPE_META))
+                                                .text_color(meta)
+                                                .child(format!("+{}", agents.overflow)),
+                                        )
+                                    }),
+                            )
+                        })
+                        .children(inline_unread),
+                )
+                // Tauri's `.workspace-activity`: lines a step under the name, 1px apart.
+                .when(!compact, |this| {
+                    this.child(
+                        v_flex()
+                            .min_w_0()
+                            .gap(ui(1.))
+                            .text_size(ui(TYPE_ROW - 1.))
+                            .line_height(relative(1.35))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(meta)
+                            .children(agents.agents.iter().map(|agent| {
+                                h_flex()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap(ui(6.))
+                                    .pl(ui(18.))
+                                    .child(agent_mark(
+                                        &agent.adapter_id,
+                                        agent.state,
+                                        glyphs,
+                                        meta,
+                                        ring,
+                                        selected,
+                                        cx,
+                                    ))
+                                    .child(div().min_w_0().truncate().child(agent.name.clone()))
+                            }))
+                            .when(agents.overflow > 0, |this| {
+                                this.child(
+                                    div()
+                                        // Under the names: indent, mark and gap.
+                                        .pl(ui(18. + 13. + 6.))
+                                        .child(format!("…{} more", agents.overflow)),
+                                )
+                            }),
+                    )
+                }),
+        )
+        .children(edge_unread.map(|badge| {
+            // The pin takes the count's place on hover.
+            badge.group_hover(group.clone(), |style| style.invisible())
+        }))
+        // Over the row's right edge, on a backing of the row's own colour, so
+        // showing it moves nothing and takes no width from the name.
+        .child(
+            div()
+                .absolute()
+                .top(ui(4.))
+                .right(ui(4.))
+                .p(ui(1.))
+                .bg(if selected {
+                    palette.accent
+                } else {
+                    palette.chrome_hover
+                })
+                .invisible()
+                .group_hover(group, |style| style.visible())
+                .child(pin_toggle),
+        )
+        .context_menu(move |popup, window, cx| menu(popup, window, cx))
+        .into_any_element()
+}
+
+/// A row's host letter, in the workspace and agent lists alike: `.host-letter`.
+pub(crate) fn host_letter(letter: &str, selected: bool, palette: &Palette) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w(ui(12.))
+        .text_center()
+        .font_family(fonts::MONO)
+        .text_size(ui(TYPE_META))
+        .font_weight(FontWeight::SEMIBOLD)
+        // A step darker than a row's number: an address.
+        .text_color(if selected {
+            palette.accent_ink
+        } else {
+            palette.chrome_dim
+        })
+        .child(letter.to_owned())
+}
+
+/// A block's label and a hairline filling the rest of the line. The first
+/// sits right under the section header, which already gives the space above.
+pub(crate) fn list_divider(
+    id: impl Into<ElementId>,
+    label: &str,
+    first: bool,
+    cx: &App,
+) -> AnyElement {
+    let palette = theme::palette(cx);
+    h_flex()
+        .id(id)
+        .items_center()
+        .gap(ui(6.))
+        .px(ui(8.))
+        .pt(ui(if first { 0. } else { 6. }))
+        .pb(ui(4.))
+        .text_size(ui(TYPE_LABEL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(palette.chrome_faint)
+        .child(label.to_uppercase())
+        .child(div().flex_1().h(ui(1.)).bg(palette.chrome_hairline))
+        .into_any_element()
+}
+
+fn host_row(workspaces: &Entity<Workspaces>, cx: &App) -> AnyElement {
+    let palette = theme::palette(cx);
+    let state = workspaces.read(cx);
+    let hosts = state.hosts(cx);
+    let Some(active) = hosts.iter().find(|host| host.active).cloned() else {
+        return div()
+            .id("host-row")
+            .flex_none()
+            .h(ui(32.))
+            .border_t_1()
+            .border_color(palette.chrome_hairline)
+            .into_any_element();
+    };
+    let latency = state.latency().map(f64::round);
+    let phase = active.phase.wire_name();
+    let label = format!(
+        "Host {} over {}, {phase}. Open the host menu.",
+        active.label, active.transport
+    );
+    let tooltip: SharedString = match latency {
+        Some(ms) => format!(
+            "{} · {} · {phase} · workspace and tab actions take about {ms} ms",
+            active.label, active.transport
+        ),
+        None => format!("{} · {} · {phase}", active.label, active.transport),
+    }
+    .into();
+    let weak = workspaces.downgrade();
+    let controller = state.controller().cloned();
+    let button = Button::new("host-row-button")
+        .ghost()
+        .small()
+        .flex_1()
+        .min_w_0()
+        .justify_start()
+        .accessibility_label(label)
+        .tooltip(tooltip)
+        .child(
+            h_flex()
+                .min_w_0()
+                .items_center()
+                .gap(ui(7.))
+                .font_family(fonts::MONO)
+                .text_size(ui(TYPE_META))
+                .text_color(palette.chrome_dim)
+                .child(
+                    div()
+                        .flex_none()
+                        .size(ui(7.))
+                        .rounded_full()
+                        .bg(phase_color(active.phase, cx)),
+                )
+                .child(div().min_w_0().truncate().child(active.label.clone()))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(palette.chrome_faint)
+                        .child(active.transport),
+                ),
+        )
+        .dropdown_menu(move |menu, window, cx| {
+            let mut entries: Vec<Entry> = hosts
+                .iter()
+                .map(|host| {
+                    let label = if host.shown && host.phase != ConnectionPhase::Connected {
+                        format!(
+                            "{} {} · {}",
+                            host.letter,
+                            host.label,
+                            host.phase.wire_name()
+                        )
+                    } else {
+                        format!("{} {}", host.letter, host.label)
+                    };
+                    let (weak, id) = (weak.clone(), host.profile_id.clone());
+                    Item::new(label, move |_, cx| {
+                        weak.update(cx, |this, cx| this.toggle_host_shown(&id, cx))
+                            .ok();
+                    })
+                    .checked(host.shown)
+                    // The active host is always shown, so its item cannot be
+                    // unchecked.
+                    .disabled(host.active)
+                    .into()
+                })
+                .collect();
+            let controller = controller.clone();
+            entries.push(Entry::Separator);
+            entries.push(
+                Item::new("Connection settings…", move |window, cx| {
+                    if let Some(controller) = controller.clone() {
+                        open_connection_dialog(controller, window, cx);
+                    }
+                })
+                .into(),
+            );
+            context_menu::fill(menu, &entries, window, cx)
+        });
+    div()
+        .id("host-row")
+        .flex_none()
+        .h(ui(32.))
+        .flex()
+        .items_center()
+        .border_t_1()
+        .border_color(palette.chrome_hairline)
+        .child(button)
+        // Beside the button, not in it: its content does not stretch, and the
+        // reading belongs at the row's right edge.
+        .when_some(latency, |this, ms| {
+            this.child(
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .pr(ui(8.))
+                    .font_family(fonts::MONO)
+                    .text_size(ui(TYPE_META))
+                    .text_color(palette.chrome_faint)
+                    .child(format!("{ms} ms")),
+            )
+        })
+        .into_any_element()
+}
+
+impl RenderOnce for Sidebar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let palette = theme::palette(cx);
+        let width = self.width;
+        let state = self.workspaces.read(cx);
+        let rows = state.rows(true, cx);
+        let hosts = state.hosts(cx);
+        let can_create = hosts.iter().any(|host| host.shown && host.can_mutate);
+        let shown_hosts = hosts.iter().filter(|host| host.shown).count();
+        let list_focus = state.list_focus.clone();
+        let section_head = |left: AnyElement, right: AnyElement| {
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(ui(8.))
+                .px(ui(8.))
+                .pt(ui(4.))
+                .pb(ui(6.))
+                .child(left)
+                .child(div().flex_1())
+                .child(right)
+        };
+
+        let pinned_only = self.pinned_only;
+        let toggle_chrome = self.chrome.clone();
+        let filter = sort_toggle(
+            "workspaces-filter",
+            if pinned_only {
+                "Showing pinned workspaces only. Show all workspaces."
+            } else {
+                "Showing all workspaces. Show pinned workspaces only."
+            },
+            if pinned_only { "pinned only" } else { "all" },
+            palette.accent,
+        )
+        .on_click(move |_, _, cx| {
+            toggle_chrome
+                .update(cx, |chrome, cx| chrome.set_pinned_only(!pinned_only, cx))
+                .ok();
+        });
+
+        let new_workspace = self.new_workspace_here.then(|| {
+            bar_button(
+                "sidebar-new-workspace",
+                IconName::Plus,
+                "New workspace",
+                if can_create {
+                    palette.chrome_dim
+                } else {
+                    disabled_ink(palette.chrome_faint)
+                },
+            )
+            .my(ui(-4.))
+            .tooltip(with_shortcut("New workspace", "session.new", cx))
+            .disabled(!can_create)
+            .on_click(|_, window, cx| commands::run("session.new", window, cx))
+        });
+
+        let sort = self.agent_sort;
+        let sort_chrome = self.chrome.clone();
+        let ordering = sort_toggle(
+            "agents-sort",
+            format!(
+                "Agent ordering: {}. Next: {}.",
+                layout::sort_mode_label(sort),
+                layout::sort_mode_label(layout::next_sort_mode(sort))
+            ),
+            layout::sort_mode_label(sort),
+            palette.accent,
+        )
+        .on_click(move |_, _, cx| {
+            sort_chrome
+                .update(cx, |chrome, cx| chrome.next_agent_sort(cx))
+                .ok();
+        });
+        // The section's own menu has no row to open from: as in Tauri, the
+        // toggle is the keyboard's way in, being what the header can focus.
+        let ordering_focus = window
+            .use_keyed_state("agents-sort-focus", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let ordering = div()
+            .relative()
+            .child(ordering.track_focus(&ordering_focus).on_key_down(
+                |event: &KeyDownEvent, window, cx| {
+                    if context_menu::is_menu_key(&event.keystroke) {
+                        context_menu::open(
+                            |menu, window, cx| {
+                                let entries = crate::agents::view::section_menu(cx);
+                                context_menu::fill(menu, &entries, window, cx)
+                            },
+                            window,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .child(context_menu::anchor(&ordering_focus));
+
+        let quiet = |text: &'static str| {
+            div()
+                .px(ui(12.))
+                .py(ui(10.))
+                .text_size(ui(TYPE_SECONDARY))
+                .text_color(palette.chrome_faint)
+                .child(text)
+        };
+
+        // Up and down among its own host's rows, as the menu's Move items.
+        // In tmux's order, not the screen's: pinned rows are lifted to the top
+        // on screen, but a move swaps places in tmux.
+        let moves = |row: &WorkspaceRow| {
+            let mut host: Vec<&WorkspaceRow> = rows
+                .iter()
+                .filter(|other| other.host_profile_id == row.host_profile_id)
+                .collect();
+            host.sort_by_key(|other| other.session.order);
+            let position = host.iter().position(|other| other.key == row.key);
+            (
+                position.is_some_and(|index| index > 0),
+                position.is_some_and(|index| index + 1 < host.len()),
+            )
+        };
+        // A pin draws a divider, not a mark: one label for the block says what
+        // a glyph repeated down every pinned row said. Each row keeps its flat
+        // number, which is its address.
+        let any_pinned = rows.iter().any(|row| row.pinned);
+        let handles = self
+            .workspaces
+            .update(cx, |this, cx| this.row_stops(&rows, cx));
+        let scroll = window
+            .use_keyed_state("sidebar-workspaces-scroll", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        let mut items: Vec<AnyElement> = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            context_menu::reveal_when_focused(
+                format!("workspace-reveal-{}", row.key),
+                &handles[index],
+                &scroll,
+                window,
+                cx,
+            );
+            if any_pinned && index == 0 {
+                items.push(list_divider(
+                    "sidebar-workspaces-pinned",
+                    "Pinned",
+                    true,
+                    cx,
+                ));
+            }
+            let after_pinned = index == 0 || rows[index - 1].pinned;
+            if any_pinned && !row.pinned && after_pinned {
+                items.push(list_divider(
+                    "sidebar-workspaces-others",
+                    "Others",
+                    false,
+                    cx,
+                ));
+            }
+            items.push(workspace_row(
+                row.clone(),
+                index,
+                moves(row),
+                RowKeys::for_rows(&handles, index),
+                &self.workspaces,
+                window,
+                cx,
+            ));
+        }
+        let workspaces_list = div()
+            .id("sidebar-workspaces-list")
+            .role(Role::List)
+            .aria_label("Workspaces")
+            .track_focus(&list_focus)
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .when(rows.is_empty(), |this| {
+                this.child(quiet(if shown_hosts > 1 {
+                    "No tmux sessions on the shown hosts yet."
+                } else {
+                    "No tmux sessions on this host yet."
+                }))
+            })
+            // Said whenever the filter is on with nothing pinned: the selected
+            // workspace sitting there alone is the ordinary way to meet it.
+            .when(!rows.is_empty() && pinned_only && !any_pinned, |this| {
+                this.child(quiet(
+                    "No pinned workspaces — Shift-click a workspace to pin it.",
+                ))
+            })
+            .children(items);
+
+        let agents_list = AgentsList {
+            sort: self.agent_sort,
+            pinned_only: self.pinned_only,
+        };
+
+        let host = host_row(&self.workspaces, cx);
+
+        v_flex()
+            .id("sidebar")
+            .test_support()
+            .role(Role::Navigation)
+            .aria_label("Workspaces and agents")
+            // CSS `line-height: normal`, under GPUI's roomier default.
+            .line_height(relative(1.2))
+            .relative()
+            .flex_none()
+            .h_full()
+            .w(ui(width))
+            .min_h_0()
+            .px(ui(6.))
+            .pt(ui(6.))
+            .bg(palette.chrome_bg)
+            .border_r_1()
+            .border_color(palette.chrome_hairline)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(section_head(
+                        section_label("sidebar-workspaces-label", "Workspaces", cx)
+                            .into_any_element(),
+                        h_flex()
+                            .gap(ui(4.))
+                            .child(filter)
+                            .children(new_workspace)
+                            .into_any_element(),
+                    ))
+                    .child(workspaces_list),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .h(ui(9.))
+                    .my(ui(2.))
+                    .border_t_1()
+                    .border_color(palette.chrome_hairline)
+                    .child(divider(
+                        self.chrome.clone(),
+                        Divider::Agents,
+                        HandleEdge::Leading,
+                        false,
+                        self.agents_ratio,
+                        window,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(ui(2.))
+                            .left(relative(0.5))
+                            .ml(ui(-14.))
+                            .w(ui(28.))
+                            .h(ui(3.))
+                            .rounded(ui(2.))
+                            .bg(palette.chrome_border),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_none()
+                    .min_h_0()
+                    .h(relative(self.agents_ratio))
+                    .child(section_head(
+                        section_label("sidebar-agents-label", "Agents", cx).into_any_element(),
+                        ordering.into_any_element(),
+                    ))
+                    .child(agents_list),
+            )
+            .child(host)
+            .child(divider(
+                self.chrome,
+                Divider::Sidebar,
+                HandleEdge::Trailing,
+                false,
+                width,
+                window,
+                cx,
+            ))
+    }
+}
