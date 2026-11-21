@@ -401,4 +401,21 @@ describe("VoiceRegistry host-global state (review round 2)", () => {
     h.registry.disposeAll();
     expect(h.store.getState().hostStatus.readiness).toBe("unknown");
   });
+
+  it("release clears the leaving pane's registration and registers the others again", async () => {
+    const h = harness();
+    const a = h.registry.open({ ...h.deps, paneId: "%1", sessionId: "$1" });
+    const b = h.registry.open({ ...h.deps, paneId: "%2", sessionId: "$1" });
+    a.focus();
+    b.focus();
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%1", "%2"]);
+    await h.registry.release(b);
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%1", "%2", "", "%1"]);
+    // Released again, nothing goes out.
+    await h.registry.release(b);
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(4);
+  });
 });

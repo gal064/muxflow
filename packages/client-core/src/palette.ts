@@ -23,12 +23,19 @@ export const colors = {
   accent: "#7aa6da",
   accentInk: "#282c34",
   accentWash: "rgba(122, 166, 218, 0.12)",
+  // The accent as small text: a link. Its own role because light's accent is a
+  // hair under 4.5:1 on the ground; dark's passes as it is.
+  linkInk: "#7aa6da",
   danger: "#cc6566",
   dangerInk: "#e79596",
   dangerWash: "rgba(204, 101, 102, 0.13)",
 
   // ── Status ────────────────────────────────────────────────────────────
   ok: "#28c840",
+  // Success and the working state as small text, where light's fills read at
+  // 3.2 and 3.1:1 on the ground. Dark's pass as they are.
+  okInk: "#28c840",
+  workingInk: "#f0c674",
   warn: "#febc2e",
 
   // ── Elevation ─────────────────────────────────────────────────────────
@@ -94,11 +101,14 @@ export const lightColors = {
   accent: "#2f6fe0",
   accentInk: "#ffffff",
   accentWash: "rgba(47, 111, 224, 0.12)",
+  linkInk: "#2563eb",
   danger: "#dc2626",
   dangerInk: "#b91c1c",
   dangerWash: "rgba(220, 38, 38, 0.13)",
 
   ok: "#16a34a",
+  okInk: "#15803d",
+  workingInk: "#b45309",
   warn: "#b45309",
 
   // Softer than black: a light surface needs a fraction of the dark lift.

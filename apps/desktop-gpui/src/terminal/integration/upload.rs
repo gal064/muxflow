@@ -1,11 +1,16 @@
 //! Files and images pasted or dropped into a pane: port of the batch flow in
 //! `TerminalTransferSurface.tsx`.
 //!
-//! On a local host a path is pasted as it is. On a remote one each file is
-//! checked by a preflight, then uploaded, and only the verified destinations
-//! are pasted. A batch is bound to the connection it started on; if the pane's
-//! host, server or epoch changes, the batch stops and pastes nothing, because
-//! its paths would name files on a host the pane no longer shows.
+//! On a local host a terminal pastes a path as it is. Otherwise each file is
+//! checked by a preflight, then uploaded into the host's staging directory,
+//! and only the verified destinations are delivered. A batch is bound to the
+//! connection it started on; if the target's host, server or epoch changes,
+//! the batch stops and delivers nothing, because its paths would name files
+//! on a host the target no longer shows.
+//!
+//! What a batch delivers into is an [`UploadTarget`]: a terminal pastes the
+//! paths, a chat attaches them to the message being written. The batch itself
+//! knows neither.
 //!
 //! `desktop-core` reports from its own threads, so events wait on a channel
 //! this task drains on a timer, the same way the terminal link does.
@@ -22,8 +27,8 @@ use desktop_core::connection::{
 };
 use desktop_core::platform::{EventBody, EventSink};
 use gpui_kit::{
-    App, AsyncWindowContext, Entity, Global, ParentElement, SharedString, Styled, WeakEntity,
-    Window,
+    App, AsyncWindowContext, Context, Entity, Global, ParentElement, SharedString, Styled,
+    WeakEntity, Window,
     component::{
         WindowExt,
         button::{Button, ButtonVariants},
@@ -80,6 +85,80 @@ impl From<String> for Stop {
     }
 }
 
+/// The verified paths a batch hands its target, each with the source it came
+/// from, in the order of the sources.
+pub struct Delivery {
+    /// `(source on this machine, path on the host)`. The same path twice when
+    /// the target takes local files where they are.
+    pub paths: Vec<(String, String)>,
+    /// The batch was a staged screenshot.
+    pub image_png: bool,
+}
+
+/// What a batch delivers into. The batch's own logic (preflight, review,
+/// upload, verified destination, a scope that changes under it) is the same
+/// for every target; only its ends are the target's.
+pub trait UploadTarget: Sized + 'static {
+    /// One batch at a time per target: true while one runs.
+    fn busy(&self) -> bool;
+    fn set_busy(&mut self, busy: bool, cx: &mut Context<Self>);
+    /// What starts and cancels uploads for the target's host.
+    fn backend(&self, cx: &App) -> Arc<dyn TerminalBackend>;
+    /// Whether a source on a local host is delivered where it is, instead of
+    /// being staged on the host like a remote one.
+    fn in_place(&self) -> bool {
+        true
+    }
+    /// Whether two files with one name, or a name already staged, are asked
+    /// about. A target that does not ask has each renamed.
+    fn reviews_collisions(&self) -> bool {
+        true
+    }
+    /// A transfer, a preflight or the upload itself, started for `source_path`.
+    fn started(&mut self, _source_path: &str, _transfer_id: &str, _cx: &mut Context<Self>) {}
+    /// Takes the verified paths. An error fails the batch.
+    fn deliver(&mut self, delivery: Delivery, cx: &mut Context<Self>) -> Result<(), String>;
+    /// The batch ended without delivering: `Some` says why it failed, `None`
+    /// is a batch the user or a changed connection stopped.
+    fn stopped(&mut self, failure: Option<String>, window: &mut Window, cx: &mut Context<Self>);
+}
+
+impl UploadTarget for TerminalPane {
+    fn busy(&self) -> bool {
+        self.integration.busy
+    }
+
+    fn set_busy(&mut self, busy: bool, _: &mut Context<Self>) {
+        self.integration.busy = busy;
+    }
+
+    fn backend(&self, cx: &App) -> Arc<dyn TerminalBackend> {
+        self.link().read(cx).backend().clone()
+    }
+
+    /// Pastes the paths: a staged screenshot raw, as agents recognize an
+    /// attachment only by its bare path, anything else shell-quoted.
+    fn deliver(&mut self, delivery: Delivery, cx: &mut Context<Self>) -> Result<(), String> {
+        let paths: Vec<String> = delivery.paths.into_iter().map(|(_, path)| path).collect();
+        let text = if delivery.image_png {
+            paths
+                .iter()
+                .map(|path| validate_agent_image_path(path).map(str::to_owned))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" ")
+        } else {
+            join_shell_escaped_paths(&paths)?
+        };
+        super::paste_text(self, text, cx)
+    }
+
+    fn stopped(&mut self, failure: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(message) = failure {
+            notices::notify(&message, window, cx);
+        }
+    }
+}
+
 /// The pane's connection, as an upload binds to it.
 pub fn scope_of(pane: &TerminalPane, cx: &App) -> Option<TransferScope> {
     let profile_id = pane.link().read(cx).profile_id();
@@ -95,19 +174,20 @@ pub fn scope_of(pane: &TerminalPane, cx: &App) -> Option<TransferScope> {
     })
 }
 
-/// How a batch reads the pane's current scope. A seam, so a test can run a
+/// How a batch reads its target's current scope. A seam, so a test can run a
 /// batch without a connection controller.
-pub type ScopeOf = Rc<dyn Fn(&TerminalPane, &App) -> Option<TransferScope>>;
+pub type ScopeOf<T = TerminalPane> = Rc<dyn Fn(&T, &App) -> Option<TransferScope>>;
 
-/// Starts a batch on `pane`. One batch at a time per pane, as in the Tauri app.
-pub fn accept(
-    pane: &Entity<TerminalPane>,
+/// Starts a batch on `pane`. One batch at a time per target, as in the Tauri
+/// app.
+pub fn accept<T: UploadTarget>(
+    pane: &Entity<T>,
     source: Source,
-    scope_of: ScopeOf,
+    scope_of: ScopeOf<T>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let busy = pane.read(cx).integration.busy;
+    let busy = pane.read(cx).busy();
     let scope = scope_of(pane.read(cx), cx);
     let failure = match (&scope, busy) {
         (None, _) => Some("File paste requires a live terminal connection."),
@@ -123,8 +203,15 @@ pub fn accept(
         return;
     }
     let scope = scope.expect("checked above");
-    let backend = pane.read(cx).link().read(cx).backend().clone();
-    pane.update(cx, |pane, _| pane.integration.busy = true);
+    let (backend, in_place, reviews_collisions) = {
+        let target = pane.read(cx);
+        (
+            target.backend(cx),
+            target.in_place(),
+            target.reviews_collisions(),
+        )
+    };
+    pane.update(cx, |pane, cx| pane.set_busy(true, cx));
     let weak = pane.downgrade();
     window
         .spawn(cx, async move |cx| {
@@ -133,23 +220,40 @@ pub fn accept(
                 backend,
                 scope,
                 scope_of,
+                in_place,
+                reviews_collisions,
             };
             let outcome = batch.run(source, cx).await;
             let _ = cx.update(|window, cx| {
-                if let Err(Stop::Failed(message)) = outcome {
+                let failure = match outcome {
+                    Ok(()) => None,
+                    Err(Stop::Silent) => Some(None),
+                    Err(Stop::Failed(message)) => Some(Some(message)),
+                };
+                let gone = weak
+                    .update(cx, |pane, cx| {
+                        if let Some(failure) = failure.clone() {
+                            pane.stopped(failure, window, cx);
+                        }
+                        pane.set_busy(false, cx);
+                    })
+                    .is_err();
+                // A target that has gone still has its failure said.
+                if gone && let Some(Some(message)) = failure {
                     notices::notify(&message, window, cx);
                 }
-                let _ = weak.update(cx, |pane, _| pane.integration.busy = false);
             });
         })
         .detach();
 }
 
-struct Batch {
-    pane: WeakEntity<TerminalPane>,
+struct Batch<T: UploadTarget> {
+    pane: WeakEntity<T>,
     backend: Arc<dyn TerminalBackend>,
     scope: TransferScope,
-    scope_of: ScopeOf,
+    scope_of: ScopeOf<T>,
+    in_place: bool,
+    reviews_collisions: bool,
 }
 
 /// `desktop-core`'s events, queued for the batch's next poll.
@@ -163,16 +267,18 @@ impl EventSink for EventQueue {
     }
 }
 
-impl Batch {
+impl<T: UploadTarget> Batch<T> {
     async fn run(&self, source: Source, cx: &mut AsyncWindowContext) -> Result<(), Stop> {
+        let local = self.scope.local && self.in_place;
         match source {
-            Source::Paths(paths) if self.scope.local => {
+            Source::Paths(paths) if local => {
                 // Only readable regular files; the answer keeps the order asked.
                 inspect_local_terminal_paths(paths.clone())?;
-                self.paste(join_shell_escaped_paths(&paths)?, cx)
+                let paths = paths.into_iter().map(|path| (path.clone(), path)).collect();
+                self.deliver(paths, false, cx)
             }
-            Source::StagedImage { path, .. } if self.scope.local => {
-                self.paste(validate_agent_image_path(&path)?.to_owned(), cx)
+            Source::StagedImage { path, .. } if local => {
+                self.deliver(vec![(path.clone(), path)], true, cx)
             }
             Source::Paths(paths) => {
                 let named = paths
@@ -202,16 +308,24 @@ impl Batch {
         // One at a time: a preflight opens its own short-lived connection and
         // must not compete with the two upload slots.
         for (path, name) in sources {
-            let id = self.start(&path, &name, true, Default::default(), image_png, &sink)?;
+            let id = self.start(&path, &name, true, self.policy(), image_png, &sink)?;
+            self.started(&path, &id, cx);
             checked.push(id.clone());
             let done = self.wait(&events, &[id], cx).await?;
             items.push(Preflight::from_completed(&done[0], &name)?);
         }
         // The preflights have become uploads; their results are no news now.
         self.dismiss_delivered(&checked, cx);
-        let policy = match review_for(&items) {
+        let review = review_for(&items).and_then(|review| {
+            let collisions = review.collisions && self.reviews_collisions;
+            (review.large || collisions).then_some(Review {
+                large: review.large,
+                collisions,
+            })
+        });
+        let policy = match review {
             Some(review) => self.ask(&review, &items, cx).await?,
-            None => Policy::default(),
+            None => self.policy(),
         };
         // The review may have outlived the connection it was asked about.
         if !self.still_current(cx) {
@@ -227,7 +341,10 @@ impl Batch {
                 image_png,
                 &sink,
             ) {
-                Ok(id) => ids.push(id),
+                Ok(id) => {
+                    self.started(&item.source_path, &id, cx);
+                    ids.push(id);
+                }
                 // The ones already moving are stopped, and the batch waits for
                 // them, so the list shows how each ended.
                 Err(error) => {
@@ -240,25 +357,37 @@ impl Batch {
             }
         }
         let done = self.wait(&events, &ids, cx).await?;
-        let mut destinations = Vec::new();
-        for event in &done {
-            destinations.push(event.verified_destination().ok_or_else(|| {
+        let mut delivered = Vec::new();
+        for (item, event) in items.iter().zip(&done) {
+            let destination = event.verified_destination().ok_or_else(|| {
                 Stop::Failed("Upload completed without a verified destination.".into())
-            })?);
+            })?;
+            delivered.push((item.source_path.clone(), destination));
         }
-        let text = if image_png {
-            destinations
-                .iter()
-                .map(|path| validate_agent_image_path(path).map(str::to_owned))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(" ")
-        } else {
-            join_shell_escaped_paths(&destinations)?
-        };
-        self.paste(text, cx)?;
-        // Delivered: the paths are in the pane, where the user is looking.
+        self.deliver(delivered, image_png, cx)?;
+        // Delivered: the paths are in the target, where the user is looking.
         self.dismiss_delivered(&ids, cx);
         Ok(())
+    }
+
+    /// The collision policy when nothing was asked: a target that does not
+    /// review names has each one renamed.
+    fn policy(&self) -> Policy {
+        Policy {
+            collision: if self.reviews_collisions {
+                UploadCollisionPolicy::Fail
+            } else {
+                UploadCollisionPolicy::Rename
+            },
+            large_confirmed: false,
+        }
+    }
+
+    fn started(&self, source_path: &str, transfer_id: &str, cx: &mut AsyncWindowContext) {
+        let _ = cx.update(|_, cx| {
+            self.pane
+                .update(cx, |pane, cx| pane.started(source_path, transfer_id, cx))
+        });
     }
 
     fn start(
@@ -372,13 +501,19 @@ impl Batch {
         .unwrap_or(false)
     }
 
-    fn paste(&self, text: String, cx: &mut AsyncWindowContext) -> Result<(), Stop> {
+    fn deliver(
+        &self,
+        paths: Vec<(String, String)>,
+        image_png: bool,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<(), Stop> {
         if !self.still_current(cx) {
             return Err(Stop::Silent);
         }
+        let delivery = Delivery { paths, image_png };
         cx.update(|_, cx| {
             self.pane
-                .update(cx, |pane, cx| super::paste_text(pane, text, cx))
+                .update(cx, |pane, cx| pane.deliver(delivery, cx))
                 .map_err(|_| Stop::Silent)?
                 .map_err(Stop::Failed)
         })
@@ -403,6 +538,7 @@ impl Batch {
         let choice: Rc<Cell<Option<UploadCollisionPolicy>>> = Rc::default();
         let detail = review_detail(review, items);
         let collisions = review.collisions;
+        let unasked = self.policy().collision;
         let picked = choice.clone();
         cx.update(|window, cx| {
             window.open_alert_dialog(cx, move |alert, window, cx| {
@@ -430,9 +566,7 @@ impl Batch {
                         .primary(),
                     ]
                 } else {
-                    vec![
-                        pick("upload-start", "Start upload", UploadCollisionPolicy::Fail).primary(),
-                    ]
+                    vec![pick("upload-start", "Start upload", unasked).primary()]
                 };
                 alert
                     .entrance(DialogEntrance::None)
@@ -491,15 +625,6 @@ impl Batch {
 struct Policy {
     collision: UploadCollisionPolicy,
     large_confirmed: bool,
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            collision: UploadCollisionPolicy::Fail,
-            large_confirmed: false,
-        }
-    }
 }
 
 /// The review dialog's text, one line each.

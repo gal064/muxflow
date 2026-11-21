@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn leaves_chords_the_keymap_never_claimed_alone() {
         assert_eq!(
-            disposition("cmd-y", false, false, true),
+            disposition("cmd-j", false, false, true),
             ShortcutDisposition::Ignore
         );
     }
@@ -613,6 +613,26 @@ mod tests {
             linux_copy(false, &rebound, "ctrl-shift-y"),
             ShortcutDisposition::Run("terminal.copy")
         );
+    }
+
+    #[test]
+    fn a_focused_text_keeps_copy_over_a_terminal_selection_on_both_platforms() {
+        for (platform, copy) in [(Platform::Mac, "cmd-c"), (Platform::Linux, "ctrl-c")] {
+            let none = ShortcutOverrides::new();
+            let run = |text_field| {
+                shortcut_disposition(
+                    &pressed(copy),
+                    false,
+                    text_field,
+                    platform,
+                    &none,
+                    true,
+                    |_| true,
+                )
+            };
+            assert_eq!(run(false), ShortcutDisposition::Run("terminal.copy"));
+            assert_eq!(run(true), ShortcutDisposition::Ignore, "{platform:?}");
+        }
     }
 
     #[test]

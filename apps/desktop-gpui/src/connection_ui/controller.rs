@@ -17,6 +17,7 @@ use desktop_core::{
     app_state::{AppStateStore, PersistedAppState, load_app_state, reset_app_state},
     connection::{
         ConnectionSpec, ProfileStore,
+        chat::{ChatAction, ChatAgentMode, ChatEvent, ChatRequest},
         helper::{HelperInstallReport, HelperRollback},
         profiles::{
             HostProfile, delete_host_profile, list_host_profiles, reset_host_profiles,
@@ -67,11 +68,12 @@ use super::{
 mod tests;
 
 /// Whether an event can change what this module derives. A file event changes
-/// nothing of its own: the Explorer reads it from the event alone.
+/// nothing of its own: the Explorer reads it from the event alone, as a chat
+/// pane reads a chat event.
 fn settles(event: &BridgeEvent) -> bool {
     !matches!(
         event,
-        BridgeEvent::Ignored | BridgeEvent::FileService { .. }
+        BridgeEvent::Ignored | BridgeEvent::FileService { .. } | BridgeEvent::Chat(_)
     )
 }
 
@@ -133,6 +135,21 @@ pub enum ConnectionEvent {
     FileService { payload: String },
     /// A Git watch's status or error; the Git feature routes it by root token.
     GitService { payload: String },
+    /// A host's session history changed. Every shown host's, as the Agents
+    /// list shows each one's woke sessions.
+    History {
+        profile_id: String,
+        event: desktop_core::connection::history::HistoryEvent,
+    },
+    /// One change to a chat a pane of this host opened.
+    Chat {
+        profile_id: String,
+        event: Box<ChatEvent>,
+    },
+    /// A host's link is connected again after a resync or a reconnect. Chat
+    /// events may have been dropped meanwhile, with nothing later to show it,
+    /// so every open chat asks for its snapshot again.
+    LinkRestored { profile_id: String },
 }
 
 pub struct AgentServiceFrame {
@@ -162,6 +179,9 @@ struct RunningBridge {
     acks: DeliveryAcks,
     recovering_flow_stall: bool,
     topology_burst: Option<TopologyBurst>,
+    /// Invalidates a pending mode negotiation when transport state changes.
+    mode_attempt: u64,
+    mode_pending: bool,
     _pump: Task<()>,
 }
 
@@ -183,6 +203,8 @@ struct LinkRuntime {
     /// The failure already journaled for this outage. A supervisor retrying an
     /// unchanged failure (a host waiting for its helper) says nothing new.
     journaled_down: Option<String>,
+    /// How many times the link came back to connected.
+    restores: u64,
 }
 
 pub struct ConnectionController {
@@ -397,6 +419,15 @@ impl ConnectionController {
 
     pub fn link(&self, profile_id: &str) -> Option<&HostLink> {
         self.links.link(profile_id)
+    }
+
+    /// How many times a host's link has come back to connected: the count
+    /// [`ConnectionEvent::LinkRestored`] was last sent at. Whoever asked the
+    /// host again at this count has nothing to ask again for that event.
+    pub fn link_restores(&self, profile_id: &str) -> u64 {
+        self.runtimes
+            .get(profile_id)
+            .map_or(0, |runtime| runtime.restores)
     }
 
     pub fn active_profile_id(&self) -> String {
@@ -1616,6 +1647,8 @@ impl ConnectionController {
             acks: DeliveryAcks::default(),
             recovering_flow_stall: false,
             topology_burst: None,
+            mode_attempt: 0,
+            mode_pending: false,
             _pump: pump,
         };
         self.runtimes
@@ -1627,10 +1660,8 @@ impl ConnectionController {
                 if let Some(bridge) = self.bridge_mut(profile_id, token) {
                     bridge.client_id = Some(client_id.clone());
                 }
-                self.dispatch(HostLinksAction::Client {
-                    profile_id: profile_id.to_owned(),
-                    client_id: Some(client_id),
-                });
+                // Publish this client only after its agent mode is initialized.
+                // A visible terminal must not accept input before that answer.
             }
             Err(error) => {
                 self.dispatch(HostLinksAction::Detail {
@@ -1784,7 +1815,19 @@ impl ConnectionController {
                 self.bridge_down(profile_id, "exit", format!("Detached: {reason}"), None, cx);
             }
             BridgeEvent::ConnectionState { phase, detail } => {
-                self.connection_state(profile_id, phase, detail, cx);
+                if phase == ConnectionPhase::Connected {
+                    self.initialize_agent_mode(profile_id, token, cx);
+                } else {
+                    if let Some(bridge) = self.bridge_mut(profile_id, token) {
+                        bridge.mode_attempt += 1;
+                        bridge.mode_pending = false;
+                    }
+                    self.dispatch(HostLinksAction::Client {
+                        profile_id: profile_id.to_owned(),
+                        client_id: None,
+                    });
+                    self.connection_state(profile_id, phase, detail, cx);
+                }
             }
             BridgeEvent::Snapshot(event) => {
                 self.note_server_identity(profile_id, &event.server_identity, cx);
@@ -1849,6 +1892,14 @@ impl ConnectionController {
             BridgeEvent::GitService { payload } => {
                 cx.emit(ConnectionEvent::GitService { payload });
             }
+            BridgeEvent::History(event) => cx.emit(ConnectionEvent::History {
+                profile_id: profile_id.to_owned(),
+                event,
+            }),
+            BridgeEvent::Chat(event) => cx.emit(ConnectionEvent::Chat {
+                profile_id: profile_id.to_owned(),
+                event,
+            }),
             BridgeEvent::Ignored => {}
         }
     }
@@ -1875,6 +1926,18 @@ impl ConnectionController {
         error: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(bridge) = self
+            .runtimes
+            .get_mut(profile_id)
+            .and_then(|runtime| runtime.bridge.as_mut())
+        {
+            bridge.mode_attempt += 1;
+            bridge.mode_pending = false;
+        }
+        self.dispatch(HostLinksAction::Client {
+            profile_id: profile_id.to_owned(),
+            client_id: None,
+        });
         let runtime = self.runtimes.get_mut(profile_id);
         let repeated = runtime
             .as_ref()
@@ -1941,6 +2004,100 @@ impl ConnectionController {
         }
     }
 
+    /// Finishes the host's first-run preference before exposing a writable
+    /// client. A reconnect negotiates again: the host atomically keeps any
+    /// saved choice, including a choice made by another desktop.
+    fn initialize_agent_mode(&mut self, profile_id: &str, token: u64, cx: &mut Context<Self>) {
+        if self.link(profile_id).is_some_and(|link| {
+            link.client_id.is_some() && link.host_state.phase == ConnectionPhase::Connected
+        }) {
+            // The mode is ready, but the transport notification still belongs
+            // to helper recovery (for example after switching back to a host).
+            self.connection_state(profile_id, ConnectionPhase::Connected, None, cx);
+            return;
+        }
+        let Some(bridge) = self.bridge_mut(profile_id, token) else {
+            return;
+        };
+        if bridge.mode_pending {
+            return;
+        }
+        let Some(client_id) = bridge.client_id.clone() else {
+            return;
+        };
+        bridge.mode_attempt += 1;
+        let attempt = bridge.mode_attempt;
+        bridge.mode_pending = true;
+        let chat = crate::settings::get(cx).new_host_chat;
+        let answer = self.backend.chat_request(
+            client_id.clone(),
+            ChatRequest {
+                action: ChatAction::SetMode.into(),
+                mode: if chat {
+                    ChatAgentMode::Chat
+                } else {
+                    ChatAgentMode::Terminal
+                }
+                .into(),
+                initialize_if_unset: true,
+                ..Default::default()
+            },
+        );
+        let owner = profile_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let answer = answer.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(bridge) = this.bridge_mut(&owner, token) else {
+                    return;
+                };
+                if !bridge.mode_pending || bridge.mode_attempt != attempt {
+                    return;
+                }
+                bridge.mode_pending = false;
+                match answer {
+                    Ok(response)
+                        if matches!(
+                            ChatAgentMode::try_from(response.mode),
+                            Ok(ChatAgentMode::Chat | ChatAgentMode::Terminal)
+                        ) =>
+                    {
+                        crate::chat::host_mode_received(
+                            &owner,
+                            response.mode == i32::from(ChatAgentMode::Chat),
+                            cx,
+                        );
+                        this.dispatch(HostLinksAction::Client {
+                            profile_id: owner.clone(),
+                            client_id: Some(client_id),
+                        });
+                        // Connected may reseed mounted panes after a resync.
+                        // The engine needs its client before that command.
+                        this.sync_terminal_clients(cx);
+                        this.connection_state(&owner, ConnectionPhase::Connected, None, cx);
+                    }
+                    // The bridge dropped under the request; its reconnect
+                    // initializes the mode again.
+                    Err(error) if desktop_core::connection::lost_to_reconnect(&error) => {}
+                    answer => {
+                        let error = answer.err().unwrap_or_else(|| {
+                            "The host returned an invalid agent mode.".to_owned()
+                        });
+                        let message = format!(
+                            "Could not initialize agent preferences: {error}. Reconnect to retry."
+                        );
+                        this.dispatch(HostLinksAction::Detail {
+                            profile_id: owner.clone(),
+                            detail: message.clone(),
+                        });
+                        this.announce(&owner, message, cx);
+                    }
+                }
+                this.settle(cx);
+            });
+        })
+        .detach();
+    }
+
     fn connection_state(
         &mut self,
         profile_id: &str,
@@ -1970,8 +2127,20 @@ impl ConnectionController {
             profile_id: profile_id.to_owned(),
             action: HostAction::Connection { phase },
         });
+        let was_connected = self
+            .runtimes
+            .get(profile_id)
+            .is_some_and(|runtime| runtime.phase == ConnectionPhase::Connected);
         // Per event: a batch can hold `resyncing` and `connected` together.
         self.observe_transitions(cx);
+        if phase == ConnectionPhase::Connected && !was_connected {
+            if let Some(runtime) = self.runtimes.get_mut(profile_id) {
+                runtime.restores += 1;
+            }
+            cx.emit(ConnectionEvent::LinkRestored {
+                profile_id: profile_id.to_owned(),
+            });
+        }
         if phase == ConnectionPhase::Connected {
             if let Some(runtime) = self.runtimes.get_mut(profile_id) {
                 runtime.quiet_reconnect = false;

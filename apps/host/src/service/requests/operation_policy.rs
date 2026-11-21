@@ -31,6 +31,8 @@ pub(crate) enum Handler {
     Agent,
     Voice,
     Automation,
+    Chat,
+    History,
     Daemon,
     Test,
 }
@@ -140,9 +142,10 @@ impl OperationPolicy {
             v1::Operation::ReconcileTerminalUpload => {
                 (Lane::Bulk, Scheduling::Inline, Handler::Filesystem)
             }
-            v1::Operation::GitStatus | v1::Operation::GitDiff => {
-                (Lane::Control, Scheduling::Detached, Handler::Git)
-            }
+            v1::Operation::GitStatus
+            | v1::Operation::GitDiff
+            | v1::Operation::GitBranchSummary
+            | v1::Operation::GitBranches => (Lane::Control, Scheduling::Detached, Handler::Git),
             // Diff bodies are the only Git payload large enough to matter to
             // terminal latency, so they alone take the independent bulk lane.
             // Detached so a body read cannot block
@@ -154,7 +157,8 @@ impl OperationPolicy {
             | v1::Operation::PrepareGitDiscard
             | v1::Operation::GitMutation
             | v1::Operation::GitCommit
-            | v1::Operation::GitPush => (Lane::Control, Scheduling::Detached, Handler::Git),
+            | v1::Operation::GitPush
+            | v1::Operation::GitCheckout => (Lane::Control, Scheduling::Detached, Handler::Git),
             v1::Operation::AgentSnapshot | v1::Operation::AgentDiagnostics => {
                 (Lane::Control, Scheduling::Inline, Handler::Agent)
             }
@@ -177,6 +181,12 @@ impl OperationPolicy {
             // Detached: a run started now waits on the new tab's shell, and
             // a save waits on the scheduler's lock while a tick launches.
             v1::Operation::Automation => (Lane::Control, Scheduling::Detached, Handler::Automation),
+            // Inline: a connection's chat requests take effect in the order
+            // it sent them. Each touches memory or hands a command to the
+            // provider, which must not make the lane wait: the first request
+            // for a pane also loads its history and connects its session.
+            v1::Operation::Chat => (Lane::Control, Scheduling::Inline, Handler::Chat),
+            v1::Operation::SessionHistory => (Lane::Control, Scheduling::Inline, Handler::History),
             v1::Operation::TestDelay
             | v1::Operation::TestInjectGap
             | v1::Operation::TestOverflow => (Lane::Control, Scheduling::Inline, Handler::Test),
@@ -242,9 +252,9 @@ mod tests {
     /// lists of the same operations would be the very drift being guarded.
     fn expected_policies() -> Vec<(v1::Operation, Lane, Scheduling, Handler)> {
         use Handler::{
-            ActiveRoot as AR, Agent as AH, Automation as AU, Daemon as DH, Filesystem as FH,
-            Git as GH, Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH,
-            Unsupported as UH, Voice as VH,
+            ActiveRoot as AR, Agent as AH, Automation as AU, Chat as CH, Daemon as DH,
+            Filesystem as FH, Git as GH, History as HH, Snapshot as SH, Terminal as TH, Test as XH,
+            TmuxAction as MH, Unsupported as UH, Voice as VH,
         };
         use Lane::{Bulk as B, Control as C};
         use Scheduling::{Detached as Dd, Inline as I};
@@ -290,6 +300,9 @@ mod tests {
             (GitMutation, C, Dd, GH),
             (GitCommit, C, Dd, GH),
             (GitPush, C, Dd, GH),
+            (GitBranchSummary, C, Dd, GH),
+            (GitBranches, C, Dd, GH),
+            (GitCheckout, C, Dd, GH),
             (AgentSnapshot, C, I, AH),
             (AgentDiagnostics, C, I, AH),
             (AgentAction, C, I, AH),
@@ -310,6 +323,8 @@ mod tests {
             (VoiceSpeak, C, Dd, VH),
             (VoiceSession, C, I, VH),
             (Automation, C, Dd, AU),
+            (Chat, C, I, CH),
+            (SessionHistory, C, I, HH),
             (TestDelay, C, I, XH),
             (TestInjectGap, C, I, XH),
             (TestOverflow, C, I, XH),

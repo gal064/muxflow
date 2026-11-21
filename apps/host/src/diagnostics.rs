@@ -804,6 +804,26 @@ fn bounded_log_text(text: &str) -> String {
 /// no path, hostname, session name or payload byte is in this line — it stays
 /// inside the privacy declaration above.
 pub fn write_bridge_exit_log(runtime: Option<&Path>, reason: &str, lifetime: Duration) {
+    append_bridge_log(
+        runtime,
+        &bridge_exit_line(now_epoch_millis(), reason, lifetime),
+    );
+}
+
+/// Names a bridge retiring the daemon it found, in `bridge.log` beside its
+/// exit line. A retired daemon is stopped, or sent SIGTERM when it does not
+/// cooperate, and nothing else records that a bridge did it: a daemon killed
+/// for answering slowly could not be told apart from one that crashed.
+/// `reason` is a fixed label (`different-build` or `silent`); see
+/// `write_bridge_exit_log` for why nothing else may be in the line.
+pub fn write_bridge_retired_daemon_log(runtime: Option<&Path>, reason: &str) {
+    append_bridge_log(
+        runtime,
+        &bridge_retired_daemon_line(now_epoch_millis(), reason),
+    );
+}
+
+fn append_bridge_log(runtime: Option<&Path>, line: &str) {
     let Some(runtime) = runtime else { return };
     let path = runtime.join("bridge.log");
     let oversized = fs::symlink_metadata(&path)
@@ -824,11 +844,7 @@ pub fn write_bridge_exit_log(runtime: Option<&Path>, reason: &str, lifetime: Dur
         options.append(true);
     }
     if let Ok(mut file) = options.open(&path) {
-        let _ = writeln!(
-            file,
-            "{}",
-            bridge_exit_line(now_epoch_millis(), reason, lifetime)
-        );
+        let _ = writeln!(file, "{line}");
     }
 }
 
@@ -846,6 +862,17 @@ fn bridge_exit_line(at_unix_millis: i64, reason: &str, lifetime: Duration) -> St
         "event": "bridgeExit",
         "reason": reason,
         "lifetimeMs": whole_millis(lifetime),
+    })
+    .to_string()
+}
+
+/// Composed apart from the write so the exact line can be pinned by a test.
+fn bridge_retired_daemon_line(at_unix_millis: i64, reason: &str) -> String {
+    serde_json::json!({
+        "atUnixMillis": at_unix_millis,
+        "subsystem": "host_bridge",
+        "event": "daemonRetired",
+        "reason": reason,
     })
     .to_string()
 }
@@ -3060,6 +3087,15 @@ mod tests {
         assert_same_json(
             serialized,
             r#"{"atUnixMillis":1700000000000,"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#,
+        );
+    }
+
+    /// Pinned exactly, for the same reason as the exit line beside it.
+    #[test]
+    fn the_bridge_retired_daemon_line_carries_only_a_fixed_reason() {
+        assert_same_json(
+            bridge_retired_daemon_line(1_700_000_000_000, "silent"),
+            r#"{"atUnixMillis":1700000000000,"event":"daemonRetired","reason":"silent","subsystem":"host_bridge"}"#,
         );
     }
 

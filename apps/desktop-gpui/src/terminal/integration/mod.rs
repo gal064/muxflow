@@ -168,6 +168,8 @@ pub fn children(
             .border_2()
             .border_color(palette.accent)
             .text_color(palette.accent_ink)
+            // A hitbox, without which GPUI applies no drag-over style.
+            .on_mouse_move(|_, _, _| {})
             .group_drag_over::<ExternalPaths>(DROP_GROUP, |style| style.visible())
             .group_drag_over::<InternalPathDrag>(DROP_GROUP, |style| style.visible())
             .child("Drop files to paste paths")
@@ -246,7 +248,9 @@ fn deliver(
 /// The upload list, in the terminal's bottom-right corner. Port of
 /// `TerminalTransferHistory`.
 pub fn upload_list(cx: &mut App) -> Option<AnyElement> {
-    let records = cx.try_global::<Uploads>()?.0.records.clone();
+    let mut records = cx.try_global::<Uploads>()?.0.records.clone();
+    // A chat's uploads are drawn on its own chips.
+    records.retain(|record| !record.pane_id.starts_with(crate::chat::CHAT_UPLOAD_PREFIX));
     if records.is_empty() {
         return None;
     }

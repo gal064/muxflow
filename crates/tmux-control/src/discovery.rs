@@ -59,6 +59,9 @@ pub struct Pane {
     /// has announced none: tmux starts every pane titled with the hostname,
     /// which names nothing about the pane.
     pub title: String,
+    /// The chat adapter whose conversation fills this pane; empty for a
+    /// terminal pane.
+    pub chat_adapter_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,8 +166,9 @@ const SESSION_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{session_name
 const WINDOW_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{window_index}__ADE_TMUX_FIELD_9C71__#{window_name}__ADE_TMUX_FIELD_9C71__#{window_active}__ADE_TMUX_FIELD_9C71__#{window_layout}__ADE_TMUX_FIELD_9C71__#{window_zoomed_flag}";
 /// A title that says nothing about the pane is published empty: tmux's default of
 /// the host name, and every title in a window whose name is locked, because that
-/// name is the one the window's agents go by.
-const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{@muxflow-name-locked},#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}}},,#{pane_title}}";
+/// name is the one the window's agents go by. The last field is the pane's chat
+/// tag, which the host sets when it turns the pane into a chat.
+const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{@muxflow-name-locked},#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}}},,#{pane_title}}__ADE_TMUX_FIELD_9C71__#{@muxflow-chat}";
 
 const IDENTITY_MARKER: &str = "__ADE_ID__";
 const SESSION_MARKER: &str = "__ADE_S__";
@@ -357,7 +361,7 @@ fn parse_window(line: &str) -> Result<Window, DiscoverError> {
 }
 
 fn parse_pane(line: &str) -> Result<Pane, DiscoverError> {
-    let value = fields("pane", line, 14)?;
+    let value = fields("pane", line, 15)?;
     let pane_pid = number::<u32>("pane", line, value[11])?;
     Ok(Pane {
         session_id: value[0].into(),
@@ -374,6 +378,7 @@ fn parse_pane(line: &str) -> Result<Pane, DiscoverError> {
         pane_pid,
         start_command: value[12].into(),
         title: value[13].into(),
+        chat_adapter_id: value[14].into(),
     })
 }
 
@@ -404,7 +409,7 @@ mod tests {
             "$1{SEPARATOR}@2{SEPARATOR}0{SEPARATOR}editor{SEPARATOR}1{SEPARATOR}b25d,80x24,0,0,2{SEPARATOR}0"
         );
         let pane = format!(
-            "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp/a path{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}{SEPARATOR}✳ alpha session"
+            "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp/a path{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}{SEPARATOR}✳ alpha session{SEPARATOR}"
         );
         let parsed = parse_batched_discovery(
             &batched_output(&[&session], &[&window], &[&pane]),
@@ -464,7 +469,7 @@ mod tests {
                 "$1{SEPARATOR}@2{SEPARATOR}0{SEPARATOR}editor{SEPARATOR}1{SEPARATOR}b25d,80x24,0,0,2{SEPARATOR}0"
             ),
             _ => format!(
-                "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}{SEPARATOR}"
+                "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}{SEPARATOR}{SEPARATOR}"
             ),
         };
         let mut seen = Vec::new();
@@ -489,9 +494,10 @@ mod tests {
 
     #[test]
     fn parses_names_and_paths_without_whitespace_splitting() {
-        let pane = parse_pane("$1__ADE_TMUX_FIELD_9C71__@2__ADE_TMUX_FIELD_9C71__%3__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__1__ADE_TMUX_FIELD_9C71__80__ADE_TMUX_FIELD_9C71__24__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__/tmp/a path__ADE_TMUX_FIELD_9C71__fish__ADE_TMUX_FIELD_9C71__123__ADE_TMUX_FIELD_9C71____ADE_TMUX_FIELD_9C71__title with spaces").unwrap();
+        let pane = parse_pane("$1__ADE_TMUX_FIELD_9C71__@2__ADE_TMUX_FIELD_9C71__%3__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__1__ADE_TMUX_FIELD_9C71__80__ADE_TMUX_FIELD_9C71__24__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__/tmp/a path__ADE_TMUX_FIELD_9C71__fish__ADE_TMUX_FIELD_9C71__123__ADE_TMUX_FIELD_9C71____ADE_TMUX_FIELD_9C71__title with spaces__ADE_TMUX_FIELD_9C71__codex").unwrap();
         assert_eq!(pane.current_path, "/tmp/a path");
         assert_eq!(pane.title, "title with spaces");
+        assert_eq!(pane.chat_adapter_id, "codex");
 
         let session = parse_session("$1__ADE_TMUX_FIELD_9C71__name with spaces__ADE_TMUX_FIELD_9C71__2__ADE_TMUX_FIELD_9C71__1").unwrap();
         assert_eq!(session.name, "name with spaces");
@@ -517,7 +523,7 @@ mod tests {
         let panes = (0..100)
             .map(|pane| {
                 format!(
-                    "${}{SEPARATOR}@{pane}{SEPARATOR}%{pane}{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}bash{SEPARATOR}999999{SEPARATOR}exec bash{SEPARATOR}bash",
+                    "${}{SEPARATOR}@{pane}{SEPARATOR}%{pane}{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}bash{SEPARATOR}999999{SEPARATOR}exec bash{SEPARATOR}bash{SEPARATOR}",
                     pane / 5,
                 )
             })

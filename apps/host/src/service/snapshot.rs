@@ -130,6 +130,8 @@ pub(super) fn snapshot_from_reconciled_identity(
                 top: item.top.into(),
                 current_path: item.current_path,
                 current_command: item.current_command,
+                chat_adapter_id: super::chat::ChatRuntime::global()
+                    .adapter_for(&item.chat_adapter_id),
             })
             .collect(),
         agents: Some(agents),

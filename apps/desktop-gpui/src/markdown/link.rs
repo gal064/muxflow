@@ -5,7 +5,7 @@
 /// What a clicked link asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Target {
-    /// An `http(s)` URL, opened in the browser once the user has seen it.
+    /// An `http(s)` URL, opened in the browser.
     External(String),
     /// A file, resolved against the document: the host canonicalizes it and
     /// decides whether it may be read.

@@ -11,6 +11,8 @@ export interface MicButtonProps {
   disabled: boolean;
   /** Why it is disabled, shown under the button; empty when enabled. */
   hint: string;
+  /** A line under the label while it waits for a press. */
+  note?: string | undefined;
   onPressIn: () => void;
   onSubmit: () => void;
   onLock: () => void;
@@ -26,7 +28,7 @@ const DRAG_PREVIEW_LIMIT = VOICE_GESTURE_THRESHOLD - 8;
  * screen works without looking at it. The disc is the visual anchor (pulsing
  * ring while recording, spinner while the host works), not the hit area.
  */
-export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, onCancel }: MicButtonProps) {
+export function MicButton({ phase, disabled, hint, note, onPressIn, onSubmit, onLock, onCancel }: MicButtonProps) {
   const pulse = useRef(new Animated.Value(0)).current;
   const dragX = useRef(new Animated.Value(0)).current;
   const [gestureDirection, setGestureDirection] = useState<VoiceGestureDirection>();
@@ -88,7 +90,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, 
 
   return (
     <Pressable
-      accessibilityHint="Hold and release to send, swipe left to lock, or swipe right to cancel"
+      accessibilityHint={`Hold and release to send, swipe left to lock, or swipe right to cancel${note && !disabled ? `. ${note}` : ""}`}
       accessibilityLabel={label}
       accessibilityRole="button"
       accessibilityState={{ disabled: disabled || busy, busy }}
@@ -139,7 +141,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, 
       </View>
       <Text accessibilityLiveRegion="polite" style={styles.label}>{label}</Text>
       {phase === "recording" ? <Text style={styles.gestureHint}>Swipe left to lock · right to discard</Text> : null}
-      {disabled && hint ? <Text style={styles.hint}>{hint}</Text> : null}
+      {disabled && hint ? <Text style={styles.hint}>{hint}</Text> : note && phase === "idle" ? <Text style={styles.hint}>{note}</Text> : null}
     </Pressable>
   );
 }

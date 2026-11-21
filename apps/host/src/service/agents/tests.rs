@@ -89,6 +89,7 @@ fn topology(command: &str) -> tmux_control::TmuxSnapshot {
             pane_pid: 0,
             start_command: String::new(),
             title: String::new(),
+            chat_adapter_id: String::new(),
         }],
     }
 }

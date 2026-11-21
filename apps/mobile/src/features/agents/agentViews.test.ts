@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Agent } from "../../store/sessionStore";
 import { colors } from "../../ui/tokens";
-import { agentDisplayName, agentStateLabel, agentTitle, waitingColor, waitingInSession, waitingLabel } from "./agentViews";
+import { agentDisplayName, agentStateLabel, agentStateWord, agentTitle, waitingColor, waitingInSession, waitingLabel, windowSubtitle } from "./agentViews";
 
 function agent(overrides: Partial<Agent> & { id: string; sessionId: string }): Agent {
   const { sessionId, ...rest } = overrides;
@@ -90,6 +90,18 @@ describe("agentDisplayName (§9.4 line 2: who, when the row is already the windo
   });
 });
 
+describe("windowSubtitle (§9.4 line 2 of a window row)", () => {
+  it("names the agents, else the command, and says first when the window is a chat", () => {
+    expect(windowSubtitle(false, [], "bash")).toBe("bash");
+    expect(windowSubtitle(false, ["Claude Code", "Codex CLI"], "node")).toBe("Claude Code, Codex CLI");
+    expect(windowSubtitle(true, ["Claude Code"], "bash")).toBe("Chat · Claude Code");
+    expect(windowSubtitle(true, ["Claude Code", "Codex CLI"], "bash")).toBe("Chat · Claude Code, Codex CLI");
+    // A chat's pane runs a shell under it; the command says nothing about the chat.
+    expect(windowSubtitle(true, [], "bash")).toBe("Chat");
+    expect(windowSubtitle(false, [], "")).toBe("");
+  });
+});
+
 describe("agentStateLabel", () => {
   it("speaks every visual mark and treats retained state as gone", () => {
     expect(agentStateLabel(agent({ id: "blocked", sessionId: "$1", lifecycle: "blocked" }))).toBe("blocked");
@@ -98,5 +110,16 @@ describe("agentStateLabel", () => {
     expect(agentStateLabel(agent({ id: "idle", sessionId: "$1", lifecycle: "idle" }))).toBe("idle");
     expect(agentStateLabel(agent({ id: "unknown", sessionId: "$1", lifecycle: "unknown" }))).toBe("status unknown");
     expect(agentStateLabel(agent({ id: "gone", sessionId: "$1", lifecycle: "working", present: false }))).toBe("gone");
+  });
+});
+
+describe("agentStateWord", () => {
+  it("says the state under an agent screen's title in the chat header's words", () => {
+    expect(agentStateWord(agent({ id: "blocked", sessionId: "$1", lifecycle: "blocked" }))).toBe("Waiting for you");
+    expect(agentStateWord(agent({ id: "working", sessionId: "$1", lifecycle: "working" }))).toBe("Working");
+    expect(agentStateWord(agent({ id: "done", sessionId: "$1", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2n, seenGeneration: 1n }))).toBe("Finished");
+    expect(agentStateWord(agent({ id: "idle", sessionId: "$1", lifecycle: "idle" }))).toBe("Idle");
+    expect(agentStateWord(agent({ id: "unknown", sessionId: "$1", lifecycle: "unknown" }))).toBe("");
+    expect(agentStateWord(agent({ id: "gone", sessionId: "$1", lifecycle: "working", present: false }))).toBe("Ended");
   });
 });

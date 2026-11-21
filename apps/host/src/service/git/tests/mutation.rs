@@ -219,10 +219,9 @@ async fn rename_diffs_use_target_specific_objects_and_reject_hunk_mutations() {
     assert_eq!(staged.old_content, base);
     assert_eq!(staged.new_content, base);
     assert_eq!(staged.hunk_count, 0);
-    // The client response carries content only; the patch that proves rename
-    // provenance is what the hunk path re-derives.
-    assert!(staged.patch.is_empty());
+    // The client gets the same patch the hunk path re-derives.
     let staged_patch = service.diff_with_patch(&request).await.unwrap().patch;
+    assert_eq!(staged.patch, staged_patch);
     assert!(
         staged_patch
             .windows(b"rename from original\n".len())

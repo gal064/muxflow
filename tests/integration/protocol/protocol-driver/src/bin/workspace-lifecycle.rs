@@ -112,6 +112,29 @@ fn main() -> Result<()> {
             initial.sessions.is_empty() && initial.server_identity == "tmux:none",
             "fixture must start empty"
         );
+        if cycle == 0 {
+            request(
+                &mut bridge,
+                v1::Request {
+                    operation: v1::Operation::Chat.into(),
+                    chat: Some(v1::ChatRequest {
+                        action: v1::ChatAction::SetMode.into(),
+                        mode: v1::ChatAgentMode::Chat.into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )?;
+        } else {
+            ensure!(
+                initial
+                    .agents
+                    .as_ref()
+                    .is_some_and(|agents| agents.agent_mode == i32::from(v1::ChatAgentMode::Chat)),
+                "reconnecting must retain Chat mode"
+            );
+        }
         let created = request(
             &mut bridge,
             v1::Request {
@@ -134,6 +157,13 @@ fn main() -> Result<()> {
             current.sessions.len() == 1,
             "create must produce exactly one workspace"
         );
+        ensure!(
+            current
+                .agents
+                .as_ref()
+                .is_some_and(|agents| agents.agent_mode == i32::from(v1::ChatAgentMode::Chat)),
+            "a new workspace must inherit Chat mode"
+        );
         request(
             &mut bridge,
             v1::Request {
@@ -154,6 +184,13 @@ fn main() -> Result<()> {
         ensure!(
             empty.sessions.is_empty() && empty.server_identity == "tmux:none",
             "close must restore empty state"
+        );
+        ensure!(
+            empty
+                .agents
+                .as_ref()
+                .is_some_and(|agents| agents.agent_mode == i32::from(v1::ChatAgentMode::Chat)),
+            "closing every workspace must retain Chat mode"
         );
         println!("PASS lifecycle cycle {}", cycle + 1);
     }

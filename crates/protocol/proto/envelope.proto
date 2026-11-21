@@ -3,6 +3,8 @@ syntax = "proto3";
 package tmux_agent.protocol.v1;
 
 import "automation.proto";
+import "chat.proto";
+import "history.proto";
 
 message Envelope {
   uint32 protocol_major = 1;
@@ -189,6 +191,21 @@ enum Operation {
   // connect and on every theme change. tmux keeps one answer per pane, so the
   // host keeps one value for every connection: the last one any client sent.
   OPERATION_SET_TERMINAL_COLORS = 59;
+  // Chat mode (chat.proto): every `ChatAction`, with `Request.chat` /
+  // `Response.chat`. Changes arrive as CHAT events, only on the connections
+  // that opened the pane.
+  OPERATION_CHAT = 60;
+  // Session history and snooze (history.proto), with `Request.history` /
+  // `Response.history`.
+  OPERATION_SESSION_HISTORY = 61;
+  // The files the working tree changes against the default branch, with line
+  // counts: `GitResponse.branch_summary`. Read only.
+  OPERATION_GIT_BRANCH_SUMMARY = 62;
+  // The repository's local branches: `GitResponse.branches`. Read only.
+  OPERATION_GIT_BRANCHES = 63;
+  // Switches to the local branch `GitRequest.branch`, as `git switch` does: a
+  // switch Git refuses changes nothing. Answers with `GitResponse.command`.
+  OPERATION_GIT_CHECKOUT = 64;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -253,7 +270,11 @@ message Request {
   // SET_TERMINAL_COLORS only: `#rrggbb`.
   string terminal_foreground = 25;
   string terminal_background = 26;
-  // NEXT FREE FIELD = 27.
+  // OPERATION_CHAT only.
+  ChatRequest chat = 27;
+  // OPERATION_SESSION_HISTORY only.
+  HistoryRequest history = 28;
+  // NEXT FREE FIELD = 29.
 }
 
 message Response {
@@ -276,6 +297,10 @@ message Response {
   repeated string diagnostic_lines = 14;
   // OPERATION_AUTOMATION only.
   AutomationResponse automation = 15;
+  // OPERATION_CHAT only.
+  ChatResponse chat = 16;
+  // OPERATION_SESSION_HISTORY only.
+  HistoryResponse history = 17;
 }
 
 enum HookIngestDisposition {
@@ -347,6 +372,11 @@ enum EventKind {
   // once synthesis settles, and is complete on its own for a phone that ignores
   // this kind. Goes only to the connection holding the session.
   EVENT_KIND_VOICE_REPLY_TEXT = 23;
+  // One change to one chat, in `chat`, scoped to its pane. Sent only to the
+  // connections that opened that pane with CHAT_ACTION_OPEN.
+  EVENT_KIND_CHAT = 24;
+  // The session history changed, in `history`: list again.
+  EVENT_KIND_SESSION_HISTORY = 25;
 }
 
 message HostEvent {
@@ -371,6 +401,10 @@ message HostEvent {
   VoiceEvent voice = 13;
   // EVENT_KIND_AUTOMATION only.
   AutomationEvent automation = 14;
+  // EVENT_KIND_CHAT only.
+  ChatEvent chat = 15;
+  // EVENT_KIND_SESSION_HISTORY only.
+  HistoryEvent history = 16;
 }
 
 message Cancel {
@@ -424,6 +458,9 @@ message Pane {
   string current_command = 11;
   reserved 12, 13, 14;
   reserved "nested_tmux", "outer_pane_id", "nested_provenance";
+  // The chat adapter whose conversation fills this pane, as in
+  // `ChatState.adapter_id`. Empty for a terminal pane.
+  string chat_adapter_id = 15;
 }
 
 message TerminalBytes {
@@ -817,6 +854,18 @@ enum GitDiffTarget {
   GIT_DIFF_TARGET_UNSPECIFIED = 0;
   GIT_DIFF_TARGET_UNSTAGED = 1;
   GIT_DIFF_TARGET_STAGED = 2;
+  // The working tree against the merge base of HEAD and the default branch
+  // (`origin/HEAD`, else `origin/main` or `origin/master`), as
+  // OPERATION_GIT_BRANCH_SUMMARY lists it. Diffs only: no mutation takes it.
+  GIT_DIFF_TARGET_BASE = 3;
+}
+
+// What OPERATION_GIT_BRANCH_SUMMARY compares the working tree with.
+enum GitSummaryBase {
+  // The merge base of HEAD and the default branch, as GIT_DIFF_TARGET_BASE.
+  GIT_SUMMARY_BASE_UNSPECIFIED = 0;
+  // HEAD: only what is not committed.
+  GIT_SUMMARY_BASE_HEAD = 1;
 }
 
 enum GitMutationKind {
@@ -895,6 +944,9 @@ message GitDiff {
   string display_path = 5;
   bytes old_content = 6;
   bytes new_content = 7;
+  // Git's own patch, three lines of context, so a hunk index names the hunk a
+  // hunk mutation applies. Empty for a binary or too-large diff, and when it
+  // is larger than the control lane carries: then `hunk_count` is still set.
   bytes patch = 8;
   string source_generation = 9;
   bool binary = 10;
@@ -996,6 +1048,46 @@ message GitRequest {
   string watch_id = 15;
   string expected_server_identity = 16;
   GitDiffContentRequest content = 17;
+  // OPERATION_GIT_CHECKOUT: the local branch, without `refs/heads/`.
+  string branch = 18;
+  // OPERATION_GIT_BRANCH_SUMMARY.
+  GitSummaryBase summary_base = 19;
+}
+
+// One file of a branch summary. Renames are not detected: a renamed file is
+// its deletion and its addition.
+message GitBranchFile {
+  bytes path = 1;
+  // MODIFIED, ADDED, DELETED or TYPE_CHANGED; UNTRACKED for a file Git does
+  // not track yet, counted as added lines.
+  GitChangeKind kind = 2;
+  uint32 added = 3;
+  uint32 removed = 4;
+  bool binary = 5;
+}
+
+// The working tree against the merge base of HEAD and the default branch, or
+// against HEAD, as `GitRequest.summary_base` asks.
+message GitBranchSummary {
+  // What the summary compares with, as Git names it (`origin/main`). Empty
+  // when the repository has no default branch to compare with; then nothing
+  // else is set.
+  string base_ref = 1;
+  string merge_base_oid = 2;
+  // Sorted by path, at most 2,000.
+  repeated GitBranchFile files = 3;
+  uint64 total_file_count = 4;
+  // Over every file, listed or not.
+  uint64 added = 5;
+  uint64 removed = 6;
+}
+
+message GitBranchList {
+  // Local branch names, most recently committed first, at most 500.
+  repeated string branches = 1;
+  // Empty on a detached HEAD.
+  string current = 2;
+  bool truncated = 3;
 }
 
 message GitResponse {
@@ -1008,6 +1100,8 @@ message GitResponse {
   GitConfirmation confirmation = 4;
   GitCommandResult command = 5;
   GitDiffContentChunk content_chunk = 6;
+  GitBranchSummary branch_summary = 7;
+  GitBranchList branches = 8;
 }
 
 message GitEvent {
@@ -1166,6 +1260,9 @@ message AgentSnapshot {
   repeated AgentAdapterDescriptor adapters = 8;
   // All live events at or below this daemon generation are included.
   uint64 accepted_generation = 9;
+  // Whether an agent started in a terminal on this host becomes a chat.
+  // Written with CHAT_ACTION_SET_MODE; never unspecified from this host.
+  ChatAgentMode agent_mode = 10;
 }
 
 message AgentHookEvent {

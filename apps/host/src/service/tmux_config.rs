@@ -61,15 +61,15 @@ fn recommended_hook_command() -> String {
 /// Built from the registry, so adding an
 /// adapter changes it — and that change is what `AlreadyCurrent` has to be able
 /// to notice, along with any change to the hook's body.
+///
+/// An agent that is a chat runs behind a pipe, in a pane whose command is a
+/// shell: that pane is known by the chat's mark on it, and the chat gives it
+/// the title an agent in a terminal would.
 fn guard_condition() -> String {
-    let mut agent_condition = String::new();
+    let mut agent_condition = format!("#{{!=:#{{{}}},}}", super::chat::CHAT_OPTION);
     for adapter in super::agents::adapters::all() {
         let test = format!("#{{==:#{{pane_current_command}},{}}}", adapter.executable());
-        agent_condition = if agent_condition.is_empty() {
-            test
-        } else {
-            format!("#{{||:{agent_condition},{test}}}")
-        };
+        agent_condition = format!("#{{||:{agent_condition},{test}}}");
     }
     format!("#{{&&:{NAME_UNLOCKED_CONDITION},#{{&&:{TITLE_OWNER_CONDITION},{agent_condition}}}}}")
 }
@@ -403,6 +403,10 @@ mod tests {
                 adapter.id()
             );
         }
+        assert!(
+            command.contains("#{!=:#{@muxflow-chat},}"),
+            "a chat's pane runs a shell, and is known by its mark: {command}"
+        );
         assert!(command.starts_with("if -F "), "{command}");
         assert!(
             command.contains(TITLE_OWNER_CONDITION),

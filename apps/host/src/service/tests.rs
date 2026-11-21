@@ -556,6 +556,7 @@ fn a_refreshed_baseline_names_what_moved() {
         pane_pid: 0,
         start_command: String::new(),
         title: String::new(),
+        chat_adapter_id: String::new(),
     };
     let base = tmux_control::TmuxSnapshot {
         sessions: vec![tmux_control::Session {
@@ -726,4 +727,118 @@ async fn a_different_contract_is_closed_before_pipelined_requests_are_dispatched
     assert_eq!(error.code, "protocol_incompatible");
     assert!(task.await.unwrap().is_err());
     assert!(shutdown_rx.try_recv().is_err());
+}
+
+/// Agent work is synchronous and, on a stalled disk, waits for tens of seconds
+/// on locks and the disk. Run on the runtime's workers, a few waiting hooks parked
+/// all of them and the daemon stopped answering handshakes. Here two workers
+/// and three hooks stuck behind the stand-in for that wait must still leave a
+/// fourth connection its hello and an answer.
+///
+/// The client side runs on its own thread and runtime: a starved server
+/// runtime drives no sockets and no timers, so a deadline kept there would
+/// hang the test instead of failing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_ingests_stuck_on_the_disk_leave_runtime_workers_free() {
+    use requests::{TEST_AGENT_WORK, TEST_AGENT_WORK_GATE, TEST_AGENT_WORK_WAITING};
+
+    let stuck = TEST_AGENT_WORK_GATE.lock().unwrap();
+    TEST_AGENT_WORK_WAITING.store(0, Ordering::Release);
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        client.set_nonblocking(true).unwrap();
+        tokio::spawn(serve_with_shutdown(
+            UnixStream::from_std(server).unwrap(),
+            None,
+        ));
+        clients.push(client);
+    }
+
+    let outcome = std::thread::spawn(move || {
+        let agent_request = |request_id, operation: v1::Operation| {
+            envelope(
+                request_id,
+                0,
+                Payload::Request(v1::Request {
+                    operation: operation.into(),
+                    agent: Some(v1::AgentRequest {
+                        agent_id: TEST_AGENT_WORK.into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+        };
+        let hello = |epoch| {
+            envelope(
+                1,
+                0,
+                Payload::ClientHello(v1::ClientHello {
+                    connection_epoch: epoch,
+                    ..Default::default()
+                }),
+            )
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let mut clients = clients
+                    .into_iter()
+                    .map(|client| UnixStream::from_std(client).unwrap())
+                    .collect::<Vec<_>>();
+                let mut fresh = clients.pop().unwrap();
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    for (epoch, client) in (1..).zip(clients.iter_mut()) {
+                        write_frame(client, &hello(epoch)).await.unwrap();
+                        let _hello = read_frame(client).await.unwrap().unwrap();
+                    }
+                    for client in &mut clients {
+                        write_frame(client, &agent_request(2, v1::Operation::AgentHookIngest))
+                            .await
+                            .unwrap();
+                    }
+                })
+                .await
+                .map_err(|_| "the hooks' own handshakes were not answered")?;
+                // Two waiting hooks are enough to park both workers when the
+                // work runs on them; with the fix all three wait on the pool.
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while TEST_AGENT_WORK_WAITING.load(Ordering::Acquire) < 2 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .map_err(|_| "the hook ingests never reached the stuck agent work")?;
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    write_frame(&mut fresh, &hello(4)).await.unwrap();
+                    let _hello = read_frame(&mut fresh).await.unwrap().unwrap();
+                    write_frame(
+                        &mut fresh,
+                        &agent_request(2, v1::Operation::AgentDiagnostics),
+                    )
+                    .await
+                    .unwrap();
+                    loop {
+                        let frame = read_frame(&mut fresh).await.unwrap().unwrap();
+                        if let Some(Payload::Response(response)) = frame.payload
+                            && frame.request_id == 2
+                        {
+                            return response;
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| "a fresh connection was not answered while hooks were stuck")
+            })
+    })
+    .join()
+    .unwrap();
+
+    drop(stuck);
+    let response = outcome.unwrap();
+    assert!(response.ok, "{response:?}");
 }

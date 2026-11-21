@@ -273,7 +273,8 @@ pub fn decode_frame(frame: &[u8]) -> Result<TerminalEvent, String> {
             }
             Ok(TerminalEvent::Other { sequence })
         }
-        4..=6 | 12..=14 | 16 | 17 | 19 => Ok(TerminalEvent::Other { sequence }),
+        // 20 and 21 are chat and session history.
+        4..=6 | 12..=14 | 16 | 17 | 19..=21 => Ok(TerminalEvent::Other { sequence }),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
@@ -569,6 +570,12 @@ mod tests {
             decode_frame(&frame(14, "agent:1", 9, b"{}")).unwrap(),
             TerminalEvent::Other { sequence: 9 }
         );
+        for (kind, label) in [(20, "%1"), (21, "history")] {
+            assert_eq!(
+                decode_frame(&frame(kind, label, 9, b"\x08\x01")).unwrap(),
+                TerminalEvent::Other { sequence: 9 }
+            );
+        }
     }
 
     #[test]

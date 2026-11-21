@@ -136,13 +136,23 @@ impl<T> Coordinator<T> {
         self.flight.is_some()
     }
 
-    /// Whether flight `id` is still the latest intent, so a two-step move may
-    /// take its second step.
-    pub fn is_current(&self, id: u64) -> bool {
-        self.flight
-            .as_ref()
-            .is_some_and(|(flight, _)| *flight == id)
-            && self.desired.is_none()
+    /// The destination of the move in flight.
+    pub fn flight_key(&self) -> Option<&str> {
+        self.flight.as_ref().map(|(_, key)| key.as_str())
+    }
+
+    /// Whether flight `id` still goes where the user wants, so a two-step
+    /// move may take its next step: it is the latest intent, or the one
+    /// waiting behind it is for the same destination and will take its result
+    /// rather than fly again.
+    pub fn still_wanted(&self, id: u64) -> bool {
+        self.flight.as_ref().is_some_and(|(flight, key)| {
+            *flight == id
+                && self
+                    .desired
+                    .as_ref()
+                    .is_none_or(|(desired, _)| desired == key)
+        })
     }
 
     pub fn finish(&mut self, id: u64) -> Finish<T> {
@@ -385,11 +395,11 @@ mod tests {
         let (a, _) = coordinator.navigate("A".into(), "a").unwrap();
         assert!(coordinator.navigate("B".into(), "b").is_none());
         assert!(coordinator.navigate("C".into(), "c").is_none());
-        assert!(!coordinator.is_current(a));
+        assert!(!coordinator.still_wanted(a));
         let Finish::Next(c, "c") = coordinator.finish(a) else {
             panic!("C starts once A lands");
         };
-        assert!(coordinator.is_current(c));
+        assert!(coordinator.still_wanted(c));
         assert_eq!(coordinator.finish(c), Finish::Latest);
         assert!(!coordinator.has_flight());
     }
@@ -399,6 +409,10 @@ mod tests {
         let mut coordinator = Coordinator::default();
         let (first, _) = coordinator.navigate("same".into(), 1).unwrap();
         assert!(coordinator.navigate("same".into(), 2).is_none());
+        assert!(
+            coordinator.still_wanted(first),
+            "the flight takes every step: its duplicate will not fly"
+        );
         assert_eq!(coordinator.finish(first), Finish::SameDestination(2));
     }
 

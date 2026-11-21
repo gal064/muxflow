@@ -243,7 +243,7 @@ fn highlight_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
-fn highlighted(text: &str, query: &str, accent: gpui_kit::Rgba) -> StyledText {
+pub(crate) fn highlighted(text: &str, query: &str, accent: gpui_kit::Rgba) -> StyledText {
     let style = HighlightStyle {
         color: Some(accent.into()),
         font_weight: Some(gpui_kit::FontWeight(650.)),

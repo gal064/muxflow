@@ -268,13 +268,18 @@ pub fn inputs(controller: &ConnectionController) -> Inputs {
         .active_session_id
         .as_deref()
         .and_then(|id| snapshot.sessions.iter().find(|session| session.id == id));
+    // The pane the shell shows focused, a pane move painted ahead of the
+    // host among them, so the root an agent launches under is that pane's.
     let pane = link.active_window_id.as_deref().and_then(|window| {
         let mut panes = snapshot
             .panes
             .iter()
             .filter(|pane| pane.window_id == window);
         let first = panes.clone().next();
-        panes.find(|pane| pane.active).or(first)
+        let focused = link.focused_pane(window);
+        panes
+            .find(|pane| Some(pane.id.as_str()) == focused)
+            .or(first)
     });
     let selection = match (&state.server_identity, session, pane) {
         (Some(server_identity), Some(session), Some(pane)) => Some(FileSelection {

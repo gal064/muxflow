@@ -692,6 +692,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
                 pane_pid: 0,
                 start_command: String::new(),
                 title: String::new(),
+                chat_adapter_id: String::new(),
             })
             .collect(),
     };

@@ -37,10 +37,12 @@ mod writer;
 use writer::ControlWriterHandle;
 pub mod agent;
 pub mod automation;
+pub mod chat;
 pub mod files;
 pub mod git;
 pub mod git_content;
 use git_content::GitContentReads;
+pub mod history;
 pub mod ports;
 pub mod tmux_action;
 // Switch-timeline instrumentation. Compiled out of a plain release build with
@@ -77,6 +79,19 @@ pub const EMPTY_TMUX_SERVER_RECONNECT: &str =
 /// bound to it, so the server that replaces it is adopted on the same
 /// connection instead of reconnecting.
 pub const NO_TMUX_SERVER: &str = "tmux:none";
+
+/// How a request in flight when the bridge dropped is answered. The reconnect
+/// that follows re-asks what still matters, so callers need not report it.
+pub const TRANSPORT_DISCONNECTED: &str =
+    "host transport disconnected; commit outcome is unknown and the request will not replay";
+const CLIENT_DETACHED: &str = "terminal client is no longer attached";
+const REPLACED_EPOCH: &str = "agent request belongs to a replaced connection epoch";
+
+/// Whether a request failed only because its connection was replaced under
+/// it. The reconnect re-asks what still matters, so callers need not report it.
+pub fn lost_to_reconnect(error: &str) -> bool {
+    [TRANSPORT_DISCONNECTED, CLIENT_DETACHED, REPLACED_EPOCH].contains(&error)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
@@ -1401,7 +1416,7 @@ pub(crate) fn get_client(
         .unwrap()
         .get(client_id)
         .cloned()
-        .ok_or_else(|| "terminal client is no longer attached".into())
+        .ok_or_else(|| CLIENT_DETACHED.into())
 }
 
 mod bridge;
@@ -1458,6 +1473,7 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
                 pane_pid: 0,
                 start_command: String::new(),
                 title: String::new(),
+                chat_adapter_id: item.chat_adapter_id,
             })
             .collect(),
     }

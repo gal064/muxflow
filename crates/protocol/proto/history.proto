@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package tmux_agent.protocol.v1;
+
+// Session history and snooze (docs/design/chat-plan.md): the agent
+// sessions this host has seen, whether or not they are still running. Kept in
+// its own file like automation.proto; envelope.proto names it in its
+// operation, request, response, event kind and event.
+
+enum HistoryAction {
+  HISTORY_ACTION_UNSPECIFIED = 0;
+  // Every recorded session, in `entries`. Search is the client's.
+  HISTORY_ACTION_LIST = 1;
+  // Starts the session again in the workspace named like the one it ran in.
+  HISTORY_ACTION_RESUME = 2;
+  // Closes the session until `snooze_until_unix_millis`.
+  HISTORY_ACTION_SNOOZE = 3;
+  // Ends a snooze now.
+  HISTORY_ACTION_WAKE = 4;
+}
+
+// One recorded session, named by `adapter_id` and `native_session_id`.
+message HistoryEntry {
+  string adapter_id = 1;
+  string native_session_id = 2;
+  string title = 3;
+  // The workspace it last ran in.
+  string workspace_name = 4;
+  string cwd = 5;
+  int64 last_active_at_unix_millis = 6;
+  // It is live now, as the agent `agent_id`.
+  bool running = 7;
+  string agent_id = 8;
+  // Zero unless it is snoozed.
+  int64 snoozed_until_unix_millis = 9;
+  // Its snooze ended and it has not been resumed since.
+  bool woke = 10;
+  // It last ran as a chat rather than in a terminal.
+  bool chat = 11;
+}
+
+message HistoryRequest {
+  HistoryAction action = 1;
+  // RESUME, SNOOZE and WAKE: the entry.
+  string adapter_id = 2;
+  string native_session_id = 3;
+  // SNOOZE.
+  int64 snooze_until_unix_millis = 4;
+  // RESUME and SNOOZE act on tmux, so they quote the server and topology the
+  // caller saw, as a tmux action does.
+  string expected_server_identity = 5;
+  uint64 expected_topology_generation = 6;
+}
+
+message HistoryResponse {
+  // Changes whenever the entries do.
+  uint64 generation = 1;
+  // LIST: newest first.
+  repeated HistoryEntry entries = 2;
+  // RESUME: where the session opened.
+  string session_id = 3;
+  string window_id = 4;
+  string pane_id = 5;
+}
+
+// The history changed: list again. `woke` holds the sessions whose snooze just
+// ended, for a notification.
+message HistoryEvent {
+  uint64 generation = 1;
+  repeated HistoryEntry woke = 2;
+}

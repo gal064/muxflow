@@ -82,19 +82,44 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     )?;
     fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o600))?;
 
-    if service::agents::ingest_fallbacks().is_err() {
-        diagnostics.record(SafeErrorClass::HookFallbackIngestionFailed);
-        write_safe_log(SafeErrorClass::HookFallbackIngestionFailed);
-    }
+    // Replay what hooks left in the mailbox while no daemon ran, off the
+    // runtime, so the socket answers from the start: a daemon started under a
+    // busy disk used to be silent for the whole drain, and a bridge retires a
+    // silent daemon. The order still holds. A live hook drains the mailbox
+    // under the same lock before it is applied, so it waits for this drain
+    // instead of overtaking it, and the timer below does the same before
+    // maintenance.
+    let startup_drain = tokio::task::spawn_blocking({
+        let diagnostics = diagnostics.clone();
+        move || {
+            if service::agents::ingest_fallbacks().is_err() {
+                diagnostics.record(SafeErrorClass::HookFallbackIngestionFailed);
+                write_safe_log(SafeErrorClass::HookFallbackIngestionFailed);
+            }
+        }
+    });
+
+    // The chats that were running when the last daemon stopped go on from
+    // where they are, with nobody connected to ask for them.
+    tokio::task::spawn_blocking(service::chat::adopt_running);
 
     // A persistence failure can recover without a daemon restart (for example,
     // after transient quota pressure). Keep draining the durable mailbox while
     // this daemon is alive; live ingest also drains synchronously before it
     // accepts a newer event, so the timer can never be an overtaking lane.
     let hook_retry = tokio::spawn(async {
+        let mut temporaries_swept: Option<std::time::Instant> = None;
         loop {
             sleep(Duration::from_secs(2)).await;
-            let _ = tokio::task::spawn_blocking(|| {
+            let sweep_temporaries = temporaries_swept
+                .is_none_or(|swept| swept.elapsed() >= STALE_TEMPORARY_SWEEP_INTERVAL);
+            if sweep_temporaries {
+                temporaries_swept = Some(std::time::Instant::now());
+            }
+            let _ = tokio::task::spawn_blocking(move || {
+                if sweep_temporaries {
+                    remove_stale_temporaries(&paths::state_dir(), std::time::SystemTime::now());
+                }
                 let _ = service::agents::ingest_fallbacks();
                 // After the drain, never before it: maintenance withdraws
                 // states that nothing has confirmed, and a hook already sitting
@@ -102,13 +127,21 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
                 // would withdraw a state the very next line was about to
                 // restore, and publish both.
                 service::agents::maintain();
+                // Snoozes end on the host's clock, connected or not.
+                service::history::maintain();
             })
             .await;
         }
     });
     // Optional features with daemon-lifetime work of their own, such as
     // automations; like the hook timer, they run with no client connected.
-    let plugin_tasks = service::plugins::start();
+    // They start once the mailbox is drained: an automation that closes an
+    // idle agent's tab must not judge it by state the mailbox is about to
+    // change.
+    let plugins = tokio::spawn(async move {
+        let _ = startup_drain.await;
+        service::plugins::start()
+    });
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
     loop {
@@ -136,9 +169,17 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         }
     }
     hook_retry.abort();
-    for task in plugin_tasks {
-        task.abort();
+    plugins.abort();
+    if let Ok(plugin_tasks) = plugins.await {
+        for task in plugin_tasks {
+            task.abort();
+        }
     }
+    // The paths go before the listener does. A bridge starts the next daemon
+    // as soon as a connect here fails, and that daemon binds the same paths:
+    // removed after the flush below, on a slow disk, they would be its.
+    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_file(&metadata_path);
     drop(listener);
     // A hot voice sidecar holds ~1 GB; kill it here rather than let
     // `kill_on_drop` race the runtime's teardown.
@@ -146,8 +187,6 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     // Flush coalesced operational counters before cooperative shutdown. This
     // is ordered against the background writer and never runs on hot paths.
     let _ = diagnostics.flush();
-    let _ = fs::remove_file(&socket_path);
-    let _ = fs::remove_file(&metadata_path);
     Ok(())
 }
 
@@ -494,12 +533,93 @@ fn process_executable(_pid: u32) -> anyhow::Result<PathBuf> {
     bail!("process executable identity is unsupported on this platform")
 }
 
+/// How often the maintenance pass lists the state folder for stale temporaries.
+/// They pile up over days, so once a minute is plenty.
+const STALE_TEMPORARY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How old a temporary has to be before it is taken for abandoned. A write
+/// takes milliseconds, or tens of seconds on a stalled disk; never an hour.
+const STALE_TEMPORARY_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Removes the temporaries of state writes that never reached their rename:
+/// `.hook-fallback-<uuid>.tmp` from a hook client killed by its agent's hook
+/// timeout mid-write, and `.agents-<uuid>.tmp` and `.sessions-<uuid>.tmp` from a
+/// daemon killed mid-persist of the agent state or the session history.
+/// Nothing else removes them, and one stalled afternoon left 138.
+fn remove_stale_temporaries(state: &Path, now: std::time::SystemTime) {
+    let Ok(entries) = fs::read_dir(state) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if ![".hook-fallback-", ".agents-", ".sessions-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            || !name.ends_with(".tmp")
+        {
+            continue;
+        }
+        // Not followed: a link here is not one of ours.
+        let stale = entry.metadata().ok().is_some_and(|metadata| {
+            metadata.file_type().is_file()
+                && metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_some_and(|age| age >= STALE_TEMPORARY_AGE)
+        });
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
         os::unix::{fs::PermissionsExt, net::UnixListener},
     };
+
+    #[test]
+    fn only_temporaries_older_than_an_hour_are_removed() {
+        let state = tempfile::tempdir().unwrap();
+        let names = [
+            ".hook-fallback-0b1c.tmp",
+            ".agents-0b1c.tmp",
+            ".hook-fallback-mailbox.lock",
+            "hook-fallback-codex-7-00000000000000000000.pb",
+            "agents.json",
+            ".sessions-0b1c.tmp",
+            "sessions.json",
+            ".diagnostics-0b1c.tmp",
+        ];
+        for name in names {
+            fs::write(state.path().join(name), b"x").unwrap();
+        }
+        let in_an_hour = std::time::SystemTime::now() + super::STALE_TEMPORARY_AGE;
+
+        super::remove_stale_temporaries(state.path(), std::time::SystemTime::now());
+        assert_eq!(fs::read_dir(state.path()).unwrap().count(), names.len());
+
+        super::remove_stale_temporaries(state.path(), in_an_hour);
+        let mut left = fs::read_dir(state.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                ".diagnostics-0b1c.tmp",
+                ".hook-fallback-mailbox.lock",
+                "agents.json",
+                "hook-fallback-codex-7-00000000000000000000.pb",
+                "sessions.json",
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn stop_is_idempotent_and_removes_only_a_stale_socket_endpoint() {

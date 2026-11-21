@@ -19,7 +19,7 @@ appId: dev.muxflow.mobile
     stopApp: false
 - extendedWaitUntil:
     visible:
-      text: Send
+      text: Esc
       enabled: true
     timeout: 30000
 - runFlow:

@@ -91,3 +91,39 @@ export function SettingsIcon({ size = 22, color }: { size?: number; color: strin
     </Svg>
   );
 }
+
+/** History: a clock face. */
+export function ClockIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M12 3a9 9 0 1 0 0 18 9 9 0 1 0 0-18M12 7.5V12l3 2" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
+/** A shell prompt: a terminal. */
+export function TerminalIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M5 7l5 5-5 5M13 17h6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
+/** A speech bubble: a chat. */
+export function ChatIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M4 5h16v11H9l-5 4z" fill="none" stroke={color} strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
+/** An arrow pointing up: send. */
+export function ArrowUpIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" />
+    </Svg>
+  );
+}

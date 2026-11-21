@@ -4,6 +4,7 @@
 //   connectHost(host)        dial the control lane, drive §7.2 into sessionStore
 //   getConnection()          the control HostConnection, or null
 //   openBulkConnection()     the bulk lane bound to the current control epoch (§11.1)
+//   openUploadConnection()   a bulk lane of its own for one upload, on the same epoch
 //   disconnectHost()         user-initiated: no reconnect
 //   setTransportFactory(f)   how a lane is dialled (the SSH module, or a dev pipe)
 //   setForegroundService(s)  the §6.3 notification: its text, and its Disconnect action
@@ -19,6 +20,8 @@ import { notificationAttention } from "../features/notifications/attention";
 import type { AndroidConnectionServices } from "./AndroidConnectionServices";
 import { backgroundTimer } from "./backgroundTimer";
 import { voiceRegistry } from "../features/voice/voiceRegistry";
+import { bindChat, chatClient } from "../features/chat/chatRuntime";
+import { bindHistory, historyClient } from "../features/history/historyRuntime";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
@@ -38,8 +41,13 @@ let resumeHost: SavedHost | null = null;
 let holdingForVoice = false;
 let suspended = false;
 let bulk: { epoch: bigint; connection: HostConnection; store: SessionStore; ready: Promise<HostConnection> } | null = null;
+/** The lanes uploads run on, each its own (`openUploadConnection`), until it closes. */
+const uploadLanes = new Set<HostConnection>();
 const listeners = new Set<(transition: AgentTransition) => void>();
 const toasts = new Set<(message: string) => void>();
+
+bindChat(() => control, (message) => toast(message));
+bindHistory(() => control, (message) => toast(message));
 
 /** The SSH module (§6.1) plugs in here; QA uses a dev TCP pipe. */
 export function setTransportFactory(f: TransportFactory): void {
@@ -148,8 +156,12 @@ export async function connectHost(host: SavedHost): Promise<void> {
       hostsStore.getState().markConnected(host.id, Date.now());
       // A new control epoch invalidates the bulk binding (§11.1).
       dropBulk();
+      dropUploadLanes();
       terminalRegistry.onConnected();
       voiceRegistry.onConnected(connection.serverIdentity);
+      // Chat subscriptions are per connection: every open chat is opened again.
+      chatClient.onConnected();
+      historyClient.onConnected();
     },
     onAgentTransition: (transition) => {
       for (const listener of listeners) listener(transition);
@@ -161,14 +173,22 @@ export async function connectHost(host: SavedHost): Promise<void> {
     },
     // A tmux server can be replaced without dropping the SSH lane. Pane IDs
     // may then be reused, so no Voice controller may survive that boundary.
-    onServerIdentityChanged: (serverIdentity) => voiceRegistry.onServerChanged(serverIdentity),
+    onServerIdentityChanged: (serverIdentity) => {
+      voiceRegistry.onServerChanged(serverIdentity);
+      chatClient.onServerChanged(serverIdentity);
+    },
     // A closed pane's Voice controller is unreachable (no screen can End it)
     // and would keep re-registering it with the host forever.
-    onPanesChanged: (serverIdentity, paneIds) => voiceRegistry.reconcilePanes(serverIdentity, paneIds),
+    onPanesChanged: (serverIdentity, paneIds) => {
+      voiceRegistry.reconcilePanes(serverIdentity, paneIds);
+      chatClient.reconcilePanes(serverIdentity, paneIds);
+    },
     // §7.4 routes ACTIVE_ROOT / directory / file-stream events to the files feature.
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
     // VOICE_PROVISION / VOICE_REPLY (voice-mode-plan.md §3) go to whichever voice session they name.
     onVoiceEvent: (event) => voiceRegistry.onVoiceEvent(event),
+    onChatEvent: (event) => chatClient.onEvent(event),
+    onHistoryEvent: (event) => historyClient.onEvent(event),
     onToast: toast,
     log,
     reconnectTimer: backgroundTimer(),
@@ -202,30 +222,84 @@ export function openBulkConnection(): Promise<HostConnection> {
     return bulk.ready;
   }
   dropBulk();
-  const dial = factory;
+  const { lane, store, ready } = dialBulkLane(factory, connection, host, "bulk", (failed) => {
+    if (bulk?.connection === failed) bulk = null;
+  });
+  bulk = { epoch, connection: lane, store, ready };
+  lane.connect();
+  return ready;
+}
+
+/**
+ * A bulk lane of its own for one upload (docs/design/mobile-chat-plan.md §3
+ * "Attachments"), bound to the current control epoch as the shared one is.
+ * Not memoised and never shared: the host keeps an upload with the connection
+ * that prepared it, and the upload closes its lane when it ends, which must
+ * not be the lane the file viewer reads on. The caller disconnects it. It is
+ * also closed, and what runs on it fails, when the control connection gets a
+ * new epoch or goes, and when the lane itself drops: an upload does not
+ * outlive its connection, so nothing re-dials it.
+ */
+export function openUploadConnection(): Promise<HostConnection> {
+  const connection = control;
+  const host = controlHost;
+  if (!factory || !connection || !host || connection.state !== "connected") {
+    return Promise.reject(new Error("The phone is not connected to the host."));
+  }
+  let unsubscribe = (): void => undefined;
+  const { lane, store, ready } = dialBulkLane(factory, connection, host, "upload", (failed) => {
+    unsubscribe();
+    uploadLanes.delete(failed);
+  });
+  uploadLanes.add(lane);
+  // Until it is open, `ready` deals with a lane that fails. After that, the first state that is not `connected` ends it.
+  let open = false;
+  unsubscribe = store.subscribe((state) => {
+    const now = state.connection.state;
+    if (now === "connected") open = true;
+    if (!open || now === "connected") return;
+    unsubscribe();
+    uploadLanes.delete(lane);
+    // Dropped, not closed by its upload: its own reconnect would keep the epoch and find no upload there.
+    if (now !== "idle") lane.disconnect();
+  });
+  lane.connect();
+  return ready;
+}
+
+/**
+ * A bulk lane bound to `connection` as it is now, not yet dialled. `ready`
+ * settles once it is connected; a lane that does not get there is
+ * disconnected, and `onFailed` told.
+ */
+function dialBulkLane(
+  dial: TransportFactory,
+  connection: HostConnection,
+  host: SavedHost,
+  tag: string,
+  onFailed: (lane: HostConnection) => void,
+): { lane: HostConnection; store: SessionStore; ready: Promise<HostConnection> } {
   const store = createSessionStore();
   const lane = new HostConnection({
     dial: (signal) => dial(host, "bulk", signal),
     nextConnectionEpoch: () => { throw new Error("bulk lanes reuse the control epoch"); },
     store,
-    bulk: { expectedServerIdentity: connection.serverIdentity, connectionEpoch: epoch },
-    log: (line) => log(`bulk ${line}`),
+    bulk: { expectedServerIdentity: connection.serverIdentity, connectionEpoch: connection.connectionEpoch },
+    log: (line) => log(`${tag} ${line}`),
     reconnectTimer: backgroundTimer(),
   });
   const ready = waitForState(store, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" || state === "idle" || state === "reconnecting" ? "bad" : undefined)
     .then((outcome) => {
       if (outcome !== "ok") {
         const message = store.getState().connection.message ?? "bulk connection failed";
-        if (bulk?.connection === lane) bulk = null;
+        onFailed(lane);
         // The lane would otherwise keep re-dialling on a stale epoch.
         lane.disconnect();
         throw new Error(message);
       }
       return lane;
     });
-  bulk = { epoch, connection: lane, store, ready };
-  lane.connect();
-  return ready;
+  return { lane, store, ready };
 }
 
 /**
@@ -270,6 +344,7 @@ export async function disconnectHost(options: { keepVoiceSessions?: boolean } = 
 
 function closeHostConnection({ keepVoiceSessions = false, keepHostState = false }: { keepVoiceSessions?: boolean; keepHostState?: boolean } = {}): void {
   dropBulk();
+  dropUploadLanes();
   const connection = control;
   control = null;
   controlHost = null;
@@ -277,7 +352,11 @@ function closeHostConnection({ keepVoiceSessions = false, keepHostState = false 
   filesStore.getState().clearAll();
   // Voice sessions are registered per connection on the host; without one (or on another host) they are dead weight.
   if (!keepVoiceSessions) voiceRegistry.disposeAll();
-  if (!keepHostState) sessionStore.getState().clearHostState();
+  if (!keepHostState) {
+    sessionStore.getState().clearHostState();
+    chatClient.reset();
+    historyClient.reset();
+  }
   sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, ...(keepHostState ? {} : { host: undefined }) });
 }
 
@@ -286,6 +365,12 @@ function dropBulk(): void {
   const lane = bulk;
   bulk = null;
   lane.connection.disconnect();
+}
+
+/** Closes every upload's lane: what runs on one fails as a lost connection. */
+function dropUploadLanes(): void {
+  for (const lane of [...uploadLanes]) lane.disconnect();
+  uploadLanes.clear();
 }
 
 type Outcome = "ok" | "bad" | "cancelled";

@@ -243,7 +243,12 @@ fn accelerators_follow_the_overrides_and_keep_the_other_bindings(cx: &mut TestAp
     } else {
         "ctrl"
     };
-    assert_eq!(accelerators("commands.show", cx), [format!("{primary}-k")]);
+    let palette = if cfg!(target_os = "macos") {
+        "cmd-shift-p"
+    } else {
+        "ctrl-shift-p"
+    };
+    assert_eq!(accelerators("commands.show", cx), [palette]);
     assert_eq!(
         accelerators("view.toggleSidebar", cx),
         [format!("{primary}-b")]
@@ -781,7 +786,9 @@ fn shortcuts_are_ignored_while_a_context_menu_is_open(cx: &mut TestAppContext) {
         .0
     });
     let palette_opens = |cx: &mut TestAppContext| {
-        with_window(handle, cx, |window, cx| window.press("secondary-k", cx));
+        with_window(handle, cx, |window, cx| {
+            window.press("secondary-shift-p", cx)
+        });
         cx.run_until_parked();
         let open = with_window(handle, cx, |window, cx| window.has_active_dialog(cx));
         with_window(handle, cx, |window, cx| window.close_all_dialogs(cx));

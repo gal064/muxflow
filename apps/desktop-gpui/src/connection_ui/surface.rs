@@ -121,7 +121,10 @@ impl ConnectionSurface {
                 state.app_recovery_modal_open(),
             )
         };
-        if !degraded {
+        // The helper dialog owns the screen while it asks or installs; the
+        // strip's wait starts over once it closes, so a strip that came due
+        // behind it does not show through as the dialog fades.
+        if !degraded || helper_modal {
             self.strip_ready = false;
             self.strip_timer = None;
         } else if !self.strip_ready && self.strip_timer.is_none() {

@@ -109,6 +109,8 @@ pub enum AppTabKind {
 pub enum GitDiffTarget {
     Staged,
     Unstaged,
+    /// The working tree against the default branch's merge base.
+    Base,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +217,9 @@ pub struct ShellPreferences {
     /// `None` is "never set": the frontend's defaults apply.
     #[serde(default)]
     pub agent_sounds: Option<AgentSoundPreferences>,
+    /// Last explicit agent choice on this desktop, used only for unconfigured hosts.
+    #[serde(default)]
+    pub new_host_chat: Option<bool>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -224,6 +229,12 @@ pub struct ShellPreferences {
     pub default_markdown_view: Option<AppTabViewMode>,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
+    /// The wake times the Snooze menu offers, as Settings writes them (`1h`,
+    /// `tomorrow 09:00`). `None` is "never set": the defaults apply. Only the
+    /// GPUI app has it, so it is left out of the frontend's contract, and
+    /// `None` is not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze_times: Option<Vec<String>>,
 }
 
 /// What a new workspace on one host profile starts with.
@@ -762,6 +773,7 @@ mod tests {
                     completed: AgentSoundMode::None,
                     volume: 0.45,
                 }),
+                new_host_chat: Some(true),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
@@ -772,6 +784,7 @@ mod tests {
                     maximized: false,
                     scale_factor_milli: Some(2_000),
                 }),
+                snooze_times: Some(vec!["30m".into(), "tomorrow 08:30".into()]),
             },
             commands: CommandPreferences {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),

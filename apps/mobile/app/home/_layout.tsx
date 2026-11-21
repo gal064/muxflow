@@ -7,7 +7,7 @@ import { waitingCount } from "../../src/store/selectors";
 import { ConnectionDot } from "../../src/features/hosts/ConnectionDot";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { UpdatePill } from "../../src/features/update/ui/UpdatePill";
-import { SettingsIcon } from "../../src/ui/components/MediaIcons";
+import { ClockIcon, SettingsIcon } from "../../src/ui/components/MediaIcons";
 import { useSession } from "../../src/ui/hooks";
 import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
 
@@ -52,7 +52,7 @@ export default function HomeLayout() {
           tabBarIcon: ({ color }) => <Text style={[styles.icon, { color }]}>✦</Text>,
           tabBarBadge: badge > 0 ? badge : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.danger, color: "#ffffff", fontSize: 10, fontWeight: "700" },
-          header: (props) => <TabHeader title={label} {...props} />,
+          header: (props) => <TabHeader history title={label} {...props} />,
         }}
       />
       <Tabs.Screen
@@ -68,7 +68,7 @@ export default function HomeLayout() {
 }
 
 /** App bar (56 dp below the status bar) with the host label, the update pill while a newer release is out, and the connection dot, then the global strip. */
-function TabHeader({ title }: { title: string; [key: string]: unknown }) {
+function TabHeader({ title, history }: { title: string; history?: boolean; [key: string]: unknown }) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   return (
@@ -76,6 +76,11 @@ function TabHeader({ title }: { title: string; [key: string]: unknown }) {
       <View style={styles.header}>
         <Text {...fixedChromeText} style={styles.headerTitle} numberOfLines={1}>{title}</Text>
         <UpdatePill />
+        {history ? (
+          <Pressable accessibilityLabel="History" accessibilityRole="button" onPress={() => router.push("/history")} style={styles.headerAction}>
+            <ClockIcon color={colors.chromeDim} />
+          </Pressable>
+        ) : null}
         <Pressable accessibilityLabel="Settings" accessibilityRole="button" onPress={() => router.push("/settings")} style={styles.headerAction}>
           <SettingsIcon color={colors.chromeDim} />
         </Pressable>

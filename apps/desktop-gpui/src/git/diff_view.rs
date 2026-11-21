@@ -1,20 +1,22 @@
-//! One Git diff tab. Port of `GitDiffSurface.tsx`, `useSharedGitDiff.ts` and
-//! `GitDiffEditor.tsx`.
+//! The Git diff tab: one per workspace, showing one file at a time. Port of
+//! `GitDiffSurface.tsx`, `useSharedGitDiff.ts` and `GitDiffEditor.tsx`.
 //!
 //! The tab joins the shared observation of its repository and reads its diff
-//! only when that status moves past the one its diff was read against. Kit's
-//! `Diff` draws the whole file, wrapped, side by side from 900 pixels wide and
-//! inline below that, as the Monaco diff editor did. Only a hunk is staged,
-//! unstaged or discarded from here: whole-file actions are the Source Control
-//! row's.
+//! only when that status moves past the one its diff was read against. It
+//! shows the hunks of Git's own patch, each one a section of Kit's `Diff` that
+//! collapses on its own, so a hunk index sent back to the host names the hunk
+//! on screen. "Show whole file" draws the whole file instead, wrapped, side by
+//! side from 900 pixels wide and inline below that, as the Monaco diff editor
+//! did. Only a hunk is staged, unstaged or discarded from here: whole-file
+//! actions are the Source Control row's. The default-branch scope is read only.
 
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use desktop_core::app_state::AppTabRecord;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, Task, Window,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, FocusHandle, FontWeight,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, Role, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, actions,
     base::TestSupportExt,
     canvas,
     component::{
@@ -47,12 +49,32 @@ use crate::{
 use super::{
     client,
     model::{
-        self, CommandResult, Diff, DiffRequest, GitScope, Mutation, MutationKind, RootInfo, Shown,
-        StatusSnapshot, Target,
+        self, CommandResult, Diff, DiffRequest, GitScope, Hunk, Mutation, MutationKind, RootInfo,
+        Shown, StatusSnapshot, Target,
     },
     panel::GitPanel,
     store::GitRepositories,
 };
+
+actions!(git_diff, [CollapseHunks, ExpandHunks]);
+
+/// Focus anywhere in the diff tab.
+const CONTEXT: &str = "GitDiff";
+
+/// VS Code's fold-all and unfold-all chords on macOS, for every hunk at once.
+/// Linux takes Ctrl+Alt: Ctrl+Shift+[ and ] are the app's previous and next tab.
+pub(super) fn init(cx: &mut App) {
+    cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-cmd-[", CollapseHunks, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-cmd-]", ExpandHunks, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-[", CollapseHunks, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-]", ExpandHunks, Some(CONTEXT)),
+    ]);
+}
 
 /// Kit could not read the patch built from the two sides.
 const UNREADABLE: &str = "This diff could not be displayed.";
@@ -120,6 +142,8 @@ enum Built {
     Blocked(&'static str),
     Unreadable,
     Files(Vec<DiffFile>, Vec<DiffDecoration>),
+    /// One section per hunk of Git's patch.
+    Hunks(Vec<DiffFile>, Vec<DiffDecoration>, Vec<Hunk>),
 }
 
 enum Body {
@@ -185,6 +209,13 @@ pub struct GitDiffView {
     settled: Rc<Cell<u8>>,
     /// The changed lines' backgrounds, which Kit's own faint tint stands in for.
     marks: Rc<Vec<DiffDecoration>>,
+    /// The hunks drawn, in the host's order. Empty for the whole file.
+    hunks: Rc<Vec<Hunk>>,
+    /// The lines of the hunks collapsed when the body was last drawn.
+    collapsed: Rc<Vec<String>>,
+    /// "Show whole file": today's full-file diff instead of the hunks.
+    whole: bool,
+    focus: FocusHandle,
     /// `workflow.git.diffPaint`: from a read to its diff on screen. Empty
     /// unless the perf probe is on.
     paint: PaintReporter,
@@ -227,6 +258,10 @@ impl GitDiffView {
             width: Rc::default(),
             settled: Rc::default(),
             marks: Rc::default(),
+            hunks: Rc::default(),
+            collapsed: Rc::default(),
+            whole: false,
+            focus: cx.focus_handle(),
             paint: PaintReporter::default(),
             _delay: None,
             _subscriptions: subscriptions,
@@ -253,7 +288,9 @@ impl GitDiffView {
             self.requested = None;
             self.status = None;
             self.error = None;
+            self.whole = false;
             self.show(None, cx);
+            self.collapsed = Rc::default();
         }
         self.bind(cx);
         self.status_moved(cx);
@@ -393,8 +430,9 @@ impl GitDiffView {
                 self.error = Some(DIFFERENT_REPOSITORY.into());
                 return self.set_loading(false, cx);
             }
-            // The shared status already says this file has no such change.
-            if !model::entry_still_changed(&shared, &path, target) {
+            // The shared status already says this file has no such change. It
+            // says nothing about the default branch.
+            if target != Target::Base && !model::entry_still_changed(&shared, &path, target) {
                 self.status = Some(shared);
                 self.show(None, cx);
                 self.error = None;
@@ -408,8 +446,9 @@ impl GitDiffView {
             target,
         };
         let transport = self.store.read(cx).transport();
+        let whole = self.whole;
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let answer = client::diff(transport, scope, request).await;
+            let answer = client::diff(transport, scope, request, whole).await;
             this.update(cx, |this, cx| {
                 if serial != this.serial {
                     return;
@@ -429,7 +468,11 @@ impl GitDiffView {
                         this.requested = Some(status.generation);
                         this.store
                             .update(cx, |store, cx| store.accept(&key, status.clone(), cx));
-                        let still = model::entry_still_changed(&status, &path, target);
+                        let still = if target == Target::Base {
+                            has_changes(&diff)
+                        } else {
+                            model::entry_still_changed(&status, &path, target)
+                        };
                         this.status = Some(Rc::new(status));
                         if still {
                             this.paint.hold(serial, paint);
@@ -460,27 +503,30 @@ impl GitDiffView {
             Some(Body::Drawn(state)) => state.read(cx).mode(),
             _ => DiffMode::Unified,
         };
+        // A hunk collapsed before a re-read, a stage say, stays collapsed. Its
+        // lines name it: the `@@` numbers and the index move when another
+        // hunk is staged. Kept across the cleared body a reload shows first.
+        // The whole file has no hunks to say anything about.
+        if let (Some(Body::Drawn(state)), false) = (&self.body, self.hunks.is_empty()) {
+            let state = state.read(cx);
+            self.collapsed = Rc::new(
+                self.hunks
+                    .iter()
+                    .filter(|hunk| state.is_file_collapsed(&hunk.key))
+                    .map(|hunk| hunk_lines(hunk).to_owned())
+                    .collect(),
+            );
+        }
+        let collapsed = self.collapsed.clone();
         self.body = None;
         self.building_shown = false;
         // Monaco diffed in a worker: the decode, the diff and the parse of a
         // file of several megabytes stay off the UI thread here too.
+        let whole = self.whole;
         self.build_task = diff.clone().map(|diff| {
-            let built = cx.background_executor().spawn(async move {
-                match model::shown_diff(&diff) {
-                    Shown::Blocked(detail) => Built::Blocked(detail),
-                    Shown::Text { original, modified } => {
-                        let patch =
-                            model::whole_file_patch(&diff.display_path, &original, &modified);
-                        DiffFile::parse(&patch).map_or(Built::Unreadable, |files| {
-                            let marks = files
-                                .first()
-                                .map(|file| changed_lines(file.path(), &patch))
-                                .unwrap_or_default();
-                            Built::Files(files, marks)
-                        })
-                    }
-                }
-            });
+            let built = cx
+                .background_executor()
+                .spawn(async move { build(&diff, whole) });
             cx.spawn(async move |this, cx| {
                 // Silent at first, as a load is.
                 let delay = cx.background_executor().timer(LOADING_DELAY);
@@ -500,17 +546,34 @@ impl GitDiffView {
                 };
                 this.update(cx, |this, cx| {
                     this.settled.set(0);
-                    if let Built::Files(_, marks) = &built {
-                        this.marks = Rc::new(marks.clone());
-                    }
+                    this.hunks = Rc::default();
                     this.body = Some(match built {
                         Built::Blocked(detail) => Body::Blocked(detail),
                         Built::Unreadable => Body::Blocked(UNREADABLE),
-                        Built::Files(files, _) => Body::Drawn(cx.new(|cx| {
-                            DiffState::new(files, cx)
-                                .with_mode(mode)
-                                .with_context_lines(None)
-                        })),
+                        Built::Files(files, marks) => {
+                            this.marks = Rc::new(marks);
+                            Body::Drawn(cx.new(|cx| {
+                                DiffState::new(files, cx)
+                                    .with_mode(mode)
+                                    .with_context_lines(None)
+                            }))
+                        }
+                        Built::Hunks(files, marks, hunks) => {
+                            this.marks = Rc::new(marks);
+                            let state = cx.new(|cx| {
+                                let mut state = DiffState::new(files, cx)
+                                    .with_mode(mode)
+                                    .with_context_lines(None);
+                                for hunk in &hunks {
+                                    if collapsed.iter().any(|lines| lines == hunk_lines(hunk)) {
+                                        state.set_file_collapsed(&hunk.key, true, cx);
+                                    }
+                                }
+                                state
+                            });
+                            this.hunks = Rc::new(hunks);
+                            Body::Drawn(state)
+                        }
                     });
                     cx.notify();
                 })
@@ -518,6 +581,54 @@ impl GitDiffView {
             })
         });
         self.diff = diff.map(Rc::new);
+        cx.notify();
+    }
+
+    /// "Show whole file" and back. The whole file needs both sides, which a
+    /// hunks read left on the host when they were large: then it reads again.
+    fn toggle_whole(&mut self, cx: &mut Context<Self>) {
+        self.whole = !self.whole;
+        // A read in flight was asked for hunks only: ask again with the sides.
+        // Forgetting the drawn diff keeps its answer from passing as unchanged.
+        if self.whole && self.load_task.is_some() {
+            self.diff = None;
+            return self.load(false, cx);
+        }
+        let Some(diff) = self.diff.clone() else {
+            return cx.notify();
+        };
+        let missing = (diff.old_ref.is_some() && diff.old_content.is_empty())
+            || (diff.new_ref.is_some() && diff.new_content.is_empty());
+        if self.whole && missing {
+            return self.load(true, cx);
+        }
+        self.diff = None;
+        self.show(Some((*diff).clone()), cx);
+    }
+
+    /// Whether every hunk is collapsed.
+    fn all_collapsed(&self, cx: &App) -> bool {
+        let Some(Body::Drawn(state)) = &self.body else {
+            return false;
+        };
+        let state = state.read(cx);
+        !self.hunks.is_empty()
+            && self
+                .hunks
+                .iter()
+                .all(|hunk| state.is_file_collapsed(&hunk.key))
+    }
+
+    fn set_all_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        let Some(Body::Drawn(state)) = &self.body else {
+            return;
+        };
+        let hunks = self.hunks.clone();
+        state.update(cx, |state, cx| {
+            for hunk in hunks.iter() {
+                state.set_file_collapsed(&hunk.key, collapsed, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -691,8 +802,69 @@ impl GitDiffView {
     }
 }
 
+/// Whether a default-branch diff found anything: its patch, or a change Git
+/// describes without one.
+fn has_changes(diff: &Diff) -> bool {
+    diff.hunk_count > 0
+        || !diff.patch.is_empty()
+        || diff.binary
+        || diff.too_large
+        || diff.old_missing != diff.new_missing
+}
+
+/// A diff the host sent without its patch, because the patch alone was more
+/// than the control lane carries: it can only be shown whole.
+fn patch_withheld(diff: &Diff) -> bool {
+    diff.patch.is_empty() && diff.hunk_count > 0
+}
+
+/// The diff's body, off the UI thread: its hunks, or the whole file when asked
+/// for, when the patch was withheld, or when there are no hunks to show (a
+/// mode change, say).
+fn build(diff: &Diff, whole: bool) -> Built {
+    if diff.binary {
+        return Built::Blocked("Binary changes cannot be displayed or edited as text.");
+    }
+    if !whole && !patch_withheld(diff) {
+        let Ok(patch) = std::str::from_utf8(&diff.patch) else {
+            return Built::Blocked(
+                "This diff contains non-UTF-8 content and is shown safely as binary.",
+            );
+        };
+        let hunks = model::split_hunks(&diff.display_path, patch);
+        if !hunks.is_empty() {
+            let mut files = Vec::with_capacity(hunks.len());
+            let mut marks = Vec::new();
+            for hunk in &hunks {
+                let Ok(parsed) = DiffFile::parse(&hunk.patch) else {
+                    return Built::Unreadable;
+                };
+                if let Some(file) = parsed.first() {
+                    marks.extend(changed_lines(file.path(), &hunk.patch));
+                }
+                files.extend(parsed);
+            }
+            return Built::Hunks(files, marks, hunks);
+        }
+    }
+    match model::shown_diff(diff) {
+        Shown::Blocked(detail) => Built::Blocked(detail),
+        Shown::Text { original, modified } => {
+            let patch = model::whole_file_patch(&diff.display_path, &original, &modified);
+            DiffFile::parse(&patch).map_or(Built::Unreadable, |files| {
+                let marks = files
+                    .first()
+                    .map(|file| changed_lines(file.path(), &patch))
+                    .unwrap_or_default();
+                Built::Files(files, marks)
+            })
+        }
+    }
+}
+
 fn same_text(a: &Diff, b: &Diff) -> bool {
     a.display_path == b.display_path
+        && a.patch == b.patch
         && a.old_content == b.old_content
         && a.new_content == b.new_content
         && (a.old_missing, a.new_missing, a.binary, a.too_large)
@@ -758,10 +930,16 @@ fn target_label(target: Target, palette: &Palette) -> impl IntoElement {
         } else {
             palette.chrome_dim
         })
-        .child(model::target_name(target).to_uppercase())
+        .child(model::target_label(target).to_uppercase())
 }
 
-fn toolbar(target: Target, path: String, palette: &Palette) -> impl IntoElement {
+/// The file's line: its side, its path, and what the tab can do with it.
+fn toolbar(
+    target: Target,
+    path: String,
+    controls: Option<AnyElement>,
+    palette: &Palette,
+) -> impl IntoElement {
     h_flex()
         .id("git-diff-toolbar")
         .flex_none()
@@ -783,6 +961,33 @@ fn toolbar(target: Target, path: String, palette: &Palette) -> impl IntoElement 
                 .text_color(palette.chrome_dim)
                 .child(path),
         )
+        .children(controls)
+}
+
+/// The lines of a hunk under its `@@` line: what it changes, wherever it sits.
+fn hunk_lines(hunk: &Hunk) -> &str {
+    hunk.patch
+        .split_once(hunk.header.as_str())
+        .map_or(hunk.patch.as_str(), |(_, lines)| lines)
+}
+
+/// `+3 −1`, in the colours of the lines they count. A zero is left out, as in
+/// the panel.
+fn counts(added: usize, removed: usize, palette: &Palette) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .gap(ui(4.))
+        .text_size(ui(TYPE_META))
+        .when(added > 0, |this| {
+            this.child(div().text_color(palette.term_2).child(format!("+{added}")))
+        })
+        .when(removed > 0, |this| {
+            this.child(
+                div()
+                    .text_color(palette.danger)
+                    .child(format!("−{removed}")),
+            )
+        })
 }
 
 fn banner(id: &'static str, role: Role, text: String, palette: &Palette) -> impl IntoElement {
@@ -797,6 +1002,91 @@ fn banner(id: &'static str, role: Role, text: String, palette: &Palette) -> impl
         .text_color(palette.danger_ink)
         .text_size(ui(11.))
         .child(text)
+}
+
+/// What a hunk's header offers, decided once per frame.
+#[derive(Clone, Copy)]
+struct HunkActions {
+    /// The hunks of a staged diff are unstaged; any other side's are staged.
+    staged: bool,
+    enabled: bool,
+}
+
+/// A hunk's header inside Kit's section shell, beside its collapse control:
+/// Git's `@@` line, the hunk's counts, and Stage and Discard where they apply.
+fn hunk_header(
+    hunk: &Hunk,
+    index: u32,
+    actions: Option<HunkActions>,
+    view: WeakEntity<GitDiffView>,
+    palette: &Palette,
+) -> AnyElement {
+    let id = |name: &str| SharedString::from(format!("git-hunk-{index}-{name}"));
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .gap(ui(8.))
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family(fonts::MONO)
+                .text_size(ui(TYPE_META))
+                .text_color(palette.chrome_faint)
+                .child(hunk.header.clone()),
+        )
+        .child(counts(hunk.added, hunk.removed, palette))
+        .when_some(actions, |this, actions| {
+            let staged = actions.staged;
+            let apply = view.clone();
+            this.child(
+                h_flex()
+                    .id(id("actions"))
+                    .role(Role::Toolbar)
+                    .aria_label(format!("Hunk {} actions", index + 1))
+                    .flex_none()
+                    .gap(ui(4.))
+                    .child(
+                        toolbar_button(
+                            Button::new(id("apply")).label(if staged {
+                                "Unstage"
+                            } else {
+                                "Stage"
+                            }),
+                            Tone::Plain,
+                            !actions.enabled,
+                            palette,
+                        )
+                        .disabled(!actions.enabled)
+                        .on_click(move |_, _, cx| {
+                            let kind = if staged {
+                                MutationKind::UnstageHunk
+                            } else {
+                                MutationKind::StageHunk
+                            };
+                            apply
+                                .update(cx, |this, cx| this.mutate(kind, index, cx))
+                                .ok();
+                        }),
+                    )
+                    .child(
+                        toolbar_button(
+                            Button::new(id("discard")).label("Discard…"),
+                            Tone::Danger,
+                            !actions.enabled,
+                            palette,
+                        )
+                        .disabled(!actions.enabled)
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| this.request_discard(index, window, cx))
+                                .ok();
+                        }),
+                    ),
+            )
+        })
+        .into_any_element()
 }
 
 impl Render for GitDiffView {
@@ -836,6 +1126,14 @@ impl Render for GitDiffView {
                 &palette,
             );
         };
+        let no_changes = if target == Target::Base {
+            "This file has no changes against the default branch.".to_owned()
+        } else {
+            format!(
+                "This file no longer has {} changes.",
+                model::target_name(target)
+            )
+        };
         let error = self.error.clone().or(self.shared_error.clone());
         // An error outranks a spinner: a surface claiming to load while it
         // holds a failure has no way out.
@@ -851,10 +1149,10 @@ impl Render for GitDiffView {
                     .id("git-diff-surface")
                     .test_support()
                     .role(Role::TabPanel)
-                    .aria_label(format!("{} diff {path}", model::target_name(target)))
+                    .aria_label(format!("{} diff {path}", model::target_label(target)))
                     .size_full()
                     .bg(palette.chrome_bg)
-                    .child(toolbar(target, path, &palette))
+                    .child(toolbar(target, path, None, &palette))
                     .child(
                         div()
                             .id("git-diff-loading")
@@ -867,28 +1165,15 @@ impl Render for GitDiffView {
                     )
                     .into_any_element();
             }
-            return empty(
-                title,
-                format!(
-                    "This file no longer has {} changes.",
-                    model::target_name(target)
-                ),
-                Some(retry(cx)),
-                &palette,
-            );
+            return empty(title, no_changes, Some(retry(cx)), &palette);
         };
         let Some(status) = self.status.clone() else {
-            return empty(
-                title,
-                format!(
-                    "This file no longer has {} changes.",
-                    model::target_name(target)
-                ),
-                Some(retry(cx)),
-                &palette,
-            );
+            return empty(title, no_changes, Some(retry(cx)), &palette);
         };
-        let entry = status.entry(&diff.path);
+        // The status speaks for uncommitted changes only.
+        let entry = (diff.target != Target::Base)
+            .then(|| status.entry(&diff.path))
+            .flatten();
         let block = entry.and_then(|entry| {
             if entry.submodule {
                 Some("Submodule pointer changes are read-only in v1.")
@@ -904,12 +1189,63 @@ impl Render for GitDiffView {
                 .any(|kind| matches!(kind, model::ChangeKind::Renamed | model::ChangeKind::Copied))
         });
         let can_mutate = self.can_write(cx) && status.authoritative && block.is_none();
-        let hunk_actions = !diff.binary
+        let hunk_actions = diff.target != Target::Base
+            && !diff.binary
             && !diff.too_large
             && block.is_none()
             && !path_change
             && diff.hunk_count > 0;
         let busy = self.busy;
+        let withheld = patch_withheld(&diff);
+        let showing_hunks = !self.hunks.is_empty();
+        let all_collapsed = self.all_collapsed(cx);
+        let (added, removed) = self.hunks.iter().fold((0, 0), |(added, removed), hunk| {
+            (added + hunk.added, removed + hunk.removed)
+        });
+        let controls =
+            h_flex()
+                .flex_none()
+                .gap(ui(6.))
+                .items_center()
+                .when(showing_hunks, |this| {
+                    this.child(counts(added, removed, &palette)).child(
+                        toolbar_button(
+                            Button::new("git-diff-collapse-all").label(if all_collapsed {
+                                "Expand all"
+                            } else {
+                                "Collapse all"
+                            }),
+                            Tone::Plain,
+                            false,
+                            &palette,
+                        )
+                        .tooltip(if cfg!(target_os = "macos") {
+                            "Collapse all ⌥⌘[ · Expand all ⌥⌘]"
+                        } else {
+                            "Collapse all Ctrl+Alt+[ · Expand all Ctrl+Alt+]"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_all_collapsed(!all_collapsed, cx)
+                        })),
+                    )
+                })
+                // A patch too large to send can only be shown whole.
+                .when(!withheld && !diff.binary, |this| {
+                    this.child(
+                        toolbar_button(
+                            Button::new("git-diff-whole").label(if self.whole {
+                                "Show hunks"
+                            } else {
+                                "Show whole file"
+                            }),
+                            Tone::Plain,
+                            false,
+                            &palette,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_whole(cx))),
+                    )
+                })
+                .into_any_element();
         let body: AnyElement = match &self.body {
             Some(Body::Blocked(detail)) => {
                 empty(diff.display_path.clone(), (*detail).into(), None, &palette)
@@ -936,6 +1272,50 @@ impl Render for GitDiffView {
                         window.request_animation_frame();
                     }
                 }
+                let element = DiffElement::new(content)
+                    // Its first frames hold an empty bordered frame, before the
+                    // rows are measured.
+                    .when(hidden, |diff| diff.opacity(0.))
+                    .change_background(false)
+                    .decorations(marks.iter().cloned())
+                    // A section is one hunk, or the whole file as one: Git's
+                    // `@@` line is the hunk's header, and the whole file's
+                    // says nothing Monaco showed.
+                    .hunk_separator(DiffHunkSeparator::Simple)
+                    .line_number(true)
+                    .syntax_highlight(true)
+                    .soft_wrap(true)
+                    .size_full();
+                let element = if showing_hunks {
+                    let hunks = self.hunks.clone();
+                    let view = cx.entity().downgrade();
+                    let actions = hunk_actions.then_some(HunkActions {
+                        staged: diff.target == Target::Staged,
+                        enabled: !busy && can_mutate,
+                    });
+                    let header_palette = palette;
+                    element.render_header(move |file, _, _| {
+                        // A hunk's key starts with its number, from 1
+                        // (`<n>/<name>`).
+                        let path: &str = file.path().as_ref();
+                        let index = path
+                            .split_once('/')
+                            .and_then(|(n, _)| n.parse::<usize>().ok()?.checked_sub(1))
+                            .filter(|&n| hunks.get(n).is_some_and(|hunk| hunk.key == path));
+                        match index {
+                            Some(index) => hunk_header(
+                                &hunks[index],
+                                index as u32,
+                                actions,
+                                view.clone(),
+                                &header_palette,
+                            ),
+                            None => div().into_any_element(),
+                        }
+                    })
+                } else {
+                    element.header_visible(false)
+                };
                 div()
                     .relative()
                     .size_full()
@@ -961,22 +1341,7 @@ impl Render for GitDiffView {
                         .absolute()
                         .size_full(),
                     )
-                    .child(
-                        DiffElement::new(content)
-                            // Its first frames hold an empty bordered frame, before the
-                            // rows are measured.
-                            .when(hidden, |diff| diff.opacity(0.))
-                            .header_visible(false)
-                            .change_background(false)
-                            .decorations(marks.iter().cloned())
-                            // The whole file is one hunk: its `@@` header says
-                            // nothing Monaco showed.
-                            .hunk_separator(DiffHunkSeparator::Simple)
-                            .line_number(true)
-                            .syntax_highlight(true)
-                            .soft_wrap(true)
-                            .size_full(),
-                    )
+                    .child(element)
                     .into_any_element()
             }
             None => div()
@@ -989,28 +1354,70 @@ impl Render for GitDiffView {
                 .child("Loading…")
                 .into_any_element(),
         };
+        // The whole file keeps today's bar of numbered hunk actions; the hunks
+        // carry theirs in their headers.
+        let bar = hunk_actions && !showing_hunks && matches!(self.body, Some(Body::Drawn(_)));
         v_flex()
             .id("git-diff-surface")
             .test_support()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &CollapseHunks, _, cx| this.set_all_collapsed(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExpandHunks, _, cx| this.set_all_collapsed(false, cx)),
+            )
+            // The chords reach the tab from a press anywhere in it; a press
+            // the diff's own text took focus for keeps it.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !this.focus.contains_focused(window, cx) {
+                        window.focus(&this.focus, cx);
+                    }
+                }),
+            )
             .role(Role::TabPanel)
             .aria_label(format!(
                 "{} diff {}",
-                model::target_name(diff.target),
+                model::target_label(diff.target),
                 diff.display_path
             ))
             .size_full()
             .min_w_0()
             .min_h_0()
             .bg(palette.chrome_bg)
-            .child(toolbar(diff.target, diff.display_path.clone(), &palette))
+            .child(toolbar(
+                diff.target,
+                diff.display_path.clone(),
+                Some(controls),
+                &palette,
+            ))
             .when_some(block, |this, block| {
                 this.child(banner("git-diff-block", Role::Note, block.into(), &palette))
+            })
+            .when(withheld, |this| {
+                this.child(
+                    div()
+                        .id("git-diff-whole-only")
+                        .role(Role::Note)
+                        .px(ui(8.))
+                        .py(ui(5.))
+                        .border_b_1()
+                        .border_color(palette.chrome_hairline)
+                        .text_size(ui(TYPE_META))
+                        .text_color(palette.chrome_dim)
+                        .child(
+                            "This diff is too large to show as hunks, so the whole file is shown.",
+                        ),
+                )
             })
             .when_some(error, |this, error| {
                 this.child(SurfaceError::new("git-diff-error", error))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(body))
-            .when(hunk_actions, |this| {
+            .when(bar, |this| {
                 let staged = diff.target == Target::Staged;
                 this.child(
                     h_flex()
@@ -1111,6 +1518,40 @@ impl GitDiffView {
 
     pub(super) fn stage_hunk(&mut self, index: u32, cx: &mut Context<Self>) {
         self.mutate(MutationKind::StageHunk, index, cx);
+    }
+
+    /// The `@@` lines of the hunks drawn; empty while the whole file is.
+    pub(super) fn hunk_headers(&self) -> Vec<String> {
+        self.hunks.iter().map(|hunk| hunk.header.clone()).collect()
+    }
+
+    pub(super) fn show_whole_file(&mut self, cx: &mut Context<Self>) {
+        self.toggle_whole(cx);
+    }
+
+    pub(super) fn collapse_hunk(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let (Some(Body::Drawn(state)), Some(hunk)) = (&self.body, self.hunks.get(index)) {
+            state.update(cx, |state, cx| {
+                state.set_file_collapsed(&hunk.key, true, cx)
+            });
+        }
+    }
+
+    /// Which drawn hunks are collapsed, in order.
+    pub(super) fn collapsed_hunks(&self, cx: &App) -> Vec<bool> {
+        let Some(Body::Drawn(state)) = &self.body else {
+            return Vec::new();
+        };
+        let state = state.read(cx);
+        self.hunks
+            .iter()
+            .map(|hunk| state.is_file_collapsed(&hunk.key))
+            .collect()
+    }
+
+    pub(super) fn collapse_all(&mut self, collapsed: bool, cx: &mut Context<Self>) -> bool {
+        self.set_all_collapsed(collapsed, cx);
+        self.all_collapsed(cx)
     }
 }
 

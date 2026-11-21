@@ -11,6 +11,7 @@ import {
   type AgentSnapshot,
   type Snapshot,
 } from "../protocol/gen/envelope_pb";
+import { ChatAgentMode } from "../protocol/gen/chat_pb";
 
 export type ConnectionState =
   | "idle"
@@ -56,7 +57,12 @@ export interface Pane {
   top: number;
   currentPath: string;
   currentCommand: string;
+  /** The chat adapter running in the pane; empty for a terminal pane. */
+  chatAdapterId: string;
 }
+
+/** Whether agents the host starts become chats (docs/design/chat-plan.md §1). Set on the desktop. */
+export type AgentMode = "terminal" | "chat" | "unknown";
 
 export type AgentLifecycle = "working" | "blocked" | "idle" | "unknown";
 export type AgentAttentionKind = "" | "blocked" | "completed";
@@ -119,6 +125,8 @@ export interface SessionState {
   panes: Record<string, Pane>;
   agents: Record<string, Agent>;
   adapters: AgentAdapterDescriptor[];
+  /** From the last authoritative agent snapshot. */
+  agentMode: AgentMode;
   notificationWatermark: bigint;
   /** Pane currently displayed on the Terminal screen. */
   focusedPaneId?: string | undefined;
@@ -161,6 +169,7 @@ export function initialSessionState(): SessionState {
     panes: {},
     agents: {},
     adapters: [],
+    agentMode: "unknown",
     notificationWatermark: 0n,
   };
 }
@@ -218,6 +227,7 @@ export function createSessionStore(): SessionStore {
           top: pane.top,
           currentPath: pane.currentPath,
           currentCommand: pane.currentCommand,
+          chatAdapterId: pane.chatAdapterId,
         };
       }
       set({
@@ -243,6 +253,7 @@ export function createSessionStore(): SessionStore {
       set({
         agents,
         adapters: snapshot.adapters.map(adapterFromProto),
+        agentMode: agentModeFromProto(snapshot.agentMode),
         notificationWatermark: snapshot.notificationWatermark,
       });
       return transitions;
@@ -287,6 +298,17 @@ export function lifecycleFromProto(value: AgentLifecycleState): AgentLifecycle {
       return "blocked";
     case AgentLifecycleState.IDLE:
       return "idle";
+    default:
+      return "unknown";
+  }
+}
+
+export function agentModeFromProto(value: ChatAgentMode): AgentMode {
+  switch (value) {
+    case ChatAgentMode.TERMINAL:
+      return "terminal";
+    case ChatAgentMode.CHAT:
+      return "chat";
     default:
       return "unknown";
   }

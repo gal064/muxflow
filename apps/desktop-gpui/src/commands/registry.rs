@@ -127,8 +127,8 @@ const SOURCE_CONTROL: &str = "Source control";
 /// take Ctrl+D (EOF) or Ctrl+E (end-of-line), or collide with another binding,
 /// the Linux default is Ghostty's instead.
 #[rustfmt::skip]
-pub static COMMANDS: [CommandDefinition; 83] = [
-    command("commands.show", "Show command palette", APPLICATION).keys("Meta+K", "Ctrl+K"),
+pub static COMMANDS: [CommandDefinition; 84] = [
+    command("commands.show", "Show command palette", APPLICATION).keys("Meta+Shift+P", "Ctrl+Shift+P"),
     command("workspaces.switch", "Quick Open…", APPLICATION).keys("Meta+P", "Ctrl+P"),
     command("shortcuts.configure", "Configure keyboard shortcuts", APPLICATION),
     command("settings.show", "Settings", APPLICATION).keys("Meta+,", "Ctrl+,"),
@@ -144,6 +144,7 @@ pub static COMMANDS: [CommandDefinition; 83] = [
     command("focus.back", "Back", VIEW).keys("Meta+[", "Ctrl+["),
     command("focus.forward", "Forward", VIEW).keys("Meta+]", "Ctrl+]"),
     command("agents.jumpUnread", "Jump to the agent that needs you", AGENTS).keys("Meta+Shift+U", "Ctrl+Shift+U"),
+    command("agents.history", "Show session history", AGENTS).keys("Meta+K", "Ctrl+K"),
     command("agents.toggleSort", "Cycle agent ordering (priority → workspace → pinned)", AGENTS),
     command("agents.focusRow", "Focus the selected agent's pane", AGENTS).requires(Requires::Row),
     command("agents.renameRow", "Rename the selected agent's tab…", AGENTS).requires(Requires::Row),
@@ -326,9 +327,9 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_lists_65_and_hides_only_the_positional_selectors() {
-        assert_eq!(COMMANDS.len(), 83);
-        assert_eq!(palette_commands().count(), 65);
+    fn the_palette_lists_66_and_hides_only_the_positional_selectors() {
+        assert_eq!(COMMANDS.len(), 84);
+        assert_eq!(palette_commands().count(), 66);
         for command in COMMANDS.iter().filter(|command| command.palette_hidden) {
             assert!(
                 command.id.starts_with("workspace.select") || command.id.starts_with("tab.select"),

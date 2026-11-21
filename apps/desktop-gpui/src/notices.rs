@@ -75,6 +75,7 @@ const ROUTINE_PREFIXES: &[&str] = &[
     "Agent status hooks installed on ",
     "Updated the agent status hooks for ",
     "Markdown link: ",
+    "Snoozed ",
 ];
 
 /// Bookkeeping that fails as a consequence of something already reported, such
@@ -300,6 +301,7 @@ mod tests {
             "automations.json changed on the host; the list is reloaded.",
             "Notification topology changed while focusing; refreshing once before resolving the exact destination…",
             "Markdown link: #section",
+            "Snoozed Codex: tomorrow.",
             "Saved shell state was reset; the invalid original was preserved for recovery.",
         ] {
             assert_eq!(severity(message), None, "{message}");

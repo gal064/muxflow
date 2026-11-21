@@ -17,6 +17,9 @@ mod view;
 
 use std::rc::Rc;
 
+/// The click test every rendered Markdown link goes through.
+pub(crate) use view::is_click;
+
 use gpui_kit::App;
 
 /// Called once from [`crate::features::init`].

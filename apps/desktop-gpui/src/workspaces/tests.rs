@@ -47,7 +47,17 @@ struct HostState {
     /// How many inputs to refuse first, as a bridge still reconnecting does.
     refused_inputs: usize,
     generation: u64,
+    /// While set, tmux actions are answered only by [`Shell::release`], as a
+    /// slow link answers them.
+    hold: bool,
+    held: Vec<HeldAnswer>,
 }
+
+/// An action's answer, and where to send it once the test lets it go.
+type HeldAnswer = (
+    futures::channel::oneshot::Sender<Result<Value, String>>,
+    Result<Value, String>,
+);
 
 #[derive(Clone, Default)]
 struct FakeHost(Arc<Mutex<HostState>>);
@@ -78,6 +88,21 @@ impl FakeHost {
 }
 
 impl TerminalBackend for FakeHost {
+    fn chat_request(
+        &self,
+        _: String,
+        request: desktop_core::connection::chat::ChatRequest,
+    ) -> BoxFuture<'static, Result<desktop_core::connection::chat::ChatResponse, String>> {
+        assert!(request.initialize_if_unset);
+        async move {
+            Ok(desktop_core::connection::chat::ChatResponse {
+                mode: request.mode,
+                ..Default::default()
+            })
+        }
+        .boxed()
+    }
+
     fn spawn_engine(
         &self,
         outputs: std::sync::mpsc::Sender<terminal_engine::EngineOutput>,
@@ -182,6 +207,11 @@ impl TerminalBackend for FakeHost {
                 "topologyGeneration": generation,
             }))
         });
+        if state.hold {
+            let (reply, answered) = futures::channel::oneshot::channel();
+            state.held.push((reply, answer));
+            return async move { answered.await.unwrap_or_else(|_| Err("dropped".into())) }.boxed();
+        }
         async move { answer }.boxed()
     }
 
@@ -272,6 +302,16 @@ fn frame(kind: u8, label: &str, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// The generation a [`snapshot_frame`] carries.
+fn snapshot_generation(frame: &[u8]) -> Option<u64> {
+    if frame.first() != Some(&7) {
+        return None;
+    }
+    let label = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let body: Value = serde_json::from_slice(&frame[3 + label + 8..]).ok()?;
+    body["generation"].as_u64()
+}
+
 fn snapshot_frame(generation: u64, snapshot: &TmuxSnapshot) -> Vec<u8> {
     let body = json!({
         "sequence": 0, "generation": generation, "serverIdentity": "tmux",
@@ -329,9 +369,22 @@ impl Shell {
     fn publish_to(&mut self, bridge: usize, frames: Vec<Vec<u8>>) {
         let sink = self.host.state().sinks[bridge].clone();
         for frame in frames {
+            // The host answers an action at a generation past every snapshot
+            // it has sent, as tmux's generations only grow.
+            if let Some(generation) = snapshot_generation(&frame) {
+                let mut host = self.host.state();
+                host.generation = host.generation.max(generation);
+            }
             sink.send(EventBody::Raw(frame)).unwrap();
         }
         self.settle();
+    }
+
+    /// A snapshot sent after everything the host has answered: it has seen
+    /// every move, and the guards their paints put up are released.
+    fn publish_caught_up(&mut self, snapshot: &TmuxSnapshot) {
+        let generation = 101 + self.host.state().generation;
+        self.publish(vec![snapshot_frame(generation, snapshot)]);
     }
 
     fn settle(&mut self) {
@@ -339,6 +392,36 @@ impl Shell {
         // What the engine produced waits for the link's next drain.
         self.visual.executor().advance_clock(POLL_IDLE);
         self.visual.run_until_parked();
+    }
+
+    /// Answers every action held so far, and those each answer leads to,
+    /// until the host has nothing left to answer.
+    fn release(&mut self) {
+        loop {
+            let held = std::mem::take(&mut self.host.state().held);
+            if held.is_empty() {
+                return;
+            }
+            for (reply, answer) in held {
+                let _ = reply.send(answer);
+            }
+            self.settle();
+        }
+    }
+
+    fn view(&mut self) -> super::ShellView {
+        let workspaces = self.workspaces();
+        self.visual.update(|_, cx| workspaces.read(cx).view(cx))
+    }
+
+    /// The workspace, window and focused pane the shell shows.
+    fn place(&mut self) -> (String, String, String) {
+        let view = self.view();
+        (
+            view.session.map(|session| session.id).unwrap_or_default(),
+            view.window.map(|window| window.id).unwrap_or_default(),
+            view.active_pane.map(|pane| pane.id).unwrap_or_default(),
+        )
     }
 
     fn run(&mut self, id: &'static str) {
@@ -1590,6 +1673,544 @@ mod agent_seams {
                 "7".to_owned()
             )]
         );
+    }
+
+    // Switching to an agent paints first when its pane's content is here.
+
+    fn at(session: &str, window: &str, pane: &str) -> (String, String, String) {
+        (session.into(), window.into(), pane.into())
+    }
+
+    fn open(shell: &mut Shell, host: &str, pane: &str) {
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane(host, pane, cx))
+            .unwrap();
+        shell.settle();
+    }
+
+    fn guard(shell: &mut Shell) -> Option<crate::connection_ui::host_links::OptimisticWindow> {
+        shell.visual.update(|_, cx| {
+            let controller = cx.global::<ConnectionUi>().0.read(cx);
+            controller.link("local").unwrap().optimistic_window.clone()
+        })
+    }
+
+    /// `world`, with `pane` the focused one of its window.
+    fn focused_on(active_window: &str, pane: &str) -> TmuxSnapshot {
+        let mut world = world(active_window);
+        let window = world
+            .panes
+            .iter()
+            .find(|candidate| candidate.id == pane)
+            .unwrap()
+            .window_id
+            .clone();
+        for candidate in world.panes.iter_mut().filter(|p| p.window_id == window) {
+            candidate.active = candidate.id == pane;
+        }
+        world
+    }
+
+    #[gpui_kit::test]
+    fn an_agent_on_screen_is_focused_before_the_host_answers_and_the_latest_click_wins(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(
+            shell.place(),
+            at("$1", "@1", "%2"),
+            "painted before the host answers"
+        );
+        // The Explorer, and the root an agent launches under, follow it.
+        let explored = shell.visual.update(|_, cx| {
+            crate::files::inputs(cx.global::<ConnectionUi>().0.read(cx))
+                .selection
+                .map(|selection| selection.pane_id)
+        });
+        assert_eq!(explored.as_deref(), Some("%2"));
+        // A snapshot that has not seen the move does not take focus back.
+        shell.publish(vec![snapshot_frame(3, &world("@1"))]);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        // A second click while the first is in flight is the one that stands.
+        open(&mut shell, "local", "%1");
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        shell.release();
+        let focused: Vec<Value> = shell
+            .host
+            .state()
+            .actions
+            .iter()
+            .filter(|action| action["kind"] == "focusPane")
+            .map(|action| action["pane_id"].clone())
+            .collect();
+        assert_eq!(focused, [json!("%2"), json!("%1")], "one move at a time");
+        // The first landing does not take the screen from the second.
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        // Held until a snapshot at the answer's generation, then tmux's stands.
+        assert!(guard(&mut shell).is_some());
+        shell.publish_caught_up(&focused_on("@1", "%1"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_agent_switch_is_put_back(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        {
+            let mut host = shell.host.state();
+            host.hold = true;
+            host.answers
+                .push_back(Err("tmux refused the switch".into()));
+        }
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"), "painted first");
+        assert!(guard(&mut shell).is_some());
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        // Nothing changed on the host, so no snapshot comes to correct it.
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        assert_eq!(guard(&mut shell), None);
+    }
+
+    fn seed_frame(pane: &str, sequence: u64, text: &str) -> Vec<u8> {
+        let mut bytes = vec![1];
+        bytes.extend_from_slice(&(pane.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(pane.as_bytes());
+        bytes.extend_from_slice(&sequence.to_be_bytes());
+        bytes.extend_from_slice(&1u64.to_be_bytes());
+        bytes.extend_from_slice(text.as_bytes());
+        bytes
+    }
+
+    fn holds(shell: &mut Shell, pane: &str) -> bool {
+        shell.visual.update(|_, cx| {
+            let controller = cx.global::<ConnectionUi>().0.read(cx);
+            controller
+                .terminal_link("local")
+                .is_some_and(|link| link.read(cx).holds(pane))
+        })
+    }
+
+    /// A terminal whose screen is not here would show an empty grid for a
+    /// round trip: that switch waits for the host. One whose screen was kept
+    /// when it went off screen paints at once.
+    #[gpui_kit::test]
+    fn a_terminal_paints_first_only_when_its_screen_is_kept(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        // %3 is shown and given its screen, then the tab is left.
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        shell.publish(vec![seed_frame("%3", 1, "agent screen")]);
+        assert!(!holds(&mut shell, "%3"), "on screen, not kept aside");
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@1", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@1"));
+        assert_eq!(guard(&mut shell), None, "both switches caught up");
+        assert!(holds(&mut shell, "%3"));
+        assert!(!holds(&mut shell, "%4"), "never shown");
+
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%4");
+        assert_eq!(
+            shell.place(),
+            at("$1", "@1", "%1"),
+            "no screen for %4 yet: the switch waits"
+        );
+        assert_eq!(guard(&mut shell), None);
+        shell.release();
+        assert_eq!(shell.place(), at("$2", "@3", "%4"));
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%4");
+
+        open(&mut shell, "local", "%3");
+        assert_eq!(
+            shell.place(),
+            at("$1", "@2", "%3"),
+            "its kept screen paints before the host answers"
+        );
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%3");
+        assert!(
+            guard(&mut shell).is_some(),
+            "held until the host's snapshot"
+        );
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+    }
+
+    /// A notification's pane paints at once, and is acknowledged only once
+    /// the host says that exact pane is focused.
+    #[gpui_kit::test]
+    fn a_notification_click_paints_its_pane_first_and_acknowledges_on_arrival(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        let requests = start_agents(
+            &mut shell,
+            HashMap::from([(
+                "client-1",
+                vec![agent("waiting", "local", ("$1", "main", "@1", "%2"))],
+            )]),
+        );
+        let route = Route {
+            host_profile: "local".into(),
+            server_identity: "tmux".into(),
+            session_id: "$1".into(),
+            session_name: "main".into(),
+            window_id: "@1".into(),
+            window_name: "editor".into(),
+            pane_id: "%2".into(),
+            agent_id: "waiting".into(),
+            attention_generation: 7,
+        };
+        shell.host.state().hold = true;
+        shell
+            .visual
+            .update(|_, cx| activation::activate(route, false, cx));
+        shell.settle();
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        let seen = |requests: &Requests| {
+            requests
+                .borrow()
+                .iter()
+                .filter(|(_, command)| command.operation == "markSeen")
+                .count()
+        };
+        shell.release();
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+        assert_eq!(
+            seen(&requests),
+            0,
+            "not before the host has the pane focused"
+        );
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+        assert_eq!(seen(&requests), 1);
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+    }
+
+    fn mark_seen_count(requests: &Requests) -> usize {
+        requests
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.operation == "markSeen")
+            .count()
+    }
+
+    fn wait_a_poll(shell: &mut Shell) {
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+    }
+
+    /// `notes`, with its one pane %4, shown and given its screen, then left:
+    /// a move back to it paints first.
+    fn keep_the_notes_screen(shell: &mut Shell) {
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$2", cx)));
+        shell.settle();
+        shell.publish(vec![seed_frame("%4", 1, "agent screen")]);
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$1", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@1"));
+        assert_eq!(guard(shell), None);
+        assert!(holds(shell, "%4"));
+    }
+
+    fn notes_route() -> Route {
+        Route {
+            host_profile: "local".into(),
+            server_identity: "tmux".into(),
+            session_id: "$2".into(),
+            session_name: "notes".into(),
+            window_id: "@3".into(),
+            window_name: "shell".into(),
+            pane_id: "%4".into(),
+            agent_id: "in-notes".into(),
+            attention_generation: 7,
+        }
+    }
+
+    fn notes_agent(shell: &mut Shell) -> Requests {
+        start_agents(
+            shell,
+            HashMap::from([(
+                "client-1",
+                vec![agent("in-notes", "local", ("$2", "notes", "@3", "%4"))],
+            )]),
+        )
+    }
+
+    /// A single-pane window's one pane is tmux's active pane already, so the
+    /// painted move alone would look arrived: the guard must be gone first.
+    #[gpui_kit::test]
+    fn a_notification_is_acknowledged_only_once_the_host_has_its_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        let requests = notes_agent(&mut shell);
+        keep_the_notes_screen(&mut shell);
+        shell.host.state().hold = true;
+        shell
+            .visual
+            .update(|_, cx| activation::activate(notes_route(), false, cx));
+        shell.settle();
+        assert_eq!(shell.place(), at("$2", "@3", "%4"), "painted first");
+        wait_a_poll(&mut shell);
+        assert_eq!(mark_seen_count(&requests), 0, "not while the host is asked");
+        shell.release();
+        wait_a_poll(&mut shell);
+        assert_eq!(
+            mark_seen_count(&requests),
+            0,
+            "nor before a snapshot has the move"
+        );
+        shell.publish_caught_up(&world("@1"));
+        wait_a_poll(&mut shell);
+        assert_eq!(mark_seen_count(&requests), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_notification_move_is_not_acknowledged(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        let requests = notes_agent(&mut shell);
+        keep_the_notes_screen(&mut shell);
+        {
+            let mut host = shell.host.state();
+            host.hold = true;
+            host.answers
+                .push_back(Err("tmux refused the switch".into()));
+        }
+        shell
+            .visual
+            .update(|_, cx| activation::activate(notes_route(), false, cx));
+        shell.settle();
+        assert_eq!(shell.place(), at("$2", "@3", "%4"));
+        wait_a_poll(&mut shell);
+        shell.release();
+        wait_a_poll(&mut shell);
+        assert_eq!(shell.place(), at("$1", "@1", "%1"), "put back");
+        assert_eq!(mark_seen_count(&requests), 0);
+    }
+
+    /// %1 and %2 given their screens, then the tab left for `server`.
+    fn keep_the_editor_screens(shell: &mut Shell) {
+        shell.publish(vec![
+            seed_frame("%1", 1, "left"),
+            seed_frame("%2", 2, "right"),
+        ]);
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(guard(shell), None);
+        assert!(holds(shell, "%1") && holds(shell, "%2"));
+    }
+
+    /// A double click while the window step is still in flight: the first
+    /// move must still focus the pane, since the second takes its result.
+    #[gpui_kit::test]
+    fn a_click_repeated_in_flight_still_focuses_its_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        keep_the_editor_screens(&mut shell);
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        assert!(
+            guard(&mut shell).is_some(),
+            "held until the host's snapshot"
+        );
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// A move painted while another flies waits behind it; replaced there by
+    /// one that cannot paint, nothing would release its guard, and the shell
+    /// would keep going back to its window.
+    #[gpui_kit::test]
+    fn a_painted_move_replaced_while_waiting_lets_go_of_its_guard(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        // %3 given its screen and left; %1 and %2 never had one.
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_window("@2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        shell.publish(vec![seed_frame("%3", 1, "agent screen")]);
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(guard(&mut shell), None);
+        assert!(holds(&mut shell, "%3") && !holds(&mut shell, "%2"));
+
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%4");
+        open(&mut shell, "local", "%3");
+        assert_eq!(shell.place(), at("$1", "@2", "%3"), "painted, and waiting");
+        open(&mut shell, "local", "%2");
+        assert_eq!(guard(&mut shell), None, "the replaced move's guard goes");
+        assert_eq!(
+            shell.place(),
+            at("$2", "@3", "%4"),
+            "and the shell is back where it was until %2 is reached"
+        );
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// A painted move to another workspace, cut short after its workspace
+    /// step for a click that has to wait: the host stops on that workspace's
+    /// own window, which nobody clicked, and the screen must not show it.
+    #[gpui_kit::test]
+    fn a_painted_move_cut_short_keeps_the_screen_until_the_next_lands(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        keep_the_editor_screens(&mut shell);
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.select_session("$2", cx)));
+        shell.settle();
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(shell.place(), at("$2", "@3", "%4"));
+        assert!(!holds(&mut shell, "%3"), "%3 has to wait");
+
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"), "painted");
+        open(&mut shell, "local", "%3");
+        // Only the workspace step answers; the host is now on $1's @1, with
+        // %1 focused.
+        let (reply, answer) = shell.host.state().held.remove(0);
+        let _ = reply.send(answer);
+        shell.settle();
+        shell.publish_caught_up(&world("@1"));
+        assert_eq!(
+            shell.place(),
+            at("$1", "@1", "%2"),
+            "the screen stays as painted while %3 is on its way"
+        );
+        assert!(guard(&mut shell).is_some());
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%3");
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+        shell.publish_caught_up(&world("@2"));
+        assert_eq!(shell.place(), at("$1", "@2", "%3"));
+    }
+
+    /// A, B, then A again before the first move has landed: the first move is
+    /// the one the user wants again, and still focuses its pane.
+    #[gpui_kit::test]
+    fn a_move_away_and_back_while_in_flight_focuses_the_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        keep_the_editor_screens(&mut shell);
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        open(&mut shell, "local", "%3");
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        assert!(
+            guard(&mut shell).is_some(),
+            "held until the host's snapshot"
+        );
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// A move that could not paint flies; asked for again once it could, the
+    /// repeat joins the flight rather than put up a guard its landing would
+    /// never release.
+    #[gpui_kit::test]
+    fn a_repeat_of_an_unpainted_move_joins_its_flight(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell.publish(vec![
+            seed_frame("%1", 1, "left"),
+            seed_frame("%2", 2, "right"),
+        ]);
+        let mut zoomed = world("@1");
+        zoomed.windows[0].zoomed = true;
+        shell.publish_caught_up(&zoomed);
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(guard(&mut shell), None, "zoomed on %1: not painted");
+        // Unzoomed while the move flies: %2 could paint now.
+        shell.publish_caught_up(&world("@1"));
+        open(&mut shell, "local", "%2");
+        assert_eq!(guard(&mut shell), None, "the repeat joins the flight");
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        shell.publish_caught_up(&focused_on("@1", "%2"));
+        assert_eq!(guard(&mut shell), None);
+        assert_eq!(shell.place(), at("$1", "@1", "%2"));
+    }
+
+    /// tmux unzooms a window to focus another of its panes, so painting the
+    /// zoomed pane swapped would be undone by a reflow a round trip later.
+    #[gpui_kit::test]
+    fn a_zoomed_window_waits_for_the_host_to_focus_another_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell.publish(vec![
+            seed_frame("%1", 1, "left"),
+            seed_frame("%2", 2, "right"),
+        ]);
+        let mut zoomed = world("@1");
+        zoomed.windows[0].zoomed = true;
+        shell.publish_caught_up(&zoomed);
+        assert!(holds(&mut shell, "%2"), "off screen behind the zoom");
+        shell.host.state().hold = true;
+        open(&mut shell, "local", "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%1"));
+        assert_eq!(guard(&mut shell), None);
+        shell.release();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%2");
+        assert_eq!(shell.place(), at("$1", "@1", "%1"), "until tmux says so");
     }
 }
 

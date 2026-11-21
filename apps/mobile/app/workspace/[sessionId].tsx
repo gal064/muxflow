@@ -1,8 +1,8 @@
 import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { agentDisplayName, agentsInWindow, loudestPill } from "../../src/features/agents/agentViews";
+import { agentDisplayName, agentsInWindow, loudestPill, windowSubtitle } from "../../src/features/agents/agentViews";
 import { stripAgentStatusGlyphs } from "../../src/features/agents/agentLabels";
 import { createTerminalWindow } from "../../src/features/terminal/createWindow";
 import { activePaneForWindow } from "../../src/features/terminal/panes";
@@ -12,6 +12,7 @@ import { getConnection, toast } from "../../src/session/connectionManager";
 import { sessionStore, type Window } from "../../src/store/sessionStore";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { ListRow } from "../../src/ui/components/ListRow";
+import { ChatIcon, FolderIcon, TerminalIcon } from "../../src/ui/components/MediaIcons";
 import { StatusPill } from "../../src/ui/components/StatusPill";
 import { useSession } from "../../src/ui/hooks";
 import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
@@ -30,6 +31,8 @@ export default function WorkspaceScreen() {
   const connected = state.connection.state === "connected";
   const [creating, setCreating] = useState(false);
   const [actionsFor, setActionsFor] = useState<Window | null>(null);
+  // A chat's mark takes room at the row's left; with one in the list, every row keeps that room so the names line up.
+  const anyChat = windows.some((w) => (activePaneForWindow(state, w.id)?.chatAdapterId ?? "") !== "");
 
   // Closing the last window closes the workspace with it; leave the empty
   // screen rather than show a workspace that no longer exists.
@@ -73,19 +76,21 @@ export default function WorkspaceScreen() {
     <View style={styles.root}>
       <Stack.Screen options={{ title: session ? stripAgentStatusGlyphs(session.name) : "Workspace" }} />
       <ConnectionStrip />
-      <ActionRow disabled={!connected} glyph="▤" label="Browse files" onPress={browseFiles} />
-      <ActionRow busy={creating} disabled={!connected || creating} glyph=">_" label="New terminal" onPress={() => void newTerminal()} />
+      <ActionRow disabled={!connected} icon={<FolderIcon color={colors.accent} size={18} />} label="Browse files" onPress={browseFiles} />
+      <ActionRow busy={creating} disabled={!connected || creating} icon={<TerminalIcon color={colors.accent} size={18} />} label="New terminal" onPress={() => void newTerminal()} />
       <FlatList
         data={windows}
         keyExtractor={(w) => w.id}
         renderItem={({ item }) => {
           const agents = agentsInWindow(state, item.id);
           const pane = activePaneForWindow(state, item.id);
-          const subtitle = agents.length > 0 ? agents.map((a) => agentDisplayName(state, a)).join(", ") : pane?.currentCommand ?? "";
+          const chat = (pane?.chatAdapterId ?? "") !== "";
+          const subtitle = windowSubtitle(chat, agents.map((a) => agentDisplayName(state, a)), pane?.currentCommand ?? "");
           const pill = loudestPill(agents);
           return (
             <ListRow
               height={metrics.windowRowHeight}
+              leading={anyChat ? <View style={[styles.mark, chat && styles.chatMark]}>{chat ? <ChatIcon color={colors.accent} size={16} /> : null}</View> : undefined}
               onPress={pane ? () => openPane(pane.id) : undefined}
               onLongPress={() => setActionsFor(item)}
               subtitle={subtitle}
@@ -126,10 +131,10 @@ function waitForPane(paneId: string): Promise<void> {
 }
 
 /** 48 dp action row on `--chrome-raised` (§9.4). */
-function ActionRow({ glyph, label, onPress, disabled, busy }: { glyph: string; label: string; onPress: () => void; disabled?: boolean; busy?: boolean }) {
+function ActionRow({ icon, label, onPress, disabled, busy }: { icon: ReactNode; label: string; onPress: () => void; disabled?: boolean; busy?: boolean }) {
   return (
     <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.action, pressed && styles.pressed, disabled && !busy && styles.disabled]}>
-      <Text {...fixedChromeText} numberOfLines={1} style={styles.actionGlyph}>{glyph}</Text>
+      <View style={styles.mark}>{icon}</View>
       <Text {...fixedChromeText} numberOfLines={1} style={styles.actionLabel}>{label}</Text>
       {busy ? <ActivityIndicator color={colors.accent} size="small" /> : null}
     </Pressable>
@@ -151,6 +156,8 @@ const styles = StyleSheet.create({
   },
   pressed: { backgroundColor: colors.chromeHover },
   disabled: { opacity: 0.5 },
-  actionGlyph: { color: colors.accent, fontSize: 16, fontWeight: "700", width: 24, textAlign: "center" },
+  /** The room a row's mark takes, the same on action and window rows. */
+  mark: { alignItems: "center", height: 28, justifyContent: "center", width: 28 },
+  chatMark: { backgroundColor: colors.chromeRaised, borderRadius: 7 },
   actionLabel: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.rowTitle },
 });

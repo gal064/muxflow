@@ -15,6 +15,7 @@ mod claude_session;
 mod codex_authority;
 pub(crate) mod codex_config;
 mod fallback;
+mod history_feed;
 mod hooks;
 mod identity;
 mod ingest;
@@ -1099,7 +1100,8 @@ impl AgentRuntime {
             .map(|record| record.adapter_id.as_str())
             .collect();
         let wiring = self.wiring.lock().unwrap().current(&running);
-        snapshot::build(&state, server_identity, &wiring)
+        let agent_mode = crate::service::chat::ChatRuntime::global().agent_mode();
+        snapshot::build(&state, server_identity, &wiring, agent_mode)
     }
 
     pub(super) fn reconcile_topology(
@@ -1136,9 +1138,17 @@ impl AgentRuntime {
                 .unwrap()
                 .retain(|agent_id, _| !observed.contains(agent_id));
         }
+        history_feed::observe(&state, Some(topology));
         let retired_codex_agent_ids = result.retired_codex_agent_ids.clone();
         drop(state);
         self.retire_codex_runtime_state(&retired_codex_agent_ids);
+        // In Chat mode an agent that has just started becomes a chat.
+        crate::service::chat::agents_detected(
+            identity,
+            detected
+                .values()
+                .map(|(pane, adapter)| (*pane, adapter.kind())),
+        );
         Ok(result.changed)
     }
 
@@ -1183,7 +1193,9 @@ impl AgentRuntime {
     }
 
     fn persist_locked(&self, state: &StoredState) -> anyhow::Result<()> {
-        store::persist(&self.state_path, state)
+        store::persist(&self.state_path, state)?;
+        history_feed::observe(state, None);
+        Ok(())
     }
 }
 

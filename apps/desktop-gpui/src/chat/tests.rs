@@ -1,0 +1,4170 @@
+//! The chat model's client rules, and a chat pane in the real window against
+//! a fake host: what it asks the host, and what it shows for what comes back.
+
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+use desktop_core::{
+    app_state::{AppStateStore, PersistedAppState},
+    connection::{
+        ConnectionSpec, ProfileStore,
+        chat::{
+            ChatAction, ChatAgentMode, ChatAttachment, ChatBackgroundTask, ChatCapabilities,
+            ChatCatalog, ChatChange, ChatCommand, ChatCommandKind, ChatConnection, ChatEvent,
+            ChatItem, ChatItemDelta, ChatItemKind, ChatModel, ChatOption, ChatOptions,
+            ChatPendingRequest, ChatPermissionMode, ChatQuestion, ChatRequest, ChatRequestKind,
+            ChatResponse, ChatSnapshot, ChatState, ChatTaskKind, ChatTool, ChatToolKind,
+            ChatToolStatus, ChatTruncate, ChatTurnState, ChatUsage,
+        },
+        helper::HelperInstallReport,
+    },
+    platform::{EventBody, EventSink},
+};
+use futures::future::{BoxFuture, FutureExt};
+use gpui_kit::{
+    AppContext, Entity, ScrollDelta, TestAppContext, VisualTestContext, point, px, size,
+    test::{TestQueryExt, TestWindowExt},
+};
+use serde_json::{Value, json};
+use tmux_control::{Pane, TmuxSnapshot};
+
+use super::model::{Chat, Outcome, PageOutcome};
+use crate::{
+    app::{self, Core},
+    connection_ui::{
+        ConnectionUi,
+        backend::{ConnectionBackend, EngineChannel, TerminalBackend, inline::InlineEngine},
+        controller::{AgentServiceFrame, ConnectionController, ConnectionEvent},
+        helper_upgrade::RemoteHelperProbe,
+    },
+    settings,
+    terminal::link::POLL_IDLE,
+    workspaces::model::fixtures::{pane, session, window},
+};
+
+const PANE: &str = "%1";
+
+fn item(id: &str, kind: ChatItemKind, text: &str) -> ChatItem {
+    ChatItem {
+        id: id.into(),
+        kind: kind.into(),
+        text: text.into(),
+        rewindable: kind == ChatItemKind::User,
+        ..Default::default()
+    }
+}
+
+fn tool(id: &str, kind: ChatToolKind, title: &str, detail: &str) -> ChatItem {
+    ChatItem {
+        id: id.into(),
+        kind: ChatItemKind::Tool.into(),
+        tool: Some(ChatTool {
+            kind: kind.into(),
+            title: title.into(),
+            detail: detail.into(),
+            status: ChatToolStatus::Ok.into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn catalog() -> ChatCatalog {
+    let command = |name: &str, description: &str, kind: ChatCommandKind| ChatCommand {
+        name: name.into(),
+        description: description.into(),
+        argument_hint: String::new(),
+        kind: kind.into(),
+    };
+    ChatCatalog {
+        capabilities: Some(ChatCapabilities {
+            rewind: true,
+            send_mid_turn: true,
+            model: true,
+            effort: true,
+            speed: true,
+            permission: true,
+            fork: true,
+            questions: true,
+            attachments: true,
+        }),
+        models: vec![
+            ChatModel {
+                id: "opus".into(),
+                label: "Opus 5.5".into(),
+                efforts: vec!["low".into(), "high".into()],
+                supports_fast: true,
+            },
+            ChatModel {
+                id: "fable".into(),
+                label: "Fable 5.2".into(),
+                efforts: Vec::new(),
+                supports_fast: false,
+            },
+        ],
+        commands: vec![
+            command(
+                "compact",
+                "Summarise the conversation",
+                ChatCommandKind::Command,
+            ),
+            command("clear", "Start over", ChatCommandKind::Command),
+            command("code-review", "Review the diff", ChatCommandKind::Skill),
+            command("btw", "Ask on the side", ChatCommandKind::Muxflow),
+        ],
+    }
+}
+
+fn state(turn: ChatTurnState) -> ChatState {
+    ChatState {
+        pane_id: PANE.into(),
+        adapter_id: "claude".into(),
+        turn: turn.into(),
+        connection: ChatConnection::Ready.into(),
+        options: Some(ChatOptions {
+            model: "opus".into(),
+            effort: "high".into(),
+            permission: ChatPermissionMode::Auto.into(),
+            ..Default::default()
+        }),
+        usage: Some(ChatUsage {
+            used_tokens: 209_000,
+            window_tokens: 1_000_000,
+        }),
+        history_complete: true,
+        ..Default::default()
+    }
+}
+
+fn snapshot(revision: u64, items: Vec<ChatItem>, older_cursor: &str) -> ChatEvent {
+    snapshot_in(revision, state(ChatTurnState::Idle), items, older_cursor)
+}
+
+fn snapshot_in(
+    revision: u64,
+    state: ChatState,
+    items: Vec<ChatItem>,
+    older_cursor: &str,
+) -> ChatEvent {
+    ChatEvent {
+        pane_id: PANE.into(),
+        revision,
+        change: Some(ChatChange::Snapshot(ChatSnapshot {
+            revision,
+            state: Some(state),
+            catalog: Some(catalog()),
+            items,
+            older_cursor: older_cursor.into(),
+        })),
+    }
+}
+
+fn event(revision: u64, change: ChatChange) -> ChatEvent {
+    ChatEvent {
+        pane_id: PANE.into(),
+        revision,
+        change: Some(change),
+    }
+}
+
+fn delta(revision: u64, item_id: &str, text: &str) -> ChatEvent {
+    event(
+        revision,
+        ChatChange::Delta(ChatItemDelta {
+            item_id: item_id.into(),
+            text_append: text.into(),
+        }),
+    )
+}
+
+fn page(revision: u64, items: Vec<ChatItem>, older_cursor: &str) -> ChatResponse {
+    ChatResponse {
+        older: items,
+        older_cursor: older_cursor.into(),
+        revision,
+        ..Default::default()
+    }
+}
+
+fn ids(chat: &Chat) -> Vec<&str> {
+    chat.items.iter().map(|item| item.id.as_str()).collect()
+}
+
+fn held() -> Chat {
+    let mut chat = Chat::default();
+    let items = vec![
+        item("u1", ChatItemKind::User, "first"),
+        item("a1", ChatItemKind::Assistant, "an"),
+    ];
+    assert_eq!(chat.apply(snapshot(10, items, "older-1")), Outcome::Reset);
+    chat
+}
+
+// The model: `chat.proto`'s client rules.
+
+#[test]
+fn nothing_applies_before_a_snapshot_and_a_snapshot_replaces_everything() {
+    let mut chat = Chat::default();
+    assert_eq!(chat.apply(delta(3, "a1", "lost")), Outcome::Ignored);
+    assert!(!chat.is_held());
+    assert_eq!(chat.page_request(), None);
+
+    let mut chat = held();
+    assert!(chat.is_held());
+    assert_eq!(ids(&chat), ["u1", "a1"]);
+    let again = vec![item("u9", ChatItemKind::User, "other")];
+    // Even one whose revision is behind: it is what the host holds now.
+    assert_eq!(chat.apply(snapshot(4, again, "")), Outcome::Reset);
+    assert_eq!(ids(&chat), ["u9"]);
+    assert_eq!(chat.older_cursor, "");
+    assert_eq!(chat.apply(delta(5, "u9", "!")), Outcome::Updated(0));
+}
+
+#[test]
+fn a_change_applies_only_as_the_next_revision() {
+    let mut chat = held();
+    // At or behind what is held: already included.
+    assert_eq!(chat.apply(delta(10, "a1", "x")), Outcome::Ignored);
+    assert_eq!(chat.apply(delta(9, "a1", "x")), Outcome::Ignored);
+    assert_eq!(chat.items[1].text, "an");
+    // A gap: something was lost.
+    assert_eq!(chat.apply(delta(12, "a1", "x")), Outcome::Reopen);
+    assert_eq!(chat.items[1].text, "an");
+    // The next one still applies once it comes.
+    assert_eq!(chat.apply(delta(11, "a1", "swer")), Outcome::Updated(1));
+    assert_eq!(chat.items[1].text, "answer");
+    assert_eq!(chat.apply(delta(12, "a1", "!")), Outcome::Updated(1));
+}
+
+#[test]
+fn items_append_update_and_follow_the_state() {
+    let mut chat = held();
+    let run = tool("t1", ChatToolKind::Command, "run", "cargo test");
+    assert_eq!(
+        chat.apply(event(11, ChatChange::Item(run.clone()))),
+        Outcome::Appended(1)
+    );
+    let mut done = run;
+    done.tool.as_mut().unwrap().result_summary = "14 passed".into();
+    assert_eq!(
+        chat.apply(event(12, ChatChange::Updated(done))),
+        Outcome::Updated(2)
+    );
+    assert_eq!(
+        chat.items[2].tool.as_ref().unwrap().result_summary,
+        "14 passed"
+    );
+    assert_eq!(
+        chat.apply(event(13, ChatChange::State(state(ChatTurnState::Working)))),
+        Outcome::State
+    );
+    assert_eq!(chat.state.turn, i32::from(ChatTurnState::Working));
+    assert_eq!(
+        chat.apply(event(14, ChatChange::Catalog(ChatCatalog::default()))),
+        Outcome::State
+    );
+    assert!(chat.catalog.models.is_empty());
+}
+
+#[test]
+fn a_change_to_an_item_not_loaded_is_ignored_but_counted() {
+    let mut chat = held();
+    assert_eq!(chat.apply(delta(11, "older", "x")), Outcome::Ignored);
+    let update = item("older", ChatItemKind::Assistant, "edited");
+    assert_eq!(
+        chat.apply(event(12, ChatChange::Updated(update))),
+        Outcome::Ignored
+    );
+    assert_eq!(ids(&chat), ["u1", "a1"]);
+    // The revision moved on all the same.
+    assert_eq!(chat.apply(delta(13, "a1", "!")), Outcome::Updated(1));
+}
+
+#[test]
+fn a_truncate_drops_what_follows_its_item() {
+    let mut chat = held();
+    let truncate = |after: &str| {
+        ChatChange::Truncate(ChatTruncate {
+            after_item_id: after.into(),
+        })
+    };
+    assert_eq!(chat.apply(event(11, truncate("u1"))), Outcome::Truncated(1));
+    assert_eq!(ids(&chat), ["u1"]);
+    assert_eq!(chat.older_cursor, "older-1");
+    // Rewound to an item this client never loaded: its place is unknown.
+    assert_eq!(chat.apply(event(12, truncate("u0"))), Outcome::Reopen);
+    // Everything, with nothing older left to ask for.
+    assert_eq!(chat.apply(event(13, truncate(""))), Outcome::Truncated(0));
+    assert!(chat.items.is_empty());
+    assert_eq!(chat.page_request(), None);
+}
+
+#[test]
+fn an_older_page_goes_before_the_first_item_without_repeats() {
+    let mut chat = held();
+    let request = chat.page_request().expect("there is something older");
+    assert_eq!(request.cursor, "older-1");
+    let older = vec![
+        item("u0", ChatItemKind::User, "zero"),
+        item("u1", ChatItemKind::User, "first"),
+    ];
+    assert_eq!(
+        chat.page_answer(&request, page(10, older, "older-2")),
+        PageOutcome::Merged(1)
+    );
+    assert_eq!(ids(&chat), ["u0", "u1", "a1"]);
+    assert_eq!(chat.page_request().unwrap().cursor, "older-2");
+    // The same answer again, as a retry would bring it.
+    assert_eq!(
+        chat.page_answer(&request, page(10, Vec::new(), "older-3")),
+        PageOutcome::Dropped
+    );
+}
+
+#[test]
+fn a_page_asked_before_the_snapshot_held_is_dropped() {
+    let mut chat = held();
+    let request = chat.page_request().unwrap();
+    let fresh = vec![item("u5", ChatItemKind::User, "new")];
+    assert_eq!(chat.apply(snapshot(20, fresh, "older-1")), Outcome::Reset);
+    let stale = vec![item("u0", ChatItemKind::User, "zero")];
+    assert_eq!(
+        chat.page_answer(&request, page(10, stale, "")),
+        PageOutcome::Dropped
+    );
+    assert_eq!(ids(&chat), ["u5"]);
+    assert_eq!(chat.older_cursor, "older-1");
+}
+
+#[test]
+fn a_page_ahead_of_the_chat_waits_for_its_revision() {
+    let mut chat = held();
+    let request = chat.page_request().unwrap();
+    let older = vec![item("u0", ChatItemKind::User, "zero")];
+    assert_eq!(
+        chat.page_answer(&request, page(12, older, "")),
+        PageOutcome::Held
+    );
+    assert_eq!(ids(&chat), ["u1", "a1"]);
+    assert_eq!(chat.apply(delta(11, "a1", "s")), Outcome::Updated(1));
+    assert_eq!(chat.page_due(), None);
+    assert_eq!(chat.apply(delta(12, "a1", "w")), Outcome::Updated(1));
+    assert_eq!(chat.page_due(), Some(PageOutcome::Merged(1)));
+    assert_eq!(ids(&chat), ["u0", "u1", "a1"]);
+    assert_eq!(chat.page_due(), None);
+}
+
+#[test]
+fn a_page_is_asked_again_when_a_change_to_it_was_missed() {
+    let mut chat = held();
+    let request = chat.page_request().unwrap();
+    // A change to an item of the page, ignored because it was not loaded yet.
+    assert_eq!(chat.apply(delta(11, "u0", "!")), Outcome::Ignored);
+    let older = vec![item("u0", ChatItemKind::User, "zero")];
+    // Read before that change: what it holds is stale.
+    assert_eq!(
+        chat.page_answer(&request, page(10, older.clone(), "")),
+        PageOutcome::AskAgain
+    );
+    assert_eq!(ids(&chat), ["u1", "a1"]);
+    // Read after it: the change is in it.
+    assert_eq!(
+        chat.page_answer(&request, page(11, older, "")),
+        PageOutcome::Merged(1)
+    );
+}
+
+// The pane, in the app's window.
+
+#[derive(Default)]
+struct HostState {
+    sinks: Vec<Arc<dyn EventSink>>,
+    chats: Vec<ChatRequest>,
+    mode_initializations: Vec<ChatRequest>,
+    /// Answers for the chat requests to come, in order; then plain success.
+    chat_answers: VecDeque<Result<ChatResponse, String>>,
+    /// The next chat request is answered only once it is released.
+    hold: bool,
+    held: Option<futures::channel::oneshot::Sender<()>>,
+    /// The paths asked about, and whether each is there.
+    files: Vec<String>,
+    existing: Vec<String>,
+    /// Git's answer to a summary, by `summary_base`; one not given is never
+    /// answered.
+    summaries: std::collections::HashMap<String, Value>,
+    /// What an upload does once started; preflights always pass.
+    upload_outcome: UploadOutcome,
+    /// Every upload and preflight started, in order.
+    uploads: Vec<Uploaded>,
+    cancelled_uploads: Vec<String>,
+    /// Every tmux action asked for, in order.
+    actions: Vec<Value>,
+}
+
+/// What the fake host does with an upload.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum UploadOutcome {
+    #[default]
+    Complete,
+    Fail,
+    /// Runs until the test finishes it.
+    Hold,
+}
+
+struct Uploaded {
+    id: String,
+    preflight: bool,
+    image_png: bool,
+    collision: crate::terminal::integration::transfers::UploadCollisionPolicy,
+    source: String,
+    name: String,
+    epoch: String,
+    sink: Arc<dyn EventSink>,
+}
+
+/// Where the fake host stages an upload.
+const STAGED: &str = "/home/u/.cache/muxflow/uploads";
+
+fn transfer(uploaded: &Uploaded, state: &str, extra: Value) -> EventBody {
+    let mut value = json!({
+        "transferId": uploaded.id, "sourcePath": uploaded.source, "name": uploaded.name,
+        "state": state, "serverIdentity": "tmux", "connectionEpoch": uploaded.epoch,
+    });
+    value
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    EventBody::Json(value.to_string())
+}
+
+fn completed(uploaded: &Uploaded) -> EventBody {
+    transfer(
+        uploaded,
+        "completed",
+        json!({
+            "destination": format!("{STAGED}/{}", uploaded.name), "blake3": "af1349b9",
+            "outcome": "published", "cleanupError": "",
+            "transferredBytes": "12", "totalBytes": "12",
+        }),
+    )
+}
+
+#[derive(Clone, Default)]
+struct FakeHost(Arc<Mutex<HostState>>);
+
+impl FakeHost {
+    fn state(&self) -> std::sync::MutexGuard<'_, HostState> {
+        self.0.lock().unwrap()
+    }
+
+    fn actions(&self) -> Vec<ChatAction> {
+        self.state()
+            .chats
+            .iter()
+            .map(|request| ChatAction::try_from(request.action).unwrap())
+            .collect()
+    }
+
+    fn last(&self, action: ChatAction) -> ChatRequest {
+        let found = self
+            .state()
+            .chats
+            .iter()
+            .rev()
+            .find(|request| request.action == i32::from(action))
+            .cloned();
+        found.unwrap_or_else(|| panic!("no {action:?} in {:?}", self.actions()))
+    }
+
+    fn count(&self, action: ChatAction) -> usize {
+        self.actions()
+            .iter()
+            .filter(|sent| **sent == action)
+            .count()
+    }
+
+    fn refuse_next(&self, error: &str) {
+        self.state().chat_answers.push_back(Err(error.to_owned()));
+    }
+
+    /// The next chat request waits for [`Self::release`] before it is answered.
+    fn hold_next(&self) {
+        self.state().hold = true;
+    }
+
+    fn release(&self) {
+        let held = self.state().held.take().expect("a held request");
+        let _ = held.send(());
+    }
+}
+
+impl TerminalBackend for FakeHost {
+    fn spawn_engine(
+        &self,
+        outputs: std::sync::mpsc::Sender<terminal_engine::EngineOutput>,
+    ) -> Box<dyn EngineChannel> {
+        Box::new(InlineEngine::new(outputs))
+    }
+
+    fn request_seed(&self, _: String, _: String) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn request_history(
+        &self,
+        _: String,
+        _: String,
+        _: u32,
+        _: u32,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn set_pane_visibility(
+        &self,
+        _: String,
+        _: String,
+        _: bool,
+        _: bool,
+        _: u64,
+        _: u64,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn resize_client(
+        &self,
+        _: String,
+        _: u16,
+        _: u16,
+        _: String,
+        _: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn send_input(&self, _: String, _: String, _: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn send_paste(&self, _: String, _: String, _: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn record_incident(&self, _: &str, _: Value) {}
+
+    fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn tmux_action(&self, _: String, action: Value) -> BoxFuture<'static, Result<Value, String>> {
+        self.state().actions.push(action);
+        async { Ok(json!({ "topologyGeneration": 1 })) }.boxed()
+    }
+
+    /// Answers on the caller's thread: a preflight completes at once, and an
+    /// upload runs, then ends as the test asked.
+    fn start_upload(
+        &self,
+        request: crate::terminal::integration::transfers::UploadRequest,
+        events: Arc<dyn EventSink>,
+    ) -> Result<String, String> {
+        let mut state = self.state();
+        let uploaded = Uploaded {
+            id: format!("t{}", state.uploads.len()),
+            preflight: request.preflight,
+            image_png: request.image_png,
+            collision: request.collision,
+            source: request.source_path.clone(),
+            name: request.destination_name.clone(),
+            epoch: request.scope.terminal_epoch.to_string(),
+            sink: events,
+        };
+        if request.preflight {
+            let size = json!({"sizeBytes": "12", "sourceKind": "regularFile", "readable": true});
+            uploaded.sink.send(transfer(&uploaded, "completed", size))?;
+        } else {
+            let moving = json!({"transferredBytes": "3", "totalBytes": "12"});
+            uploaded.sink.send(transfer(&uploaded, "running", moving))?;
+            match state.upload_outcome {
+                UploadOutcome::Complete => uploaded.sink.send(completed(&uploaded))?,
+                UploadOutcome::Fail => uploaded.sink.send(transfer(
+                    &uploaded,
+                    "failed",
+                    json!({"error": "disk full"}),
+                ))?,
+                UploadOutcome::Hold => {}
+            }
+        }
+        let id = uploaded.id.clone();
+        state.uploads.push(uploaded);
+        Ok(id)
+    }
+
+    fn cancel_upload(&self, transfer_id: String) -> Result<Value, String> {
+        let mut state = self.state();
+        state.cancelled_uploads.push(transfer_id.clone());
+        if let Some(uploaded) = state.uploads.iter().find(|upload| upload.id == transfer_id) {
+            uploaded
+                .sink
+                .send(transfer(uploaded, "cancelled", json!({})))?;
+        }
+        Ok(json!({"disposition": "cancelled"}))
+    }
+
+    fn chat_request(
+        &self,
+        _: String,
+        request: ChatRequest,
+    ) -> BoxFuture<'static, Result<ChatResponse, String>> {
+        if request.initialize_if_unset {
+            self.state().mode_initializations.push(request.clone());
+            return async move {
+                Ok(ChatResponse {
+                    mode: request.mode,
+                    ..Default::default()
+                })
+            }
+            .boxed();
+        }
+        let mut state = self.state();
+        state.chats.push(request);
+        let answer = state
+            .chat_answers
+            .pop_front()
+            .unwrap_or_else(|| Ok(ChatResponse::default()));
+        if !std::mem::take(&mut state.hold) {
+            return async move { answer }.boxed();
+        }
+        let (release, released) = futures::channel::oneshot::channel();
+        state.held = Some(release);
+        async move {
+            let _ = released.await;
+            answer
+        }
+        .boxed()
+    }
+
+    /// The repository at `/work/repo`, clean, and the summaries asked for.
+    fn git_request(
+        &self,
+        _: String,
+        command: desktop_core::connection::git::GitCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let status = json!({ "status": {
+            "repository": { "repositoryId": "repo", "worktreeRoot": "/work/repo",
+                            "headName": "gpui/chat" },
+            "generation": "1", "sourceGeneration": "source-1", "entries": [],
+            "authoritative": true,
+        }});
+        match command.operation.as_str() {
+            "watch" | "status" => async move { Ok(status) }.boxed(),
+            "branchSummary" => match self.state().summaries.get(&command.summary_base) {
+                Some(summary) => {
+                    let answer = json!({ "branchSummary": summary });
+                    async move { Ok(answer) }.boxed()
+                }
+                None => futures::future::pending().boxed(),
+            },
+            _ => async { Err("not asked here".to_owned()) }.boxed(),
+        }
+    }
+
+    fn file_request(&self, _: String, command: Value) -> BoxFuture<'static, Result<Value, String>> {
+        let mut state = self.state();
+        let path = command["path"].as_str().unwrap_or_default().to_owned();
+        let exists = state.existing.contains(&path);
+        state.files.push(path);
+        async move {
+            if exists {
+                Ok(json!({}))
+            } else {
+                Err("file_not_found: No such file.".to_owned())
+            }
+        }
+        .boxed()
+    }
+}
+
+impl ConnectionBackend for FakeHost {
+    fn start_terminal(
+        &self,
+        _: String,
+        _: ConnectionSpec,
+        _: bool,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<String, String> {
+        let mut state = self.state();
+        state.sinks.push(sink);
+        Ok(format!("client-{}", state.sinks.len()))
+    }
+
+    fn stop_terminal(&self, _: String) {}
+
+    fn acknowledge_delivery(
+        &self,
+        _: String,
+        _: u64,
+        _: u64,
+        _: u64,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn probe_link(&self, _: String) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn discard_ssh_masters(&self) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn probe_helper(
+        &self,
+        _: ConnectionSpec,
+    ) -> BoxFuture<'static, Result<RemoteHelperProbe, String>> {
+        async { Err("not probed here".to_owned()) }.boxed()
+    }
+
+    fn install_helper(
+        &self,
+        _: ConnectionSpec,
+        _: bool,
+    ) -> BoxFuture<'static, Result<HelperInstallReport, String>> {
+        async { Err("not installed here".to_owned()) }.boxed()
+    }
+
+    fn save_app_state(&self, _: PersistedAppState) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn late_requests(&self, _: &str) -> Option<u32> {
+        None
+    }
+
+    fn now_ms(&self) -> u64 {
+        1_000
+    }
+
+    fn network_online(&self) -> bool {
+        true
+    }
+}
+
+fn frame(kind: u8, label: &str, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![kind];
+    bytes.extend_from_slice(&(label.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(label.as_bytes());
+    bytes.extend_from_slice(&0u64.to_be_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn topology(generation: u64, panes: Vec<Pane>) -> Vec<u8> {
+    topology_of(
+        generation,
+        vec![window("@1", "$1", 0, "agent", true)],
+        panes,
+    )
+}
+
+fn topology_of(generation: u64, windows: Vec<tmux_control::Window>, panes: Vec<Pane>) -> Vec<u8> {
+    let snapshot = TmuxSnapshot {
+        sessions: vec![session("$1", "main", 0)],
+        windows,
+        panes,
+    };
+    let body = json!({
+        "sequence": 0, "generation": generation, "serverIdentity": "tmux",
+        "authoritative": true, "snapshot": snapshot,
+    });
+    frame(7, "snapshot", body.to_string().as_bytes())
+}
+
+/// The agent's pane, a chat, beside a shell.
+fn panes() -> Vec<Pane> {
+    vec![
+        Pane {
+            active: true,
+            current_path: "/work/repo".into(),
+            chat_adapter_id: "claude".into(),
+            ..pane(PANE, "@1", "$1", (0, 0, 60, 24))
+        },
+        pane("%2", "@1", "$1", (61, 0, 39, 24)),
+    ]
+}
+
+struct Shell {
+    host: FakeHost,
+    controller: Entity<ConnectionController>,
+    visual: VisualTestContext,
+    /// Every chat pane made, oldest first.
+    panes: std::rc::Rc<std::cell::RefCell<Vec<gpui_kit::WeakEntity<super::ChatPane>>>>,
+    _dir: tempfile::TempDir,
+}
+
+impl Shell {
+    /// The chat pane of [`PANE`], the first made.
+    fn pane(&self) -> Entity<super::ChatPane> {
+        self.panes.borrow()[0]
+            .upgrade()
+            .expect("the chat pane is there")
+    }
+
+    /// The working line's seconds.
+    fn seconds(&mut self) -> String {
+        self.label("chat-working-time")
+    }
+
+    /// Moves the clock on, as time passing does.
+    fn wait(&mut self, time: std::time::Duration) {
+        self.visual.executor().advance_clock(time);
+        self.settle();
+    }
+
+    fn publish(&mut self, frames: Vec<Vec<u8>>) {
+        let sink = self.host.state().sinks[0].clone();
+        for frame in frames {
+            sink.send(EventBody::Raw(frame)).unwrap();
+        }
+        self.settle();
+    }
+
+    fn settle(&mut self) {
+        self.visual.run_until_parked();
+        // What the engine produced waits for the link's next drain.
+        self.visual.executor().advance_clock(POLL_IDLE);
+        self.visual.run_until_parked();
+        self.visual.update(|window, cx| window.render_frame(cx));
+        self.visual.run_until_parked();
+    }
+
+    /// A chat event, as the bridge hands the controller one.
+    fn chat(&mut self, event: ChatEvent) {
+        let controller = self.controller.clone();
+        self.visual.update(|_, cx| {
+            controller.update(cx, |_, cx| {
+                cx.emit(ConnectionEvent::Chat {
+                    profile_id: "local".into(),
+                    event: Box::new(event),
+                });
+            });
+        });
+        self.settle();
+    }
+
+    fn shows(&mut self, id: &str) -> bool {
+        let id = id.to_owned();
+        self.visual
+            .update(|window, _| window.try_find(id).is_some())
+    }
+
+    fn label(&mut self, id: &str) -> String {
+        let id = id.to_owned();
+        self.visual
+            .update(|window, _| window.find(id).label().unwrap_or_default().to_owned())
+    }
+
+    fn named(&mut self, label: &str) -> bool {
+        self.visual
+            .update(|window, _| window.try_find_by_label(label).is_some())
+    }
+
+    fn click(&mut self, id: &str) {
+        let id = id.to_owned();
+        self.visual.update(|window, cx| window.click(id, cx));
+        self.settle();
+    }
+
+    fn hover(&mut self, id: &str) {
+        let id = id.to_owned();
+        self.visual.update(|window, cx| window.hover(id, cx));
+        self.settle();
+    }
+
+    fn input(&mut self, text: &str) {
+        self.visual.update(|window, cx| window.input(text, cx));
+        self.settle();
+    }
+
+    fn press(&mut self, key: &str) {
+        self.visual.update(|window, cx| window.press(key, cx));
+        self.settle();
+    }
+
+    /// Puts tmux window `id` on screen, as the tab strip does.
+    fn show_window(&mut self, id: &str) {
+        let controller = self.controller.clone();
+        let id = id.to_owned();
+        self.visual.update(|_, cx| {
+            controller.update(cx, |controller, cx| {
+                controller.set_active_window("local", Some(id), cx);
+            });
+        });
+        self.settle();
+    }
+
+    /// Chooses an entry of the menu on show.
+    fn choose(&mut self, label: &str) {
+        let at = self
+            .visual
+            .update(|window, _| window.find_by_label(label).bounds().center());
+        self.visual
+            .simulate_click(at, gpui_kit::Modifiers::default());
+        self.settle();
+    }
+}
+
+/// The app's window on a connected local host whose one window holds a chat
+/// pane and a shell, the chat not yet answered.
+fn shell(cx: &mut TestAppContext) -> Shell {
+    shell_with(cx, false)
+}
+
+/// [`shell`], with Source Control running: the chat's folder is the
+/// repository at `/work/repo`.
+fn shell_in_repository(cx: &mut TestAppContext) -> Shell {
+    shell_with(cx, true)
+}
+
+fn shell_with(cx: &mut TestAppContext, git: bool) -> Shell {
+    let dir = tempfile::tempdir().unwrap();
+    let profiles = dir.path().join("profiles.json");
+    let saved = json!({
+        "schemaVersion": 1, "lastProfileId": "local",
+        "profiles": [
+            { "id": "local", "label": "Local", "connection": { "mode": "local" }, "shown": true },
+        ],
+    });
+    std::fs::write(&profiles, saved.to_string()).unwrap();
+    let state_path = dir.path().join("app-state.json");
+    let state = json!({
+        "schemaVersion": 1, "appTabs": [], "shell": {},
+        "workspaceUi": [{
+            "hostProfileId": "local", "serverIdentity": "tmux",
+            "sessionId": "$1", "sessionName": "main",
+        }],
+    });
+    std::fs::write(&state_path, state.to_string()).unwrap();
+    let host = FakeHost::default();
+    let backend: Arc<dyn ConnectionBackend> = Arc::new(host.clone());
+    let store = Arc::new(ProfileStore::load(profiles).unwrap());
+    let app_state = Arc::new(AppStateStore::load(state_path.clone()));
+    let controller = cx.new(|cx| ConnectionController::new(backend, store, app_state, cx));
+    cx.run_until_parked();
+    let chat_panes: std::rc::Rc<std::cell::RefCell<Vec<gpui_kit::WeakEntity<super::ChatPane>>>> =
+        std::rc::Rc::default();
+    cx.update(|cx| {
+        let made = std::rc::Rc::clone(&chat_panes);
+        cx.observe_new(move |_: &mut super::ChatPane, _, cx| {
+            made.borrow_mut().push(cx.weak_entity());
+        })
+        .detach();
+    });
+    let window = cx.update(|cx| {
+        gpui_kit::init(cx);
+        app::init(Core::at(Path::new(&state_path)), cx);
+        cx.set_global(ConnectionUi(controller.clone()));
+        super::start(controller.clone(), Arc::new(host.clone()), cx);
+        if git {
+            crate::git::start(controller.clone(), Arc::new(host.clone()), cx);
+        }
+        app::open_main_window(cx).unwrap()
+    });
+    let visual = VisualTestContext::from_window(window, cx);
+    visual.simulate_resize(size(px(1280.), px(800.)));
+    let mut shell = Shell {
+        host,
+        controller,
+        visual,
+        panes: chat_panes,
+        _dir: dir,
+    };
+    shell.publish(vec![
+        frame(10, "terminal", &1u64.to_be_bytes()),
+        frame(6, "connected", &[]),
+        topology(1, panes()),
+    ]);
+    shell
+}
+
+/// [`shell`], with the chat opened on a short conversation.
+fn open(cx: &mut TestAppContext) -> Shell {
+    let mut shell = shell(cx);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item(
+                "u1",
+                ChatItemKind::User,
+                "Find out why wrapped paths are missed.",
+            ),
+            item("a1", ChatItemKind::Assistant, "The detector joins rows."),
+            tool("t1", ChatToolKind::Command, "run", "cargo test links"),
+        ],
+        "",
+    ));
+    shell
+}
+
+#[gpui_kit::test]
+fn a_chat_pane_opens_its_chat_and_shows_what_the_host_holds(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    // Only the pane with a chat adapter, and for the server it is on.
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+    let opened = shell.host.last(ChatAction::Open);
+    assert_eq!(opened.pane_id, PANE);
+    assert_eq!(opened.expected_server_identity, "tmux");
+    assert!(shell.named("Chat"));
+    assert!(!shell.shows("chat-item-u1"), "nothing before the snapshot");
+
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Find out why."),
+            item("a1", ChatItemKind::Assistant, "The detector joins rows."),
+            tool("t1", ChatToolKind::Command, "run", "cargo test links"),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-item-u1"), "Find out why.");
+    assert!(shell.shows("chat-item-a1"));
+    assert!(shell.shows("chat-tool-t1"));
+    assert!(shell.named("Context used: 209k / 1M"));
+    assert!(shell.named("Model: Opus 5.5"));
+    assert!(shell.named("Effort: High"));
+    assert!(shell.named("Permissions: Auto"));
+    assert!(shell.named("Send"));
+
+    // An item that arrives, and text that streams into it.
+    let mut reply = item("a2", ChatItemKind::Assistant, "It ");
+    reply.streaming = true;
+    shell.chat(event(11, ChatChange::Item(reply)));
+    shell.chat(delta(12, "a2", "works."));
+    assert!(shell.shows("chat-item-a2"));
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+}
+
+#[gpui_kit::test]
+fn a_lost_change_a_full_queue_and_a_restored_link_open_the_chat_again(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    // A gap in the revisions.
+    shell.chat(delta(14, "a1", "lost"));
+    assert_eq!(shell.host.count(ChatAction::Open), 2);
+    // What still arrives before the snapshot is behind it too: one `OPEN`.
+    shell.chat(delta(15, "a1", "lost"));
+    assert_eq!(shell.host.count(ChatAction::Open), 2);
+    shell.chat(snapshot(
+        20,
+        vec![item(
+            "a1",
+            ChatItemKind::Assistant,
+            "The detector joins rows.",
+        )],
+        "",
+    ));
+    // The host could not queue the snapshot: asked again after a moment.
+    shell.host.refuse_next("chat_queue_full: The chat is busy.");
+    shell.chat(delta(30, "a1", "lost"));
+    assert_eq!(shell.host.count(ChatAction::Open), 3);
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    shell.settle();
+    assert_eq!(shell.host.count(ChatAction::Open), 4);
+    assert!(!shell.shows("chat-open-error"));
+    // The connection resynced: events may have been dropped with nothing
+    // later to show it.
+    shell.publish(vec![frame(6, "resyncing", &[]), frame(6, "connected", &[])]);
+    assert_eq!(shell.host.count(ChatAction::Open), 5);
+}
+
+#[gpui_kit::test]
+fn a_conversation_the_host_will_not_send_again_says_it_may_be_behind(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell
+        .host
+        .refuse_next("chat_unavailable: This pane has no chat to open.");
+    shell.chat(delta(14, "a1", "lost"));
+    assert_eq!(
+        shell.label("chat-open-error"),
+        "This conversation may be out of date. This pane has no chat to open."
+    );
+    assert!(shell.shows("chat-item-u1"), "what is held stays readable");
+    shell.click("chat-open-retry");
+    assert_eq!(shell.host.count(ChatAction::Open), 3);
+    assert!(!shell.shows("chat-open-error"));
+}
+
+#[gpui_kit::test]
+fn a_message_shows_at_once_and_is_sent_under_its_own_id(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("Only look at boxed output.");
+    shell.press("enter");
+    let sent = shell.host.last(ChatAction::Send);
+    assert_eq!(sent.text, "Only look at boxed output.");
+    assert!(!sent.client_message_id.is_empty());
+    let pending = format!("chat-sending-{}", sent.client_message_id);
+    assert_eq!(shell.label(&pending), "Only look at boxed output.");
+
+    // The host's item takes the pending bubble's place.
+    let arrived = item(
+        &sent.client_message_id,
+        ChatItemKind::User,
+        "Only look at boxed output.",
+    );
+    shell.chat(event(11, ChatChange::Item(arrived)));
+    assert!(!shell.shows(&pending));
+    assert!(shell.shows(&format!("chat-item-{}", sent.client_message_id)));
+
+    // A refused message comes back to the composer, with the reason.
+    shell
+        .host
+        .refuse_next("chat_agent_gone: The agent has exited.");
+    shell.input("Still there?");
+    shell.press("enter");
+    assert_eq!(shell.label("chat-notice"), "The agent has exited.");
+    assert_eq!(shell.host.count(ChatAction::Send), 2);
+    shell.press("enter");
+    let again = shell.host.last(ChatAction::Send);
+    assert_eq!(again.text, "Still there?");
+    assert_eq!(shell.host.count(ChatAction::Send), 3);
+}
+
+#[gpui_kit::test]
+fn editing_an_earlier_message_rewinds_to_it_before_sending(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    // The button shows while the pointer is on the message.
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    assert!(shell.named("Editing an earlier message"));
+    shell.input(" Only boxed output.");
+    shell.press("enter");
+    let rewind = shell.host.last(ChatAction::Rewind);
+    assert_eq!(rewind.item_id, "u1");
+    let sent = shell.host.last(ChatAction::Send);
+    assert_eq!(
+        sent.text,
+        "Find out why wrapped paths are missed. Only boxed output."
+    );
+    let actions = shell.host.actions();
+    assert_eq!(
+        actions[actions.len() - 2..],
+        [ChatAction::Rewind, ChatAction::Send]
+    );
+    assert!(!shell.named("Editing an earlier message"));
+
+    // Cancel leaves the conversation alone.
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    shell.click("chat-edit-cancel");
+    assert!(!shell.named("Editing an earlier message"));
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::Rewind), 1);
+}
+
+#[gpui_kit::test]
+fn stop_takes_sends_place_while_the_agent_works(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(shell.named("Stop"));
+    assert!(!shell.named("Send"));
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    // Enter still sends while it works.
+    shell.input("Also the fixture.");
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "Also the fixture.");
+}
+
+#[gpui_kit::test]
+fn escape_stops_the_agent_while_it_works(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    // Once while it stops.
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    shell.chat(event(13, ChatChange::State(state(ChatTurnState::Working))));
+    // From a control elsewhere in the chat too: the earlier message's Edit.
+    shell.press("shift-tab");
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+    assert!(!shell.named("Editing an earlier message"));
+
+    // A menu open in the chat has Escape to itself.
+    shell.click("chat-model");
+    assert!(shell.named("Fable 5.2"));
+    shell.press("escape");
+    assert!(!shell.named("Fable 5.2"));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_command_list_before_it_stops_anything(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell.input("/c");
+    assert!(shell.named("Commands"));
+    shell.press("escape");
+    assert!(!shell.named("Commands"));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 0);
+    // The next one is the agent's.
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+}
+
+#[gpui_kit::test]
+fn escape_cancels_an_edit_before_it_stops_anything(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    assert!(shell.named("Editing an earlier message"));
+    shell.press("escape");
+    assert!(!shell.named("Editing an earlier message"));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 0);
+    assert_eq!(shell.host.count(ChatAction::Rewind), 0);
+}
+
+#[gpui_kit::test]
+fn escape_stops_nothing_while_the_agent_is_idle_or_waits_for_an_answer(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.press("escape");
+    shell.chat(event(11, ChatChange::State(permission("r1"))));
+    assert!(shell.shows("chat-request"));
+    shell.press("escape");
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+}
+
+#[gpui_kit::test]
+fn typing_or_pressing_in_a_chat_says_its_agent_has_been_seen(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::terminal::integration::agents::PaneActivity;
+
+    let mut shell = open(cx);
+    shell.visual.update(|window, _| window.activate_window());
+    shell.settle();
+    let noted = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+    shell.visual.update(|_, cx| {
+        let noted = noted.clone();
+        cx.set_global(PaneActivity(Rc::new(move |host, pane, _| {
+            noted.borrow_mut().push((host.to_owned(), pane.to_owned()))
+        })));
+    });
+    let this_pane = ("local".to_owned(), PANE.to_owned());
+    let seen = |noted: &Rc<RefCell<Vec<(String, String)>>>| {
+        let mut noted = noted.borrow_mut();
+        let all = noted.iter().all(|note| *note == this_pane);
+        let any = !noted.is_empty();
+        noted.clear();
+        any && all
+    };
+
+    shell.input("Still");
+    assert!(seen(&noted), "typing in the composer");
+    // A key that types nothing, on a control that is not the composer.
+    shell.press("shift-tab");
+    assert!(seen(&noted), "a key elsewhere in the chat");
+    shell.click("chat-item-a1");
+    assert!(seen(&noted), "a press on the conversation");
+    shell
+        .visual
+        .update(|window, cx| window.right_click("chat-tool-t1", cx));
+    shell.settle();
+    assert!(seen(&noted), "any button");
+}
+
+#[gpui_kit::test]
+fn a_permission_request_is_answered_from_its_card(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let mut waiting = state(ChatTurnState::Waiting);
+    waiting.pending = Some(ChatPendingRequest {
+        request_id: "r1".into(),
+        kind: ChatRequestKind::Permission.into(),
+        title: "Auto mode is asking: run this command?".into(),
+        detail: "git push --force origin gpui/chat".into(),
+        questions: Vec::new(),
+    });
+    shell.chat(event(11, ChatChange::State(waiting)));
+    assert!(shell.named("Auto mode is asking: run this command?"));
+    shell.click("chat-deny");
+    let answer = shell.host.last(ChatAction::Answer);
+    assert_eq!(answer.request_id, "r1");
+    assert!(!answer.answer.unwrap().allow);
+
+    // The card goes when the host says the turn moved on.
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(!shell.shows("chat-request"));
+}
+
+#[gpui_kit::test]
+fn questions_are_answered_one_at_a_time(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let option = |id: &str, label: &str| ChatOption {
+        id: id.into(),
+        label: label.into(),
+        description: "What it means.".into(),
+    };
+    let mut waiting = state(ChatTurnState::Waiting);
+    waiting.pending = Some(ChatPendingRequest {
+        request_id: "r2".into(),
+        kind: ChatRequestKind::Question.into(),
+        questions: vec![
+            ChatQuestion {
+                id: "scope".into(),
+                header: "Scope".into(),
+                prompt: "How should the fix be scoped?".into(),
+                options: vec![
+                    option("boxed", "Boxed output only"),
+                    option("any", "Any path"),
+                ],
+                multi_select: false,
+                allow_other: true,
+            },
+            ChatQuestion {
+                id: "checks".into(),
+                header: "Checks".into(),
+                prompt: "Which checks should run?".into(),
+                options: vec![option("unit", "Unit tests"), option("lint", "Clippy")],
+                multi_select: true,
+                allow_other: false,
+            },
+        ],
+        ..Default::default()
+    });
+    shell.chat(event(11, ChatChange::State(waiting)));
+    assert!(shell.named("How should the fix be scoped?"));
+    // Nothing picked: nothing to submit.
+    shell.click("chat-submit");
+    assert_eq!(shell.host.count(ChatAction::Answer), 0);
+    shell.click("chat-option-0");
+    shell.click("chat-option-1");
+    shell.click("chat-submit");
+    assert!(shell.named("Which checks should run?"));
+    assert_eq!(shell.host.count(ChatAction::Answer), 0);
+    shell.click("chat-option-0");
+    shell.click("chat-option-1");
+    shell.click("chat-submit");
+    let answer = shell.host.last(ChatAction::Answer);
+    assert_eq!(answer.request_id, "r2");
+    let answers = answer.answer.unwrap().answers;
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].question_id, "scope");
+    // One choice: the second pick replaced the first.
+    assert_eq!(answers[0].option_ids, ["any"]);
+    assert_eq!(answers[1].question_id, "checks");
+    assert_eq!(answers[1].option_ids, ["unit", "lint"]);
+}
+
+#[gpui_kit::test]
+fn a_question_can_be_skipped_or_answered_in_other_words(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let mut waiting = state(ChatTurnState::Waiting);
+    waiting.pending = Some(ChatPendingRequest {
+        request_id: "r3".into(),
+        kind: ChatRequestKind::Question.into(),
+        questions: vec![ChatQuestion {
+            id: "scope".into(),
+            prompt: "How should the fix be scoped?".into(),
+            options: vec![ChatOption {
+                id: "boxed".into(),
+                label: "Boxed output only".into(),
+                description: String::new(),
+            }],
+            allow_other: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    shell.chat(event(11, ChatChange::State(waiting.clone())));
+    shell.click("chat-option-other");
+    shell.input("Only the tests");
+    shell.click("chat-submit");
+    let answer = shell.host.last(ChatAction::Answer).answer.unwrap();
+    assert!(answer.answers[0].option_ids.is_empty());
+    assert_eq!(answer.answers[0].other_text, "Only the tests");
+    assert!(!answer.skipped);
+
+    // The card goes and its field with it: the keyboard is the composer's.
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    shell.input("Thanks.");
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "Thanks.");
+
+    // Asked again, and skipped this time.
+    waiting.pending.as_mut().unwrap().request_id = "r4".into();
+    shell.chat(event(13, ChatChange::State(waiting)));
+    shell.click("chat-skip");
+    let skipped = shell.host.last(ChatAction::Answer);
+    assert_eq!(skipped.request_id, "r4");
+    assert!(skipped.answer.unwrap().skipped);
+}
+
+#[gpui_kit::test]
+fn a_slash_lists_the_providers_commands_and_enter_takes_one(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("/c");
+    assert!(shell.named("Commands"));
+    assert!(shell.named("/compact"));
+    assert!(shell.named("/clear"));
+    assert!(shell.named("/code-review"));
+    assert!(!shell.named("/btw"), "nothing in it matches");
+    shell.press("down");
+    shell.press("enter");
+    // Taken into the composer, not sent.
+    assert_eq!(shell.host.count(ChatAction::Send), 0);
+    assert!(!shell.named("Commands"));
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "/clear");
+
+    // Escape closes the list and leaves the text.
+    shell.input("/co");
+    assert!(shell.named("Commands"));
+    shell.press("escape");
+    assert!(!shell.named("Commands"));
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "/co");
+}
+
+#[gpui_kit::test]
+fn a_dollar_lists_the_skills_in_the_middle_of_a_message(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("look at this with $co");
+    assert!(shell.named("$code-review"));
+    assert!(!shell.named("$compact"), "a command is not a skill");
+    shell.press("enter");
+    // Taken into the message, not sent.
+    assert_eq!(shell.host.count(ChatAction::Send), 0);
+    assert!(!shell.named("$code-review"));
+    shell.press("enter");
+    assert_eq!(
+        shell.host.last(ChatAction::Send).text,
+        "look at this with $code-review"
+    );
+}
+
+#[gpui_kit::test]
+fn a_side_question_forks_instead_of_sending(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("/btw which file holds the join?");
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::Send), 0);
+    let fork = shell.host.last(ChatAction::SideFork);
+    assert_eq!(fork.text, "which file holds the join?");
+
+    // Refused: the question is back in the composer, with the reason.
+    shell
+        .host
+        .refuse_next("chat_side_fork_unavailable: A fork cannot be made yet.");
+    shell.input("/btw and the tests?");
+    shell.press("enter");
+    assert_eq!(shell.label("chat-notice"), "A fork cannot be made yet.");
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::SideFork), 3);
+    assert_eq!(shell.host.last(ChatAction::SideFork).text, "and the tests?");
+}
+
+#[gpui_kit::test]
+fn earlier_messages_load_when_the_top_shows(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(page(
+        10,
+        vec![item("u0", ChatItemKind::User, "Before that.")],
+        "",
+    )));
+    // A short conversation: its top is on screen at once.
+    shell.chat(snapshot(
+        10,
+        vec![item("u1", ChatItemKind::User, "Find out why.")],
+        "older-1",
+    ));
+    let asked = shell.host.last(ChatAction::LoadOlder);
+    assert_eq!(asked.older_cursor, "older-1");
+    assert_eq!(shell.label("chat-item-u0"), "Before that.");
+    assert_eq!(shell.host.count(ChatAction::LoadOlder), 1, "nothing older");
+
+    // A page that fails is offered again, not asked for in a loop.
+    shell.host.refuse_next("chat_history_unavailable: Not now.");
+    shell.chat(snapshot(
+        20,
+        vec![item("u1", ChatItemKind::User, "Find out why.")],
+        "older-9",
+    ));
+    assert_eq!(shell.host.count(ChatAction::LoadOlder), 2);
+    assert!(shell.named("Load earlier messages"));
+    shell.click("chat-load-older");
+    assert_eq!(shell.host.count(ChatAction::LoadOlder), 3);
+}
+
+#[gpui_kit::test]
+fn a_tool_row_opens_to_show_its_output(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let mut run = tool("t1", ChatToolKind::Command, "run", "cargo test links");
+    run.tool.as_mut().unwrap().output_preview = "test result: ok. 14 passed".into();
+    let read = tool("t2", ChatToolKind::Read, "read", "src/links.rs");
+    shell.chat(snapshot(10, vec![run, read], ""));
+    assert!(!shell.shows("chat-tool-output-t1"));
+    shell.click("chat-tool-open-t1");
+    assert!(shell.shows("chat-tool-output-t1"));
+    shell.click("chat-tool-open-t1");
+    assert!(!shell.shows("chat-tool-output-t1"));
+    // Nothing to show: not a control.
+    assert!(!shell.shows("chat-tool-open-t2"));
+}
+
+#[gpui_kit::test]
+fn inline_code_is_asked_about_once_the_text_is_whole(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().existing.push("src/links.rs".into());
+    let mut reply = item(
+        "a1",
+        ChatItemKind::Assistant,
+        "It is in `src/links.rs`, not `src/gone.rs`. Run `cargo test`.",
+    );
+    reply.streaming = true;
+    shell.chat(snapshot(10, vec![reply.clone()], ""));
+    assert!(shell.host.state().files.is_empty(), "still being written");
+    reply.streaming = false;
+    shell.chat(event(11, ChatChange::Updated(reply)));
+    // Each path once, one at a time; a command is not a path.
+    assert_eq!(shell.host.state().files, ["src/links.rs", "src/gone.rs"]);
+    shell.settle();
+    assert_eq!(shell.host.state().files.len(), 2);
+}
+
+#[gpui_kit::test]
+fn a_chat_is_closed_when_its_pane_goes(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    assert_eq!(shell.host.count(ChatAction::Close), 0);
+    shell.publish(vec![topology(
+        2,
+        vec![Pane {
+            active: true,
+            ..pane("%2", "@1", "$1", (0, 0, 100, 24))
+        }],
+    )]);
+    let closed = shell.host.last(ChatAction::Close);
+    assert_eq!(closed.pane_id, PANE);
+    assert!(!shell.named("Chat"));
+}
+
+#[gpui_kit::test]
+fn the_hosts_agent_mode_follows_its_snapshot_and_is_changed_by_request(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let mode = |shell: &mut Shell| shell.visual.update(|_, cx| settings::agent_mode(cx));
+    assert_eq!(
+        mode(&mut shell).chat,
+        Some(false),
+        "the handshake supplied the host mode"
+    );
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        controller.update(cx, |_, cx| {
+            cx.emit(ConnectionEvent::AgentService(AgentServiceFrame {
+                profile_id: "local".into(),
+                server_identity: "tmux".into(),
+                terminal_epoch: 1,
+                scope: "snapshot".into(),
+                payload: json!({ "agentMode": "terminal" }).to_string(),
+            }));
+        });
+    });
+    shell.settle();
+    assert_eq!(mode(&mut shell).chat, Some(false));
+
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.settle();
+    let request = shell.host.last(ChatAction::SetMode);
+    assert_eq!(request.mode, i32::from(ChatAgentMode::Chat));
+    assert_eq!(
+        mode(&mut shell),
+        settings::AgentMode {
+            chat: Some(true),
+            changing: false
+        }
+    );
+
+    // A refusal leaves what the host last said.
+    shell.host.refuse_next("chat_invalid: Not now.");
+    shell
+        .visual
+        .update(|_, cx| super::set_agent_mode(false, cx));
+    shell.settle();
+    assert_eq!(mode(&mut shell).chat, Some(true));
+}
+
+fn permission(request_id: &str) -> ChatState {
+    let mut waiting = state(ChatTurnState::Waiting);
+    waiting.pending = Some(ChatPendingRequest {
+        request_id: request_id.into(),
+        kind: ChatRequestKind::Permission.into(),
+        title: "Run this command?".into(),
+        detail: "cargo test".into(),
+        questions: Vec::new(),
+    });
+    waiting
+}
+
+#[gpui_kit::test]
+fn an_answer_goes_once_and_to_the_request_its_card_showed(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(permission("r1"))));
+    shell.host.hold_next();
+    shell.click("chat-allow");
+    assert_eq!(shell.host.last(ChatAction::Answer).request_id, "r1");
+    // Still on its way: what else the chat does meanwhile sends no second one.
+    shell.chat(delta(12, "a1", " More."));
+    shell.click("chat-allow");
+    shell.click("chat-deny");
+    assert_eq!(shell.host.count(ChatAction::Answer), 1);
+
+    // Another request takes the card's place before the answer is back.
+    shell.chat(event(13, ChatChange::State(permission("r2"))));
+    shell.host.release();
+    shell.settle();
+    shell.click("chat-deny");
+    let second = shell.host.last(ChatAction::Answer);
+    assert_eq!(second.request_id, "r2");
+    assert!(!second.answer.unwrap().allow);
+    assert_eq!(shell.host.count(ChatAction::Answer), 2);
+}
+
+#[gpui_kit::test]
+fn a_side_question_forks_while_a_provider_that_takes_no_message_works(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let mut opened = snapshot_in(10, state(ChatTurnState::Working), Vec::new(), "");
+    if let Some(ChatChange::Snapshot(snapshot)) = &mut opened.change {
+        let catalog = snapshot.catalog.as_mut().unwrap();
+        catalog.capabilities.as_mut().unwrap().send_mid_turn = false;
+    }
+    shell.chat(opened);
+    shell.input("Also the fixture.");
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::Send), 0);
+    assert_eq!(
+        shell.label("chat-notice"),
+        "The agent is working. Stop it, or wait for it to finish."
+    );
+    for _ in 0.."Also the fixture.".len() {
+        shell.press("backspace");
+    }
+    shell.input("/btw which file holds the join?");
+    shell.press("enter");
+    assert_eq!(
+        shell.host.last(ChatAction::SideFork).text,
+        "which file holds the join?"
+    );
+}
+
+#[gpui_kit::test]
+fn a_snapshot_that_beats_its_answer_leaves_the_next_lost_change_asked_about(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = open(cx);
+    shell.host.hold_next();
+    shell.chat(delta(14, "a1", "lost"));
+    assert_eq!(shell.host.count(ChatAction::Open), 2);
+    // The snapshot is an event: here before the answer to the `OPEN`.
+    shell.chat(snapshot(
+        20,
+        vec![item(
+            "a1",
+            ChatItemKind::Assistant,
+            "The detector joins rows.",
+        )],
+        "",
+    ));
+    // A change lost from here on is asked about, answer or no answer.
+    shell.chat(delta(30, "a1", "lost"));
+    assert_eq!(shell.host.count(ChatAction::Open), 3);
+    shell.host.release();
+    shell.settle();
+    assert_eq!(shell.host.count(ChatAction::Open), 3);
+}
+
+#[gpui_kit::test]
+fn an_edit_is_sent_even_if_its_pane_leaves_while_the_host_rewinds(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    shell.input(" Only boxed output.");
+    shell.host.hold_next();
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::Send), 0, "the rewind first");
+    shell.publish(vec![topology(
+        2,
+        vec![Pane {
+            active: true,
+            ..pane("%2", "@1", "$1", (0, 0, 100, 24))
+        }],
+    )]);
+    assert!(!shell.named("Chat"));
+    shell.host.release();
+    shell.settle();
+    assert_eq!(
+        shell.host.last(ChatAction::Send).text,
+        "Find out why wrapped paths are missed. Only boxed output."
+    );
+}
+
+#[gpui_kit::test]
+fn shift_enter_makes_a_line_and_enter_sends_them_all(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("First line");
+    shell.press("shift-enter");
+    assert_eq!(shell.host.count(ChatAction::Send), 0);
+    shell.input("second line");
+    shell.press("enter");
+    assert_eq!(
+        shell.host.last(ChatAction::Send).text,
+        "First line\nsecond line"
+    );
+}
+
+#[gpui_kit::test]
+fn a_notice_goes_with_the_text_it_was_about(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.host.refuse_next("The connection was lost.");
+    shell.input("No");
+    shell.press("enter");
+    assert!(shell.shows("chat-notice"));
+    shell.press("backspace");
+    assert!(shell.shows("chat-notice"));
+    shell.press("backspace");
+    assert!(!shell.shows("chat-notice"));
+}
+
+#[gpui_kit::test]
+fn the_wheel_over_long_output_moves_the_output_and_not_the_conversation(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let mut items: Vec<ChatItem> = (0..40)
+        .map(|number| {
+            item(
+                &format!("a{number}"),
+                ChatItemKind::Assistant,
+                &format!("Earlier answer {number}."),
+            )
+        })
+        .collect();
+    let mut run = tool("t1", ChatToolKind::Command, "run", "cargo clippy");
+    run.tool.as_mut().unwrap().output_preview = "warning: unused variable\n".repeat(80);
+    items.push(run);
+    shell.chat(snapshot(10, items, ""));
+    shell.click("chat-tool-open-t1");
+    let top = |shell: &mut Shell| {
+        shell
+            .visual
+            .update(|window, _| window.find("chat-tool-open-t1").bounds().top())
+    };
+    let wheel = |shell: &mut Shell, lines: f32| {
+        shell.visual.update(|window, cx| {
+            let delta = ScrollDelta::Lines(point(0., lines));
+            window.scroll("chat-tool-output-t1", delta, cx);
+        });
+        shell.settle();
+    };
+    wheel(&mut shell, -6.);
+    let before = top(&mut shell);
+    // The wheel over the output is the output's, at its start too.
+    wheel(&mut shell, 2.);
+    wheel(&mut shell, 8.);
+    assert_eq!(top(&mut shell), before);
+    // Over the row's head it is the conversation's.
+    shell.visual.update(|window, cx| {
+        let delta = ScrollDelta::Lines(point(0., 4.));
+        window.scroll("chat-tool-open-t1", delta, cx);
+    });
+    shell.settle();
+    assert!(top(&mut shell) > before);
+}
+
+#[gpui_kit::test]
+fn a_refused_message_comes_back_above_what_was_typed_since(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell
+        .host
+        .refuse_next("chat_agent_gone: The agent has exited.");
+    shell.host.hold_next();
+    shell.input("First.");
+    shell.press("enter");
+    shell.input("Second.");
+    shell.host.release();
+    shell.settle();
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "First.\nSecond.");
+}
+
+#[gpui_kit::test]
+fn the_same_text_sent_again_keeps_its_id_and_a_duplicate_means_it_arrived(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.host.refuse_next("The connection was lost.");
+    shell.input("Only look at boxed output.");
+    shell.press("enter");
+    let first = shell.host.last(ChatAction::Send);
+    assert_eq!(shell.label("chat-notice"), "The connection was lost.");
+
+    // Sent again before anything else is known: the host had taken it.
+    shell
+        .host
+        .refuse_next("chat_message_duplicate: That message was already sent.");
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::Send), 2);
+    let again = shell.host.last(ChatAction::Send);
+    assert_eq!(again.client_message_id, first.client_message_id);
+    assert!(!shell.shows("chat-notice"));
+    let arrived = |id: &str, text: &str| ChatChange::Item(item(id, ChatItemKind::User, text));
+    shell.chat(event(
+        11,
+        arrived(&first.client_message_id, "Only look at boxed output."),
+    ));
+    assert!(!shell.shows(&format!("chat-sending-{}", first.client_message_id)));
+    assert!(shell.shows(&format!("chat-item-{}", first.client_message_id)));
+
+    // A message that shows up while its text waits to be sent again takes
+    // the text with it, and the same words later are a new message.
+    shell.host.refuse_next("The connection was lost.");
+    shell.input("Yes.");
+    shell.press("enter");
+    let lost = shell.host.last(ChatAction::Send);
+    shell.chat(event(12, arrived(&lost.client_message_id, "Yes.")));
+    assert!(!shell.shows("chat-notice"));
+    shell.press("enter");
+    assert_eq!(
+        shell.host.count(ChatAction::Send),
+        3,
+        "nothing left to send"
+    );
+    shell.input("Yes.");
+    shell.press("enter");
+    assert_eq!(shell.host.count(ChatAction::Send), 4);
+    assert_ne!(
+        shell.host.last(ChatAction::Send).client_message_id,
+        lost.client_message_id
+    );
+}
+
+#[gpui_kit::test]
+fn another_panes_or_hosts_chat_changes_nothing_here(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let mut elsewhere = snapshot(
+        40,
+        vec![item("x1", ChatItemKind::User, "Not for this pane.")],
+        "",
+    );
+    elsewhere.pane_id = "%9".into();
+    shell.chat(elsewhere);
+    let controller = shell.controller.clone();
+    let other_host = snapshot(
+        41,
+        vec![item("x2", ChatItemKind::User, "Not for this host.")],
+        "",
+    );
+    shell.visual.update(|_, cx| {
+        controller.update(cx, |_, cx| {
+            cx.emit(ConnectionEvent::Chat {
+                profile_id: "other".into(),
+                event: Box::new(other_host),
+            });
+        });
+    });
+    shell.settle();
+    assert!(shell.shows("chat-item-u1"));
+    assert!(!shell.shows("chat-item-x1"));
+    assert!(!shell.shows("chat-item-x2"));
+    assert_eq!(shell.host.count(ChatAction::Open), 1);
+}
+
+#[gpui_kit::test]
+fn a_press_on_the_conversation_leaves_the_keyboard_with_the_composer(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    // Focus is only followed in the window that has the keyboard.
+    shell.visual.update(|window, _| window.activate_window());
+    shell.settle();
+    shell.click("chat-item-u1");
+    shell.settle();
+    shell.input("Still");
+    shell.click("chat-tool-t1");
+    shell.settle();
+    shell.input(" typing.");
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "Still typing.");
+}
+
+#[gpui_kit::test]
+fn the_keyboard_leaves_the_composer_for_the_controls_and_presses_them(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    // Back from the composer: the reply's Fork and Copy, then the earlier
+    // message's Edit.
+    for _ in 0..3 {
+        shell.press("shift-tab");
+    }
+    shell.press("enter");
+    assert!(shell.named("Editing an earlier message"));
+    shell.click("chat-edit-cancel");
+
+    // A question's options take Space once the keyboard is on them.
+    let mut waiting = state(ChatTurnState::Waiting);
+    waiting.pending = Some(ChatPendingRequest {
+        request_id: "r5".into(),
+        kind: ChatRequestKind::Question.into(),
+        questions: vec![ChatQuestion {
+            id: "checks".into(),
+            prompt: "Which checks should run?".into(),
+            options: vec![ChatOption {
+                id: "unit".into(),
+                label: "Unit tests".into(),
+                description: String::new(),
+            }],
+            multi_select: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    shell.chat(event(11, ChatChange::State(waiting)));
+    shell.click("chat-option-0");
+    shell.press("space");
+    shell.click("chat-submit");
+    assert_eq!(shell.host.count(ChatAction::Answer), 0, "picked, then not");
+    shell.click("chat-option-0");
+    shell.press("space");
+    shell.press("space");
+    shell.click("chat-submit");
+    let answer = shell.host.last(ChatAction::Answer).answer.unwrap();
+    assert_eq!(answer.answers[0].option_ids, ["unit"]);
+}
+
+#[gpui_kit::test]
+fn a_card_of_several_questions_goes_back_to_change_an_answer(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let question = |id: &str, prompt: &str, options: [&str; 2]| ChatQuestion {
+        id: id.into(),
+        prompt: prompt.into(),
+        options: options
+            .iter()
+            .map(|option| ChatOption {
+                id: (*option).into(),
+                label: (*option).into(),
+                description: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut waiting = state(ChatTurnState::Waiting);
+    waiting.pending = Some(ChatPendingRequest {
+        request_id: "r6".into(),
+        kind: ChatRequestKind::Question.into(),
+        questions: vec![
+            question("scope", "Which scope?", ["boxed", "any"]),
+            question("checks", "Which checks?", ["unit", "lint"]),
+        ],
+        ..Default::default()
+    });
+    shell.chat(event(11, ChatChange::State(waiting)));
+    assert!(!shell.shows("chat-back"), "nothing before the first");
+    shell.click("chat-option-0");
+    shell.click("chat-submit");
+    shell.click("chat-back");
+    assert!(shell.named("Which scope?"));
+    shell.click("chat-option-1");
+    shell.click("chat-submit");
+    shell.click("chat-option-0");
+    shell.click("chat-submit");
+    let answer = shell.host.last(ChatAction::Answer).answer.unwrap();
+    assert_eq!(answer.answers[0].option_ids, ["any"]);
+    assert_eq!(answer.answers[1].option_ids, ["unit"]);
+}
+
+#[gpui_kit::test]
+fn a_right_click_copies_what_cannot_be_selected(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let copy = |shell: &mut Shell, id: &'static str, entry: &'static str| {
+        shell.visual.update(|window, cx| window.right_click(id, cx));
+        shell.settle();
+        shell.visual.update(|window, cx| {
+            // The menu's entry, not a message's button of the same name.
+            let found = window
+                .find_all_by_role(gpui_kit::Role::MenuItem)
+                .into_iter()
+                .find(|item| item.label() == Some(entry))
+                .expect("a menu item");
+            let item = found.path().last().cloned().expect("a menu item");
+            window.click(item, cx);
+        });
+        shell.settle();
+        shell
+            .visual
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+    };
+    assert_eq!(
+        copy(&mut shell, "chat-item-u1", "Copy message").as_deref(),
+        Some("Find out why wrapped paths are missed.")
+    );
+    assert_eq!(
+        copy(&mut shell, "chat-tool-t1", "Copy").as_deref(),
+        Some("cargo test links")
+    );
+}
+
+#[gpui_kit::test]
+fn a_narrow_chat_shows_its_details_only_from_the_details_button(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    assert!(shell.shows("chat-details-toggle"));
+    assert!(!shell.shows("chat-details-card"));
+    // The conversation starts under the button, so it hides no first row.
+    let (toggle, first) = shell.visual.update(|window, _| {
+        (
+            window.find("chat-details-toggle").bounds(),
+            window.find("chat-item-u1").bounds(),
+        )
+    });
+    assert!(first.top() >= toggle.bottom(), "{first:?} under {toggle:?}");
+    shell.click("chat-details-toggle");
+    assert!(shell.named("Session details"));
+    assert_eq!(shell.label("chat-details-folder"), "Folder: /work/repo");
+    assert_eq!(
+        shell.label("chat-details-context"),
+        "Context used: 209k / 1M"
+    );
+    // No repository is observed here, so no Git row is offered.
+    assert!(!shell.shows("chat-details-branch"));
+    shell.click("chat-details-toggle");
+    assert!(!shell.shows("chat-details-card"));
+}
+
+/// The window wide enough for the card to sit beside the chat, the chat open
+/// in the repository at `/work/repo`, whose host answers `summaries`, by
+/// `summary_base`, once the status has rested.
+fn wide_in_repository(cx: &mut TestAppContext, summaries: &[(&str, Value)]) -> Shell {
+    let mut shell = shell_in_repository(cx);
+    shell.host.state().summaries = summaries
+        .iter()
+        .map(|(base, summary)| ((*base).to_owned(), summary.clone()))
+        .collect();
+    shell.visual.update(|_, cx| {
+        cx.set_global(crate::agents::view::ActiveRoot {
+            path: "/work/repo".into(),
+            token: "t".into(),
+            git_worktree: true,
+        })
+    });
+    shell.chat(snapshot(
+        10,
+        vec![item("u1", ChatItemKind::User, "Hi.")],
+        "",
+    ));
+    shell.visual.simulate_resize(size(px(3000.), px(800.)));
+    shell.settle();
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(1100));
+    shell.settle();
+    shell
+}
+
+fn source_control_scope(shell: &mut Shell) -> crate::git::panel::Scope {
+    shell
+        .visual
+        .update(|_, cx| crate::git::panel(cx).unwrap().read(cx).scope())
+}
+
+#[gpui_kit::test]
+fn the_card_counts_uncommitted_work_beside_the_branch_s_and_opens_each(cx: &mut TestAppContext) {
+    use crate::git::panel::Scope;
+
+    let mut shell = wide_in_repository(
+        cx,
+        &[
+            (
+                "head",
+                json!({ "baseRef": "HEAD", "totalFileCount": "2", "added": "12",
+                        "removed": "3" }),
+            ),
+            (
+                "",
+                json!({ "baseRef": "origin/main", "totalFileCount": "9", "added": "182",
+                        "removed": "41" }),
+            ),
+        ],
+    );
+    // The absolute path stays for the tooltip and the label.
+    assert_eq!(shell.label("chat-details-folder"), "Folder: /work/repo");
+    assert!(shell.shows("chat-details-branch"));
+    assert_eq!(
+        shell.label("chat-details-uncommitted"),
+        "Uncommitted +12 \u{2212}3"
+    );
+    assert_eq!(
+        shell.label("chat-details-branch-changes"),
+        "Branch vs main +182 \u{2212}41"
+    );
+
+    assert_eq!(source_control_scope(&mut shell), Scope::Uncommitted);
+    shell.click("chat-details-branch-changes");
+    assert_eq!(source_control_scope(&mut shell), Scope::Branch);
+    shell.click("chat-details-uncommitted");
+    assert_eq!(source_control_scope(&mut shell), Scope::Uncommitted);
+}
+
+#[gpui_kit::test]
+fn both_changes_rows_show_while_the_host_counts(cx: &mut TestAppContext) {
+    let mut shell = wide_in_repository(cx, &[]);
+    assert_eq!(
+        shell.label("chat-details-uncommitted"),
+        "Uncommitted \u{2026}"
+    );
+    assert_eq!(
+        shell.label("chat-details-branch-changes"),
+        "Branch \u{2026}"
+    );
+    // They already open the Git panel.
+    shell.click("chat-details-branch-changes");
+    assert_eq!(
+        source_control_scope(&mut shell),
+        crate::git::panel::Scope::Branch
+    );
+}
+
+#[gpui_kit::test]
+fn a_clean_tree_reads_none_and_no_default_branch_drops_the_branch_row(cx: &mut TestAppContext) {
+    let mut shell = wide_in_repository(
+        cx,
+        &[
+            (
+                "head",
+                json!({ "baseRef": "HEAD", "totalFileCount": "0", "added": "0",
+                        "removed": "0" }),
+            ),
+            // No default branch: nothing else is set.
+            ("", json!({})),
+        ],
+    );
+    assert_eq!(shell.label("chat-details-uncommitted"), "Uncommitted none");
+    assert!(!shell.shows("chat-details-branch-changes"));
+}
+
+#[gpui_kit::test]
+fn a_wide_chat_shows_its_details_beside_the_conversation(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.visual.simulate_resize(size(px(3000.), px(800.)));
+    shell.settle();
+    assert!(shell.shows("chat-details-card"));
+    assert!(!shell.shows("chat-details-toggle"));
+}
+
+#[gpui_kit::test]
+fn only_a_successful_explicit_choice_becomes_the_default_for_new_hosts(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell
+        .visual
+        .update(|_, cx| assert!(!settings::get(cx).new_host_chat));
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+    shell.host.refuse_next("could not save host settings");
+    shell
+        .visual
+        .update(|_, cx| super::set_agent_mode(false, cx));
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+}
+
+#[gpui_kit::test]
+fn a_stale_explicit_mode_reply_cannot_change_the_remembered_preference(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.publish(vec![frame(6, "disconnected", &[])]);
+    shell.host.release();
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert!(!settings::get(cx).new_host_chat));
+    shell.publish(vec![frame(6, "connected", &[])]);
+    shell
+        .visual
+        .update(|_, cx| assert_eq!(settings::agent_mode(cx).chat, Some(false)));
+}
+
+#[gpui_kit::test]
+fn applying_to_all_hosts_reports_offline_hosts_without_queuing_changes(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let writer = messages.clone();
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        cx.subscribe(&controller, move |_, event, _| {
+            if let ConnectionEvent::Status(message) = event {
+                writer.lock().unwrap().push(message.clone());
+            }
+        })
+        .detach();
+    });
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| {
+        super::apply_to_hosts(
+            true,
+            vec![
+                ("local".into(), "Local".into()),
+                ("offline".into(), "Offline host".into()),
+            ],
+            controller,
+            cx,
+        )
+    });
+    shell.settle();
+    assert_eq!(shell.host.count(ChatAction::SetMode), 1);
+    assert!(
+        messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.contains("Applied Chat to 1 hosts")
+                && message.contains("Offline host: not connected"))
+    );
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+}
+
+#[gpui_kit::test]
+fn applying_to_all_hosts_keeps_success_in_settings(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let writer = messages.clone();
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        cx.subscribe(&controller, move |_, event, _| {
+            if let ConnectionEvent::Status(message) = event {
+                writer.lock().unwrap().push(message.clone());
+            }
+        })
+        .detach();
+    });
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| {
+        super::apply_to_hosts(true, vec![("local".into(), "Local".into())], controller, cx)
+    });
+    shell.settle();
+    shell
+        .visual
+        .update(|_, cx| assert_eq!(super::apply_result(cx), Some("Applied Chat to 1 hosts.")));
+    assert!(
+        !messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.starts_with("Applied "))
+    );
+}
+
+#[gpui_kit::test]
+fn choosing_chat_on_local_initializes_the_next_new_remote_as_chat(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    shell.settle();
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        controller.update(cx, |controller, cx| {
+            controller.add_host(cx);
+            controller.set_ssh_target("new-qa-host".into(), cx);
+            controller.connect(cx);
+        })
+    });
+    shell.settle();
+    let sink = shell.host.state().sinks.last().unwrap().clone();
+    sink.send(EventBody::Raw(frame(6, "connected", &[])))
+        .unwrap();
+    shell.settle();
+    let state = shell.host.state();
+    assert!(state.mode_initializations.len() >= 2);
+    assert_eq!(
+        state.mode_initializations.last().unwrap().mode,
+        i32::from(ChatAgentMode::Chat)
+    );
+}
+
+#[gpui_kit::test]
+fn agent_radios_remember_selected_keyboard_activation_without_duplicating_changes(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let controller = shell.controller.clone();
+    shell.visual.update(|window, cx| {
+        settings::dialog::open_with(settings::dialog::Tab::Agents, Some(controller), window, cx)
+    });
+    shell.settle();
+    fn focus_radio(shell: &mut Shell, index: usize) {
+        for _ in 0..30 {
+            if shell.visual.update(|window, _| {
+                window.within("settings-agent-mode").find(index).focused() == Some(true)
+            }) {
+                return;
+            }
+            shell.visual.update(|window, cx| window.focus_next(cx));
+            shell.settle();
+        }
+        panic!("radio did not receive focus");
+    }
+    focus_radio(&mut shell, 0);
+    for key in ["space", "enter"] {
+        shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+            mode: ChatAgentMode::Terminal.into(),
+            ..Default::default()
+        }));
+        let before = shell.host.count(ChatAction::SetMode);
+        shell.press(key);
+        assert_eq!(shell.host.count(ChatAction::SetMode), before + 1);
+        assert_eq!(
+            shell.host.last(ChatAction::SetMode).mode,
+            i32::from(ChatAgentMode::Terminal)
+        );
+    }
+    focus_radio(&mut shell, 1);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    let before = shell.host.count(ChatAction::SetMode);
+    shell.press("space");
+    assert_eq!(shell.host.count(ChatAction::SetMode), before + 1);
+    assert_eq!(
+        shell.host.last(ChatAction::SetMode).mode,
+        i32::from(ChatAgentMode::Chat)
+    );
+    shell
+        .visual
+        .update(|_, cx| assert!(settings::get(cx).new_host_chat));
+    // Focus leaves the radio group. Activating Apply only opens its confirmation.
+    shell.visual.update(|window, cx| window.focus_next(cx));
+    shell.settle();
+    shell.press("space");
+    assert_eq!(shell.host.count(ChatAction::SetMode), before + 1);
+}
+
+#[gpui_kit::test]
+fn replies_from_different_hosts_do_not_reverse_the_latest_explicit_preference(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Chat.into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.visual.update(|_, cx| super::set_agent_mode(true, cx));
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        controller.update(cx, |controller, cx| {
+            controller.add_host(cx);
+            controller.set_ssh_target("another-qa-host".into(), cx);
+            controller.connect(cx);
+        })
+    });
+    shell.settle();
+    let sink = shell.host.state().sinks.last().unwrap().clone();
+    sink.send(EventBody::Raw(frame(6, "connected", &[])))
+        .unwrap();
+    shell.settle();
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        mode: ChatAgentMode::Terminal.into(),
+        ..Default::default()
+    }));
+    shell
+        .visual
+        .update(|_, cx| super::set_agent_mode(false, cx));
+    shell.settle();
+    shell.host.release();
+    shell.settle();
+    shell.visual.update(|_, cx| {
+        assert_eq!(super::agent_mode("local", cx), Some(true));
+        assert!(
+            !settings::get(cx).new_host_chat,
+            "the newer Terminal choice wins over the older delayed Chat reply"
+        );
+    });
+}
+
+// Kept chats: a chat that leaves the screen stays open, and comes back as it
+// was left.
+
+/// [`panes`], and a second window holding a shell; `@1` the active one.
+fn two_windows(generation: u64) -> Vec<u8> {
+    two_windows_on(generation, "@1")
+}
+
+/// [`two_windows`], with `active` the window tmux says is active.
+fn two_windows_on(generation: u64, active: &str) -> Vec<u8> {
+    let mut panes = panes();
+    panes.push(Pane {
+        active: true,
+        ..pane("%3", "@2", "$1", (0, 0, 100, 24))
+    });
+    let windows = vec![
+        window("@1", "$1", 0, "agent", active == "@1"),
+        window("@2", "$1", 1, "shell", active == "@2"),
+    ];
+    topology_of(generation, windows, panes)
+}
+
+#[test]
+fn the_kept_set_lets_the_least_recently_shown_go_and_never_one_on_screen() {
+    let key = |pane: u32| ("local".to_owned(), "tmux".to_owned(), format!("%{pane}"));
+    let mut kept = super::KeptChats::<u32>::default();
+    for pane in 1..=9 {
+        kept.insert(key(pane), pane);
+    }
+    assert_eq!(kept.show(&key(1)), Some(1), "now the most recent");
+    kept.trim(|_| false);
+    assert_eq!(kept.show(&key(2)), None);
+    assert_eq!(kept.show(&key(1)), Some(1));
+    // More on screen than the cap: none of them goes.
+    for pane in 10..=12 {
+        kept.insert(key(pane), pane);
+    }
+    kept.trim(|_| true);
+    assert_eq!(kept.show(&key(3)), Some(3));
+    kept.trim(|key| key.2 != "%4");
+    assert_eq!(kept.show(&key(4)), None);
+    assert_eq!(kept.show(&key(3)), Some(3));
+}
+
+/// The window of [`two_windows`] with the chat on screen, the chat opened.
+fn kept(cx: &mut TestAppContext) -> Shell {
+    let mut shell = shell(cx);
+    shell.publish(vec![two_windows(2)]);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Find out why."),
+            item("a1", ChatItemKind::Assistant, "The detector joins rows."),
+        ],
+        "",
+    ));
+    shell
+}
+
+#[gpui_kit::test]
+fn a_chat_come_back_to_is_as_it_was_left_and_not_opened_again(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.input("Half a thought");
+    shell.show_window("@2");
+    assert!(!shell.named("Chat"));
+    // It is still open at the host, and what happens meanwhile applies.
+    shell.chat(event(
+        11,
+        ChatChange::Item(item("a2", ChatItemKind::Assistant, "Done while away.")),
+    ));
+    shell.show_window("@1");
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+    assert!(!shell.shows("chat-updating"), "nothing to wait for");
+    assert!(shell.shows("chat-item-u1"));
+    assert!(shell.shows("chat-item-a2"));
+    // The draft, with the keyboard back in it.
+    shell.input(", and more.");
+    shell.press("enter");
+    assert_eq!(
+        shell.host.last(ChatAction::Send).text,
+        "Half a thought, and more."
+    );
+}
+
+#[gpui_kit::test]
+fn a_chat_come_back_to_keeps_its_place(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.publish(vec![two_windows(2)]);
+    let items = (0..40)
+        .map(|number| {
+            item(
+                &format!("a{number}"),
+                ChatItemKind::Assistant,
+                &format!("Earlier answer {number}."),
+            )
+        })
+        .collect();
+    shell.chat(snapshot(10, items, ""));
+    shell.visual.update(|window, cx| {
+        let delta = ScrollDelta::Lines(point(0., 6.));
+        window.scroll("chat-item-a39", delta, cx);
+    });
+    shell.settle();
+    let top = |shell: &mut Shell| {
+        shell
+            .visual
+            .update(|window, _| window.find("chat-item-a30").bounds().top())
+    };
+    let before = top(&mut shell);
+    shell.show_window("@2");
+    shell.show_window("@1");
+    assert_eq!(top(&mut shell), before);
+    assert_eq!(shell.host.count(ChatAction::Open), 1);
+}
+
+#[gpui_kit::test]
+fn the_ninth_chat_lets_the_least_recently_shown_go(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    let chat = |number: u32| Pane {
+        active: true,
+        chat_adapter_id: "claude".into(),
+        ..pane(
+            &format!("%{number}"),
+            &format!("@{number}"),
+            "$1",
+            (0, 0, 100, 24),
+        )
+    };
+    let windows = (1..=9)
+        .map(|number| window(&format!("@{number}"), "$1", number, "agent", number == 1))
+        .collect();
+    shell.publish(vec![topology_of(2, windows, (1..=9).map(chat).collect())]);
+    for number in 2..=8 {
+        shell.show_window(&format!("@{number}"));
+    }
+    assert_eq!(shell.host.count(ChatAction::Open), 8);
+    assert_eq!(shell.host.count(ChatAction::Close), 0, "eight are kept");
+    shell.show_window("@9");
+    assert_eq!(shell.host.count(ChatAction::Close), 1);
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, "%1");
+    // Coming back to the second costs nothing; to the first, an `OPEN`.
+    shell.show_window("@2");
+    assert_eq!(shell.host.count(ChatAction::Open), 9);
+    shell.show_window("@1");
+    assert_eq!(shell.host.count(ChatAction::Open), 10);
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, "%3");
+}
+
+#[gpui_kit::test]
+fn a_kept_chat_whose_pane_went_is_let_go(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.show_window("@2");
+    // tmux still has it, in another window: kept.
+    shell.publish(vec![two_windows(3)]);
+    assert_eq!(shell.host.count(ChatAction::Close), 0);
+    shell.publish(vec![topology_of(
+        4,
+        vec![
+            window("@1", "$1", 0, "agent", false),
+            window("@2", "$1", 1, "shell", true),
+        ],
+        vec![
+            pane("%2", "@1", "$1", (0, 0, 100, 24)),
+            Pane {
+                active: true,
+                ..pane("%3", "@2", "$1", (0, 0, 100, 24))
+            },
+        ],
+    )]);
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, PANE);
+}
+
+#[gpui_kit::test]
+fn a_kept_chat_reports_no_activity_and_keeps_no_keyboard(cx: &mut TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::terminal::integration::agents::PaneActivity;
+
+    let mut shell = kept(cx);
+    shell.visual.update(|window, _| window.activate_window());
+    shell.settle();
+    let noted = Rc::new(RefCell::new(Vec::<String>::new()));
+    shell.visual.update(|_, cx| {
+        let noted = noted.clone();
+        cx.set_global(PaneActivity(Rc::new(move |_, pane, _| {
+            noted.borrow_mut().push(pane.to_owned())
+        })));
+    });
+    shell.input("Still");
+    assert!(noted.borrow().iter().any(|pane| pane == PANE));
+    shell.show_window("@2");
+    noted.borrow_mut().clear();
+    shell.input("ls");
+    shell.press("shift-tab");
+    shell.press("enter");
+    assert!(
+        !noted.borrow().iter().any(|pane| pane == PANE),
+        "{:?}",
+        noted.borrow()
+    );
+    // What was typed went to the shell, not into the kept chat's draft.
+    shell.show_window("@1");
+    shell.press("enter");
+    assert_eq!(shell.host.last(ChatAction::Send).text, "Still");
+}
+
+#[gpui_kit::test]
+fn a_kept_chat_is_opened_again_after_a_lost_link_once_shown(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.show_window("@2");
+    // tmux follows: a resync puts its active window on screen.
+    shell.publish(vec![two_windows_on(3, "@2")]);
+    shell.publish(vec![frame(6, "resyncing", &[]), frame(6, "connected", &[])]);
+    assert!(!shell.named("Chat"));
+    assert_eq!(
+        shell.host.count(ChatAction::Open),
+        1,
+        "nothing asked off screen"
+    );
+    shell.show_window("@1");
+    assert_eq!(shell.host.count(ChatAction::Open), 2);
+    // What was held shows at once, said to be on its way again.
+    assert!(shell.shows("chat-item-u1"));
+    assert_eq!(shell.label("chat-updating"), "Updating…");
+    shell.chat(snapshot(
+        20,
+        vec![item("u1", ChatItemKind::User, "Find out why.")],
+        "",
+    ));
+    assert!(!shell.shows("chat-updating"));
+    assert!(!shell.shows("chat-item-a1"));
+}
+
+#[gpui_kit::test]
+fn closing_the_window_closes_its_kept_chats(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    shell.show_window("@2");
+    assert_eq!(shell.host.count(ChatAction::Close), 0);
+    shell.visual.update(|window, _| window.remove_window());
+    shell.visual.run_until_parked();
+    assert_eq!(shell.host.last(ChatAction::Close).pane_id, PANE);
+}
+
+// The optimistic overlay: a choice and a Stop show at once.
+
+#[gpui_kit::test]
+fn a_pill_shows_a_choice_at_once_and_snaps_back_when_refused(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell
+        .host
+        .refuse_next("chat_agent_gone: The model was not changed: the agent is not running.");
+    shell.host.hold_next();
+    shell.click("chat-model");
+    shell.choose("Fable 5.2");
+    assert_eq!(
+        shell
+            .host
+            .last(ChatAction::SetOptions)
+            .options
+            .unwrap()
+            .model,
+        "fable"
+    );
+    assert!(shell.named("Model: Fable 5.2"), "before the host answers");
+    shell.host.release();
+    shell.settle();
+    assert!(shell.named("Model: Opus 5.5"));
+    assert_eq!(
+        shell.label("chat-notice"),
+        "The model was not changed: the agent is not running."
+    );
+
+    // Taken, and the state shows it.
+    shell.click("chat-model");
+    shell.choose("Fable 5.2");
+    let mut fable = state(ChatTurnState::Idle);
+    fable.options.as_mut().unwrap().model = "fable".into();
+    shell.chat(event(11, ChatChange::State(fable)));
+    assert!(shell.named("Model: Fable 5.2"));
+    // Taken, but the agent settled on something else: the host's word wins
+    // after a moment.
+    shell.click("chat-model");
+    shell.choose("Opus 5.5");
+    assert!(shell.named("Model: Opus 5.5"));
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(3));
+    shell.settle();
+    assert!(shell.named("Model: Fable 5.2"));
+}
+
+#[gpui_kit::test]
+fn stop_shows_at_once_until_the_turn_ends(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert!(shell.shows("chat-working-time"));
+    shell.host.hold_next();
+    shell.click("chat-send");
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+    // "Stopping…" alone, with no seconds after it (S7).
+    assert!(!shell.shows("chat-working-time"));
+    // Off while it stops: a second press sends nothing.
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    shell.host.release();
+    shell.settle();
+    assert_eq!(
+        shell.label("chat-working"),
+        "Stopping…",
+        "answered, still working"
+    );
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert!(shell.named("Send"));
+}
+
+#[gpui_kit::test]
+fn a_stopped_turn_with_a_message_behind_it_works_on_that_message(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(5));
+    shell.settle();
+    assert_eq!(shell.label("chat-working-time"), "5s");
+    shell.click("chat-send");
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+    // A change while the turn is still being stopped is not its end.
+    shell.chat(event(
+        12,
+        ChatChange::State(with_tasks(ChatTurnState::Working, vec![server()])),
+    ));
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+    // The stopped turn ends, and the message sent during it starts its own:
+    // the agent works, on a turn that has only just begun.
+    let next = ChatState {
+        turns_ended: 1,
+        ..state(ChatTurnState::Working)
+    };
+    shell.chat(event(13, ChatChange::State(next)));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.label("chat-working-time"), "0s");
+    assert!(shell.named("Stop"));
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+}
+
+#[gpui_kit::test]
+fn a_refused_or_unanswered_stop_is_stop_again(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    shell
+        .host
+        .refuse_next("chat_agent_gone: The agent has exited.");
+    shell.click("chat-send");
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.label("chat-notice"), "The agent has exited.");
+    assert!(shell.named("Stop"));
+
+    // An answer that never comes leaves it pending for ten seconds only.
+    shell.host.hold_next();
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 2);
+    assert_eq!(shell.label("chat-working"), "Stopping…");
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(10));
+    shell.settle();
+    assert_eq!(shell.label("chat-working"), "Working…");
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 3);
+}
+
+// The timeline: groups of steps, the working line, thinking, message buttons.
+
+fn with_status(mut item: ChatItem, status: ChatToolStatus) -> ChatItem {
+    item.tool.as_mut().unwrap().status = status.into();
+    item
+}
+
+fn edited(id: &str, path: &str, added: u32, removed: u32) -> ChatItem {
+    let mut item = tool(id, ChatToolKind::Edit, "edit", path);
+    let edit = item.tool.as_mut().unwrap();
+    edit.path = path.into();
+    edit.added = added;
+    edit.removed = removed;
+    item
+}
+
+fn clipboard(shell: &mut Shell) -> Option<String> {
+    shell
+        .visual
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+}
+
+fn ticking(shell: &mut Shell) -> bool {
+    let pane = shell.pane();
+    shell.visual.update(|_, cx| pane.read(cx).is_ticking())
+}
+
+#[gpui_kit::test]
+fn a_run_of_three_steps_folds_into_one_line_that_stays_open_as_it_grows(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Group the tool rows."),
+            item("a1", ChatItemKind::Assistant, "I'll start with the view."),
+            tool("r1", ChatToolKind::Read, "read", "src/chat/view.rs"),
+            tool("r2", ChatToolKind::Read, "read", "src/chat/pane.rs"),
+        ],
+        "",
+    ));
+    // Two steps stay rows.
+    assert!(shell.shows("chat-tool-r1"));
+    assert!(!shell.shows("chat-group-r1"));
+
+    // A third folds them into one closed line.
+    let check = tool("c1", ChatToolKind::Command, "run", "cargo check");
+    shell.chat(event(11, ChatChange::Item(check)));
+    assert!(!shell.shows("chat-tool-r1"));
+    assert_eq!(shell.label("chat-group-r1"), "3 steps, read 2 · ran 1");
+    shell.click("chat-group-r1");
+    assert!(shell.shows("chat-tool-r1") && shell.shows("chat-tool-c1"));
+
+    // It stays open as steps and the agent's text come after it.
+    let search = tool("s1", ChatToolKind::Search, "search", "fn render_row");
+    shell.chat(event(12, ChatChange::Item(search)));
+    shell.chat(event(
+        13,
+        ChatChange::Item(item("a2", ChatItemKind::Assistant, "Done.")),
+    ));
+    assert!(shell.shows("chat-tool-s1"));
+    assert_eq!(
+        shell.label("chat-group-r1"),
+        "4 steps, read 2 · ran 1 · searched 1"
+    );
+    shell.click("chat-group-r1");
+    assert!(!shell.shows("chat-tool-r1"));
+
+    // A rewind into it leaves two steps: rows again.
+    shell.chat(event(
+        14,
+        ChatChange::Truncate(ChatTruncate {
+            after_item_id: "r2".into(),
+        }),
+    ));
+    assert!(!shell.shows("chat-group-r1"));
+    assert!(shell.shows("chat-tool-r1") && shell.shows("chat-tool-r2"));
+}
+
+#[gpui_kit::test]
+fn a_page_that_continues_a_run_joins_its_group(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.host.state().chat_answers.push_back(Ok(page(
+        10,
+        vec![
+            item("u0", ChatItemKind::User, "Go."),
+            tool("r1", ChatToolKind::Read, "read", "a.rs"),
+        ],
+        "",
+    )));
+    shell.chat(snapshot(
+        10,
+        vec![
+            tool("r2", ChatToolKind::Read, "read", "b.rs"),
+            tool("r3", ChatToolKind::Read, "read", "c.rs"),
+            item("a1", ChatItemKind::Assistant, "Read them."),
+        ],
+        "older-1",
+    ));
+    assert!(shell.shows("chat-item-u0"), "the page arrived");
+    assert_eq!(shell.label("chat-group-r1"), "3 steps, read 3");
+    assert!(!shell.shows("chat-tool-r2"));
+}
+
+#[gpui_kit::test]
+fn the_run_a_turn_adds_to_is_one_closed_line_and_the_working_line_says_what_runs(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let test = with_status(
+        tool(
+            "c2",
+            ChatToolKind::Command,
+            "run",
+            "cargo test -p muxflow-gpui chat",
+        ),
+        ChatToolStatus::Running,
+    );
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![
+            item("u1", ChatItemKind::User, "Run the chat tests."),
+            item("a1", ChatItemKind::Assistant, "The view compiles."),
+            tool("r1", ChatToolKind::Read, "read", "src/chat/view.rs"),
+            edited("e1", "src/chat/view.rs", 84, 9),
+            tool("c1", ChatToolKind::Command, "run", "cargo check"),
+            test.clone(),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-group-r1"), "4 steps so far");
+    assert!(!shell.shows("chat-tool-c2"), "closed: no row under it");
+    // The edits stay in sight.
+    assert_eq!(shell.label("chat-group-file-r1-0"), "view.rs");
+    assert_eq!(
+        shell.label("chat-working"),
+        "Running cargo test -p muxflow-gpui chat…"
+    );
+    // Opened, every row is there and the chips are not needed.
+    shell.click("chat-group-r1");
+    assert!(shell.shows("chat-tool-c2"));
+    assert!(!shell.shows("chat-group-file-r1-0"));
+
+    // A failed step, and the turn's end: the line goes and nothing is left.
+    let failed = with_status(test, ChatToolStatus::Failed);
+    shell.chat(event(11, ChatChange::Updated(failed)));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    shell.chat(event(12, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert_eq!(
+        shell.label("chat-group-r1"),
+        "4 steps, 1 failed, read 1 · ran 2 · edited 1 file"
+    );
+    assert!(shell.shows("chat-tool-c2"), "still open");
+}
+
+#[gpui_kit::test]
+fn more_than_three_edited_files_are_two_chips_and_a_count_that_opens_the_group(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item("u1", ChatItemKind::User, "Fix them."),
+            edited("e1", "src/view.rs", 1, 0),
+            edited("e2", "src/pane.rs", 2, 1),
+            edited("e3", "src/model.rs", 3, 0),
+            edited("e4", "src/tests.rs", 4, 2),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-group-e1"), "4 steps, edited 4 files");
+    assert_eq!(shell.label("chat-group-file-e1-0"), "view.rs");
+    assert_eq!(shell.label("chat-group-file-e1-1"), "pane.rs");
+    assert!(!shell.shows("chat-group-file-e1-2"));
+    assert_eq!(shell.label("chat-group-more-e1"), "+2");
+    shell.click("chat-group-more-e1");
+    assert!(shell.shows("chat-tool-e4"), "the count opens the group");
+}
+
+#[gpui_kit::test]
+fn the_working_line_ticks_once_a_second_and_only_while_on_screen(cx: &mut TestAppContext) {
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    let mut shell = kept(cx);
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.seconds(), "0s");
+    assert!(ticking(&mut shell));
+    shell.wait(Duration::from_secs(2));
+    assert_eq!(shell.seconds(), "2s");
+
+    // Kept off screen: no timer, and the pane draws nothing.
+    shell.show_window("@2");
+    assert!(!ticking(&mut shell));
+    let pane = shell.pane();
+    let notified = Rc::new(Cell::new(0));
+    let counted = notified.clone();
+    let _counting = shell
+        .visual
+        .update(|_, cx| cx.observe(&pane, move |_, _| counted.set(counted.get() + 1)));
+    shell.wait(Duration::from_secs(5));
+    assert_eq!(notified.get(), 0);
+    shell.show_window("@1");
+    assert!(ticking(&mut shell));
+    assert_eq!(shell.seconds(), "7s");
+
+    // Waiting on the user: the card is the status, and there is no line.
+    shell.chat(event(12, ChatChange::State(permission("r1"))));
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+    // The same turn goes on.
+    shell.chat(event(13, ChatChange::State(state(ChatTurnState::Working))));
+    assert_eq!(shell.seconds(), "7s");
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+}
+
+#[gpui_kit::test]
+fn a_chat_under_an_app_tab_is_off_screen_until_the_tab_goes(cx: &mut TestAppContext) {
+    use crate::terminal::surface::TerminalSurface;
+
+    let surfaces: std::rc::Rc<std::cell::RefCell<Vec<gpui_kit::WeakEntity<TerminalSurface>>>> =
+        std::rc::Rc::default();
+    let made = surfaces.clone();
+    cx.update(|cx| {
+        cx.observe_new(move |_: &mut TerminalSurface, _, cx| {
+            made.borrow_mut().push(cx.weak_entity());
+        })
+        .detach();
+    });
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(ticking(&mut shell));
+    let surface = surfaces
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|surface| surface.upgrade())
+        .expect("the window's terminal surface");
+    let pane = shell.pane();
+    // As the chrome says when an app tab covers the terminal, and when it
+    // goes: the chat's timer follows.
+    let cover = |shell: &mut Shell, covered: bool| {
+        shell.visual.update(|_, cx| {
+            surface.update(cx, |surface, cx| surface.set_terminal_visible(!covered, cx));
+            pane.read(cx).is_ticking()
+        })
+    };
+    assert!(!cover(&mut shell, true), "nobody sees it under the tab");
+    assert!(cover(&mut shell, false), "on screen again");
+}
+
+#[gpui_kit::test]
+fn thinking_is_said_while_it_streams_and_is_a_thought_row_once_it_ends(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![item("u1", ChatItemKind::User, "Fold thinking in too.")],
+        "",
+    ));
+    // The agent says that it thinks, before any of it is text.
+    let mut thinking = item("t1", ChatItemKind::Reasoning, "");
+    thinking.streaming = true;
+    shell.chat(event(11, ChatChange::Item(thinking.clone())));
+    assert_eq!(shell.label("chat-working"), "Thinking…");
+    assert!(!shell.shows("chat-working-preview"));
+    assert!(!shell.shows("chat-thought-t1"));
+    shell.chat(delta(
+        12,
+        "t1",
+        "A group ends where text starts. So the row",
+    ));
+    assert_eq!(
+        shell.label("chat-working-preview"),
+        "A group ends where text starts."
+    );
+    assert!(
+        !shell.shows("chat-thought-t1"),
+        "said by the line, not a row"
+    );
+
+    shell.wait(std::time::Duration::from_secs(8));
+    thinking.text = "A group ends where text starts. So the row index is not enough.".into();
+    thinking.streaming = false;
+    shell.chat(event(13, ChatChange::Updated(thinking.clone())));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(shell.label("chat-thought-open-t1"), "Thought for 8s");
+    assert!(!shell.shows("chat-thought-text-t1"));
+    shell.click("chat-thought-open-t1");
+    assert!(shell.shows("chat-thought-text-t1"));
+
+    // One this pane did not watch says only that it thought.
+    shell.chat(snapshot(
+        20,
+        vec![item("u1", ChatItemKind::User, "Again."), thinking],
+        "",
+    ));
+    assert_eq!(shell.label("chat-thought-open-t1"), "Thought");
+}
+
+/// The conversation the message buttons are tried on: a reply that cannot
+/// be rewound to, and one of two texts with a step between them.
+fn replies(cx: &mut TestAppContext) -> Shell {
+    let mut shell = shell(cx);
+    let mut sealed = item("u0", ChatItemKind::User, "Hello.");
+    sealed.rewindable = false;
+    shell.chat(snapshot(
+        10,
+        vec![
+            sealed,
+            item("a0", ChatItemKind::Assistant, "Hi."),
+            item("u1", ChatItemKind::User, "Group the tool rows."),
+            item("a1", ChatItemKind::Assistant, "I'll start with the view."),
+            tool("r1", ChatToolKind::Read, "read", "src/view.rs"),
+            item("a2", ChatItemKind::Assistant, "Runs now fold."),
+        ],
+        "",
+    ));
+    shell
+}
+
+#[gpui_kit::test]
+fn a_message_has_its_buttons_and_a_reply_only_under_its_last_text(cx: &mut TestAppContext) {
+    let mut shell = replies(cx);
+    // The user's: Copy, and Edit where it can be rewound to.
+    assert_eq!(shell.label("chat-copy-u1"), "Copy");
+    assert_eq!(shell.label("chat-edit-u1"), "Edit and resend");
+    assert!(shell.shows("chat-copy-u0"));
+    assert!(!shell.shows("chat-edit-u0"));
+    // The agent's: Copy and Fork under the last text of each reply.
+    assert!(shell.shows("chat-copy-a0") && shell.shows("chat-fork-a0"));
+    assert!(!shell.shows("chat-copy-a1") && !shell.shows("chat-fork-a1"));
+    assert_eq!(shell.label("chat-copy-a2"), "Copy");
+    assert_eq!(shell.label("chat-fork-a2"), "Fork from here");
+    // The reply a turn is still writing has none yet.
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    assert!(!shell.shows("chat-copy-a2") && !shell.shows("chat-fork-a2"));
+    assert!(shell.shows("chat-copy-a0"));
+    // The pencil edits.
+    shell.hover("chat-item-u1");
+    shell.click("chat-edit-u1");
+    assert!(shell.named("Editing an earlier message"));
+}
+
+#[gpui_kit::test]
+fn copy_takes_the_message_or_its_whole_reply_and_shows_a_check_for_a_second(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = replies(cx);
+    shell.hover("chat-item-u1");
+    shell.click("chat-copy-u1");
+    assert_eq!(
+        clipboard(&mut shell).as_deref(),
+        Some("Group the tool rows.")
+    );
+    assert_eq!(shell.label("chat-copy-u1"), "Copied");
+    shell.wait(std::time::Duration::from_secs(1));
+    assert_eq!(shell.label("chat-copy-u1"), "Copy");
+    // A reply's: every text of it, as Markdown.
+    shell.hover("chat-item-a2");
+    shell.click("chat-copy-a2");
+    assert_eq!(
+        clipboard(&mut shell).as_deref(),
+        Some("I'll start with the view.\n\nRuns now fold.")
+    );
+    assert_eq!(shell.label("chat-copy-a2"), "Copied");
+}
+
+/// The agents' runtime, which shows a pane the host opened once the
+/// topology has it, as the app runs it.
+fn follow_panes(shell: &mut Shell) {
+    struct NoAgents;
+    impl crate::agents::runtime::AgentTransport for NoAgents {
+        fn agent_request(
+            &self,
+            _: String,
+            _: desktop_core::connection::agent::AgentCommand,
+        ) -> BoxFuture<'static, Result<Value, String>> {
+            async { Err("not asked here".to_owned()) }.boxed()
+        }
+    }
+    let controller = shell.controller.clone();
+    shell.visual.update(|_, cx| {
+        let effects = crate::agents::tests::Recorded(std::rc::Rc::default());
+        let runtime = cx.new(|_| {
+            crate::agents::runtime::AgentRuntime::new(
+                std::rc::Rc::new(NoAgents),
+                std::rc::Rc::new(effects),
+            )
+        });
+        cx.set_global(crate::agents::Agents {
+            runtime,
+            controller,
+        });
+    });
+}
+
+fn forking(shell: &mut Shell, id: &str) -> bool {
+    let pane = shell.pane();
+    shell.visual.update(|_, cx| pane.read(cx).forking(id))
+}
+
+#[gpui_kit::test]
+fn fork_from_here_sends_the_reply_waits_for_the_host_and_shows_the_fork(cx: &mut TestAppContext) {
+    let mut shell = replies(cx);
+    follow_panes(&mut shell);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        forked_pane_id: "%3".into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.hover("chat-item-a2");
+    shell.click("chat-fork-a2");
+    assert_eq!(shell.host.last(ChatAction::Fork).item_id, "a2");
+    // Pending until the host answers: a second press sends nothing.
+    assert!(forking(&mut shell, "a2"));
+    assert!(shell.shows("chat-fork-a2"));
+    shell.click("chat-fork-a2");
+    assert_eq!(shell.host.count(ChatAction::Fork), 1);
+
+    // The fork's pane, beside its source, is shown once it is there.
+    let mut with_fork = panes();
+    with_fork.push(Pane {
+        chat_adapter_id: "claude".into(),
+        title: "Group the tool rows. (fork)".into(),
+        ..pane("%3", "@1", "$1", (0, 25, 100, 10))
+    });
+    shell.publish(vec![topology(2, with_fork)]);
+    shell.host.release();
+    shell.settle();
+    assert!(!forking(&mut shell, "a2"));
+    let focused = shell
+        .host
+        .state()
+        .actions
+        .iter()
+        .any(|action| action["kind"] == "focusPane" && action["pane_id"] == "%3");
+    assert!(focused, "{:?}", shell.host.state().actions);
+}
+
+#[gpui_kit::test]
+fn a_fork_answered_after_the_user_moved_on_does_not_pull_them_back(cx: &mut TestAppContext) {
+    let mut shell = kept(cx);
+    follow_panes(&mut shell);
+    shell.host.state().chat_answers.push_back(Ok(ChatResponse {
+        forked_pane_id: "%4".into(),
+        ..Default::default()
+    }));
+    shell.host.hold_next();
+    shell.hover("chat-item-a1");
+    shell.click("chat-fork-a1");
+    assert!(forking(&mut shell, "a1"));
+
+    // Off to the other window while the host forks.
+    shell.show_window("@2");
+    let mut panes = panes();
+    panes.push(Pane {
+        active: true,
+        ..pane("%3", "@2", "$1", (0, 0, 100, 24))
+    });
+    panes.push(Pane {
+        chat_adapter_id: "claude".into(),
+        ..pane("%4", "@1", "$1", (0, 25, 100, 10))
+    });
+    let windows = vec![
+        window("@1", "$1", 0, "agent", false),
+        window("@2", "$1", 1, "shell", true),
+    ];
+    shell.publish(vec![topology_of(3, windows, panes)]);
+    shell.host.release();
+    shell.settle();
+    assert!(!forking(&mut shell, "a1"), "the button is itself again");
+    let focused = shell
+        .host
+        .state()
+        .actions
+        .iter()
+        .any(|action| action["kind"] == "focusPane" && action["pane_id"] == "%4");
+    assert!(!focused, "{:?}", shell.host.state().actions);
+}
+
+#[gpui_kit::test]
+fn a_fork_the_host_refuses_says_why_and_its_button_comes_back(cx: &mut TestAppContext) {
+    let mut shell = replies(cx);
+    shell
+        .host
+        .refuse_next("chat_fork_unavailable: This agent cannot fork from a reply.");
+    shell.hover("chat-item-a0");
+    shell.click("chat-fork-a0");
+    assert_eq!(shell.host.last(ChatAction::Fork).item_id, "a0");
+    assert_eq!(
+        shell.label("chat-notice"),
+        "This agent cannot fork from a reply."
+    );
+    assert!(!forking(&mut shell, "a0"));
+    shell.click("chat-fork-a0");
+    assert_eq!(shell.host.count(ChatAction::Fork), 2);
+
+    // An answer that never comes leaves the button pending only so long.
+    shell.host.hold_next();
+    shell.hover("chat-item-a2");
+    shell.click("chat-fork-a2");
+    assert!(forking(&mut shell, "a2"));
+    shell.wait(std::time::Duration::from_secs(10));
+    assert!(!forking(&mut shell, "a2"));
+}
+
+// Background tasks, subagents, compacting (S9).
+
+fn task(id: &str, kind: ChatTaskKind, description: &str, stoppable: bool) -> ChatBackgroundTask {
+    ChatBackgroundTask {
+        id: id.into(),
+        kind: kind.into(),
+        description: description.into(),
+        started_at_unix_millis: 0,
+        stoppable,
+    }
+}
+
+fn with_tasks(turn: ChatTurnState, tasks: Vec<ChatBackgroundTask>) -> ChatState {
+    ChatState {
+        background: tasks,
+        ..state(turn)
+    }
+}
+
+fn server() -> ChatBackgroundTask {
+    task("b1", ChatTaskKind::Command, "Run the dev server", true)
+}
+
+#[gpui_kit::test]
+fn the_chip_comes_and_goes_with_the_list_and_stays_while_the_chat_is_idle(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    assert!(!shell.shows("chat-tasks"));
+    shell.chat(event(
+        11,
+        ChatChange::State(with_tasks(ChatTurnState::Working, vec![server()])),
+    ));
+    assert_eq!(shell.label("chat-tasks"), "1 command");
+    assert!(!shell.shows("chat-tasks-agent"));
+    // On the composer's top edge, beside the composer and not in it: the
+    // composer's border is drawn after its children, through the chip (S9).
+    let (chip, composer) = shell
+        .visual
+        .update(|window, _| (window.find("chat-tasks"), window.find("chat-composer")));
+    assert!(
+        !chip
+            .path()
+            .contains(&gpui_kit::ElementId::from("chat-composer")),
+        "{:?}",
+        chip.path()
+    );
+    let edge = composer.bounds().top();
+    assert!(chip.bounds().top() < edge && edge < chip.bounds().bottom());
+    // The turn ends; the command still runs.
+    shell.chat(event(
+        12,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, vec![server()])),
+    ));
+    assert_eq!(shell.label("chat-tasks"), "1 command");
+    assert!(!shell.shows("chat-working"));
+    // A subagent has a pill of its own, named; the ones after it are a count.
+    let audit = task(
+        "b2",
+        ChatTaskKind::Subagent,
+        "Explore: audit the tests",
+        true,
+    );
+    let docs = task("b4", ChatTaskKind::Subagent, "Check the docs", true);
+    shell.chat(event(
+        13,
+        ChatChange::State(with_tasks(
+            ChatTurnState::Idle,
+            vec![server(), audit.clone()],
+        )),
+    ));
+    assert_eq!(
+        shell.label("chat-tasks"),
+        "Explore: audit the tests, 1 command"
+    );
+    assert!(shell.shows("chat-tasks-agent"));
+    assert!(!shell.shows("chat-tasks-agents"));
+    shell.chat(event(
+        14,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, vec![audit, docs])),
+    ));
+    assert_eq!(
+        shell.label("chat-tasks"),
+        "Explore: audit the tests, +1 agent"
+    );
+    assert!(!shell.shows("chat-tasks-others"));
+    // The agent's pill says how long it has run, so it ticks though no turn
+    // works and the list is closed.
+    assert!(ticking(&mut shell));
+    // In a narrow pane the row stays on the composer, the agent's pill
+    // giving way.
+    let long = task(
+        "b5",
+        ChatTaskKind::Subagent,
+        &"Review every crate in the workspace for unsafe code ".repeat(4),
+        true,
+    );
+    shell.chat(event(
+        15,
+        ChatChange::State(with_tasks(
+            ChatTurnState::Idle,
+            vec![
+                long,
+                task("b6", ChatTaskKind::Subagent, "Docs", true),
+                server(),
+            ],
+        )),
+    ));
+    shell.visual.simulate_resize(size(px(520.), px(700.)));
+    shell.settle();
+    let (row, composer) = shell
+        .visual
+        .update(|window, _| (window.find("chat-tasks"), window.find("chat-composer")));
+    assert!(
+        row.bounds().right() <= composer.bounds().right(),
+        "{:?} past {:?}",
+        row.bounds(),
+        composer.bounds()
+    );
+    assert!(shell.shows("chat-tasks-others"));
+    // The last one ends: the chip goes with it.
+    shell.chat(event(16, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-tasks"));
+    assert!(!ticking(&mut shell));
+}
+
+#[gpui_kit::test]
+fn the_chip_opens_the_list_and_stop_asks_the_host_and_holds_its_row(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    let watched = task("b3", ChatTaskKind::Other, "Watch the logs", false);
+    let audit = task(
+        "b2",
+        ChatTaskKind::Subagent,
+        "Explore: audit the tests",
+        true,
+    );
+    let tasks = vec![server(), audit.clone(), watched];
+    shell.chat(event(
+        11,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, tasks.clone())),
+    ));
+    assert!(!shell.shows("chat-task-b1"));
+    // The agent's pill says how long it has run.
+    assert!(ticking(&mut shell));
+    shell.click("chat-tasks");
+    assert_eq!(shell.label("chat-task-b1"), "Run the dev server");
+    assert_eq!(shell.label("chat-task-b2"), "Explore: audit the tests");
+    // Its times tick while it is open, though no turn works.
+    assert!(ticking(&mut shell));
+    // A task the agent cannot stop has no button.
+    assert!(shell.shows("chat-task-stop-b1"));
+    assert!(!shell.shows("chat-task-stop-b3"));
+
+    // Stop: one request, and nothing more while the row waits to leave.
+    shell.click("chat-task-stop-b1");
+    assert_eq!(shell.host.last(ChatAction::StopTask).task_id, "b1");
+    shell.click("chat-task-stop-b1");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 1);
+    // The list changes for another reason: still being stopped.
+    shell.chat(event(
+        12,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, tasks.clone())),
+    ));
+    shell.click("chat-task-stop-b1");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 1);
+    // It leaves the list.
+    let left = vec![audit.clone(), tasks[2].clone()];
+    shell.chat(event(
+        13,
+        ChatChange::State(with_tasks(ChatTurnState::Idle, left.clone())),
+    ));
+    assert!(!shell.shows("chat-task-b1"));
+    assert_eq!(
+        shell.label("chat-tasks"),
+        "Explore: audit the tests, 1 background task"
+    );
+
+    // A refusal says why, and the button can be pressed again.
+    shell
+        .host
+        .refuse_next("chat_task_not_found: That task is no longer running.");
+    shell.click("chat-task-stop-b2");
+    assert_eq!(
+        shell.label("chat-notice"),
+        "That task is no longer running."
+    );
+    shell.click("chat-task-stop-b2");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 3);
+    // An answer that never brings the list's change holds it ten seconds.
+    shell.wait(std::time::Duration::from_secs(10));
+    shell.click("chat-task-stop-b2");
+    assert_eq!(shell.host.count(ChatAction::StopTask), 4);
+
+    // The list closes with its last task, and its timer stops.
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-task-b2"));
+    assert!(!ticking(&mut shell));
+}
+
+#[gpui_kit::test]
+fn a_running_subagent_is_a_row_under_the_working_line_and_a_step_once_it_ends(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let mut explore = with_status(
+        tool(
+            "g1",
+            ChatToolKind::Subagent,
+            "agent",
+            "Find where uploads are staged",
+        ),
+        ChatToolStatus::Running,
+    );
+    {
+        let agent = explore.tool.as_mut().unwrap();
+        agent.agent_type = "Explore".into();
+        agent.activity = "Reading terminal_upload.rs".into();
+        agent.tool_uses = 7;
+        agent.tokens = 24_100;
+    }
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![
+            item("u1", ChatItemKind::User, "Find where uploads are staged."),
+            tool("r1", ChatToolKind::Read, "read", "src/a.rs"),
+            tool("r2", ChatToolKind::Read, "read", "src/b.rs"),
+            explore.clone(),
+            tool("r3", ChatToolKind::Read, "read", "src/c.rs"),
+        ],
+        "",
+    ));
+    assert_eq!(shell.label("chat-working"), "Waiting on 1 subagent…");
+    assert_eq!(
+        shell.label("chat-subagent-g1"),
+        "Explore Find where uploads are staged"
+    );
+    assert_eq!(
+        shell.label("chat-subagent-line-g1"),
+        "Reading terminal_upload.rs · 7 tools · 24.1k tokens"
+    );
+    // Not folded with the steps around it.
+    assert_eq!(shell.label("chat-group-r1"), "3 steps so far");
+    shell.click("chat-group-r1");
+    assert!(!shell.shows("chat-tool-g1"));
+
+    // It ends: a step of the group, with its figures.
+    let agent = explore.tool.as_mut().unwrap();
+    agent.status = ChatToolStatus::Ok.into();
+    agent.tool_uses = 12;
+    agent.tokens = 61_000;
+    shell.chat(event(11, ChatChange::Updated(explore)));
+    assert!(!shell.shows("chat-subagent-g1"));
+    assert_eq!(shell.label("chat-working"), "Working…");
+    assert_eq!(
+        shell.label("chat-tool-g1"),
+        "Explore: Find where uploads are staged · 12 tools · 61k tokens"
+    );
+    assert_eq!(shell.label("chat-group-r1"), "4 steps so far");
+}
+
+#[gpui_kit::test]
+fn the_working_line_says_compacting_whatever_the_turn_says(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    let mut shell = kept(cx);
+    let compacting = |turn| ChatState {
+        compacting: true,
+        ..state(turn)
+    };
+    shell.chat(event(
+        11,
+        ChatChange::State(compacting(ChatTurnState::Working)),
+    ));
+    assert_eq!(shell.label("chat-working"), "Compacting context…");
+    assert!(shell.shows("chat-working-escape"));
+    shell.wait(Duration::from_secs(12));
+    assert_eq!(shell.seconds(), "12s");
+    // The turn ends and the agent still compacts: no Esc to stop.
+    shell.chat(event(
+        12,
+        ChatChange::State(compacting(ChatTurnState::Idle)),
+    ));
+    assert_eq!(shell.label("chat-working"), "Compacting context…");
+    assert!(!shell.shows("chat-working-escape"));
+    assert!(ticking(&mut shell));
+    // Not off screen.
+    shell.show_window("@2");
+    assert!(!ticking(&mut shell));
+    shell.show_window("@1");
+    assert!(ticking(&mut shell));
+    // Done: the notice says so, with its mark, and the line goes.
+    shell.chat(event(
+        13,
+        ChatChange::Item(item(
+            "n1",
+            ChatItemKind::Notice,
+            "Context compacted, was 182k tokens",
+        )),
+    ));
+    shell.chat(event(14, ChatChange::State(state(ChatTurnState::Idle))));
+    assert!(!shell.shows("chat-working"));
+    assert!(!ticking(&mut shell));
+}
+
+// Attachments (S6).
+
+mod attachments {
+    use std::{path::PathBuf, rc::Rc, time::Duration};
+
+    use gpui_kit::{ExternalPaths, FileDropEvent};
+
+    use super::*;
+    use crate::chat::attach::ClipboardRead;
+    use crate::terminal::integration::transfers::UploadCollisionPolicy;
+
+    const SCREENSHOT: &str = "clipboard-0f8fad5b-d9cb-469f-a165-70867728950e.png";
+
+    impl Shell {
+        /// What the clipboard holds, as the native reader says it.
+        fn clipboard(&mut self, answer: Value) {
+            self.visual.update(|_, cx| {
+                cx.set_global(ClipboardRead(Rc::new(move || Ok(Some(answer.clone())))));
+            });
+        }
+
+        fn paste(&mut self) {
+            self.press("secondary-v");
+            self.uploads_settle();
+        }
+
+        /// Lets the upload batches poll until nothing is left to do.
+        fn uploads_settle(&mut self) {
+            for _ in 0..20 {
+                self.visual
+                    .executor()
+                    .advance_clock(Duration::from_millis(50));
+                self.visual.run_until_parked();
+            }
+            self.settle();
+        }
+
+        fn click_and_settle(&mut self, id: &str) {
+            self.click(id);
+            self.uploads_settle();
+        }
+
+        /// Files dropped on the middle of the chat.
+        fn drop_files(&mut self, paths: &[PathBuf]) {
+            let at = self
+                .visual
+                .update(|window, _| window.find(format!("chat-{PANE}")).bounds().center());
+            // GPUI hit-tests nothing after a key press until the pointer
+            // moves, and a file drag does not count as moving it. The
+            // pointer is moved first, as a user who types and then drops
+            // must do too (the terminal's drop is the same).
+            self.visual
+                .simulate_mouse_move(at, None, Default::default());
+            let paths = ExternalPaths(paths.iter().cloned().collect());
+            self.visual.simulate_event(FileDropEvent::Entered {
+                position: at,
+                paths,
+            });
+            self.visual
+                .simulate_event(FileDropEvent::Pending { position: at });
+            self.visual
+                .simulate_event(FileDropEvent::Submit { position: at });
+            self.uploads_settle();
+        }
+
+        fn composer_text(&mut self) -> String {
+            let pane = self.pane();
+            self.visual
+                .update(|_, cx| pane.read(cx).composer.read(cx).value().to_string())
+        }
+
+        /// The uploads started, preflights left out.
+        fn uploaded(&self) -> Vec<(String, bool)> {
+            self.host
+                .state()
+                .uploads
+                .iter()
+                .filter(|upload| !upload.preflight)
+                .map(|upload| (upload.name.clone(), upload.image_png))
+                .collect()
+        }
+
+        /// Finishes the upload the fake host holds.
+        fn finish_upload(&mut self) {
+            {
+                let state = self.host.state();
+                let held = state.uploads.last().expect("an upload");
+                held.sink.send(completed(held)).unwrap();
+            }
+            self.uploads_settle();
+        }
+
+        /// Says the chat's host is a remote one, as an upload sees it.
+        fn remote(&mut self) {
+            let pane = self.pane();
+            self.visual.update(|_, cx| {
+                pane.update(cx, |pane, _| {
+                    pane.upload_scope = Rc::new(|pane, cx| {
+                        pane.transfer_scope(cx).map(|scope| TransferScope {
+                            local: false,
+                            ..scope
+                        })
+                    });
+                });
+            });
+        }
+    }
+
+    use crate::terminal::integration::transfers::TransferScope;
+
+    fn files(dir: &tempfile::TempDir, names: &[&str]) -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, b"twelve bytes").unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn a_pasted_image_is_uploaded_and_sent_by_its_host_path(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let staged = files(&dir, &[SCREENSHOT]).remove(0);
+        shell.clipboard(json!({"kind": "image", "staged": {
+            "path": staged, "name": SCREENSHOT, "sizeBytes": "12",
+        }}));
+        shell.paste();
+        assert!(shell.shows("chat-attachment-1"));
+        assert_eq!(shell.composer_text(), "", "an image is not text");
+        // Uploaded as a screenshot, and its name kept: the host may rename
+        // it, unasked.
+        assert_eq!(shell.uploaded(), [(SCREENSHOT.to_owned(), true)]);
+        assert!(matches!(
+            shell.host.state().uploads[1].collision,
+            UploadCollisionPolicy::Rename
+        ));
+        // Ready: on this machine's host there is no bar and no check.
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            format!("{SCREENSHOT}, 12 B")
+        );
+        assert!(!shell.shows("chat-attachment-progress-1"));
+
+        shell.input("The card covers the composer.");
+        shell.host.hold_next();
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "The card covers the composer.");
+        assert_eq!(sent.attachments.len(), 1);
+        assert_eq!(sent.attachments[0].path, format!("{STAGED}/{SCREENSHOT}"));
+        assert_eq!(sent.attachments[0].media_type, "image/png");
+        // The pending bubble shows the file, and the composer is clear of it.
+        let id = sent.client_message_id.clone();
+        assert!(shell.shows(&format!("chat-sent-{id}-0")));
+        assert!(!shell.shows("chat-attachment-1"));
+        shell.host.release();
+
+        // The host's item takes its place, with the same chip.
+        let mut arrived = item(&id, ChatItemKind::User, "The card covers the composer.");
+        arrived.attachments = sent.attachments.clone();
+        shell.chat(event(11, ChatChange::Item(arrived)));
+        assert_eq!(
+            shell.label(&format!("chat-sent-{id}-0")),
+            format!("{SCREENSHOT}, 12 B")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn two_dropped_files_upload_one_after_the_other_and_one_can_be_removed(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let dropped = files(&dir, &["muxflow-gpui.log", "card.png"]);
+        shell.drop_files(&dropped);
+        assert!(shell.shows("chat-attachment-1"));
+        assert!(shell.shows("chat-attachment-2"));
+        assert_eq!(
+            shell.uploaded(),
+            [
+                ("muxflow-gpui.log".to_owned(), false),
+                ("card.png".to_owned(), false)
+            ]
+        );
+        shell.hover("chat-attachment-1");
+        shell.click("chat-attachment-x-1");
+        assert!(!shell.shows("chat-attachment-1"));
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "", "the files alone are a message");
+        let paths: Vec<&str> = sent.attachments.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(paths, [format!("{STAGED}/card.png")]);
+        assert_eq!(sent.attachments[0].media_type, "image/png");
+    }
+
+    #[gpui_kit::test]
+    fn files_dragged_over_the_chat_show_the_drop_hint_until_they_leave(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let hint = |shell: &mut Shell| {
+            shell
+                .visual
+                .update(|window, _| window.find("chat-drop-hint").visible())
+        };
+        assert!(!hint(&mut shell), "nothing is dragged");
+        let at = shell
+            .visual
+            .update(|window, _| window.find(format!("chat-{PANE}")).bounds().center());
+        shell
+            .visual
+            .simulate_mouse_move(at, None, Default::default());
+        let paths = ExternalPaths(files(&dir, &["card.png"]).into_iter().collect());
+        shell.visual.simulate_event(FileDropEvent::Entered {
+            position: at,
+            paths,
+        });
+        shell
+            .visual
+            .simulate_event(FileDropEvent::Pending { position: at });
+        shell.settle();
+        assert!(hint(&mut shell), "drawn while files are over the chat");
+        shell.visual.simulate_event(FileDropEvent::Exited);
+        shell.settle();
+        assert!(!hint(&mut shell), "gone with them");
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_upload_keeps_send_off_until_it_is_retried_or_removed(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.host.state().upload_outcome = UploadOutcome::Fail;
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["muxflow-gpui.log"]));
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, upload failed: disk full"
+        );
+        assert!(shell.shows("chat-attachment-retry-1"));
+        shell.input("The log from the crash is attached.");
+        shell.press("enter");
+        assert_eq!(shell.host.count(ChatAction::Send), 0);
+        assert_eq!(
+            shell.label("chat-notice"),
+            "An attachment failed to upload. Retry or remove it."
+        );
+        // The chip says it; the terminal's upload list does not.
+        let listed = shell
+            .visual
+            .update(|_, cx| crate::terminal::integration::upload_list(cx).is_some());
+        assert!(!listed);
+
+        shell.host.state().upload_outcome = UploadOutcome::Complete;
+        shell.click_and_settle("chat-attachment-retry-1");
+        assert_eq!(shell.label("chat-attachment-1"), "muxflow-gpui.log, 12 B");
+        shell.press("enter");
+        assert_eq!(shell.host.last(ChatAction::Send).attachments.len(), 1);
+
+        // Removed instead, a failed file goes, and Send is on again.
+        shell.host.state().upload_outcome = UploadOutcome::Fail;
+        shell.drop_files(&files(&dir, &["again.log"]));
+        shell.click("chat-attachment-remove-2");
+        assert!(!shell.shows("chat-attachment-2"));
+        shell.input("Never mind.");
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(
+            (sent.text.as_str(), sent.attachments.len()),
+            ("Never mind.", 0)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn send_waits_while_a_file_uploads_to_a_remote_host(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.remote();
+        shell.host.state().upload_outcome = UploadOutcome::Hold;
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["muxflow-gpui.log"]));
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, uploading"
+        );
+        assert!(shell.shows("chat-attachment-progress-1"), "the bar");
+        shell.input("Screenshots and the log attached.");
+        shell.press("enter");
+        assert_eq!(shell.host.count(ChatAction::Send), 0);
+        assert_eq!(
+            shell.label("chat-notice"),
+            "The attachments are still uploading."
+        );
+        assert_eq!(shell.composer_text(), "Screenshots and the log attached.");
+
+        shell.finish_upload();
+        // Its check, for a moment, where the bar was.
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, uploaded"
+        );
+        assert!(!shell.shows("chat-attachment-progress-1"));
+        shell.wait(Duration::from_secs(2));
+        assert_eq!(shell.label("chat-attachment-1"), "muxflow-gpui.log, 12 B");
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(
+            sent.attachments[0].path,
+            format!("{STAGED}/muxflow-gpui.log")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn pasted_text_is_still_text(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.input("Look at ");
+        shell.clipboard(json!({"kind": "text", "text": "wrapped paths"}));
+        shell.paste();
+        assert_eq!(shell.composer_text(), "Look at wrapped paths");
+        assert!(!shell.shows("chat-attachments"));
+        assert!(shell.host.state().uploads.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn the_limits_are_said_over_the_composer(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.png");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(26 * 1024 * 1024)
+            .unwrap();
+        shell.drop_files(&[big]);
+        assert_eq!(
+            shell.label("chat-notice"),
+            "huge.png is over 25 MB, the most an image can be."
+        );
+        assert!(!shell.shows("chat-attachments"));
+        let names: Vec<String> = (0..11).map(|n| format!("f{n}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        shell.drop_files(&files(&dir, &names));
+        assert!(shell.shows("chat-attachment-10"));
+        assert!(!shell.shows("chat-attachment-11"));
+        assert_eq!(
+            shell.label("chat-notice"),
+            "A message takes at most 10 attachments."
+        );
+    }
+
+    #[gpui_kit::test]
+    fn an_edited_message_keeps_its_files(cx: &mut TestAppContext) {
+        let mut shell = shell(cx);
+        let mut sent = item("u1", ChatItemKind::User, "Why does it overlap?");
+        sent.attachments = vec![ChatAttachment {
+            path: format!("{STAGED}/card.png"),
+            name: "card.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1_468_006,
+        }];
+        shell.chat(snapshot(10, vec![sent], ""));
+        assert_eq!(shell.label("chat-sent-u1-0"), "card.png, 1.4 MB");
+        shell.hover("chat-item-u1");
+        shell.click("chat-edit-u1");
+        assert!(shell.shows("chat-attachment-1"));
+        shell.input(" Below 940px.");
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "Why does it overlap? Below 940px.");
+        assert_eq!(sent.attachments[0].path, format!("{STAGED}/card.png"));
+        assert!(shell.host.state().uploads.is_empty(), "already on the host");
+    }
+
+    /// The chat's upload records left in the shared list.
+    fn chat_records(shell: &mut Shell) -> usize {
+        shell.visual.update(|_, cx| {
+            cx.try_global::<crate::terminal::integration::upload::Uploads>()
+                .map_or(0, |uploads| {
+                    uploads
+                        .0
+                        .records
+                        .iter()
+                        .filter(|record| {
+                            record.pane_id.starts_with(crate::chat::CHAT_UPLOAD_PREFIX)
+                        })
+                        .count()
+                })
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_message_whose_answer_was_lost_takes_its_files_with_it_when_it_arrives(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["card.png"]));
+        shell.input("Look.");
+        shell.host.refuse_next("The connection was lost.");
+        shell.press("enter");
+        let lost = shell.host.last(ChatAction::Send);
+        assert_eq!(lost.attachments.len(), 1);
+        // Back in the composer, to be sent again.
+        assert_eq!(shell.composer_text(), "Look.");
+        assert!(shell.shows("chat-attachment-1"));
+
+        // The host had it: its text and its file both leave the composer.
+        let mut arrived = item(&lost.client_message_id, ChatItemKind::User, "Look.");
+        arrived.attachments = lost.attachments.clone();
+        shell.chat(event(11, ChatChange::Item(arrived)));
+        assert_eq!(shell.composer_text(), "");
+        assert!(!shell.shows("chat-attachment-1"));
+        shell.input("Next.");
+        shell.press("enter");
+        let next = shell.host.last(ChatAction::Send);
+        assert_eq!((next.text.as_str(), next.attachments.len()), ("Next.", 0));
+    }
+
+    #[gpui_kit::test]
+    fn a_message_whose_answer_comes_after_its_item_is_not_given_back(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["card.png"]));
+        shell.input("Look.");
+        shell.host.refuse_next("The connection was lost.");
+        shell.host.hold_next();
+        shell.press("enter");
+        let sent = shell.host.last(ChatAction::Send);
+        let mut arrived = item(&sent.client_message_id, ChatItemKind::User, "Look.");
+        arrived.attachments = sent.attachments.clone();
+        shell.chat(event(11, ChatChange::Item(arrived)));
+        shell.host.release();
+        shell.settle();
+        assert_eq!(shell.composer_text(), "");
+        assert!(!shell.shows("chat-attachment-1"));
+        assert!(!shell.shows("chat-notice"));
+    }
+
+    #[gpui_kit::test]
+    fn files_alone_sent_again_with_other_files_are_another_message(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["card.png"]));
+        shell.host.refuse_next("The connection was lost.");
+        shell.press("enter");
+        let lost = shell.host.last(ChatAction::Send);
+        assert!(shell.shows("chat-attachment-1"));
+        // The same files again: the same message, under its id.
+        shell.host.refuse_next("The connection was lost.");
+        shell.press("enter");
+        let again = shell.host.last(ChatAction::Send);
+        assert_eq!(again.client_message_id, lost.client_message_id);
+        // Another file in its place, with the same (empty) text: a new one,
+        // which the host does not drop as a duplicate.
+        shell.hover("chat-attachment-1");
+        shell.click("chat-attachment-x-1");
+        shell.drop_files(&files(&dir, &["log.txt"]));
+        shell.press("enter");
+        let other = shell.host.last(ChatAction::Send);
+        assert_eq!(other.attachments[0].name, "log.txt");
+        assert_ne!(other.client_message_id, lost.client_message_id);
+    }
+
+    #[gpui_kit::test]
+    fn an_image_read_after_its_message_went_is_not_added_to_the_next(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let staged = files(&dir, &[SCREENSHOT]).remove(0);
+        shell.clipboard(json!({"kind": "image", "staged": {
+            "path": staged, "name": SCREENSHOT, "sizeBytes": "12",
+        }}));
+        shell.input("The card covers the composer.");
+        // Enter sends while the clipboard is still read.
+        shell.visual.update(|window, cx| {
+            window.press("secondary-v", cx);
+            window.press("enter", cx);
+        });
+        shell.uploads_settle();
+        let sent = shell.host.last(ChatAction::Send);
+        assert_eq!(sent.text, "The card covers the composer.");
+        assert!(sent.attachments.is_empty());
+        assert!(!shell.shows("chat-attachment-1"), "nor in the next one");
+        assert!(shell.uploaded().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn a_file_removed_before_its_upload_has_an_id_is_stopped_once_it_has(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.host.state().upload_outcome = UploadOutcome::Hold;
+        let dir = tempfile::tempdir().unwrap();
+        let path = files(&dir, &["muxflow-gpui.log"]).remove(0);
+        let pane = shell.pane();
+        shell.visual.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.attach_paths(vec![path.to_string_lossy().into_owned()], window, cx);
+                assert_eq!(
+                    pane.attachments[0].upload,
+                    crate::chat::attach::Upload::Uploading(None)
+                );
+                pane.remove_attachment(1, cx);
+            });
+        });
+        shell.uploads_settle();
+        assert_eq!(shell.host.state().cancelled_uploads, ["t0"]);
+        assert!(shell.uploaded().is_empty(), "the batch went no further");
+        assert_eq!(chat_records(&mut shell), 0);
+    }
+
+    #[gpui_kit::test]
+    fn editing_an_earlier_message_stops_the_uploads_it_replaces(cx: &mut TestAppContext) {
+        let mut shell = open(cx);
+        shell.host.state().upload_outcome = UploadOutcome::Hold;
+        let dir = tempfile::tempdir().unwrap();
+        shell.drop_files(&files(&dir, &["muxflow-gpui.log"]));
+        assert_eq!(
+            shell.label("chat-attachment-1"),
+            "muxflow-gpui.log, uploading"
+        );
+        shell.hover("chat-item-u1");
+        shell.click("chat-edit-u1");
+        shell.uploads_settle();
+        assert!(!shell.shows("chat-attachment-1"));
+        assert_eq!(shell.host.state().cancelled_uploads, ["t1"]);
+        // The cancelled record does not stay to fill the shared list.
+        assert_eq!(chat_records(&mut shell), 0);
+    }
+
+    #[gpui_kit::test]
+    fn a_sent_file_opens_from_the_keyboard(cx: &mut TestAppContext) {
+        let mut shell = shell(cx);
+        let mut sent = item("u1", ChatItemKind::User, "Why does it overlap?");
+        let path = format!("{STAGED}/card.png");
+        sent.attachments = vec![ChatAttachment {
+            path: path.clone(),
+            name: "card.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1_468_006,
+        }];
+        shell.chat(snapshot(10, vec![sent], ""));
+        assert_eq!(
+            shell
+                .visual
+                .update(|window, _| window.find("chat-sent-u1-0").role()),
+            Some(gpui_kit::Role::Button)
+        );
+        // Back from the composer: the message's Edit and Copy, then its file.
+        for _ in 0..3 {
+            shell.press("shift-tab");
+        }
+        shell.press("enter");
+        assert_eq!(shell.host.state().files, std::slice::from_ref(&path));
+        shell.press("space");
+        assert_eq!(shell.host.state().files, [path.clone(), path]);
+    }
+}

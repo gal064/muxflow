@@ -220,7 +220,7 @@ version-dependent branches.
 ### Release skew and admission policy
 
 Today `validateHostContract` checks only the envelope's `protocolMajor`
-(currently 4). `HostConnection.onHelloFrame` logs `helperVersion` and the build
+(currently 5). `HostConnection.onHelloFrame` logs `helperVersion` and the build
 digest but does not compare either with the app version. A newer helper with
 the same major is admitted; a different major becomes a terminal
 `incompatible` state. The host also refuses a different client major.
