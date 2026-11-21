@@ -19,6 +19,16 @@ pub fn target_name(target: Target) -> &'static str {
     match target {
         Target::Staged => "staged",
         Target::Unstaged => "unstaged",
+        Target::Base => "base",
+    }
+}
+
+/// What a tab and its toolbar call a target.
+pub fn target_label(target: Target) -> &'static str {
+    match target {
+        Target::Staged => "staged",
+        Target::Unstaged => "unstaged",
+        Target::Base => "branch",
     }
 }
 
@@ -143,6 +153,9 @@ pub struct Diff {
     pub old_missing: bool,
     pub new_missing: bool,
     pub hunk_count: u32,
+    /// Git's patch, whose hunks the tab draws. Empty when the host left it out
+    /// as too large while `hunk_count` says there are hunks.
+    pub patch: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,6 +329,7 @@ struct WireDiff {
     old_missing: bool,
     new_missing: bool,
     hunk_count: u32,
+    patch: String,
     old_content_ref: Option<WireContentRef>,
     new_content_ref: Option<WireContentRef>,
 }
@@ -354,6 +368,38 @@ pub(super) struct WireResponse {
     diff: Option<WireDiff>,
     confirmation: Option<WireConfirmation>,
     command: Option<WireCommand>,
+    #[serde(rename = "branchSummary")]
+    branch_summary: Option<WireBranchSummary>,
+    branches: Option<WireBranches>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct WireBranches {
+    branches: Vec<String>,
+    current: String,
+    truncated: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct WireBranchFile {
+    path: String,
+    display_path: String,
+    kind: String,
+    added: u32,
+    removed: u32,
+    binary: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct WireBranchSummary {
+    base_ref: String,
+    files: Vec<WireBranchFile>,
+    total_file_count: String,
+    added: String,
+    removed: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -496,6 +542,7 @@ pub(super) fn response_diff(
     let target = match value.target.as_str() {
         "staged" => Target::Staged,
         "unstaged" => Target::Unstaged,
+        "base" => Target::Base,
         _ => return Err("Host returned an unknown Git diff target.".into()),
     };
     let diff = Diff {
@@ -515,6 +562,9 @@ pub(super) fn response_diff(
         old_missing: value.old_missing,
         new_missing: value.new_missing,
         hunk_count: value.hunk_count,
+        patch: BASE64
+            .decode(&value.patch)
+            .map_err(|_| "Host returned a malformed Git patch.".to_owned())?,
     };
     if diff.repository.id != request.repository_id
         || diff.path != request.path
@@ -729,7 +779,7 @@ pub fn status_code(entry: &StatusEntry, target: Target) -> &'static str {
 pub fn kind_for(entry: &StatusEntry, target: Target) -> ChangeKind {
     match target {
         Target::Staged => entry.index_kind,
-        Target::Unstaged => entry.worktree_kind,
+        Target::Unstaged | Target::Base => entry.worktree_kind,
     }
 }
 
@@ -880,7 +930,9 @@ fn or_question(value: &str) -> &str {
 
 // The diff tab.
 
-/// The one Git diff tab a workspace holds for this repository, path and side.
+/// The Git diff tab a workspace shows every file in. A workspace saved before
+/// the tab was reused may hold several; the one already on this file wins,
+/// else the first.
 pub fn find_git_diff_tab<'a>(
     state: &'a PersistedAppState,
     host: &str,
@@ -890,15 +942,19 @@ pub fn find_git_diff_tab<'a>(
     path: &str,
     target: Target,
 ) -> Option<&'a AppTabRecord> {
-    state.app_tabs.iter().find(|tab| {
+    let mut tabs = state.app_tabs.iter().filter(|tab| {
         tab.host_profile_id == host
             && tab.server_identity == server
             && tab.session_id == session_id
             && tab.kind == AppTabKind::GitDiff
-            && tab.git_repository_id.as_deref() == Some(repository_id)
+    });
+    let first = tabs.clone().next();
+    tabs.find(|tab| {
+        tab.git_repository_id.as_deref() == Some(repository_id)
             && tab.git_path.as_deref() == Some(path)
             && tab.git_target == Some(target)
     })
+    .or(first)
 }
 
 /// Where a diff tab opens: the workspace and the repository it belongs to.
@@ -911,9 +967,9 @@ pub struct DiffTabPlace<'a> {
     pub root_token: &'a str,
 }
 
-/// Opens or repoints the diff tab, returning its id. A single click opens a
-/// preview, which a pinned open promotes; a preview open never demotes a
-/// pinned tab. The caller selects it.
+/// Opens the workspace's one diff tab, or points it at this file, returning
+/// its id. A single click opens a preview, which a pinned open promotes; a
+/// preview open never demotes a pinned tab. The caller selects it.
 pub fn open_git_diff_tab(
     state: &mut PersistedAppState,
     place: &DiffTabPlace,
@@ -936,7 +992,7 @@ pub fn open_git_diff_tab(
     let (name, _) = split_display_path(&entry.display_path);
     let describe = |tab: &mut AppTabRecord| {
         tab.resource = format!("{}:{}", target_name(target), entry.display_path);
-        tab.title = format!("{name} ({})", target_name(target));
+        tab.title = format!("{name} ({})", target_label(target));
         tab.root_path = Some(place.root_path.to_owned());
         tab.root_token = Some(place.root_token.to_owned());
         tab.git_repository_id = Some(status.repository.id.clone());
@@ -1182,4 +1238,195 @@ impl DeferredBodies {
             }
         }
     }
+}
+
+// The default-branch scope.
+
+/// One file the working tree changes against the default branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchFile {
+    /// Opaque base64 path identity, as a status entry's.
+    pub path: String,
+    pub display_path: String,
+    pub kind: ChangeKind,
+    pub added: u32,
+    pub removed: u32,
+    pub binary: bool,
+}
+
+impl BranchFile {
+    /// The row a diff tab opens from: renames are not detected here, so a file
+    /// is only ever its own path.
+    pub fn as_entry(&self) -> StatusEntry {
+        StatusEntry {
+            path: self.path.clone(),
+            display_path: self.display_path.clone(),
+            absolute_path: None,
+            original_path: None,
+            display_original_path: None,
+            index_kind: ChangeKind::None,
+            worktree_kind: self.kind,
+            conflicted: false,
+            conflict_code: String::new(),
+            untracked: self.kind == ChangeKind::Untracked,
+            ignored: false,
+            submodule: false,
+            submodule_state: String::new(),
+            symlink: false,
+        }
+    }
+}
+
+/// What a [`BranchSummary`] compares the working tree with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummaryBase {
+    /// The merge base with the default branch: the whole branch, uncommitted
+    /// work included.
+    DefaultBranch,
+    /// HEAD: staged, unstaged and untracked work only.
+    Head,
+}
+
+impl SummaryBase {
+    /// `GitCommand.summary_base`.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::DefaultBranch => "",
+            Self::Head => "head",
+        }
+    }
+}
+
+/// What the working tree changes against the default branch or HEAD.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchSummary {
+    /// `origin/main`, or `HEAD`; `None` when there is no default branch to
+    /// compare with.
+    pub base_ref: Option<String>,
+    pub files: Vec<BranchFile>,
+    pub total_file_count: u64,
+    pub added: u64,
+    pub removed: u64,
+}
+
+pub(super) fn response_branch_summary(response: WireResponse) -> Result<BranchSummary, String> {
+    let value = response
+        .branch_summary
+        .ok_or("Host omitted the branch summary.")?;
+    let files = value
+        .files
+        .into_iter()
+        .map(|file| {
+            require_base64_path(&file.path, "Git branch path")?;
+            Ok(BranchFile {
+                path: file.path,
+                display_path: file.display_path,
+                kind: ChangeKind::from_wire(&file.kind),
+                added: file.added,
+                removed: file.removed,
+                binary: file.binary,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let count = |value: &str, label| {
+        if value.is_empty() {
+            Ok(0)
+        } else {
+            decimal_u64(value, label)
+        }
+    };
+    Ok(BranchSummary {
+        base_ref: optional(value.base_ref),
+        total_file_count: count(&value.total_file_count, "Git branch file count")?,
+        added: count(&value.added, "Git branch added lines")?,
+        removed: count(&value.removed, "Git branch removed lines")?,
+        files,
+    })
+}
+
+/// The repository's local branches, most recently committed first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Branches {
+    pub names: Vec<String>,
+    /// `None` on a detached HEAD.
+    pub current: Option<String>,
+    /// The host lists at most 500.
+    pub truncated: bool,
+}
+
+pub(super) fn response_branches(response: WireResponse) -> Result<Branches, String> {
+    let value = response.branches.ok_or("Host omitted the branch list.")?;
+    Ok(Branches {
+        names: value.branches,
+        current: optional(value.current),
+        truncated: value.truncated,
+    })
+}
+
+// The hunks a diff tab draws.
+
+/// One hunk of Git's patch, in the order the host numbers them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    /// The `@@` line, with the enclosing scope Git names.
+    pub header: String,
+    /// The hunk as a patch of its own, under a path unique to it, for Kit's
+    /// `Diff` to draw as one collapsible section.
+    pub patch: String,
+    /// The path in `patch`, which keys the section.
+    pub key: String,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// Splits Git's patch into its hunks. Each becomes a patch under its own path,
+/// `<index>/<file name>`: unique, so each collapses on its own, and still
+/// ending in the file's name, which picks the highlighting. Lines before the
+/// first `@@` are Git's headers and belong to no hunk; a hunk's content lines
+/// never start with `@@`, so the split is exact and index `n` here is the
+/// host's hunk `n`.
+pub fn split_hunks(display_path: &str, patch: &str) -> Vec<Hunk> {
+    let (name, _) = split_display_path(display_path);
+    let safe = !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    let name = if safe { name } else { "file" };
+    let mut hunks: Vec<Hunk> = Vec::new();
+    // A type change is two sections for one path: a hunk ends at the next
+    // section's `diff --git` line, whose header lines belong to no hunk.
+    let mut open = false;
+    for line in patch.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            open = false;
+        } else if line.starts_with("@@ ") {
+            open = true;
+            let key = format!("{}/{name}", hunks.len() + 1);
+            hunks.push(Hunk {
+                header: line.trim_end().to_owned(),
+                patch: format!("--- a/{key}\n+++ b/{key}\n{line}"),
+                key,
+                added: 0,
+                removed: 0,
+            });
+        } else if let Some(hunk) = hunks.last_mut().filter(|_| open) {
+            if line.starts_with('+') {
+                hunk.added += 1;
+            } else if line.starts_with('-') {
+                hunk.removed += 1;
+            }
+            hunk.patch.push_str(line);
+        }
+    }
+    for hunk in &mut hunks {
+        if !hunk.patch.ends_with('\n') {
+            hunk.patch.push('\n');
+        }
+    }
+    hunks
+}
+
+/// The opaque form of a path, as the host sends it.
+pub fn encode_path(path: &[u8]) -> String {
+    BASE64.encode(path)
 }

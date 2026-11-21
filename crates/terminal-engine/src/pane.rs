@@ -102,6 +102,10 @@ pub enum EngineOutput {
         generation: u64,
     },
     Epoch(u64),
+    /// The hidden panes whose screens are kept, after any change to that set:
+    /// mounting one of them shows its last screen at once instead of an empty
+    /// grid that waits for the host.
+    Held(Vec<String>),
     /// The host gave up resuming this pane's stream; reconnect the link. Names
     /// the epoch it was admitted under, so a stall an earlier bridge left in the
     /// queue is not taken for this one.

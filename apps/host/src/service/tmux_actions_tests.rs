@@ -40,6 +40,7 @@ fn pane(id: &str, window_id: &str, active: bool) -> tmux_control::Pane {
         pane_pid: 0,
         start_command: String::new(),
         title: String::new(),
+        chat_adapter_id: String::new(),
     }
 }
 

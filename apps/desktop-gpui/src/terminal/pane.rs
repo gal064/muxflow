@@ -58,6 +58,9 @@ pub struct TerminalPane {
     pub(super) perf: Rc<RefCell<PanePerf>>,
     pub(super) last_stats: Rc<Cell<CacheStats>>,
     revealed: bool,
+    /// Mounted on the screen the engine kept while it was hidden, so it shows
+    /// that before the host's reveal.
+    restored: bool,
     /// tmux's active pane, when there are several to tell apart.
     pub(super) active: bool,
     cursor_on: bool,
@@ -111,6 +114,7 @@ impl TerminalPane {
             perf: Rc::default(),
             last_stats: Rc::default(),
             revealed: false,
+            restored: false,
             active: false,
             cursor_on: true,
             last_output: None,
@@ -227,6 +231,14 @@ impl TerminalPane {
         self.revealed = true;
         self.note_painted.set(true);
         cx.notify();
+    }
+
+    pub(super) fn set_restored(&mut self, restored: bool) {
+        self.restored = restored;
+    }
+
+    pub(super) fn restored(&self) -> bool {
+        self.restored
     }
 
     /// The engine reveals a pane once per mount, so no later reveal can release

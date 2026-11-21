@@ -93,6 +93,35 @@ fn sort_toggle(
         )
 }
 
+/// A [`sort_toggle`] with a chevron after its value, for a setting that has
+/// more than two values to step through.
+fn sort_toggle_with_chevron(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    text: impl Into<SharedString>,
+    accent: Rgba,
+) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .compact()
+        .h(ui(14.))
+        .accessibility_label(label)
+        .child(
+            h_flex()
+                .items_center()
+                .gap(ui(2.))
+                .text_size(ui(TYPE_LABEL))
+                .text_color(accent)
+                .child(text.into())
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(ui(10.))
+                        .text_color(accent),
+                ),
+        )
+}
+
 /// A link's phase as a color.
 pub(crate) fn phase_color(phase: ConnectionPhase, cx: &App) -> Rgba {
     let palette = theme::palette(cx);
@@ -770,7 +799,7 @@ impl RenderOnce for Sidebar {
 
         let sort = self.agent_sort;
         let sort_chrome = self.chrome.clone();
-        let ordering = sort_toggle(
+        let ordering = sort_toggle_with_chevron(
             "agents-sort",
             format!(
                 "Agent ordering: {}. Next: {}.",
@@ -809,6 +838,18 @@ impl RenderOnce for Sidebar {
                 },
             ))
             .child(context_menu::anchor(&ordering_focus));
+
+        // The session history: an icon, as the Workspaces header's New is, so
+        // it reads as a button and not as another setting beside the ordering.
+        let history = bar_button(
+            "agents-history",
+            IconName::Clock,
+            "Session history",
+            palette.chrome_dim,
+        )
+        .my(ui(-4.))
+        .tooltip(with_shortcut("Session history", "agents.history", cx))
+        .on_click(|_, window, cx| commands::run("agents.history", window, cx));
 
         let quiet = |text: &'static str| {
             div()
@@ -981,7 +1022,12 @@ impl RenderOnce for Sidebar {
                     .h(relative(self.agents_ratio))
                     .child(section_head(
                         section_label("sidebar-agents-label", "Agents", cx).into_any_element(),
-                        ordering.into_any_element(),
+                        h_flex()
+                            .items_center()
+                            .gap(ui(4.))
+                            .child(ordering)
+                            .child(history)
+                            .into_any_element(),
                     ))
                     .child(agents_list),
             )

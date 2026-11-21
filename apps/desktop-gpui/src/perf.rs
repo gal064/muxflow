@@ -18,6 +18,7 @@
 //! waking a GPUI task.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -73,6 +74,15 @@ impl PaneSpan {
     }
 }
 
+/// An agent's pane the user asked to see, until it is on screen.
+struct AgentSwitch {
+    host: String,
+    pane_id: String,
+    started: Instant,
+    /// Whether the move painted before the host answered, once it is planned.
+    painted_first: Option<bool>,
+}
+
 struct OpenSpan {
     name: PaneSpan,
     scope: String,
@@ -98,6 +108,7 @@ pub struct Probe {
     spans: BTreeMap<u64, OpenSpan>,
     next_span: u64,
     recent_paints: VecDeque<((String, String), Instant)>,
+    agent_switch: Option<AgentSwitch>,
 }
 
 impl Probe {
@@ -118,6 +129,7 @@ impl Probe {
             spans: BTreeMap::new(),
             next_span: 0,
             recent_paints: VecDeque::new(),
+            agent_switch: None,
         }
     }
 
@@ -440,6 +452,52 @@ impl Probe {
         }
     }
 
+    /// An agent row, a notification or the jump asked for `pane_id`. A switch
+    /// still waiting is superseded: only the latest is the one the user sees.
+    pub fn agent_switch_requested(&mut self, host: &str, pane_id: &str, now: Instant, t: i64) {
+        if self.agent_switch.take().is_some() {
+            self.counter("workflow.agentSwitchSuperseded", 1);
+        }
+        self.agent_switch = Some(AgentSwitch {
+            host: host.to_owned(),
+            pane_id: pane_id.to_owned(),
+            started: now,
+            painted_first: None,
+        });
+        self.record(
+            "perf.agentSwitch",
+            json!({ "phase": "requested", "paneId": pane_id }),
+            t,
+        );
+    }
+
+    /// Whether the move to the pane asked for paints before the host answers.
+    pub fn agent_switch_planned(&mut self, painted_first: bool) {
+        if let Some(switch) = &mut self.agent_switch
+            && switch.painted_first.is_none()
+        {
+            switch.painted_first = Some(painted_first);
+        }
+    }
+
+    /// The surface shows `pane_id` on `host` with its content. Ends the
+    /// switch waiting for it, handing back when it started and what it was.
+    fn agent_switch_shown(&mut self, host: &str, pane_id: &str) -> Option<(Instant, bool)> {
+        // One whose pane never came is let go, as a span is.
+        if self
+            .agent_switch
+            .as_ref()
+            .is_some_and(|switch| switch.started.elapsed() >= SPAN_TIMEOUT)
+        {
+            self.agent_switch = None;
+            self.counter("workflow.agentSwitchTimeouts", 1);
+        }
+        let switch = self
+            .agent_switch
+            .take_if(|switch| switch.host == host && switch.pane_id == pane_id)?;
+        Some((switch.started, switch.painted_first.unwrap_or(false)))
+    }
+
     fn prune_spans(&mut self, now: Instant) {
         let before = self.spans.len();
         self.spans
@@ -600,6 +658,71 @@ pub fn abandon_pane_spans_for_scope(scope: &str) {
 
 pub fn note_pane_painted(scope: &str, pane_id: &str) {
     with_probe(|probe, t| probe.note_pane_painted(scope, pane_id, Instant::now(), t));
+}
+
+/// Opens the agent switch probe: `perf.agentSwitch` `requested` now, and the
+/// `agent.switch` sample once the pane is on screen.
+pub fn agent_switch_requested(host: &str, pane_id: &str) {
+    with_probe(|probe, t| {
+        probe.agent_switch_requested(host, pane_id, Instant::now(), t);
+        AGENT_SWITCH_PENDING.store(true, Ordering::Relaxed);
+    });
+}
+
+/// Set while an agent switch waits for its pane, so the paths that end one,
+/// which run on every paint, do nothing the rest of the time.
+static AGENT_SWITCH_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Whether an agent switch is waiting for its pane to be on screen.
+pub fn agent_switch_pending() -> bool {
+    AGENT_SWITCH_PENDING.load(Ordering::Relaxed)
+}
+
+/// Whether the move the waiting switch made paints before the host answers.
+pub fn agent_switch_planned(painted_first: bool) {
+    with_probe(|probe, _| probe.agent_switch_planned(painted_first));
+}
+
+/// The terminal surface is drawing `pane_id` on `host` with its content:
+/// `mount` is `chat` or `terminal`, and `held` whether that content was here
+/// already (a chat kept open, a terminal's kept or live screen) rather than
+/// fetched for this mount. Ends the waiting switch for that pane, if any,
+/// once this frame is on screen: the `agent.switch` sample, in milliseconds
+/// from the request, and a `perf.agentSwitch` `painted` record.
+pub fn agent_switch_shown(
+    host: &str,
+    pane_id: &str,
+    mount: &'static str,
+    held: bool,
+    window: &gpui_kit::Window,
+) {
+    if !agent_switch_pending() {
+        return;
+    }
+    let mut shown = None;
+    with_probe(|probe, _| {
+        shown = probe.agent_switch_shown(host, pane_id);
+        if probe.agent_switch.is_none() {
+            AGENT_SWITCH_PENDING.store(false, Ordering::Relaxed);
+        }
+    });
+    let Some((started, painted_first)) = shown else {
+        return;
+    };
+    let pane_id = pane_id.to_owned();
+    window.on_next_frame(move |_, _| {
+        let ms = started.elapsed().as_secs_f64() * 1000.;
+        let fields = json!({
+            "paneId": pane_id, "mount": mount, "held": held, "paintedFirst": painted_first,
+        });
+        with_probe(|probe, t| {
+            probe.sample("agent.switch", ms, Some(fields.clone()), t);
+            let mut record = fields;
+            record["phase"] = "painted".into();
+            record["ms"] = json!((ms * 1000.).round() / 1000.);
+            probe.record("perf.agentSwitch", record, t);
+        });
+    });
 }
 
 /// One interaction's request-to-pixels measurement: it starts when made and

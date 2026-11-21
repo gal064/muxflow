@@ -1,10 +1,14 @@
 import Constants from "expo-constants";
 import { Stack } from "expo-router";
+import { useEffect } from "react";
 import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useStore } from "zustand";
 
 import { TERMINAL_FONT_SIZES } from "../src/features/terminal/sizing";
 import { openAppUpdates, updateStore } from "../src/features/update";
+import { refreshAgents } from "../src/features/agents/refresh";
+import { agentModeLabel } from "../src/features/chat/chatModel";
+import { useSession } from "../src/ui/hooks";
 import { prefsStore } from "../src/store/prefsStore";
 import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 
@@ -16,6 +20,12 @@ export default function SettingsScreen() {
   const voicePlayScreenOff = useStore(prefsStore, (state) => state.voicePlayScreenOff);
   const update = useStore(updateStore, (state) => state.update);
   const downloading = useStore(updateStore, (state) => state.downloading);
+  const connected = useSession((state) => state.connection.state === "connected");
+  const agentMode = useSession((state) => state.agentMode);
+  // The host tells only the desktop that set it; its next agent snapshot carries the mode.
+  useEffect(() => {
+    if (connected) void refreshAgents();
+  }, [connected]);
   return (
     <View style={styles.root}>
       <Stack.Screen options={{ title: "Settings" }} />
@@ -34,6 +44,15 @@ export default function SettingsScreen() {
         />
         <Text style={styles.help}>New agent starts this command in a new terminal window. Shell options and arguments are allowed.</Text>
       </View>
+      {connected && agentMode !== "unknown" ? (
+        <View accessible accessibilityLabel={`Agents start as ${agentModeLabel(agentMode)}. Change it on your desktop app.`} style={styles.settingRow}>
+          <View style={styles.settingCopy}>
+            <Text {...fixedChromeText} style={styles.label}>Agents start as</Text>
+            <Text style={styles.help}>Set for this host. Change it on your desktop app.</Text>
+          </View>
+          <Text {...fixedChromeText} style={styles.readOnlyValue}>{agentModeLabel(agentMode)}</Text>
+        </View>
+      ) : null}
       <View style={styles.settingRow}>
         <View style={styles.settingCopy}>
           <Text {...fixedChromeText} style={styles.label}>Terminal font size</Text>
@@ -56,11 +75,11 @@ export default function SettingsScreen() {
       </View>
       <View style={styles.settingRow}>
         <View style={styles.settingCopy}>
-          <Text {...fixedChromeText} style={styles.label}>Keep screen awake in Voice</Text>
-          <Text style={styles.help}>Prevents screen sleep only while the Voice screen is open.</Text>
+          <Text {...fixedChromeText} style={styles.label}>Keep screen awake in voice mode</Text>
+          <Text style={styles.help}>Prevents screen sleep only while voice mode is on.</Text>
         </View>
         <Switch
-          accessibilityLabel="Keep screen awake in Voice"
+          accessibilityLabel="Keep screen awake in voice mode"
           onValueChange={(value) => prefsStore.getState().setVoiceKeepAwake(value)}
           thumbColor={voiceKeepAwake ? colors.accent : colors.chromeDim}
           trackColor={{ false: colors.chromeBorder, true: colors.accentWash }}
@@ -71,7 +90,7 @@ export default function SettingsScreen() {
         <View style={styles.settingRow}>
           <View style={styles.settingCopy}>
             <Text {...fixedChromeText} style={styles.label}>Play replies with screen off</Text>
-            <Text style={styles.help}>Keeps playing replies when you turn the phone off on the Voice screen.</Text>
+            <Text style={styles.help}>Keeps playing replies when you turn the phone off in voice mode.</Text>
           </View>
           <Switch
             accessibilityLabel="Play replies with screen off"
@@ -117,5 +136,6 @@ const styles = StyleSheet.create({
   sizeOption: { alignItems: "center", borderColor: colors.chromeBorder, borderRadius: radii.pill, borderWidth: StyleSheet.hairlineWidth, justifyContent: "center", minHeight: 44, minWidth: 40 },
   sizeOptionSelected: { backgroundColor: colors.accentWash, borderColor: colors.accent },
   sizeLabel: { color: colors.chromeInkStrong, fontSize: typeScale.body },
+  readOnlyValue: { color: colors.chromeDim, fontSize: typeScale.body },
   updateLink: { color: colors.danger, fontSize: typeScale.rowSecondary, fontWeight: "600" },
 });

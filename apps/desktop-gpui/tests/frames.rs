@@ -46,11 +46,11 @@ fn weights_are_distinct_faces() {
 
 #[cfg(target_os = "linux")]
 mod frames {
+    mod chat;
+
     use std::{collections::HashSet, path::Path, sync::Arc};
 
-    use gpui_kit::{
-        AnyWindowHandle, Bounds, HeadlessAppContext, Rgba, WindowBounds, assets::Assets, px, size,
-    };
+    use gpui_kit::{AnyWindowHandle, Bounds, HeadlessAppContext, Rgba, WindowBounds, px, size};
     use muxflow_gpui::{
         app::{self, Core},
         fonts,
@@ -61,7 +61,7 @@ mod frames {
     fn context(state_path: &Path) -> HeadlessAppContext {
         let mut cx = HeadlessAppContext::with_platform(
             gpui_kit::platform::current_platform(true).text_system(),
-            Arc::new(Assets),
+            Arc::new(app::AppAssets),
             gpui_kit::platform::current_headless_renderer,
         );
         cx.update(|cx| {
@@ -345,6 +345,7 @@ mod frames {
             }
             render_surfaces(theme);
             render_context_menu(theme);
+            chat::run(theme);
         }
     }
 }

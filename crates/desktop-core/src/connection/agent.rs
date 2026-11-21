@@ -56,7 +56,7 @@ pub async fn agent_request(
     let requested_epoch = parse_u64("connectionEpoch", &command.connection_epoch)?;
     let current_epoch = client.terminal_epoch.load(Ordering::Acquire);
     if requested_epoch == 0 || requested_epoch != current_epoch {
-        return Err("agent request belongs to a replaced connection epoch".into());
+        return Err(super::REPLACED_EPOCH.into());
     }
     let host_profile_id = client.host_profile_id.lock().unwrap().clone();
     let adapter_id = command.adapter_id;
@@ -216,6 +216,8 @@ pub(crate) fn snapshot_json(value: &v1::AgentSnapshot, host_profile_id: &str) ->
         "notificationWatermark": value.notification_watermark.to_string(),
         "acceptedGeneration": value.accepted_generation.to_string(),
         "adapters": value.adapters.iter().map(adapter_descriptor_json).collect::<Vec<_>>(),
+        // Whether an agent started in a terminal on this host becomes a chat.
+        "agentMode": if value.agent_mode == i32::from(v1::ChatAgentMode::Chat) { "chat" } else { "terminal" },
     })
 }
 
@@ -343,6 +345,21 @@ mod tests {
         assert_eq!(json["route"]["paneTitleFallback"], "✳ Ship release");
         let sideband = with_connection_epoch(json, (1_u64 << 53) + 3);
         assert_eq!(sideband["connectionEpoch"], ((1_u64 << 53) + 3).to_string());
+    }
+
+    #[test]
+    fn a_snapshot_says_whether_agents_start_as_chats() {
+        let mode = |agent_mode: v1::ChatAgentMode| {
+            let snapshot = v1::AgentSnapshot {
+                agent_mode: agent_mode.into(),
+                ..Default::default()
+            };
+            snapshot_json(&snapshot, "profile-1")["agentMode"].clone()
+        };
+        assert_eq!(mode(v1::ChatAgentMode::Chat), "chat");
+        assert_eq!(mode(v1::ChatAgentMode::Terminal), "terminal");
+        // A host that never said is a host whose agents run in the terminal.
+        assert_eq!(mode(v1::ChatAgentMode::Unspecified), "terminal");
     }
 
     /// Every field of the descriptor crosses the bridge.

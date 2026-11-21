@@ -1,0 +1,454 @@
+syntax = "proto3";
+
+package tmux_agent.protocol.v1;
+
+// Chat mode (docs/design/chat-plan.md): an agent running in a tmux pane,
+// shown as a conversation instead of a terminal. The host turns each
+// provider's structured interface into the messages below; nothing here names
+// a provider. Kept in its own file like automation.proto; envelope.proto names
+// it in its operation, request, response, event kind and event.
+
+// Whether an agent started in a terminal becomes a chat. One value per host.
+enum ChatAgentMode {
+  CHAT_AGENT_MODE_UNSPECIFIED = 0;
+  // The default: agents run in the terminal.
+  CHAT_AGENT_MODE_TERMINAL = 1;
+  CHAT_AGENT_MODE_CHAT = 2;
+}
+
+enum ChatAction {
+  CHAT_ACTION_UNSPECIFIED = 0;
+  // Subscribes this connection to `pane_id`. The pane's snapshot arrives as a
+  // `ChatEvent` ahead of the answer. Sent again for a chat that is already
+  // open, it brings a fresh snapshot. Refused with `chat_queue_full` when the
+  // snapshot could not be queued: send it again.
+  CHAT_ACTION_OPEN = 1;
+  // Ends this connection's subscription to `pane_id`. The chat keeps running.
+  CHAT_ACTION_CLOSE = 2;
+  // Sends `text`, with any `attachments`, as a user message.
+  CHAT_ACTION_SEND = 3;
+  // Stops the running turn.
+  CHAT_ACTION_INTERRUPT = 4;
+  // Answers the pending request `request_id` with `answer`.
+  CHAT_ACTION_ANSWER = 5;
+  // Drops the user message `item_id` and everything after it.
+  CHAT_ACTION_REWIND = 6;
+  // Applies `options` from the next message on.
+  CHAT_ACTION_SET_OPTIONS = 7;
+  // Answers with the page of items before `older_cursor`.
+  CHAT_ACTION_LOAD_OLDER = 8;
+  // Forks the conversation into a split and sends `text` there.
+  CHAT_ACTION_SIDE_FORK = 9;
+  // Writes the host's agent mode from `mode`. Names no pane.
+  CHAT_ACTION_SET_MODE = 10;
+  // Forks the conversation into a new chat through the end of the turn that
+  // holds `item_id`.
+  CHAT_ACTION_FORK = 11;
+  // Stops the background task `task_id`, one of `ChatState.background`.
+  CHAT_ACTION_STOP_TASK = 12;
+  // Answers with the slash commands and skills of the agent running in the
+  // terminal pane `pane_id`, as a chat lists them: `ChatResponse.commands`.
+  // For a terminal pane, not a chat; an empty list when the pane runs no agent
+  // whose commands the host can read.
+  CHAT_ACTION_TERMINAL_COMMANDS = 13;
+}
+
+enum ChatPermissionMode {
+  CHAT_PERMISSION_MODE_UNSPECIFIED = 0;
+  // The provider approves what it judges safe and asks about the rest.
+  CHAT_PERMISSION_MODE_AUTO = 1;
+  // No checks and no sandbox.
+  CHAT_PERMISSION_MODE_FULL = 2;
+}
+
+enum ChatSpeed {
+  CHAT_SPEED_UNSPECIFIED = 0;
+  CHAT_SPEED_STANDARD = 1;
+  CHAT_SPEED_FAST = 2;
+}
+
+enum ChatTurnState {
+  CHAT_TURN_STATE_UNSPECIFIED = 0;
+  CHAT_TURN_STATE_IDLE = 1;
+  CHAT_TURN_STATE_WORKING = 2;
+  // Stopped on `ChatState.pending` until it is answered.
+  CHAT_TURN_STATE_WAITING = 3;
+}
+
+// The host's link to the agent process behind the chat.
+enum ChatConnection {
+  CHAT_CONNECTION_UNSPECIFIED = 0;
+  CHAT_CONNECTION_CONNECTING = 1;
+  CHAT_CONNECTION_READY = 2;
+  // The agent exited.
+  CHAT_CONNECTION_ENDED = 3;
+  // `ChatState.failure` says why.
+  CHAT_CONNECTION_FAILED = 4;
+}
+
+enum ChatItemKind {
+  CHAT_ITEM_KIND_UNSPECIFIED = 0;
+  CHAT_ITEM_KIND_USER = 1;
+  CHAT_ITEM_KIND_ASSISTANT = 2;
+  CHAT_ITEM_KIND_REASONING = 3;
+  // `ChatItem.tool` is set.
+  CHAT_ITEM_KIND_TOOL = 4;
+  // A line from the host or the provider, such as "Interrupted".
+  CHAT_ITEM_KIND_NOTICE = 5;
+}
+
+enum ChatToolKind {
+  CHAT_TOOL_KIND_UNSPECIFIED = 0;
+  CHAT_TOOL_KIND_COMMAND = 1;
+  CHAT_TOOL_KIND_READ = 2;
+  CHAT_TOOL_KIND_EDIT = 3;
+  CHAT_TOOL_KIND_SEARCH = 4;
+  CHAT_TOOL_KIND_WEB = 5;
+  CHAT_TOOL_KIND_MCP = 6;
+  CHAT_TOOL_KIND_SUBAGENT = 7;
+  CHAT_TOOL_KIND_OTHER = 8;
+}
+
+enum ChatToolStatus {
+  CHAT_TOOL_STATUS_UNSPECIFIED = 0;
+  CHAT_TOOL_STATUS_RUNNING = 1;
+  CHAT_TOOL_STATUS_OK = 2;
+  CHAT_TOOL_STATUS_FAILED = 3;
+}
+
+enum ChatRequestKind {
+  CHAT_REQUEST_KIND_UNSPECIFIED = 0;
+  // Allow or deny one action. Answered with `ChatAnswer.allow`.
+  CHAT_REQUEST_KIND_PERMISSION = 1;
+  // One or more questions. Answered with `ChatAnswer.answers` or `skipped`.
+  CHAT_REQUEST_KIND_QUESTION = 2;
+}
+
+enum ChatCommandKind {
+  CHAT_COMMAND_KIND_UNSPECIFIED = 0;
+  // A slash command of the provider.
+  CHAT_COMMAND_KIND_COMMAND = 1;
+  // A skill installed for the agent.
+  CHAT_COMMAND_KIND_SKILL = 2;
+  // Handled by Muxflow instead of the provider: `/btw` and `/side`.
+  CHAT_COMMAND_KIND_MUXFLOW = 3;
+}
+
+enum ChatTaskKind {
+  CHAT_TASK_KIND_UNSPECIFIED = 0;
+  // A shell command.
+  CHAT_TASK_KIND_COMMAND = 1;
+  CHAT_TASK_KIND_SUBAGENT = 2;
+  CHAT_TASK_KIND_OTHER = 3;
+}
+
+// What the composer's pills select. In `ChatRequest.options` an empty string
+// or an unspecified enum keeps the current value.
+message ChatOptions {
+  // A `ChatModel.id`.
+  string model = 1;
+  // One of the selected model's `efforts`.
+  string effort = 2;
+  ChatPermissionMode permission = 3;
+  ChatSpeed speed = 4;
+}
+
+// One tool call, drawn as a single row.
+message ChatTool {
+  ChatToolKind kind = 1;
+  // The row's verb: "read", "run", "edit".
+  string title = 2;
+  // What it acted on: a path, a command line, a query.
+  string detail = 3;
+  ChatToolStatus status = 4;
+  // The row's short outcome, such as "14 passed".
+  string result_summary = 5;
+  // EDIT and READ: the file, as the provider named it.
+  string path = 6;
+  // EDIT: lines added and removed.
+  uint32 added = 7;
+  uint32 removed = 8;
+  // The start of the tool's output, at most 16 KiB.
+  string output_preview = 9;
+  // The output was longer than `output_preview`.
+  bool output_truncated = 10;
+  // SUBAGENT: the kind of agent, as the provider names it: "Explore".
+  string agent_type = 11;
+  // SUBAGENT: what it is doing now: "Running ls -la".
+  string activity = 12;
+  // SUBAGENT: the tool calls it has made and the tokens it has used.
+  uint32 tool_uses = 13;
+  uint64 tokens = 14;
+  // SUBAGENT: it runs in the background, apart from the turn.
+  bool background = 15;
+}
+
+// A file sent with a user message, already on the host.
+message ChatAttachment {
+  // Absolute, on the host. Empty on an item for an image the agent's record
+  // holds inline: there is no file to name.
+  string path = 1;
+  // The name to show.
+  string name = 2;
+  // Such as "image/png". Empty when not known.
+  string media_type = 3;
+  uint64 size_bytes = 4;
+}
+
+// Work the agent runs outside the turn, such as a background command.
+message ChatBackgroundTask {
+  // The provider's id for the task: STOP_TASK takes it.
+  string id = 1;
+  ChatTaskKind kind = 2;
+  string description = 3;
+  int64 started_at_unix_millis = 4;
+  // STOP_TASK accepts this task.
+  bool stoppable = 5;
+}
+
+// One entry of the timeline. An item is sent whole when it appears and again
+// whenever it changes other than by appended text.
+message ChatItem {
+  // Unique within the pane, and stable while the item changes.
+  string id = 1;
+  // Never changes for an item.
+  ChatItemKind kind = 2;
+  // Markdown for ASSISTANT; plain text otherwise. Empty for TOOL.
+  string text = 3;
+  // More `ChatItemDelta` text is coming.
+  bool streaming = 4;
+  ChatTool tool = 5;
+  int64 at_unix_millis = 6;
+  // USER only: REWIND accepts this item.
+  bool rewindable = 7;
+  // USER only: the files sent with the message.
+  repeated ChatAttachment attachments = 8;
+}
+
+message ChatOption {
+  string id = 1;
+  string label = 2;
+  string description = 3;
+}
+
+message ChatQuestion {
+  string id = 1;
+  // A few words naming the question.
+  string header = 2;
+  string prompt = 3;
+  repeated ChatOption options = 4;
+  // Several options may be chosen.
+  bool multi_select = 5;
+  // A typed answer is accepted beside the options.
+  bool allow_other = 6;
+}
+
+// What the agent is waiting on. At most one per chat.
+message ChatPendingRequest {
+  string request_id = 1;
+  ChatRequestKind kind = 2;
+  string title = 3;
+  // PERMISSION: the command or file the agent wants to act on.
+  string detail = 4;
+  // QUESTION only.
+  repeated ChatQuestion questions = 5;
+}
+
+message ChatQuestionAnswer {
+  string question_id = 1;
+  repeated string option_ids = 2;
+  // The typed answer, when the question allows one.
+  string other_text = 3;
+}
+
+message ChatAnswer {
+  // PERMISSION: true allows, false denies.
+  bool allow = 1;
+  // QUESTION: one entry per question answered.
+  repeated ChatQuestionAnswer answers = 2;
+  // QUESTION: the user declined to answer.
+  bool skipped = 3;
+}
+
+// One entry of the composer's slash list.
+message ChatCommand {
+  // Without the leading slash.
+  string name = 1;
+  string description = 2;
+  string argument_hint = 3;
+  ChatCommandKind kind = 4;
+}
+
+message ChatModel {
+  string id = 1;
+  string label = 2;
+  // The effort levels this model accepts, lowest first. Empty when it has none.
+  repeated string efforts = 3;
+  bool supports_fast = 4;
+}
+
+// What this chat's provider can do. A client hides the controls for the rest.
+message ChatCapabilities {
+  bool rewind = 1;
+  // SEND is accepted while a turn is working.
+  bool send_mid_turn = 2;
+  bool model = 3;
+  bool effort = 4;
+  bool speed = 5;
+  bool permission = 6;
+  bool fork = 7;
+  bool questions = 8;
+  // SEND takes `attachments`. A client offers no way to attach without it.
+  bool attachments = 9;
+}
+
+message ChatCatalog {
+  ChatCapabilities capabilities = 1;
+  repeated ChatModel models = 2;
+  repeated ChatCommand commands = 3;
+}
+
+message ChatUsage {
+  uint64 used_tokens = 1;
+  // The model's context window. Zero when the provider has not said.
+  uint64 window_tokens = 2;
+}
+
+message ChatState {
+  string pane_id = 1;
+  string adapter_id = 2;
+  string native_session_id = 3;
+  ChatTurnState turn = 4;
+  ChatConnection connection = 5;
+  // Why `connection` is FAILED, for display.
+  string failure = 6;
+  ChatOptions options = 7;
+  ChatUsage usage = 8;
+  // Set only while `turn` is WAITING.
+  ChatPendingRequest pending = 9;
+  // False when messages older than the oldest the host can serve existed and
+  // are not available.
+  bool history_complete = 10;
+  // What the agent runs outside the turn, whatever `turn` says.
+  repeated ChatBackgroundTask background = 11;
+  // The agent is compacting the conversation's context.
+  bool compacting = 12;
+  // How many turns have ended since the host began following the chat. A
+  // turn stopped while a message waits behind it ends with `turn` still
+  // WORKING, for that message's own turn; this still counts it.
+  uint64 turns_ended = 13;
+}
+
+// Everything a client needs to draw a chat it has just opened. It replaces
+// whatever the client held for the pane.
+message ChatSnapshot {
+  // The revision of the last change included: the same as its event's.
+  uint64 revision = 1;
+  ChatState state = 2;
+  ChatCatalog catalog = 3;
+  // The newest items, oldest first, at most 200.
+  repeated ChatItem items = 4;
+  // Passed to LOAD_OLDER for the items before `items`. Empty when there are
+  // none.
+  string older_cursor = 5;
+}
+
+message ChatRequest {
+  ChatAction action = 1;
+  // Every action but SET_MODE.
+  string pane_id = 2;
+  // The tmux server the caller saw the pane on. Pane ids are local to a
+  // server, so a request quoting another server is refused.
+  string expected_server_identity = 3;
+  // SEND and SIDE_FORK.
+  string text = 4;
+  // SEND: chosen by the caller, at random, and used as the id of the USER
+  // item, so the caller can match the item to what it sent. One already in
+  // the timeline is refused with `chat_message_duplicate`. Empty lets the host
+  // choose.
+  string client_message_id = 5;
+  // ANSWER: `ChatPendingRequest.request_id`.
+  string request_id = 6;
+  ChatAnswer answer = 7;
+  // REWIND: a `rewindable` USER item. FORK: any item of the turn to fork
+  // through.
+  string item_id = 8;
+  // LOAD_OLDER: the `older_cursor` of the snapshot or the previous page.
+  string older_cursor = 9;
+  // SET_OPTIONS.
+  ChatOptions options = 10;
+  // SET_MODE.
+  ChatAgentMode mode = 11;
+  // SET_MODE: write only when this host has no saved settings yet.
+  // The response always returns the effective host mode.
+  bool initialize_if_unset = 12;
+  // SEND: files on the host to send with `text`.
+  repeated ChatAttachment attachments = 13;
+  // STOP_TASK: a `ChatBackgroundTask.id`.
+  string task_id = 14;
+}
+
+message ChatResponse {
+  // LOAD_OLDER: the page before the cursor, oldest first, at most 200 items.
+  repeated ChatItem older = 1;
+  // LOAD_OLDER: the cursor for the page before `older`. Empty at the start.
+  string older_cursor = 2;
+  // SIDE_FORK and FORK: the pane the fork opened in.
+  string forked_pane_id = 3;
+  // SET_MODE: the mode now stored.
+  ChatAgentMode mode = 4;
+  // LOAD_OLDER: the pane's revision when `older` was read. The page arrives
+  // apart from the pane's events, so a client takes three cares with it. It
+  // drops a page that answers a request made before its current snapshot. It
+  // keeps a page aside until its own revision for the pane has reached this
+  // one, since the events up to here are already in the page. And it asks for
+  // the page again if, past this revision, it ignored an `updated` or a
+  // `delta` for an item it did not hold.
+  uint64 revision = 5;
+  // TERMINAL_COMMANDS: the agent's commands and skills, without Muxflow's own.
+  repeated ChatCommand commands = 6;
+}
+
+// Text appended to a `streaming` item.
+message ChatItemDelta {
+  string item_id = 1;
+  string text_append = 2;
+}
+
+// A rewind: drop every item after `after_item_id`. Empty drops them all,
+// which is what rewinding the first message does. A client that does not hold
+// `after_item_id`, because it lies before the items it has loaded, sends OPEN
+// again.
+message ChatTruncate {
+  string after_item_id = 1;
+}
+
+// One change to one chat, sent only to the connections that opened it.
+//
+// A client keeps one revision per open pane. A `snapshot` sets it. Any other
+// event applies only when its revision is one more than the client's; one at
+// or below it is ignored, and a gap means a change was lost, so the client
+// sends OPEN again. Events for a pane the client holds no snapshot of are
+// ignored. A client also sends OPEN again for every chat it has open, or has
+// asked to open, after a RESYNC_REQUIRED event or a reconnect, where chat
+// events may have been dropped with nothing later to show it.
+message ChatEvent {
+  string pane_id = 1;
+  // One more than the pane's previous change. A `snapshot` takes no revision
+  // of its own: it carries the one it is current to.
+  uint64 revision = 2;
+  oneof change {
+    // A new item, which goes after every other.
+    ChatItem item = 3;
+    ChatItemDelta delta = 4;
+    ChatState state = 5;
+    ChatCatalog catalog = 6;
+    ChatTruncate truncate = 7;
+    // The answer to OPEN.
+    ChatSnapshot snapshot = 8;
+    // The new whole of an item already in the timeline, which keeps its
+    // place. A client that does not hold the item, because it lies before the
+    // items it has loaded, ignores it.
+    ChatItem updated = 9;
+  }
+}

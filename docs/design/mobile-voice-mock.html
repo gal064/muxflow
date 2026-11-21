@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muxflow phone: one mic for dictation and voice mode</title>
+<style>
+:root{--pg:#f6f6f7;--card:#fff;--ink:#1c1c20;--dim:#5d5d68;--line:#dcdce1;--acc:#2f6fe0;--bad:#b91c1c;--good:#15803d;--warn:#b45309;--tag:#ececf0}
+@media (prefers-color-scheme:dark){:root{--pg:#17191d;--card:#1f2228;--ink:#e8e8ea;--dim:#a0a4ad;--line:#343842;--acc:#7aa6da;--bad:#e79596;--good:#5fd27a;--warn:#f0c674;--tag:#2a2e36}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--pg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:0 0 96px}
+main{max-width:1180px;margin:0 auto;padding:28px 20px}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:20px;margin:0 0 6px}
+p{margin:0 0 10px;max-width:78ch}
+code{font:12.5px ui-monospace,"JetBrains Mono",Menlo,monospace;background:var(--tag);padding:1px 5px;border-radius:4px}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;margin:22px 0}
+.tag{display:inline-block;font-size:11px;font-weight:600;border-radius:4px;padding:1px 6px;margin-left:6px;background:var(--tag);color:var(--dim);white-space:nowrap}
+.tag.y{color:var(--good)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;vertical-align:top;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)}
+ul.plain{margin:0 0 10px;padding-left:20px;max-width:80ch}
+ul.plain li{margin:3px 0}
+.stage{display:flex;flex-wrap:wrap;gap:22px;margin:16px 0 4px;align-items:flex-start}
+figure{margin:0;width:300px}
+figcaption{font-size:13px;color:var(--dim);margin-top:8px;line-height:1.4}
+figcaption b{color:var(--ink)}
+.lab{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border-radius:4px;padding:1px 7px;margin-bottom:6px}
+.lab.now{background:rgba(204,101,102,.18);color:var(--bad)}
+.lab.new{background:rgba(40,200,64,.16);color:var(--good)}
+
+/* ---- the phone, in the app's own colours (packages/client-core/src/palette.ts) ---- */
+.phone{--bg:#282c34;--rs:#2c313a;--hl:#313640;--bd:#3e4451;--k:#c4c8c6;--ks:#fff;--dm:#a4abb6;--ft:#7f8794;--ac:#7aa6da;--ai:#282c34;--wash:rgba(122,166,218,.12);--dg:#cc6566;--dgi:#e79596;--dgw:rgba(204,101,102,.13);--ok:#28c840;--wk:#f0c674;
+  width:300px;height:620px;border-radius:26px;border:1px solid var(--bd);background:var(--bg);color:var(--k);overflow:hidden;display:flex;flex-direction:column;position:relative;font:12.5px/1.45 Roboto,system-ui,sans-serif}
+.phone svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.sb{height:22px;flex:none;display:flex;justify-content:space-between;align-items:center;padding:0 16px;font-size:10.5px;color:var(--ks)}
+.hd{height:46px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid var(--hl)}
+.hd .ib{width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--dm);border-radius:16px}
+.hd .ib.on{background:var(--wash);color:var(--ac)}
+.hd .ib:first-child{color:var(--ks)}
+.hd .tt{flex:1;min-width:0}
+.hd .t1{color:var(--ks);font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hd .t2{color:var(--dm);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+.dot{width:7px;height:7px;border-radius:4px;background:var(--ft);flex:none;display:inline-block}.dot.w{background:var(--wk)}.dot.r{background:var(--dg)}
+.tl{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:9px;padding:10px;position:relative}
+.u{align-self:flex-end;max-width:86%;background:var(--rs);border:1px solid var(--hl);border-radius:11px 11px 3px 11px;padding:6px 10px;color:var(--ks)}
+.a{color:var(--k)}
+.a code{font:11.5px ui-monospace,Menlo,monospace;background:var(--rs);color:var(--ks);padding:0 3px;border-radius:3px}
+.steps{display:flex;align-items:center;gap:6px;color:var(--dm);font-size:12px}
+.steps svg{width:13px;height:13px}
+.status{flex:none;display:flex;align-items:center;gap:8px;color:var(--dm);font-size:12px;padding:6px 13px}
+.status .what{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ft)}
+.spin{width:12px;height:12px;border-radius:6px;border:2px solid var(--bd);border-top-color:var(--wk);flex:none}
+.cmp{flex:none;margin:0 9px 10px;border:1px solid var(--bd);border-radius:15px;overflow:hidden}
+.cmp .rw{display:flex;align-items:flex-end;gap:7px;padding:6px 7px}
+.cmp .in{flex:1;color:var(--ft);padding:6px 0;min-width:0}
+.rb{width:30px;height:30px;border-radius:15px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--dm);flex:none}
+.rb.hot{border-color:var(--ac);color:var(--ac);background:var(--wash)}
+.sq{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--ac);color:var(--ai)}
+.sq.off{background:var(--rs);color:var(--ft)}
+
+/* reply player, the conversation's last row in voice mode */
+.rp{border:1px solid var(--hl);border-radius:8px;display:flex;align-items:center;gap:8px;padding:6px 8px}
+.rp.new{border-color:var(--ac);background:var(--wash)}
+.pl{width:28px;height:28px;border-radius:14px;background:var(--ac);color:var(--ai);display:flex;align-items:center;justify-content:center;flex:none}
+.pl svg{width:13px;height:13px;fill:currentColor}
+.trk{flex:1;height:3px;border-radius:2px;background:var(--bd);position:relative}.trk i{position:absolute;left:0;top:0;height:3px;border-radius:2px;background:var(--ac)}
+.rp small{color:var(--ft);font-size:10.5px;font-variant-numeric:tabular-nums}
+.rp b{color:var(--ks);font-weight:500;font-size:11.5px}
+.spd{border:1px solid var(--bd);border-radius:6px;padding:2px 7px;font-size:11px;font-weight:600;color:var(--k)}
+
+/* the old slim bar */
+.obar{flex:none;margin:0 9px 10px;border:1px solid var(--ac);background:var(--wash);border-radius:13px;display:flex;align-items:center;gap:10px;padding:7px 10px}
+.obar .d{width:38px;height:38px;border-radius:19px;background:var(--ac);color:var(--ai);display:flex;align-items:center;justify-content:center;flex:none}
+.obar span{font-size:11.5px;line-height:1.35}
+.ostop{align-self:flex-end;border:1px solid var(--dg);color:var(--dgi);border-radius:999px;padding:4px 14px;margin:0 10px 6px;font-size:11.5px;font-weight:600;flex:none}
+
+/* the voice pane */
+.vp{flex:none;border-top:1px solid var(--hl)}
+.vc{display:flex;align-items:center;gap:7px;padding:7px 10px}
+.vc .cp{color:var(--ft);font-size:11px}
+.pb{height:30px;border-radius:8px;background:var(--rs);display:flex;align-items:center;justify-content:center;gap:6px;padding:0 11px;font-weight:600;font-size:11.5px;color:var(--k);flex:none}
+.pb.on{background:var(--ac);color:var(--ai)}
+.pb.stop{background:transparent;border:1px solid var(--dg);color:var(--dgi)}
+.pb.ic{padding:0;width:34px}
+.vc .sp{flex:1}
+.vc.dim{opacity:.35}
+.hold{height:200px;background:var(--rs);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;position:relative}
+.hold.rec{background:var(--wash)}
+.disc{width:72px;height:72px;border-radius:36px;background:var(--ac);color:var(--ai);display:flex;align-items:center;justify-content:center;position:relative;margin-bottom:6px}
+.disc svg{width:32px;height:32px}
+.disc.rec{background:var(--dg);color:var(--ks);box-shadow:0 0 0 12px rgba(204,101,102,.22)}
+.disc.left{transform:translateX(-34px)}
+.h1{color:var(--ks);font-weight:600;font-size:13px}
+.h2{color:var(--ft);font-size:10.5px}
+.tg{position:absolute;top:38px;width:58px;display:flex;flex-direction:column;align-items:center;gap:5px;font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.tg i{width:44px;height:44px;border-radius:22px;border:1px solid;display:flex;align-items:center;justify-content:center;background:var(--bg)}
+.tg i svg{width:20px;height:20px}
+.tg.l{left:12px;color:var(--ac)}.tg.l i{border-color:var(--ac)}
+.tg.r{right:12px;color:var(--dgi)}.tg.r i{border-color:var(--dg)}
+.tg.l.act i{background:var(--ac);color:var(--ai)}
+
+/* dictation, in the reply field's place */
+.dict{flex:none;margin:0 9px 10px;border:1px solid var(--dg);background:var(--dgw);border-radius:15px;height:44px;display:flex;align-items:center;gap:7px;padding:0 7px;position:relative}
+.dict.lk{border-color:var(--bd);background:var(--bg)}
+.dt{width:30px;height:30px;border-radius:15px;border:1px solid;display:flex;align-items:center;justify-content:center;flex:none}
+.dt svg{width:14px;height:14px}
+.dt.l{border-color:var(--ac);color:var(--ac)}.dt.r{border-color:var(--dg);color:var(--dgi)}
+.dict .mid{flex:1;min-width:0;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dm);white-space:nowrap}
+.dict .t{color:var(--ks);font-variant-numeric:tabular-nums;font-weight:600}
+.wave{display:flex;align-items:center;gap:2px;height:16px}.wave i{display:block;width:2px;border-radius:1px;background:var(--dgi)}
+.dict.lk .wave i{background:var(--dm)}
+.fing{position:absolute;right:46px;top:-12px;width:54px;height:54px;border-radius:27px;background:var(--dg);color:var(--ks);display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 9px rgba(204,101,102,.22)}
+.fing svg{width:22px;height:22px}
+.tip{position:absolute;right:30px;bottom:60px;background:var(--rs);border:1px solid var(--ac);border-radius:9px;padding:6px 10px;font-size:11px;color:var(--ks);line-height:1.35;box-shadow:0 3px 10px rgba(0,0,0,.35)}
+.tip small{display:block;color:var(--dm);font-size:10.5px}
+.tip::after{content:"";position:absolute;right:46px;bottom:-6px;width:10px;height:10px;background:var(--rs);border-right:1px solid var(--ac);border-bottom:1px solid var(--ac);transform:rotate(45deg)}
+.card{border:1px solid var(--bd);border-radius:10px;background:var(--bg);margin:0 9px 8px;padding:8px 10px;flex:none;font-size:11.5px}
+.card b{color:var(--ks)}
+
+/* ---- answers ---- */
+.q{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0;background:var(--pg)}
+.qt{display:flex;gap:10px;align-items:baseline;margin-bottom:8px}
+.qid{font-weight:700;color:var(--acc);flex:none}.qq{flex:1;font-weight:600}
+.q label{display:flex;gap:9px;padding:5px 0;cursor:pointer;align-items:flex-start}
+.q label input{margin-top:4px}
+.q .od{display:block;color:var(--dim);font-size:13px}
+textarea{width:100%;margin-top:6px;border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--ink);font:13px/1.4 system-ui;padding:6px 8px;resize:vertical}
+.abar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 20px;display:flex;gap:10px;align-items:center;z-index:5}
+.abar .pr{flex:1;font-size:13px;color:var(--dim)}
+button{font:inherit;border:1px solid var(--acc);background:var(--acc);color:#fff;font-weight:600;border-radius:8px;padding:7px 13px;cursor:pointer}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-ear" viewBox="0 0 24 24"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.5v.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-kbd" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 4h4v16H7zM13 4h4v16h-4z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7zM14 3v5h5"/></symbol>
+</svg>
+
+<main>
+<h1>Phone chat: one mic for dictation and voice mode</h1>
+<p>Today a chat has two buttons that do the same thing. The headphones in the header and the mic in the reply field both turn voice mode on. Voice mode then swaps the reply field for a slim bar. That bar has no Lock or Discard targets, no Autoplay switch, and puts the speed on the reply instead of with the other controls.</p>
+<p>Proposed: the headphones go, and the mic in the reply field does two things.</p>
+<ul class="plain">
+  <li><b>Hold</b> to dictate one message. Release and it is transcribed and sent, without entering voice mode.</li>
+  <li><b>Tap</b> to open voice mode, a conversation where replies are read aloud. It gets the Voice screen's talk pane with the left and right swipe targets, plus Speed, Autoplay and a way back to the keyboard.</li>
+</ul>
+<p>The phone screens are drawings in the app's colours. The ones marked Now are drawn from the code. Nothing is implemented yet. Answer the questions at the bottom, then press <b>Copy answers</b> and paste the result to Claude.</p>
+
+<section>
+  <h2>Now</h2>
+  <div class="stage">
+    <figure><span class="lab now">Now</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib" style="outline:2px dashed var(--dg)"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="steps"><svg><use href="#i-file"/></svg>Edited 2 files · Ran 1 command</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="rb"><svg><use href="#i-plus"/></svg></span><span class="in">Reply</span><span class="rb" style="outline:2px dashed var(--dg)"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Two ways into one mode.</b> The headphones and the mic both turn voice mode on.</figcaption></figure>
+
+    <figure><span class="lab now">Now</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot w"></i>Working · Opus 5.5 · High</div></div><span class="ib on"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+          <div class="rp"><span class="pl"><svg><use href="#i-play"/></svg></span><span class="trk"><i style="width:0"></i></span><small>0:41</small><span class="spd">1.5×</span></div>
+          <div class="u">Run the whole test suite</div>
+        </div>
+        <div class="ostop">Stop</div>
+        <div class="obar"><span class="d"><svg><use href="#i-mic"/></svg></span><span>Hold to talk. Swipe left to lock, right to cancel.</span></div>
+      </div>
+      <figcaption><b>Voice mode.</b> A 64 dp bar with the gesture written out but nothing to aim for. Every reply plays on its own, with no switch to stop that. Speed sits on the reply row.</figcaption></figure>
+  </div>
+</section>
+
+<section>
+  <h2>Hold the mic: dictate one message</h2>
+  <p>This works outside voice mode. Nothing is read back, and the chat stays as it is.</p>
+  <div class="stage">
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="steps"><svg><use href="#i-file"/></svg>Edited 2 files · Ran 1 command</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+        </div>
+        <div class="tip">Hold to dictate a message<small>Tap for voice mode</small></div>
+        <div class="cmp"><div class="rw"><span class="rb"><svg><use href="#i-plus"/></svg></span><span class="in">Reply</span><span class="rb hot"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>One mic.</b> The headphones are gone from the header. The tip shows until the mic has been held once.</figcaption></figure>
+
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="steps"><svg><use href="#i-file"/></svg>Edited 2 files · Ran 1 command</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+        </div>
+        <div class="dict">
+          <span class="dt l"><svg><use href="#i-lock"/></svg></span>
+          <span class="mid"><i class="dot r"></i><span class="t">0:07</span>‹ Lock · Discard ›</span>
+          <span class="dt r" style="margin-left:46px"><svg><use href="#i-trash"/></svg></span>
+          <span class="fing"><svg><use href="#i-mic"/></svg></span>
+        </div>
+      </div>
+      <figcaption><b>Holding.</b> The reply field becomes the recording strip, with Lock at the left end and Discard at the right, the same as in voice mode. The red disc follows the thumb. Let go to send. A thumb that slides off the mic locks the take instead.</figcaption></figure>
+
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="steps"><svg><use href="#i-file"/></svg>Edited 2 files · Ran 1 command</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+        </div>
+        <div class="dict lk">
+          <span class="dt r"><svg><use href="#i-trash"/></svg></span>
+          <span class="mid"><i class="dot r"></i><span class="t">0:14</span>Locked</span>
+          <span class="sq"><svg><use href="#i-up"/></svg></span>
+        </div>
+      </div>
+      <figcaption><b>Locked.</b> Keep talking with your hands free. Send transcribes it and sends it; the bin drops it. While it is being transcribed the strip reads "Transcribing…", then your message appears in the chat.</figcaption></figure>
+  </div>
+</section>
+
+<section>
+  <h2>Tap the mic: voice mode</h2>
+  <p>This is the Voice screen's talk pane, in the reply field's place. Replies are read aloud.</p>
+  <div class="stage">
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+          <div class="rp"><span class="pl"><svg><use href="#i-pause"/></svg></span><span class="trk"><i style="width:38%"></i></span><small>0:16 / 0:41</small></div>
+        </div>
+        <div class="vp">
+          <div class="vc"><span class="cp">Speed</span><span class="pb">1.5×</span><span class="pb on">Autoplay On</span><span class="sp"></span><span class="pb ic" title="Keyboard"><svg><use href="#i-kbd"/></svg></span></div>
+          <div class="hold"><span class="disc"><svg><use href="#i-mic"/></svg></span><span class="h1">Hold anywhere here to talk</span><span class="h2">Swipe left to lock · right to discard</span></div>
+        </div>
+      </div>
+      <figcaption><b>Voice mode.</b> The pane takes about a third of the screen, so a thumb finds it without looking. Speed and Autoplay sit above it and are the same settings as on the Voice screen. The keyboard button goes back to typing.</figcaption></figure>
+
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why do long links wrap in the middle of the scheme?</div>
+          <div class="a">The terminal broke rows on any character. <code>wrap_url</code> now keeps the scheme with the host, and there is a test for it.</div>
+          <div class="rp"><span class="pl"><svg><use href="#i-play"/></svg></span><span class="trk"><i style="width:100%"></i></span><small>0:41</small></div>
+        </div>
+        <div class="vp">
+          <div class="vc dim"><span class="cp">Speed</span><span class="pb">1.5×</span><span class="pb on">Autoplay On</span><span class="sp"></span><span class="pb ic"><svg><use href="#i-kbd"/></svg></span></div>
+          <div class="hold rec">
+            <span class="tg l act"><i><svg><use href="#i-lock"/></svg></i>Lock</span>
+            <span class="tg r"><i><svg><use href="#i-trash"/></svg></i>Discard</span>
+            <span class="disc rec left"><svg><use href="#i-mic"/></svg></span><span class="h1">Listening… 0:05</span><span class="h2">Let go to send</span>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Talking.</b> The Lock and Discard targets appear at each side, and the disc slides toward the one you are swiping to. Locked, a tap anywhere on the pane sends, as on the Voice screen.</figcaption></figure>
+
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span>5G ▮▮▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot w"></i>Working · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Does the suite pass now?</div>
+          <div class="a">Not yet: two snapshot tests still expect the old wrapping. I'm updating them.</div>
+          <div class="rp new"><span class="pl"><svg><use href="#i-play"/></svg></span><b>New reply</b><span class="trk"><i style="width:0"></i></span><small>0:12</small></div>
+        </div>
+        <div class="status"><span class="spin"></span><span>Working 0:18</span><span class="what">Running pnpm test</span></div>
+        <div class="vp">
+          <div class="vc"><span class="cp">Speed</span><span class="pb">1×</span><span class="pb">Autoplay Off</span><span class="sp"></span><span class="pb stop">Stop</span><span class="pb ic"><svg><use href="#i-kbd"/></svg></span></div>
+          <div class="hold"><span class="disc"><svg><use href="#i-mic"/></svg></span><span class="h1">Hold anywhere here to talk</span><span class="h2">Swipe left to lock · right to discard</span></div>
+        </div>
+      </div>
+      <figcaption><b>Autoplay off, agent working.</b> A new reply waits under a highlighted Play. Stop joins the controls row while the agent works, away from the pane so a thumb on it cannot hit it.</figcaption></figure>
+  </div>
+</section>
+
+<section>
+  <h2>How it behaves</h2>
+  <table>
+    <tr><th></th><th>Outside voice mode</th><th>In voice mode</th></tr>
+    <tr><td>Tap the mic</td><td>Opens voice mode</td><td>There is no mic; the pane replaces the reply field</td></tr>
+    <tr><td>Hold</td><td>The mic: dictate, let go to send</td><td>Anywhere on the pane: talk, let go to send</td></tr>
+    <tr><td>Swipe left / right while holding</td><td colspan="2">Lock / Discard, the same everywhere, the Voice screen included</td></tr>
+    <tr><td>Replies read aloud</td><td>No</td><td>Yes with Autoplay on, otherwise Play</td></tr>
+    <tr><td>Leave</td><td></td><td>The keyboard button. Back leaves the chat as it does now.</td></tr>
+  </table>
+  <ul class="plain" style="margin-top:12px">
+    <li><b>Tap and hold apart.</b> A press shorter than a quarter of a second is a tap and opens voice mode. Held longer, recording starts, and a haptic tick says it is listening. The microphone is readied when the finger goes down, never just because a chat opened: readying it takes the audio session (other apps duck, a headset switches to its call profile) and asks for the permission the first time.</li>
+    <li><b>The keyboard open.</b> Holding the mic leaves the keyboard up, and the strip takes the field's place. Tapping the mic closes the keyboard and opens voice mode.</li>
+    <li><b>Voice not set up on the host.</b> Tapping the mic opens voice mode with the "Set up voice" card, and the text field stays, as now. Its mic shows that voice mode is on, and a tap on it turns voice mode off. Holding records nothing and says "Voice isn't set up on this host" in a toast.</li>
+    <li><b>A question or permission card waiting, or an agent that takes no message while it works.</b> Holding records nothing and says why. In voice mode the card stays above the pane and is answered by tapping.</li>
+    <li><b>The Agents tab's Talk</b> still opens a chat straight into voice mode.</li>
+    <li><b>The terminal Voice screen</b> keeps its layout. Its Bigger/Smaller switch does not come to the chat, because the pane is already a third of the screen.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What changes in the code</h2>
+  <ul class="plain">
+    <li><code>ChatHeader</code>: the headphones button goes.</li>
+    <li><code>Composer</code>: a tap on the mic turns voice mode on, and a hold drives the chat's <code>VoiceController</code>, which already sends a transcript with <code>chatClient.send</code>. The recording strip is new.</li>
+    <li>Voice mode uses the talk pane: the Voice screen's controls row (Speed, Autoplay) becomes a shared component, and the <code>MicButton</code> pane variant moves in. The <code>bar</code> variant and <code>ChatVoiceBar</code> are deleted, and the reply row loses its speed button.</li>
+    <li><code>useChatVoice</code>: replies are read aloud only in voice mode, and the chat follows the Autoplay setting instead of always playing.</li>
+    <li>The host and the protocol do not change.</li>
+  </ul>
+</section>
+
+<section id="answers">
+  <h2>Questions</h2>
+  <div id="qs"></div>
+  <textarea id="notes" rows="3" placeholder="Anything else"></textarea>
+</section>
+</main>
+
+<div class="abar"><span class="pr" id="pr"></span><button id="copy">Copy answers</button></div>
+
+<script>
+(function(){
+  var KEY='muxflow-mobile-voice-mock-v1';
+  /* id, question, options [value, label, detail]. The first option is the recommended one. */
+  var QS=[
+    ['V1','Letting go of a dictation',[['send','Transcribe and send it straight away','What you described: quick and hands-free.'],['field','Put the text in the field to check, then Send','One more tap, but a misheard word never reaches the agent.']]],
+    ['V2','Dictating with text or files already in the field',[['together','The transcript is added after the text and all of it is sent, files included'],['field','The transcript goes into the field and nothing is sent','Half-typed text is never sent by accident.']]],
+    ['V3','Swipe directions on the reply field\'s mic',[['same','Left to lock, right to discard, as in voice mode','The same everywhere. The mic sits about 75 dp from the right edge, enough room for the 64 dp swipe.'],['chat-apps','Up to lock, left to discard, as WhatsApp and Telegram do','Familiar, but the opposite of voice mode.']]],
+    ['V4','Speed and Autoplay',[['shared','One setting each, shared with the terminal Voice screen'],['per-chat','Separate for each chat']]]
+  ];
+  var state={answers:{},notes:''};
+  try{var s=JSON.parse(localStorage.getItem(KEY)||'null');if(s&&s.answers)state=s}catch(e){}
+  function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+  function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+  var box=document.getElementById('qs');
+  QS.forEach(function(q){
+    var d=el('div','q');var qt=el('div','qt');qt.appendChild(el('span','qid',q[0]));qt.appendChild(el('span','qq',q[1]));d.appendChild(qt);
+    q[2].concat([['other','Something else']]).forEach(function(o,i){
+      var lab=el('label');var inp=el('input');inp.type='radio';inp.name=q[0];inp.checked=state.answers[q[0]]===o[0];
+      inp.addEventListener('change',function(){state.answers[q[0]]=o[0];save();refresh()});
+      var t=el('span');t.appendChild(el('span',null,o[1]));if(i===0)t.appendChild(el('span','tag y','Recommended'));if(o[2])t.appendChild(el('span','od',o[2]));
+      lab.appendChild(inp);lab.appendChild(t);d.appendChild(lab);
+    });
+    box.appendChild(d);
+  });
+  var notes=document.getElementById('notes');notes.value=state.notes||'';
+  notes.addEventListener('input',function(){state.notes=notes.value;save()});
+  function refresh(){var n=QS.filter(function(q){return state.answers[q[0]]}).length;document.getElementById('pr').textContent=n+' of '+QS.length+' answered'}
+  refresh();
+  document.getElementById('copy').addEventListener('click',function(){
+    var lines=['Voice mock answers:'];
+    QS.forEach(function(q){var a=state.answers[q[0]];var o=q[2].filter(function(x){return x[0]===a})[0];lines.push(q[0]+' '+q[1]+': '+(o?o[1]:a==='other'?'Something else':'(not answered)'))});
+    if(state.notes)lines.push('Notes: '+state.notes);
+    var txt=lines.join('\n');
+    (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(function(){document.getElementById('copy').textContent='Copied'},function(){prompt('Copy:',txt)});
+  });
+})();
+</script>
+</body>
+</html>

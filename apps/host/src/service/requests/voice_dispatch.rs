@@ -130,7 +130,7 @@ async fn dispatch(
             } else {
                 if request.expected_server_identity != active_server_identity {
                     return Err(VoiceError::invalid(
-                        "tmux server identity changed; reopen Voice",
+                        "tmux server identity changed; turn voice mode on again",
                     ));
                 }
                 service.register_session(

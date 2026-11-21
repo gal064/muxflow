@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::connection_ui::{backend::TerminalBackend, bridge_events::ChannelSink};
 
 use super::model::{
-    self, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope, Mutation, StatusSnapshot,
-    path_bytes, target_name,
+    self, BranchSummary, Branches, CommandResult, DeferredBodies, Diff, DiffRequest, GitScope,
+    Mutation, StatusSnapshot, SummaryBase, path_bytes, target_name,
 };
 
 /// How Git reaches a host's helper.
@@ -89,6 +89,8 @@ fn command(scope: &GitScope, operation: &str) -> GitCommand {
         confirmation_token: String::new(),
         commit_message: String::new(),
         watch_id: String::new(),
+        branch: String::new(),
+        summary_base: String::new(),
     }
 }
 
@@ -169,12 +171,15 @@ pub fn unwatch(
 }
 
 /// One round trip: the diff and the authoritative status it was read against.
-/// Bodies the host withheld from the control lane are then read over the bulk
-/// lane, where they cannot delay a keystroke.
+/// With `bodies`, the sides the host withheld from the control lane are then
+/// read over the bulk lane, where they cannot delay a keystroke. The hunks need
+/// only the patch, so only the whole file asks for them, or a diff whose patch
+/// was too large to send, which can only be shown whole.
 pub async fn diff(
     transport: Transport,
     scope: GitScope,
     request: DiffRequest,
+    bodies: bool,
 ) -> Result<(Diff, StatusSnapshot), String> {
     let wire = GitCommand {
         repository_id: request.repository_id.clone(),
@@ -189,10 +194,65 @@ pub async fn diff(
     };
     let answer = read(&transport, &scope, wire).await?;
     let (mut diff, status) = model::response_diff(model::response(answer)?, &request)?;
-    if diff.old_ref.is_some() || diff.new_ref.is_some() {
+    // No hunk to draw (an empty patch, a mode change, a pure rename) draws the
+    // whole file, which needs the sides.
+    let no_hunks = !diff
+        .patch
+        .split(|&byte| byte == b'\n')
+        .any(|line| line.starts_with(b"@@ "));
+    if (bodies || no_hunks) && (diff.old_ref.is_some() || diff.new_ref.is_some()) {
         read_bodies(&transport, &scope, &mut diff).await?;
     }
     Ok((diff, status))
+}
+
+/// What the working tree changes against `base`.
+pub async fn branch_summary(
+    transport: Transport,
+    scope: GitScope,
+    repository_id: String,
+    base: SummaryBase,
+) -> Result<BranchSummary, String> {
+    let wire = GitCommand {
+        repository_id,
+        summary_base: base.wire().to_owned(),
+        ..command(&scope, "branchSummary")
+    };
+    let answer = read(&transport, &scope, wire).await?;
+    model::response_branch_summary(model::response(answer)?)
+}
+
+/// The repository's local branches.
+pub async fn branches(
+    transport: Transport,
+    scope: GitScope,
+    repository_id: String,
+) -> Result<Branches, String> {
+    let wire = GitCommand {
+        repository_id,
+        ..command(&scope, "branches")
+    };
+    let answer = read(&transport, &scope, wire).await?;
+    model::response_branches(model::response(answer)?)
+}
+
+/// Switches to the local branch `branch`. Sent exactly once, like a commit; a
+/// switch Git refuses comes back not applied, with Git's words.
+pub async fn checkout(
+    transport: Transport,
+    scope: GitScope,
+    repository_id: String,
+    expected_status_generation: u64,
+    branch: String,
+) -> Result<CommandResult, String> {
+    let wire = GitCommand {
+        repository_id,
+        expected_status_generation: expected_status_generation.to_string(),
+        branch,
+        ..command(&scope, "checkout")
+    };
+    let answer = transport.request(scope.client_id.clone(), wire).await?;
+    model::response_command(model::response(answer)?)
 }
 
 /// Both withheld sides over one bulk read; a failure on either side stops the

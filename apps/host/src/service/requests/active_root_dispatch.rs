@@ -445,6 +445,7 @@ mod terminal_file_tests {
             pane_pid: 1,
             start_command: "zsh".into(),
             title: String::new(),
+            chat_adapter_id: String::new(),
         };
         let request = v1::FileServiceRequest {
             pane_id: "%1".into(),

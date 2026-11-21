@@ -33,17 +33,17 @@ describe("parsePersistedPrefs", () => {
     ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
-    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13 });
+    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13, chatMicTipDone: false });
   });
 
   it.each<[string, number, boolean]>([
-    ['{"voicePlaybackRate":1.5,"voiceBigPane":true}', 1.5, true],
+    ['{"voicePlaybackRate":1.5,"voiceKeepAwake":true}', 1.5, true],
     ['{"voicePlaybackRate":2}', 2, false],
-    // Unknown speeds and non-boolean flags fall back; a persisted value never disables the screen.
-    ['{"voicePlaybackRate":3,"voiceBigPane":"yes"}', 1, false],
-    ['{"voicePlaybackRate":"1.5","voiceBigPane":1}', 1, false],
-  ])("voice fields %j → %s× big=%s", (raw, rate, big) => {
-    expect(parsePersistedPrefs(raw)).toMatchObject({ voicePlaybackRate: rate, voiceAutoPlay: true, voiceBigPane: big });
+    // Unknown speeds and non-boolean flags fall back.
+    ['{"voicePlaybackRate":3,"voiceKeepAwake":"yes"}', 1, false],
+    ['{"voicePlaybackRate":"1.5","voiceKeepAwake":1}', 1, false],
+  ])("voice fields %j → %s× awake=%s", (raw, rate, awake) => {
+    expect(parsePersistedPrefs(raw)).toMatchObject({ voicePlaybackRate: rate, voiceAutoPlay: true, voiceKeepAwake: awake });
   });
 
   it("accepts only a boolean autoplay preference and defaults to the existing on behavior", () => {
@@ -81,7 +81,7 @@ describe("prefsStore", () => {
     store.getState().setAgentListMode("workspace");
     expect(store.getState().agentListMode).toBe("workspace");
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13 });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13, chatMicTipDone: false });
 
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
@@ -100,16 +100,15 @@ describe("prefsStore", () => {
     await store.getState().hydrate();
     store.getState().setVoicePlaybackRate(2);
     store.getState().setVoiceAutoPlay(false);
-    store.getState().setVoiceBigPane(true);
     store.getState().setVoiceKeepAwake(true);
     store.getState().setVoicePlayScreenOff(false);
     // Setting the value already held writes nothing.
-    store.getState().setVoiceBigPane(true);
-    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(5));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false, terminalFontSize: 13 });
+    store.getState().setVoiceKeepAwake(true);
+    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(4));
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceKeepAwake: true, voicePlayScreenOff: false, terminalFontSize: 13, chatMicTipDone: false });
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
-    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false });
+    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceKeepAwake: true, voicePlayScreenOff: false });
   });
 
   it("restores the terminal font size after a restart", async () => {

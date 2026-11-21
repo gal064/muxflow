@@ -27,13 +27,17 @@ use super::{
 
 mod active_root_dispatch;
 mod agent_dispatch;
+mod chat_dispatch;
 mod dispatcher;
 mod file_stream_dispatch;
 mod filesystem_dispatch;
 pub(super) mod git_dispatch;
+mod history_dispatch;
 pub(super) mod operation_policy;
 mod tmux_action_dispatch;
 mod voice_dispatch;
+#[cfg(test)]
+pub(super) use agent_dispatch::{TEST_AGENT_WORK, TEST_AGENT_WORK_GATE, TEST_AGENT_WORK_WAITING};
 pub(super) use dispatcher::handle_request;
 
 #[derive(Clone)]

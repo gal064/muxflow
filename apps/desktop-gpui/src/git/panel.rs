@@ -13,8 +13,8 @@ use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
     FontWeight, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
     ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Window,
-    base::TestSupportExt,
+    Subscription, Task, Window,
+    base::{Selectable, TestSupportExt},
     component::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
@@ -45,11 +45,15 @@ use crate::{
 use super::{
     client,
     model::{
-        self, ChangeKind, CommandResult, GitScope, Live, Mutation, MutationKind, Outcome, RootInfo,
-        StatusEntry, StatusSnapshot, Target, Verb,
+        self, BranchFile, BranchSummary, ChangeKind, CommandResult, GitScope, Live, Mutation,
+        MutationKind, Outcome, RootInfo, StatusEntry, StatusSnapshot, SummaryBase, Target, Verb,
     },
     store::{GitRepositories, RepositoryState},
 };
+
+/// How long the status must rest before a summary is read for a reader while
+/// the panel does not list it.
+const SUMMARY_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Key context around the commit message box.
 const COMMIT_CONTEXT: &str = "GitCommit";
@@ -102,6 +106,28 @@ impl PanelContext {
     }
 }
 
+/// Which changes the panel lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scope {
+    /// The status: staged, unstaged and untracked, with their actions.
+    #[default]
+    Uncommitted,
+    /// The working tree against the default branch. Read only.
+    Branch,
+}
+
+/// A summary of the changes against one base, read for one repository and
+/// status generation.
+#[derive(Default)]
+struct BranchList {
+    /// The repository key and status generation it was asked for.
+    asked: Option<(String, u64)>,
+    summary: Option<Rc<BranchSummary>>,
+    error: Option<String>,
+    /// The read in flight; dropping it cancels the read at the host.
+    task: Option<Task<()>>,
+}
+
 pub enum PanelEvent {
     /// For the app's status channel.
     Message(String),
@@ -126,6 +152,8 @@ struct CommitForm {
     busy: bool,
     /// The message was committed; the field empties on the next draw.
     clear: bool,
+    /// The keyboard goes to the message on the next draw.
+    focus: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,6 +191,15 @@ pub struct GitPanel {
     pending: HashMap<String, &'static str>,
     limits: HashMap<&'static str, usize>,
     form: CommitForm,
+    scope: Scope,
+    /// Against the default branch: the Branch scope's list.
+    branch: BranchList,
+    /// Against HEAD: what is not committed, counted in lines, which the
+    /// status does not carry. Read only for readers.
+    uncommitted: BranchList,
+    /// How many others need both summaries kept read whatever the panel
+    /// lists: the chat details cards on screen.
+    summary_readers: usize,
     /// `workflow.git.panelPaint`: from showing or observing a repository to
     /// drawing its first status. None unless the perf probe is on.
     panel_paint: Option<crate::perf::PaintTicket>,
@@ -182,6 +219,7 @@ impl GitPanel {
     pub fn new(store: Entity<GitRepositories>, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&store, |this, _, cx| {
             this.publish_rows(cx);
+            this.follow_branch(cx);
             cx.notify();
         });
         Self {
@@ -195,6 +233,10 @@ impl GitPanel {
             pending: HashMap::new(),
             limits: HashMap::new(),
             form: CommitForm::default(),
+            scope: Scope::default(),
+            branch: BranchList::default(),
+            uncommitted: BranchList::default(),
+            summary_readers: 0,
             panel_paint: None,
             _store: observed,
         }
@@ -231,6 +273,7 @@ impl GitPanel {
         }
         self.context = context;
         self.publish_rows(cx);
+        self.follow_branch(cx);
         cx.notify();
     }
 
@@ -272,6 +315,9 @@ impl GitPanel {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.scope == Scope::Branch {
+            self.refresh_branch(cx);
+        }
         if let Some(key) = self.key.clone() {
             let refreshing = self.store.update(cx, |store, cx| store.refresh(&key, cx));
             cx.background_executor().spawn(refreshing).detach();
@@ -283,6 +329,202 @@ impl GitPanel {
             cx.emit(PanelEvent::OpenDiff {
                 entry: entry.clone(),
                 target,
+                status,
+                preview,
+            });
+        }
+    }
+
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+
+    pub fn set_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        if self.scope != scope {
+            self.scope = scope;
+            self.follow_branch(cx);
+            self.publish_rows(cx);
+            cx.notify();
+        }
+    }
+
+    fn summary_list(&self, base: SummaryBase) -> &BranchList {
+        match base {
+            SummaryBase::DefaultBranch => &self.branch,
+            SummaryBase::Head => &self.uncommitted,
+        }
+    }
+
+    fn summary_list_mut(&mut self, base: SummaryBase) -> &mut BranchList {
+        match base {
+            SummaryBase::DefaultBranch => &mut self.branch,
+            SummaryBase::Head => &mut self.uncommitted,
+        }
+    }
+
+    /// What the working tree changes against `base`, as last read.
+    pub fn summary(&self, base: SummaryBase) -> Option<Rc<BranchSummary>> {
+        self.summary_list(base).summary.clone()
+    }
+
+    /// Whether the last read against `base` failed. The panel's Branch scope
+    /// says why.
+    pub fn summary_failed(&self, base: SummaryBase) -> bool {
+        self.summary_list(base).error.is_some()
+    }
+
+    /// Keeps both summaries read whatever scope is listed, for as long as
+    /// each `true` is not yet matched by a `false`.
+    pub fn read_summaries(&mut self, reading: bool, cx: &mut Context<Self>) {
+        if reading {
+            self.summary_readers += 1;
+        } else {
+            self.summary_readers = self.summary_readers.saturating_sub(1);
+        }
+        self.follow_branch(cx);
+    }
+
+    /// Lists the uncommitted changes and puts the keyboard in the commit
+    /// message once the form is drawn.
+    pub fn start_commit(&mut self, cx: &mut Context<Self>) {
+        self.set_scope(Scope::Uncommitted, cx);
+        self.form.focus = true;
+        cx.notify();
+    }
+
+    /// Reads the repository's local branches. `None` while there is no
+    /// repository to ask.
+    pub fn branches(
+        &self,
+        cx: &App,
+    ) -> Option<impl std::future::Future<Output = Result<model::Branches, String>> + use<>> {
+        let scope = self.context.scope.clone()?;
+        let status = self.state(cx).status?;
+        let transport = self.store.read(cx).transport();
+        Some(client::branches(
+            transport,
+            scope,
+            status.repository.id.clone(),
+        ))
+    }
+
+    /// Switches the repository to the local branch `branch`, against the
+    /// status on screen. `None` while Git cannot be written to.
+    pub fn checkout(
+        &mut self,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<CommandResult, String>>> {
+        let state = self.state(cx);
+        if self.unavailable(&state) {
+            return None;
+        }
+        let (key, scope, status) = (
+            self.key.clone()?,
+            self.context.scope.clone()?,
+            state.status?,
+        );
+        let transport = self.store.read(cx).transport();
+        Some(cx.spawn(async move |this, cx| {
+            let result = client::checkout(
+                transport,
+                scope,
+                status.repository.id.clone(),
+                status.generation,
+                branch,
+            )
+            .await;
+            if let Ok(result) = &result {
+                this.update(cx, |this, cx| this.accept(&key, result, cx))
+                    .ok();
+            }
+            result
+        }))
+    }
+
+    /// Keeps the summaries in step with the repository: read again whenever
+    /// the observed status moves, since an edit, a commit or a switch all
+    /// move it. The default-branch one while its scope is listed or a reader
+    /// wants it; the one against HEAD only for a reader.
+    fn follow_branch(&mut self, cx: &mut Context<Self>) {
+        let listed = self.scope == Scope::Branch;
+        let read = self.summary_readers > 0;
+        self.follow_summary(SummaryBase::DefaultBranch, listed || read, !listed, cx);
+        self.follow_summary(SummaryBase::Head, read, true, cx);
+    }
+
+    /// One summary, while `wanted`. `settle` waits for a status that keeps
+    /// moving (an agent editing) to rest, rather than reading every save.
+    fn follow_summary(
+        &mut self,
+        base: SummaryBase,
+        wanted: bool,
+        settle: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // Another repository's summary goes at once, before its status arrives.
+        if self
+            .summary_list(base)
+            .asked
+            .as_ref()
+            .is_some_and(|(asked, _)| Some(asked) != self.key.as_ref())
+        {
+            *self.summary_list_mut(base) = BranchList::default();
+        }
+        let state = self.state(cx);
+        let wanted = self
+            .key
+            .clone()
+            .zip(state.status.as_ref().map(|status| status.generation))
+            .filter(|_| wanted);
+        let Some((key, generation)) = wanted else {
+            return;
+        };
+        if self.summary_list(base).asked == Some((key.clone(), generation)) {
+            return;
+        }
+        let (Some(scope), Some(status)) = (self.context.scope.clone(), state.status) else {
+            return;
+        };
+        let transport = self.store.read(cx).transport();
+        let repository_id = status.repository.id.clone();
+        let settle = settle.then(|| cx.background_executor().timer(SUMMARY_SETTLE));
+        let task = cx.spawn(async move |this, cx| {
+            if let Some(settle) = settle {
+                settle.await;
+            }
+            let answer = client::branch_summary(transport, scope, repository_id, base).await;
+            this.update(cx, |this, cx| {
+                let list = this.summary_list_mut(base);
+                list.task = None;
+                match answer {
+                    Ok(summary) => {
+                        list.summary = Some(Rc::new(summary));
+                        list.error = None;
+                    }
+                    Err(error) => list.error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        let list = self.summary_list_mut(base);
+        list.asked = Some((key, generation));
+        list.task = Some(task);
+    }
+
+    /// Re-reads the default-branch list even if the status has not moved: the
+    /// remote branch may have.
+    fn refresh_branch(&mut self, cx: &mut Context<Self>) {
+        self.branch.asked = None;
+        self.follow_branch(cx);
+    }
+
+    fn open_branch_file(&mut self, file: &BranchFile, preview: bool, cx: &mut Context<Self>) {
+        if let Some(status) = self.state(cx).status {
+            cx.emit(PanelEvent::OpenDiff {
+                entry: file.as_entry(),
+                target: Target::Base,
                 status,
                 preview,
             });
@@ -341,7 +583,7 @@ impl GitPanel {
         {
             let to = match target {
                 Target::Staged => Target::Unstaged,
-                Target::Unstaged => Target::Staged,
+                Target::Unstaged | Target::Base => Target::Staged,
             };
             self.follow = Some((entry.path.clone(), to));
         }
@@ -531,15 +773,28 @@ impl GitPanel {
             .as_ref()
             .filter(|_| self.shown)
             .and_then(|(path, target)| {
-                let entry = state.status.as_ref()?.entry(path)?.clone();
+                // A default-branch row need not be in the status.
+                let entry = match target {
+                    Target::Base => self
+                        .branch
+                        .summary
+                        .as_ref()?
+                        .files
+                        .iter()
+                        .find(|file| file.path == *path)?
+                        .as_entry(),
+                    _ => state.status.as_ref()?.entry(path)?.clone(),
+                };
                 Some((entry, *target))
             });
         let source = focused.map(|(entry, target)| {
             let mut available: Vec<CommandId> = vec!["git.openDiff"];
-            if !self.unavailable(&state) && !entry.conflicted && !entry.submodule {
+            // The default-branch list is read only.
+            let writable = self.scope == Scope::Uncommitted && target != Target::Base;
+            if writable && !self.unavailable(&state) && !entry.conflicted && !entry.submodule {
                 available.push(match target {
                     Target::Staged => "git.unstage",
-                    Target::Unstaged => "git.stage",
+                    Target::Unstaged | Target::Base => "git.stage",
                 });
                 available.push("git.discard");
             }
@@ -976,7 +1231,7 @@ impl GitPanel {
         // whatever claims it next.
         let from = match target {
             Target::Staged => Target::Unstaged,
-            Target::Unstaged => Target::Staged,
+            Target::Unstaged | Target::Base => Target::Staged,
         };
         if self.follow == Some((entry.path.clone(), target))
             && model::kind_for(entry, from) == ChangeKind::None
@@ -1282,6 +1537,235 @@ impl GitPanel {
             .into_any_element()
     }
 
+    /// Uncommitted | vs origin/main, at the top of the list.
+    fn render_scope_switch(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let base = self
+            .branch
+            .summary
+            .as_ref()
+            .and_then(|summary| summary.base_ref.clone())
+            .unwrap_or_else(|| "origin/main".into());
+        let segment = |id: &'static str, label: String, scope: Scope| {
+            let chosen = self.scope == scope;
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .compact()
+                .px(ui(8.))
+                .label(label)
+                .role(Role::RadioButton)
+                .selected(chosen)
+                .text_color(if chosen {
+                    palette.chrome_ink
+                } else {
+                    palette.chrome_dim
+                })
+                .when(chosen, |button| {
+                    button
+                        .bg(palette.chrome_raised)
+                        .border_1()
+                        .border_color(palette.chrome_border)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
+        };
+        h_flex()
+            .px(ui(12.))
+            .pt(ui(8.))
+            .child(
+                h_flex()
+                    .id("git-scope")
+                    .role(Role::RadioGroup)
+                    .aria_label("Changes to list")
+                    .gap(ui(2.))
+                    .p(ui(2.))
+                    .rounded(ui(RADIUS_CONTROL + 2.))
+                    .border_1()
+                    .border_color(palette.chrome_hairline)
+                    .child(segment(
+                        "git-scope-uncommitted",
+                        "Uncommitted".into(),
+                        Scope::Uncommitted,
+                    ))
+                    .child(segment(
+                        "git-scope-branch",
+                        format!("vs {base}"),
+                        Scope::Branch,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// The files the working tree changes against the default branch. Read
+    /// only: a row opens its diff and nothing else.
+    fn render_branch(
+        &self,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let list = v_flex()
+            .id("git-branch-changes")
+            .test_support()
+            .role(Role::List)
+            .aria_label("Changes against the default branch")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
+        let Some(summary) = self.branch.summary.clone() else {
+            return match &self.branch.error {
+                Some(error) => list.child(SurfaceError::new("git-branch-error", error.clone())),
+                None => list.child(quiet(
+                    "Reading changes against the default branch…",
+                    palette,
+                )),
+            }
+            .into_any_element();
+        };
+        let Some(base) = summary.base_ref.clone() else {
+            return list
+                .child(quiet(
+                    "No origin/main to compare with: this repository has no default branch on origin.",
+                    palette,
+                ))
+                .into_any_element();
+        };
+        let counts = |added: u64, removed: u64, binary: bool| {
+            h_flex()
+                .flex_none()
+                .gap(ui(4.))
+                .text_size(ui(TYPE_META))
+                .when(binary, |this| {
+                    this.child(div().text_color(palette.chrome_faint).child("binary"))
+                })
+                .when(added > 0, |this| {
+                    this.child(div().text_color(palette.term_2).child(format!("+{added}")))
+                })
+                .when(removed > 0, |this| {
+                    this.child(
+                        div()
+                            .text_color(palette.danger)
+                            .child(format!("−{removed}")),
+                    )
+                })
+        };
+        let rows: Vec<AnyElement> = summary
+            .files
+            .iter()
+            .map(|file| {
+                // A stop in the Tab order; Enter and Space press it, as a click.
+                let focus = window
+                    .use_keyed_state(
+                        SharedString::from(format!("git-branch-focus-{}", file.path)),
+                        cx,
+                        |_, cx| cx.focus_handle().tab_stop(true),
+                    )
+                    .read(cx)
+                    .clone();
+                let (name, dir) = model::split_display_path(&file.display_path);
+                let (shape, tint) = file_icon(name, FileKind::File, None, false);
+                let open = file.clone();
+                let selected = self
+                    .focused
+                    .as_ref()
+                    .is_some_and(|(path, target)| *target == Target::Base && *path == file.path);
+                h_flex()
+                    .id(SharedString::from(format!("git-branch-row-{}", file.path)))
+                    .test_support()
+                    .role(Role::Button)
+                    .aria_label(file.display_path.clone())
+                    .track_focus(&focus)
+                    .w_full()
+                    .items_center()
+                    .gap(ui(6.))
+                    .px(ui(12.))
+                    .py(ui(3.))
+                    .font_family(fonts::MONO)
+                    .text_size(ui(12.))
+                    .line_height(relative(ROW_LINE))
+                    .text_color(palette.chrome_ink)
+                    .hover(|style| style.bg(palette.chrome_hover))
+                    .when(selected, |this| this.bg(palette.chrome_raised))
+                    .tooltip({
+                        let tooltip = SharedString::from(format!(
+                            "{} · {}",
+                            file.display_path,
+                            file.kind.name()
+                        ));
+                        move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .on_click(
+                        cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
+                            this.focused = Some((open.path.clone(), Target::Base));
+                            this.open_branch_file(&open, event.click_count() < 2, cx);
+                            this.publish_rows(cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        svg()
+                            .data(shape.svg())
+                            .size(ui(12.))
+                            .flex_none()
+                            .text_color(tint.color(palette)),
+                    )
+                    .child(div().min_w_0().truncate().child(name.to_owned()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui(TYPE_META))
+                            .text_color(palette.chrome_faint)
+                            .child(dir.to_owned()),
+                    )
+                    .child(counts(file.added.into(), file.removed.into(), file.binary))
+                    .when(
+                        focus.is_focused(window) && window.last_input_was_keyboard(),
+                        |this| this.border_2().border_color(palette.accent),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let shown = summary.files.len() as u64;
+        // A failed re-read keeps the last list, but says it may be stale.
+        list.when_some(self.branch.error.clone(), |this, error| {
+            this.child(SurfaceError::new("git-branch-error", error))
+        })
+        .child(
+            h_flex()
+                .px(ui(12.))
+                .pt(ui(SECTION_LABEL_TOP))
+                .pb(ui(SECTION_LABEL_BOTTOM))
+                .gap(ui(6.))
+                .text_size(ui(TYPE_LABEL))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(palette.chrome_faint)
+                .child(
+                    div()
+                        .flex_1()
+                        .child(format!("CHANGES · {}", summary.total_file_count)),
+                )
+                .child(counts(summary.added, summary.removed, false)),
+        )
+        .children(rows)
+        .when(summary.files.is_empty(), |this| {
+            this.child(quiet(format!("No changes against {base}."), palette))
+        })
+        .when(summary.total_file_count > shown, |this| {
+            this.child(quiet(
+                format!(
+                    "Showing the first {shown} of {} files.",
+                    summary.total_file_count
+                ),
+                palette,
+            ))
+        })
+        .into_any_element()
+    }
+
     /// The labeled way to the row's actions, and the keyboard's.
     fn menu_entries(
         &self,
@@ -1306,7 +1790,7 @@ impl GitPanel {
             entries.push(
                 match target {
                     Target::Staged => Item::new("Unstage", run("git.unstage")),
-                    Target::Unstaged => Item::new("Stage", run("git.stage")),
+                    Target::Unstaged | Target::Base => Item::new("Stage", run("git.stage")),
                 }
                 .disabled(entry.submodule)
                 .into(),
@@ -1340,6 +1824,9 @@ impl GitPanel {
         let input = self.input(window, cx);
         if std::mem::take(&mut self.form.clear) {
             input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        if std::mem::take(&mut self.form.focus) {
+            input.update(cx, |input, cx| input.focus(window, cx));
         }
         let staged = self.staged_count(cx);
         let busy = self.form.busy;
@@ -1573,7 +2060,24 @@ impl Render for GitPanel {
             )
         })
         .collect();
-        let form = self.render_form(&status, unavailable, &palette, window, cx);
+        let branch = self.scope == Scope::Branch;
+        let form = (!branch).then(|| self.render_form(&status, unavailable, &palette, window, cx));
+        let switch = self.render_scope_switch(&palette, cx);
+        let changes = if branch {
+            self.render_branch(&palette, window, cx)
+        } else {
+            v_flex()
+                .id("git-status-groups")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .children(lists)
+                .when(clean, |this| {
+                    this.child(quiet("Working tree clean.", &palette))
+                })
+                .into_any_element()
+        };
         v_flex()
             .id("git-panel")
             .test_support()
@@ -1630,6 +2134,7 @@ impl Render for GitPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
             )
+            .child(switch)
             .when_some(state.error.clone(), |this, error| {
                 this.child(SurfaceError::new("git-error", error))
             })
@@ -1652,19 +2157,8 @@ impl Render for GitPanel {
                     &palette,
                 ))
             })
-            .child(
-                v_flex()
-                    .id("git-status-groups")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .children(lists)
-                    .when(clean, |this| {
-                        this.child(quiet("Working tree clean.", &palette))
-                    }),
-            )
-            .child(form)
+            .child(changes)
+            .children(form)
             .into_any_element()
     }
 }

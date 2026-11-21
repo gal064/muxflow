@@ -10,6 +10,18 @@ export function agentPillState(agent: Agent): PillState {
   return agent.present ? displayState(agent) : "gone";
 }
 
+/** The state under an agent screen's title, in the chat header's words. */
+export function agentStateWord(agent: Agent): string {
+  switch (agentPillState(agent)) {
+    case "blocked": return "Waiting for you";
+    case "working": return "Working";
+    case "done": return "Finished";
+    case "idle": return "Idle";
+    case "gone": return "Ended";
+    case "unknown": return "";
+  }
+}
+
 /** The state word paired with a decorative agent mark for assistive technology. */
 export function agentStateLabel(agent: Agent): string {
   const state = agentPillState(agent);
@@ -51,6 +63,17 @@ export function agentDisplayName(state: Pick<SessionState, "adapters">, agent: A
 
 function adapterDisplayName(state: Pick<SessionState, "adapters">, agent: Agent): string {
   return state.adapters.find((a) => a.id === agent.adapterId)?.displayName ?? agent.adapterId;
+}
+
+/**
+ * A window row's second line (§9.4): its agents by name, else the command its
+ * active pane runs. A window whose active pane is a chat says so first:
+ * "Chat · Claude Code", or "Chat" alone with no agent.
+ */
+export function windowSubtitle(chat: boolean, agentNames: string[], command: string): string {
+  const agents = agentNames.join(", ");
+  if (chat) return agents ? `Chat · ${agents}` : "Chat";
+  return agents || command;
 }
 
 export function agentsInWindow(state: Pick<SessionState, "agents">, windowId: string): Agent[] {

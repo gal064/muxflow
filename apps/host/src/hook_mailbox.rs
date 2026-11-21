@@ -8,7 +8,7 @@ use anyhow::Context;
 
 /// Process-shared transaction guard for one runtime's hook mailbox.
 ///
-/// Writers hold it across prune + rename + directory sync, and the daemon
+/// Writers hold it across prune + write + rename, and the daemon
 /// holds it across enumerate + apply/delete. Keeping the lock file in place is
 /// intentional: unlinking an advisory-lock inode lets a racing process lock a
 /// different replacement inode and destroys mutual exclusion.

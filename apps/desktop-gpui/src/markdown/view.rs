@@ -24,7 +24,6 @@ use std::sync::LazyLock;
 
 use super::link::{self, Target};
 use crate::{
-    commands::dialogs::{Confirmation, open_confirmation},
     editor::{self, Document},
     theme::{
         self, Palette,
@@ -284,7 +283,7 @@ const CLICK_SLOP: f32 = 4.;
 /// wherever the press began, so without this a drag that ends on a link, or a
 /// right click, would follow it. Kit itself already holds off while the
 /// preview has a selection.
-fn is_click(event: &ClickEvent, pressed: Option<Point<Pixels>>) -> bool {
+pub(crate) fn is_click(event: &ClickEvent, pressed: Option<Point<Pixels>>) -> bool {
     match event {
         ClickEvent::Mouse(click) => {
             let travelled = pressed.map(|at| at - click.up.position);
@@ -296,25 +295,14 @@ fn is_click(event: &ClickEvent, pressed: Option<Point<Pixels>>) -> bool {
     }
 }
 
-pub(super) fn follow(origin: &Origin, href: &str, window: &mut Window, cx: &mut App) {
+pub(super) fn follow(origin: &Origin, href: &str, cx: &mut App) {
     match link::target(&origin.resource, href) {
-        Target::External(url) => open_confirmation(
-            Confirmation {
-                title: "Open external link?".into(),
-                detail: url.clone().into(),
-                confirm_label: "Open link".into(),
-                destructive: false,
-                on_confirm: Rc::new(move |_, cx| {
-                    if let Err(error) =
-                        desktop_core::external_links::open_external_link(url.clone(), true)
-                    {
-                        editor::report(error, cx);
-                    }
-                }),
-            },
-            window,
-            cx,
-        ),
+        // The click is the user's deliberate gesture: the address opens at once.
+        Target::External(url) => {
+            if let Err(error) = desktop_core::external_links::open_external_link(url, true) {
+                editor::report(error, cx);
+            }
+        }
         Target::File(path) => {
             // The tab's own host, server and session, as Tauri required.
             let here =
@@ -423,12 +411,14 @@ impl Render for PreviewView {
                     // own; Tauri's preview has no label.
                     .code_block_actions(|_, _, _| div())
                     .image_source(move |uri| image_source(&images, uri))
-                    .on_link_click(move |href: &SharedString, event: &ClickEvent, window, cx| {
-                        let pressed = *pressed.lock().expect("the press is never poisoned");
-                        if is_click(event, pressed) {
-                            follow(&origin, href, window, cx);
-                        }
-                    })
+                    .on_link_click(
+                        move |href: &SharedString, event: &ClickEvent, _window, cx| {
+                            let pressed = *pressed.lock().expect("the press is never poisoned");
+                            if is_click(event, pressed) {
+                                follow(&origin, href, cx);
+                            }
+                        },
+                    )
                     .w_full()
                     .h_full()
                     .pt(px(48.))

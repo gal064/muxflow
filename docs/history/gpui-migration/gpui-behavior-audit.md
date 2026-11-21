@@ -27,8 +27,8 @@ requirements) are covered by the grouped "host, unchanged" rows, not one row eac
 |---|---|---|
 | The Linux keymap is the macOS keymap with ⌘ read as Ctrl, except Ctrl+D (EOF) and Ctrl+E (end of line), where Ghostty's default is used | holds | `gpui/commands/registry.rs` (`COMMANDS`, comments on `pane.splitRight` and `pane.zoom`); keymap test `linux_chords_resolve_with_ghostty_fallbacks` |
 | Any command can be rebound or unbound in **Configure keyboard shortcuts**; commands without a default key are still in the palette | holds | `gpui/commands/shortcut_editor.rs`; `registry.rs` `palette_commands` hides only the 18 positional selectors, which all have defaults |
-| Application, Linux: Ctrl+K, Ctrl+P, Ctrl+,, Ctrl+B, Ctrl+L, Ctrl+Shift+E, Ctrl+Shift+G, Ctrl+[, Ctrl+], Ctrl+Shift+U | holds | `gpui/commands/registry.rs`; `keymap.rs` test `every_default_resolves_from_the_keystroke_that_produces_it` |
-| Application, macOS: ⌘K, ⌘P, ⌘,, ⌘B, ⌘L, ⌘⇧E, ⌘⇧G, ⌘[, ⌘], ⌘⇧U | mac-only (unverified) | `registry.rs` `Meta+…` defaults; `keymap.rs` `shortcut_from_keystroke` maps `platform` to `Meta`; `Platform::current()` |
+| Application, Linux: Ctrl+Shift+P, Ctrl+K, Ctrl+P, Ctrl+,, Ctrl+B, Ctrl+L, Ctrl+Shift+E, Ctrl+Shift+G, Ctrl+[, Ctrl+], Ctrl+Shift+U | holds | `gpui/commands/registry.rs`; `keymap.rs` test `every_default_resolves_from_the_keystroke_that_produces_it` |
+| Application, macOS: ⌘⇧P, ⌘K, ⌘P, ⌘,, ⌘B, ⌘L, ⌘⇧E, ⌘⇧G, ⌘[, ⌘], ⌘⇧U | mac-only (unverified) | `registry.rs` `Meta+…` defaults; `keymap.rs` `shortcut_from_keystroke` maps `platform` to `Meta`; `Platform::current()` |
 | Quick Open matches files beneath the focused pane's directory, tabs in the workspace, and workspace names, paths and branches across shown hosts | holds | `gpui/commands/quick_open.rs` (`quick_open_items`); source in `gpui/workspaces/commands.rs` `Source` |
 | Quick Open: Enter opens a file or switches to the tab or workspace; an open file appears as a tab result; file contents are not searched | holds | `gpui/commands/quick_open.rs`; file search is names and paths only (`"Searching filenames…"`) |
 | An empty query lists tabs and workspaces at once; file search starts only after typing | holds | `quick_open.rs:177`, `:338` |
@@ -224,7 +224,7 @@ Tauri release is still the shipping app.
 
 What the owner should check on the Mac.
 
-1. Every macOS column chord in `keybindings.md` runs its command: ⌘K, ⌘P, ⌘,, ⌘B, ⌘L, ⌘⇧E, ⌘⇧G, ⌘[, ⌘], ⌘⇧U, ⌘N, ⌘1–9, ⌘T, ⌘W, ⌘⇧[, ⌘⇧], ⌃1–9, ⌘D, ⌘⇧D, ⌘⌥+arrows, ⌘E, ⌘C, ⌘V, ⌘F. Confirm ⌘⇧[ and ⌘⇧] switch tabs (GPUI reports the shifted character) and that ⌃1–9 selects tabs while ⌘1–9 selects workspaces.
+1. Every macOS column chord in `keybindings.md` runs its command: ⌘⇧P, ⌘K, ⌘P, ⌘,, ⌘B, ⌘L, ⌘⇧E, ⌘⇧G, ⌘[, ⌘], ⌘⇧U, ⌘N, ⌘1–9, ⌘T, ⌘W, ⌘⇧[, ⌘⇧], ⌃1–9, ⌘D, ⌘⇧D, ⌘⌥+arrows, ⌘E, ⌘C, ⌘V, ⌘F. Confirm ⌘⇧[ and ⌘⇧] switch tabs (GPUI reports the shifted character) and that ⌃1–9 selects tabs while ⌘1–9 selects workspaces.
 2. ⌘← and ⌘→ in a shell prompt move to line start and end (Control-A and Control-E), and in a full-screen program such as an agent composer send Home and End.
 3. ⌘C copies a selection and, with nothing selected in an agent composer, does nothing harmful; ⌘V pastes. ⌃C always interrupts.
 4. Option-drag selects text while a mouse-reporting program (vim, tmux mouse mode) is running; Shift-drag does too.

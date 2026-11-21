@@ -72,6 +72,10 @@ pub struct SetupState {
     /// The helper install that already asked about agent status, by host.
     pub auto_setup: Option<String>,
     auto_setup_spent: Option<String>,
+    /// The host whose hooks that install is setting up, and whether it has
+    /// finished: it stays until the snapshot after it says how the host is
+    /// wired.
+    pub(super) auto_installing: Option<(String, bool)>,
     asserted: Option<String>,
     reassert_running: bool,
     reassert_attempted: bool,
@@ -98,6 +102,22 @@ impl AgentRuntime {
             profile_id: scope.host_profile_id.clone(),
             identity: scope.identity(),
         })
+    }
+
+    /// Whether the hooks on `host` are being set up by themselves right now: no
+    /// moment to tell the user they are missing.
+    pub fn hook_setup_underway(&self, host: &str) -> bool {
+        let installing = self
+            .setup
+            .auto_installing
+            .as_ref()
+            .is_some_and(|(installing, _)| installing == host);
+        // Consented with the helper and about to start once the host is free.
+        let due = self.setup.auto_setup.as_deref() == Some(host)
+            && !host_hook_wiring(self.adapters(host))
+                .setup_targets
+                .is_empty();
+        installing || due
     }
 
     /// Whether Settings and the sidebar line should offer to set this host up.
@@ -174,6 +194,9 @@ impl AgentRuntime {
         let decision = self.decision(&host);
         let targets = self.setup_targets();
         let wiring = host_hook_wiring(self.adapters(&host));
+        if wiring.reports && self.hook_setup_underway(&host) {
+            self.setup.auto_installing = None;
+        }
         let promptable = connected && self.setup.allowed && should_prompt_for_setup(&wiring);
 
         let prompt_key = Some((host.clone(), promptable, decision));
@@ -190,8 +213,16 @@ impl AgentRuntime {
                         // status; asking twice about one decision is noise.
                         self.setup.auto_setup = None;
                         self.setup.auto_setup_spent = Some(host.clone());
+                        self.setup.auto_installing = Some((host.clone(), false));
                         let label = self.setup.host_label.clone();
                         self.install(targets.clone(), consented, None, cx, move |this, ok, cx| {
+                            if let Some((_, finished)) = &mut this.setup.auto_installing {
+                                *finished = true;
+                            }
+                            if !ok {
+                                this.setup.auto_installing = None;
+                                cx.notify();
+                            }
                             this.status_line(
                                 if ok {
                                     format!("Agent status hooks installed on {label}.")
@@ -202,7 +233,12 @@ impl AgentRuntime {
                             );
                         });
                     }
-                    _ => self.offer_setup(cx),
+                    (true, None) => {
+                        // It cannot run by itself after all: asking is the answer.
+                        self.setup.auto_setup = None;
+                        self.offer_setup(cx)
+                    }
+                    (false, _) => self.offer_setup(cx),
                 }
             }
         }

@@ -50,6 +50,8 @@ export interface HostHarness {
   primarySessionId: string;
   /** Working directory of the primary pane; a scratch directory the test may populate. */
   workDir: string;
+  /** The helper's scratch HOME, when the harness was started with `isolateHome`. */
+  home?: string;
   tmux(args: string[]): string;
   /** Lines the helper wrote to stderr. */
   stderr: string[];
@@ -95,13 +97,29 @@ class ChildTransport implements Transport {
   }
 }
 
-export async function startHostHarness(): Promise<HostHarness> {
+export interface HostHarnessOptions {
+  /**
+   * Run the helper with HOME pointing at a scratch directory. For a test that
+   * makes the helper write under HOME, as an upload does
+   * (`$HOME/.cache/muxflow/uploads`): the user's own folders are then never
+   * touched. Off by default, which leaves the helper the caller's HOME.
+   */
+  isolateHome?: boolean;
+}
+
+export async function startHostHarness(options: HostHarnessOptions = {}): Promise<HostHarness> {
   const binary = buildHost();
   // Keep TMPDIR short: the daemon's Unix socket path is limited to ~104 bytes.
   const runtime = mkdtempSync(path.join(tmpdir(), "mxm-"));
   const workDir = mkdtempSync(path.join(tmpdir(), "mxm-work-"));
+  const home = options.isolateHome ? mkdtempSync(path.join(tmpdir(), "mxm-home-")) : undefined;
   const socket = `mxm-${process.pid}-${path.basename(runtime).slice(4)}`;
-  const env = { ...process.env, ADE_HOST_RUNTIME_DIR: runtime, ADE_TMUX_SOCKET_NAME: socket };
+  const env: NodeJS.ProcessEnv = { ...process.env, ADE_HOST_RUNTIME_DIR: runtime, ADE_TMUX_SOCKET_NAME: socket };
+  if (home !== undefined) {
+    env.HOME = home;
+    // These would point the helper back out of the scratch HOME.
+    for (const name of ["XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"]) delete env[name];
+  }
   const tmux = (args: string[]): string => {
     const result = spawnSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
     if (result.status !== 0) throw new Error(`tmux ${args.join(" ")} failed: ${result.stderr.trim()}`);
@@ -146,7 +164,8 @@ export async function startHostHarness(): Promise<HostHarness> {
     spawnSync("tmux", ["-L", socket, "kill-server"], { encoding: "utf8" });
     rmSync(runtime, { recursive: true, force: true });
     rmSync(workDir, { recursive: true, force: true });
+    if (home !== undefined) rmSync(home, { recursive: true, force: true });
   };
 
-  return { transport, dial, primarySessionId, workDir, tmux, stderr, stop };
+  return { transport, dial, primarySessionId, workDir, ...(home === undefined ? {} : { home }), tmux, stderr, stop };
 }

@@ -132,6 +132,7 @@ mod tests {
             pane_pid: 1,
             start_command: String::new(),
             title: String::new(),
+            chat_adapter_id: String::new(),
         }
     }
 

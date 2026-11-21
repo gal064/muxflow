@@ -23,7 +23,9 @@ pub(crate) mod snapshot;
 use snapshot::{server_identity, snapshot_from_identity};
 mod active_root;
 pub(crate) mod agents;
+pub(crate) mod chat;
 mod filesystem;
+pub(crate) mod history;
 use filesystem::FileService;
 mod git;
 use git::GitService;
@@ -904,6 +906,7 @@ async fn serve_connection(
     // the service's drop — which runs after the await below, a circularity
     // that could never resolve.
     git.release_connection();
+    chat::ChatRuntime::global().disconnect(connection_id);
     drop(event_registration.take());
     drop(control_tx);
     if timeout(WRITER_DRAIN_GRACE, &mut writer_task).await.is_err() {

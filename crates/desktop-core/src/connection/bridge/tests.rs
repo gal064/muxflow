@@ -416,6 +416,62 @@ fn a_resync_barrier_resumes_the_same_run_instead_of_reconnecting() {
     assert_eq!(harness.finish(), Err("host bridge closed".into()));
 }
 
+/// Chat and history events reach the renderer as ordered frames, in the
+/// order the host sent them, with the event the host sent inside.
+#[test]
+fn chat_and_history_events_are_forwarded_as_ordered_frames() {
+    let mut harness = StreamHarness::start(0);
+    let chat = v1::ChatEvent {
+        pane_id: "%3".into(),
+        revision: 7,
+        change: Some(v1::chat_event::Change::Truncate(v1::ChatTruncate {
+            after_item_id: "m1".into(),
+        })),
+    };
+    let history = v1::HistoryEvent {
+        generation: 2,
+        ..Default::default()
+    };
+    harness.send(&envelope(
+        0,
+        1,
+        Payload::Event(v1::HostEvent {
+            kind: v1::EventKind::Chat.into(),
+            scope: "%3".into(),
+            chat: Some(chat.clone()),
+            ..Default::default()
+        }),
+    ));
+    harness.send(&envelope(
+        0,
+        2,
+        Payload::Event(v1::HostEvent {
+            kind: v1::EventKind::SessionHistory.into(),
+            history: Some(history.clone()),
+            ..Default::default()
+        }),
+    ));
+
+    let (kind, label, sequence, payload) = harness.frame_with_payload();
+    assert_eq!((kind, label.as_str(), sequence), (20, "%3", 1));
+    assert_eq!(super::super::chat::decode_event(&payload), Ok(chat));
+    let (kind, label, sequence, payload) = harness.frame_with_payload();
+    assert_eq!((kind, label.as_str(), sequence), (21, "history", 2));
+    assert_eq!(super::super::history::decode_event(&payload), Ok(history));
+
+    // An event of either kind with nothing in it ends the run, like any
+    // other event that omits its payload.
+    harness.send(&envelope(
+        0,
+        3,
+        Payload::Event(v1::HostEvent {
+            kind: v1::EventKind::Chat.into(),
+            ..Default::default()
+        }),
+    ));
+    assert_eq!(harness.finish(), Err("chat event omitted payload".into()));
+}
+
 #[test]
 fn a_host_requested_resync_preserves_its_exact_reason_for_the_journal() {
     let mut harness = StreamHarness::start(0);

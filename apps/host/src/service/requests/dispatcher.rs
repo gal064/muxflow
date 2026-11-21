@@ -111,9 +111,9 @@ pub(crate) async fn handle_request(
                 operation,
                 request,
                 control_tx,
-                generation,
-                topology_baseline,
-                &cancellation,
+                Arc::clone(generation),
+                Arc::clone(topology_baseline),
+                Arc::clone(&cancellation),
             )
             .await;
             pending.lock().unwrap().remove(&request_id);
@@ -161,6 +161,54 @@ pub(crate) async fn handle_request(
                 .await
                 .unwrap_or_else(|_| response_error("internal", "automation request failed")),
             };
+            send_response(control_tx, request_id, response).await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::Chat, Some(_)) => {
+            // A terminal agent's commands are read by starting the agent, which
+            // takes a second or more: answered off the ordered lane, which
+            // drops a connection whose request runs that long.
+            if super::chat_dispatch::lists_terminal_commands(&request) {
+                let control_tx = control_tx.clone();
+                let pending = Arc::clone(pending);
+                let topology_baseline = Arc::clone(topology_baseline);
+                tokio::spawn(async move {
+                    super::chat_dispatch::terminal_commands(
+                        request_id,
+                        request,
+                        &control_tx,
+                        topology_baseline,
+                    )
+                    .await;
+                    pending.lock().unwrap().remove(&request_id);
+                });
+                return;
+            }
+            super::chat_dispatch::handle(
+                request_id,
+                request,
+                control_tx,
+                connection_id,
+                topology_baseline,
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::History, Some(_)) => {
+            // Synchronous like an agent operation, and for the same reason off
+            // the runtime's workers: it runs tmux, writes the session record,
+            // and a snooze reads the agent state behind an ingest's write.
+            let generation = Arc::clone(generation);
+            let topology_baseline = Arc::clone(topology_baseline);
+            let response = tokio::task::spawn_blocking(move || {
+                super::history_dispatch::handle(request.history, &generation, &topology_baseline)
+            })
+            .await
+            .unwrap_or_else(|_| response_error("internal", "history request failed"));
             send_response(control_tx, request_id, response).await;
             pending.lock().unwrap().remove(&request_id);
             return;

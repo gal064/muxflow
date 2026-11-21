@@ -96,10 +96,7 @@ pub(super) fn supervise_bridge(
         if let Some(writer) = client.writer.lock().unwrap().take() {
             writer.close();
         }
-        client
-            .fail_pending(
-                "host transport disconnected; commit outcome is unknown and the request will not replay",
-            );
+        client.fail_pending(super::TRANSPORT_DISCONNECTED);
         if let Some(mut child) = client.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -1034,6 +1031,27 @@ fn process_event(
         }
         v1::EventKind::Automation => {
             send_protocol_event(channel, event_sequence, TerminalEvent::AutomationChanged)?;
+        }
+        v1::EventKind::Chat => {
+            let chat = event.chat.ok_or("chat event omitted payload")?;
+            send_protocol_event(
+                channel,
+                event_sequence,
+                TerminalEvent::ChatService {
+                    payload: super::chat::encode_event(&chat),
+                    pane_id: chat.pane_id,
+                },
+            )?;
+        }
+        v1::EventKind::SessionHistory => {
+            let history = event.history.ok_or("history event omitted payload")?;
+            send_protocol_event(
+                channel,
+                event_sequence,
+                TerminalEvent::HistoryService {
+                    payload: super::history::encode_event(&history),
+                },
+            )?;
         }
         _ => send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?,
     }

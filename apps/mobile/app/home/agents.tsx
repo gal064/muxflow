@@ -1,6 +1,6 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Dimensions, Keyboard, type LayoutChangeEvent } from "react-native";
+import { Dimensions, Keyboard, Platform, type LayoutChangeEvent } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { agentTitle, noAdapterWired } from "../../src/features/agents/agentViews";
@@ -14,6 +14,10 @@ import type { Agent } from "../../src/store/sessionStore";
 import { EmptyState } from "../../src/ui/components/EmptyState";
 import { useSession } from "../../src/ui/hooks";
 import { WorkspaceActionsSheet } from "../../src/features/terminal/WorkspaceActionsSheet";
+import { snoozeBlocked, wakeLabel } from "../../src/features/history/historyModel";
+import { historyClient } from "../../src/features/history/historyRuntime";
+import { SnoozeSheet } from "../../src/features/history/ui/SnoozeSheet";
+import { refusalText } from "../../src/features/chat/refusals";
 
 /** Agents tab — design.md §9.3.1. The list itself lives in `AgentList`. */
 export default function AgentsScreen() {
@@ -29,6 +33,19 @@ export default function AgentsScreen() {
   const windows = useSession((s) => s.windows);
   const [refreshing, setRefreshing] = useState(false);
   const [actionsFor, setActionsFor] = useState<Agent | null>(null);
+  const [snoozeFor, setSnoozeFor] = useState<Agent | null>(null);
+  // iOS cannot present a modal while another is still sliding away: the
+  // Snooze sheet waits for the actions sheet to finish closing there.
+  const snoozeAfterActions = useRef<Agent | null>(null);
+  const openSnooze = useCallback((agent: Agent) => {
+    if (Platform.OS === "ios") snoozeAfterActions.current = agent;
+    else setSnoozeFor(agent);
+  }, []);
+  const actionsClosed = useCallback(() => {
+    const agent = snoozeAfterActions.current;
+    snoozeAfterActions.current = null;
+    if (agent) setSnoozeFor(agent);
+  }, []);
   const heldWindow = actionsFor?.present ? windows[actionsFor.route.windowId] : undefined;
   const screenSummary = useCallback(() => {
     const window = Dimensions.get("window");
@@ -77,8 +94,18 @@ export default function AgentsScreen() {
       return;
     }
     markSeenIfNeeded(agent);
-    router.push({ pathname: "/voice/[paneId]", params: { paneId: toRouteParam(agent.route.paneId), sessionId: toRouteParam(agent.route.sessionId), agentId: toRouteParam(agent.id) } });
+    router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(agent.route.paneId), sessionId: toRouteParam(agent.route.sessionId), voice: "1" } });
   }, [router]);
+
+  const snooze = useCallback(async (agent: Agent, untilMs: number) => {
+    setSnoozeFor(null);
+    try {
+      await historyClient.snooze({ adapterId: agent.adapterId, nativeSessionId: agent.nativeSessionId }, untilMs);
+      toast(`Snoozed until ${wakeLabel(untilMs, Date.now())}.`);
+    } catch (error) {
+      toast(`Couldn't snooze: ${refusalText(error)}`);
+    }
+  }, []);
 
   const empty = (
     <EmptyState
@@ -96,16 +123,25 @@ export default function AgentsScreen() {
     <>
       <AgentList empty={connected ? empty : null} onLayout={onLayout} onLongPress={setActionsFor} onOpen={open} onRefresh={onRefresh} onTalk={talk} refreshing={refreshing} />
       <WorkspaceActionsSheet
+        onClosed={actionsClosed}
         onDismiss={() => setActionsFor(null)}
         sessionId={actionsFor?.route.sessionId}
         title={actionsFor ? agentTitle({ adapters, windows }, actionsFor) : undefined}
         visible={actionsFor !== null}
         // An agent's pin is its tab's, as on the desktop; a gone agent's tab may be gone too.
         pin={heldWindow ? { label: heldWindow.pinned ? "Unpin agent" : "Pin agent", target: { kind: "window", sessionId: heldWindow.sessionId, windowId: heldWindow.id }, pinned: !heldWindow.pinned } : undefined}
+        snooze={actionsFor ? { blocked: snoozeBlocked(actionsFor), onPress: () => openSnooze(actionsFor) } : undefined}
         // A gone agent has no pane left to close.
         close={actionsFor?.present && actionsFor.route.paneId
           ? { label: "Close agent", target: { kind: "pane", sessionId: actionsFor.route.sessionId, windowId: actionsFor.route.windowId, paneId: actionsFor.route.paneId } }
           : undefined}
+      />
+      <SnoozeSheet
+        now={Date.now()}
+        onDismiss={() => setSnoozeFor(null)}
+        onPick={(untilMs) => { if (snoozeFor) void snooze(snoozeFor, untilMs); }}
+        title={snoozeFor ? agentTitle({ adapters, windows }, snoozeFor) : undefined}
+        visible={snoozeFor !== null}
       />
     </>
   );

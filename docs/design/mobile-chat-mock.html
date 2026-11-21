@@ -1,0 +1,840 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Phone chat: problems found and proposed fixes</title>
+<style>
+:root{--pg:#f6f6f7;--card:#fff;--ink:#1c1c20;--dim:#5d5d68;--line:#dcdce1;--acc:#2f6fe0;--bad:#b91c1c;--good:#15803d;--warn:#b45309;--tag:#ececf0}
+@media (prefers-color-scheme:dark){:root{--pg:#17191d;--card:#1f2228;--ink:#e8e8ea;--dim:#a0a4ad;--line:#343842;--acc:#7aa6da;--bad:#e79596;--good:#5fd27a;--warn:#f0c674;--tag:#2a2e36}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--pg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:0 0 96px}
+main{max-width:1180px;margin:0 auto;padding:28px 20px}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:20px;margin:0 0 6px}
+h3{font-size:14px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+p{margin:0 0 10px;max-width:78ch}
+code{font:12.5px ui-monospace,"JetBrains Mono",Menlo,monospace;background:var(--tag);padding:1px 5px;border-radius:4px}
+a{color:var(--acc)}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;margin:22px 0}
+.sid{display:inline-block;background:var(--acc);color:#fff;border-radius:6px;font-size:13px;padding:1px 8px;margin-right:9px;vertical-align:2px}
+.tag{display:inline-block;font-size:11px;font-weight:600;border-radius:4px;padding:1px 6px;margin-left:6px;background:var(--tag);color:var(--dim);white-space:nowrap}
+.tag.live{color:var(--bad)}.tag.code{color:var(--warn)}.tag.y{color:var(--good)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;vertical-align:top;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)}
+td.n{white-space:nowrap;color:var(--dim);font-variant-numeric:tabular-nums}
+ul.plain{margin:0 0 10px;padding-left:20px;max-width:80ch}
+ul.plain li{margin:3px 0}
+.stage{display:flex;flex-wrap:wrap;gap:22px;margin:16px 0 4px;align-items:flex-start}
+figure{margin:0;width:300px}
+figcaption{font-size:13px;color:var(--dim);margin-top:8px;line-height:1.4}
+figcaption b{color:var(--ink)}
+.lab{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border-radius:4px;padding:1px 7px;margin-bottom:6px}
+.lab.now{background:rgba(204,101,102,.18);color:var(--bad)}
+.lab.new{background:rgba(40,200,64,.16);color:var(--good)}
+.shot{width:300px;border-radius:26px;border:1px solid #3e4451;display:block}
+
+/* ---- the phone, in the app's own colours (packages/client-core/src/palette.ts) ---- */
+.phone{--bg:#282c34;--rs:#2c313a;--hl:#313640;--bd:#3e4451;--k:#c4c8c6;--ks:#fff;--dm:#a4abb6;--ft:#7f8794;--ac:#7aa6da;--ai:#282c34;--wash:rgba(122,166,218,.12);--dg:#cc6566;--dgi:#e79596;--dgw:rgba(204,101,102,.13);--ok:#28c840;--wk:#f0c674;
+  width:300px;height:620px;border-radius:26px;border:1px solid var(--bd);background:var(--bg);color:var(--k);overflow:hidden;display:flex;flex-direction:column;position:relative;font:12.5px/1.45 Roboto,system-ui,sans-serif}
+.phone svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.phone .mono{font-family:ui-monospace,"JetBrains Mono",Menlo,monospace}
+.sb{height:22px;flex:none;display:flex;justify-content:space-between;align-items:center;padding:0 16px;font-size:10.5px;color:var(--ks)}
+.hd{height:46px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid var(--hl)}
+.hd .ib{width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--dm);border-radius:16px}
+.hd .ib.on{background:var(--wash);color:var(--ac)}
+.hd .ib:first-child{color:var(--ks)}
+.hd .tt{flex:1;min-width:0}
+.hd .t1{color:var(--ks);font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hd .t2{color:var(--dm);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+.dot{width:7px;height:7px;border-radius:4px;background:var(--ft);flex:none}.dot.w{background:var(--wk)}.dot.b{background:var(--dg)}.dot.d{background:var(--ok)}
+.tl{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:9px;padding:10px;position:relative}
+.tl.top{justify-content:flex-start}
+.u{align-self:flex-end;max-width:86%;background:var(--rs);border:1px solid var(--hl);border-radius:11px 11px 3px 11px;padding:6px 10px;color:var(--ks)}
+.u.sel{border-color:var(--ac);background:var(--wash)}
+.a{color:var(--k)}.a b{color:var(--ks)}
+.a code,.u code{font:11.5px ui-monospace,Menlo,monospace;background:var(--rs);color:var(--ks);padding:0 3px;border-radius:3px}
+.note{align-self:center;color:var(--ft);font-size:11px}
+.steps{display:flex;align-items:center;gap:6px;color:var(--dm);font-size:12px}
+.steps svg{width:13px;height:13px}
+.steps .f{color:var(--dgi)}
+.rows{border-left:2px solid var(--hl);margin-left:5px;padding-left:9px;display:flex;flex-direction:column;gap:5px}
+.r{display:flex;gap:7px;align-items:baseline;font-size:11.5px}
+.r .v{color:var(--ft);flex:none}.r .s{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--k)}
+.r .o{flex:none;font-family:Roboto,system-ui,sans-serif;font-size:10.5px;color:var(--ok)}.r .o.f{color:var(--dgi)}.r .o.w{color:var(--wk)}
+.r2{font-size:10.5px;color:var(--ft);margin:-3px 0 0 0;font-family:Roboto,system-ui,sans-serif}
+.oldrow{border:1px solid var(--hl);border-radius:7px;padding:6px 9px}
+.acts{display:flex;gap:14px;color:var(--ft);align-items:center;font-size:10.5px;margin-top:-3px}
+.acts svg{width:14px;height:14px}
+.dock{flex:none;padding:0 9px}
+.status{display:flex;align-items:center;gap:8px;color:var(--dm);font-size:12px;padding:6px 4px}
+.status .el{color:var(--ft);font-variant-numeric:tabular-nums}
+.status .what{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ft)}
+.spin{width:12px;height:12px;border-radius:6px;border:2px solid var(--bd);border-top-color:var(--wk);flex:none;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.chipline{display:flex;gap:6px;padding:0 4px 6px}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--bd);border-radius:999px;padding:2px 9px;font-size:11px;color:var(--dm);background:var(--bg)}
+.chip svg{width:12px;height:12px}
+.cmp{flex:none;margin:0 9px 10px;border:1px solid var(--bd);border-radius:15px;overflow:hidden}
+.cmp .ban{background:var(--wash);border-bottom:1px solid var(--hl);padding:5px 10px;font-size:10.5px;display:flex;gap:8px;align-items:center}
+.cmp .ban span{flex:1}.cmp .ban b{color:var(--dm);font-weight:400;font-size:12px}
+.cmp .rw{display:flex;align-items:flex-end;gap:7px;padding:6px 7px 6px 10px}
+.cmp .in{flex:1;color:var(--ft);padding:6px 0;min-width:0}.cmp .in.has{color:var(--ks)}
+.rb{width:30px;height:30px;border-radius:15px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--dm);flex:none}
+.sq{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex:none;background:var(--ac);color:var(--ai)}
+.sq.off{background:var(--rs);color:var(--ft)}.sq.stop{background:var(--dg);color:var(--ks)}
+.sq.stop i{display:block;width:10px;height:10px;border-radius:2px;background:var(--ks)}
+.att{display:flex;gap:6px;padding:7px 9px 0}
+.thumb{width:44px;height:44px;border-radius:7px;background:linear-gradient(135deg,#4b5b78,#2f3a4d);border:1px solid var(--bd);position:relative;flex:none}
+.thumb.big{width:120px;height:84px;border-radius:9px;align-self:flex-end}
+.fchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--bd);border-radius:7px;padding:4px 8px;font-size:11px;color:var(--k);height:44px}
+.fchip.sm{height:auto;align-self:flex-end}
+.fchip small{display:block;color:var(--ft);font-size:10px}
+.bar{position:absolute;left:0;bottom:0;height:2px;background:var(--ac);width:60%}
+.kbd{flex:none;height:196px;background:#1b1e24;border-top:1px solid var(--hl);display:flex;flex-direction:column;gap:7px;padding:10px 6px;justify-content:center}
+.kbd i{display:block;height:34px;border-radius:6px;background:repeating-linear-gradient(90deg,#2b2f37 0 24px,transparent 24px 29px)}
+.kbd i:nth-child(2){margin:0 14px}.kbd i:nth-child(3){margin:0 30px}
+.card{border:1px solid var(--bd);border-radius:10px;overflow:hidden;background:var(--bg);margin:0 9px 8px;flex:none}
+.card.ask{border-color:var(--dg)}
+.card .ch{display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--hl);color:var(--ks);font-weight:600;font-size:12px}
+.card.ask .ch{background:var(--dgw)}
+.card .ch span{flex:1}.card .ch small{color:var(--ft);font-weight:400}
+.card .cb{padding:9px 10px;display:flex;flex-direction:column;gap:7px}
+.opt{display:flex;gap:8px;border:1px solid var(--hl);border-radius:7px;padding:6px 8px}
+.opt.on{border-color:var(--ac);background:var(--wash)}
+.opt i{width:13px;height:13px;border-radius:7px;border:1.5px solid var(--ft);flex:none;margin-top:2px}.opt.on i{background:var(--ac);border-color:var(--ac)}
+.opt b{display:block;color:var(--ks);font-weight:500}.opt small{color:var(--dm);font-size:11px}
+.btns{display:flex;gap:7px}
+.btn{border:1px solid var(--bd);border-radius:6px;padding:7px 13px;color:var(--k)}
+.btn.p{background:var(--ac);border-color:var(--ac);color:var(--ai);font-weight:600}.btn.g{border-color:transparent;color:var(--dm)}
+.cmdbox{background:var(--rs);border:1px solid var(--hl);border-radius:5px;padding:5px 8px;color:var(--ks);font-size:11.5px}
+.waitbar{margin:0 9px 8px;border:1px solid var(--dg);background:var(--dgw);border-radius:9px;padding:7px 10px;display:flex;align-items:center;gap:8px;color:var(--ks);font-size:12px;flex:none}
+.waitbar span{flex:1}.waitbar b{color:var(--ac);font-weight:600}
+.latest{position:absolute;right:10px;bottom:10px;background:var(--rs);border:1px solid var(--bd);border-radius:999px;padding:5px 11px 5px 9px;display:flex;gap:6px;align-items:center;color:var(--ks);font-size:11.5px;box-shadow:0 3px 10px rgba(0,0,0,.35)}
+.latest .dot{background:var(--ac)}
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.45)}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--rs);border-radius:14px 14px 0 0;border-top:1px solid var(--bd);padding:8px 14px 16px}
+.sheet .grab{width:34px;height:4px;border-radius:2px;background:var(--bd);margin:0 auto 9px}
+.sheet h4{margin:0 0 8px;color:var(--ks);font-size:14px}
+.si{display:flex;align-items:center;gap:11px;padding:10px 2px;border-bottom:1px solid var(--hl);color:var(--ks)}
+.si:last-child{border-bottom:0}.si small{color:var(--ft);margin-left:auto;font-size:11px}
+.si .sub{display:block;color:var(--ft);font-size:10.5px}
+.si .x{margin-left:auto;border:1px solid var(--bd);border-radius:6px;padding:3px 9px;font-size:11px;color:var(--dgi)}
+.kv{display:flex;gap:8px;align-items:center;padding:5px 0;font-size:12px}
+.kv svg{color:var(--ft);width:14px;height:14px}.kv .g{color:var(--ok)}.kv .rd{color:var(--dgi)}.kv .m{color:var(--ft);margin-left:auto;font-size:11px}
+.cap{color:var(--ft);font-size:10px;letter-spacing:.08em;text-transform:uppercase;margin:9px 0 5px}
+.pills{display:flex;flex-wrap:wrap;gap:6px}
+.pill{border:1px solid var(--bd);border-radius:999px;padding:5px 11px;font-size:11.5px}.pill.on{border-color:var(--ac);background:var(--wash);color:var(--ac);font-weight:600}
+.meter{height:4px;border-radius:2px;background:var(--hl);flex:1;overflow:hidden}.meter i{display:block;height:4px;width:22%;background:var(--dm)}
+.codeb{border:1px solid var(--hl);border-radius:7px;overflow:hidden;background:#22262d}
+.codeb .ct{display:flex;justify-content:space-between;align-items:center;padding:3px 8px;border-bottom:1px solid var(--hl);color:var(--ft);font-size:10.5px}
+.codeb pre{margin:0;padding:7px 8px;font:11px/1.5 ui-monospace,Menlo,monospace;color:var(--ks);white-space:pre;overflow:hidden}
+.tbl{border:1px solid var(--hl);border-radius:7px;overflow:hidden;font-size:11.5px}
+.tbl div{display:grid;grid-template-columns:1.1fr .8fr 1.3fr;border-bottom:1px solid var(--hl)}
+.tbl div:last-child{border-bottom:0}.tbl div:first-child{color:var(--ks);font-weight:600;background:var(--rs)}
+.tbl span{padding:4px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rawmd{white-space:pre-wrap;word-break:break-word}
+.wsrow{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--hl)}
+.wsrow b{color:var(--ks);font-weight:500;display:block;font-size:13.5px}.wsrow small{color:var(--dm);font-size:11px;display:flex;gap:5px;align-items:center}
+.mark{width:28px;height:28px;border-radius:7px;background:var(--rs);display:flex;align-items:center;justify-content:center;color:var(--ac)}
+
+/* ---- answers ---- */
+.answers{margin-top:20px;border-top:1px dashed var(--line);padding-top:16px}
+.q{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0;background:var(--pg)}
+.q.done{border-color:var(--good)}.q.need{border-color:var(--warn)}.q.flash{outline:3px solid var(--acc)}
+.qt{display:flex;gap:10px;align-items:baseline;margin-bottom:8px}
+.qid{font-weight:700;color:var(--acc);flex:none}.qq{flex:1;font-weight:600}.qst{font-size:12px;color:var(--dim);flex:none}
+.q label{display:flex;gap:9px;padding:5px 0;cursor:pointer;align-items:flex-start}
+.q label input{margin-top:4px}
+.q .od{display:block;color:var(--dim);font-size:13px}
+.q textarea,#notes,#json{width:100%;margin-top:6px;border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--ink);font:13px/1.4 system-ui;padding:6px 8px;resize:vertical}
+#json{font:12px/1.4 ui-monospace,Menlo,monospace}
+.abar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 20px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;z-index:5}
+.abar .pr{flex:1;min-width:140px;font-size:13px;color:var(--dim)}
+.abar .mt{height:4px;background:var(--line);border-radius:2px;margin-top:4px;overflow:hidden}.abar .mt i{display:block;height:4px;background:var(--good);width:0}
+button{font:inherit;border:1px solid var(--line);background:var(--pg);color:var(--ink);border-radius:8px;padding:7px 13px;cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button.ok{background:var(--good);border-color:var(--good);color:#fff}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-ear" viewBox="0 0 24 24"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.5v.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
+  <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="5" r="2.2"/><circle cx="12" cy="19" r="2.2"/><path d="M6 7.2v2.3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7.2M12 12.5v4.3"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-chevd" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-img" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 18l5-5 4 4 3-3 4 4"/></symbol>
+  <symbol id="i-cam" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7zM14 3v5h5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><path d="M5 7l5 5-5 5M13 17h6"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13v2M15 13v2"/></symbol>
+  <symbol id="i-host" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="8" r="2.2"/><path d="M6 7.2v9.6M18 10.2c0 4-6 3-12 6"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></symbol>
+  <symbol id="i-select" viewBox="0 0 24 24"><path d="M5 7V5h2M17 5h2v2M19 17v2h-2M7 19H5v-2M9 9h6v6H9z"/></symbol>
+</svg>
+
+<main>
+<h1>Phone chat: problems found and proposed fixes</h1>
+<p>I ran the current phone app (branch <code>gpui/chat</code>, version 0.1.33) in the Android emulator against a separate dev host with the scripted chat, and read the chat code against what the host now sends. Twenty-two problems came out of it. Each section below shows what the phone does now and what I propose. Nothing is implemented yet.</p>
+<p><span class="lab now">Now</span> pictures are real screenshots from the emulator, except where a caption says the screen is drawn from the code. <span class="lab new">Proposed</span> pictures are drawings in the app's own colours.</p>
+<p>Answer under each section, then press <b>Copy answers</b> in the bar at the bottom and paste the result to Claude.</p>
+
+<section id="list">
+  <h2>The problems</h2>
+  <p><span class="tag live">Seen live</span> means I reproduced it in the emulator. <span class="tag code">From the code</span> means the scripted chat could not show it, so it comes from reading the code. Size: S under a day, M one to two days, L more.</p>
+  <table>
+    <tr><th>#</th><th>Problem</th><th>Cause</th><th>Where</th><th>Size</th></tr>
+    <tr><td class="n">1</td><td>A chat opens partway up its history, not at the newest message <span class="tag live">Seen live</span></td><td rowspan="5">The conversation is one plain scroll view holding every message. "Am I at the end" is worked out from scroll events, which also fire when the keyboard resizes the list and while the app scrolls by itself, so following switches off. Earlier messages are added above with nothing holding the reader's place. The exact trigger on open is not pinned down yet; it happened three times out of three.</td><td><a href="#s1">S1</a></td><td rowspan="5">M</td></tr>
+    <tr><td class="n">2</td><td>With the keyboard open, the newest messages are hidden, and a message you send and the reply to it never come into view <span class="tag live">Seen live</span></td><td><a href="#s1">S1</a></td></tr>
+    <tr><td class="n">3</td><td>"Load earlier messages" throws you to the top of the loaded page and loses your place <span class="tag live">Seen live</span></td><td><a href="#s1">S1</a></td></tr>
+    <tr><td class="n">4</td><td>After scrolling up there is no way back to the newest message, and no sign that something new arrived <span class="tag code">From the code</span></td><td><a href="#s1">S1</a></td></tr>
+    <tr><td class="n">5</td><td>Every loaded message is drawn at once, so a long chat gets slower the more you load <span class="tag code">From the code</span></td><td><a href="#s1">S1</a></td></tr>
+    <tr><td class="n">6</td><td>Every tool call is its own boxed row: nine calls fill the screen <span class="tag live">Seen live</span></td><td>Rows are one to one with items. The desktop now groups them; the phone does not.</td><td><a href="#s2">S2</a></td><td>M</td></tr>
+    <tr><td class="n">7</td><td>Opening a tool row with no output just repeats the command <span class="tag live">Seen live</span></td><td>A row opens whenever its text is longer than 32 characters, even when nothing was cut.</td><td><a href="#s2">S2</a></td><td>S</td></tr>
+    <tr><td class="n">8</td><td>"Working…" sits inside the conversation, so it is off screen when you scroll up or type. It shows no time and not what the agent is doing <span class="tag live">Seen live</span></td><td>The indicator is the last item of the scroll view.</td><td><a href="#s3">S3</a></td><td>S</td></tr>
+    <tr><td class="n">9</td><td>A question or a permission request can be off screen while the agent waits for you. Nothing else on screen says so <span class="tag live">Seen live</span></td><td>The request card is also an item at the end of the scroll view.</td><td><a href="#s3">S3</a></td><td>M</td></tr>
+    <tr><td class="n">10</td><td>Compacting shows nothing until it is over; stopping shows nothing until the agent has stopped <span class="tag code">From the code</span></td><td>The phone does not read <code>ChatState.compacting</code>, and Stop has no pending state.</td><td><a href="#s3">S3</a></td><td>S</td></tr>
+    <tr><td class="n">11</td><td>Background tasks do not show at all and cannot be stopped <span class="tag code">From the code</span></td><td>The phone does not read <code>ChatState.background</code> and never sends <code>STOP_TASK</code>.</td><td><a href="#s4">S4</a></td><td>M</td></tr>
+    <tr><td class="n">12</td><td>A subagent's row says only "agent" and its task: not which agent, what it is doing, or how much it has done <span class="tag live">Seen live</span></td><td>The phone does not read the row's agent type, activity, tool count and tokens.</td><td><a href="#s4">S4</a></td><td>S</td></tr>
+    <tr><td class="n">13</td><td>The agent's replies cannot be selected or copied <span class="tag live">Seen live</span></td><td>Reply text is not selectable and there is no copy action.</td><td><a href="#s5">S5</a></td><td>S</td></tr>
+    <tr><td class="n">14</td><td>Editing a message is hidden behind a long press. The keyboard does not open, the message being edited is not marked, and the system Back button leaves the chat instead of cancelling <span class="tag live">Seen live</span></td><td>Long press only sets the draft. Nothing focuses the field or handles Back.</td><td><a href="#s5">S5</a></td><td>S</td></tr>
+    <tr><td class="n">15</td><td>No fork from a reply <span class="tag code">From the code</span></td><td>The phone never sends <code>FORK</code>. It has only the <code>/btw</code> side question.</td><td><a href="#s5">S5</a></td><td>S</td></tr>
+    <tr><td class="n">16</td><td>Messages carry no time <span class="tag live">Seen live</span></td><td>The item's time is on the wire and not drawn.</td><td><a href="#s5">S5</a></td><td>S</td></tr>
+    <tr><td class="n">17</td><td>A half-written message is lost when you leave the chat <span class="tag code">From the code</span></td><td>The draft lives in the screen, which is thrown away on Back.</td><td><a href="#s5">S5</a></td><td>S</td></tr>
+    <tr><td class="n">18</td><td>Tables come out as raw <code>|</code> lines. Code blocks have no box, wrap, and cannot be copied. Lists inside lists are flattened <span class="tag code">From the code</span></td><td>Chat reuses the small renderer written for voice replies, which draws a whole reply as one run of text.</td><td><a href="#s6">S6</a></td><td>M</td></tr>
+    <tr><td class="n">19</td><td>No way to attach a photo or a file. A message sent from the desktop with attachments shows its text only, and an image-only message is an empty bubble <span class="tag code">From the code</span></td><td>The phone does not read or send <code>attachments</code>, and has no upload client.</td><td><a href="#s7">S7</a></td><td>L</td></tr>
+    <tr><td class="n">20</td><td>The header says only the window name ("bash"). No state, no model. Its buttons are the text glyphs <code>♪</code> and <code>i</code> <span class="tag live">Seen live</span></td><td>The header was built before the chat had state worth showing; icons were never drawn.</td><td><a href="#s8">S8</a></td><td>S</td></tr>
+    <tr><td class="n">21</td><td>Details shows the host's raw address and the full folder path, and nothing about the branch or what changed <span class="tag live">Seen live</span></td><td>The phone prints the pane's path as it is and sends no Git request.</td><td><a href="#s8">S8</a></td><td>M</td></tr>
+    <tr><td class="n">22</td><td>In Workspaces a chat reads "0: bash / bash": nothing says it is a chat or that it is waiting for you. With voice not set up, turning voice on replaces the text field with a bar that does nothing <span class="tag live">Seen live</span></td><td>Window rows do not look at the pane's chat. Voice mode swaps the composer out before it knows voice can work.</td><td><a href="#s9">S9</a></td><td>S</td></tr>
+  </table>
+</section>
+
+<!-- ============ S1 ============ -->
+<section id="s1">
+  <h2><span class="sid">S1</span>Where the chat lands and stays</h2>
+  <p>Problems 1 to 5. One change fixes all five: the conversation becomes one list that is anchored to its end, draws only what is on screen, and holds your place when messages are added above. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-open.webp" alt="Chat opened on question 25 of 110"><figcaption><b>Just opened.</b> The chat holds 110 earlier exchanges and a newer turn after them. It opened on question 25.</figcaption></figure>
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-keyboard.webp" alt="Keyboard open, sent message not visible"><figcaption><b>A message was just sent.</b> It is not on screen, and neither is the question the agent then asked.</figcaption></figure>
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-older.webp" alt="After loading earlier messages"><figcaption><b>After "Load earlier messages"</b> from question 17. You are now at question 1.</figcaption></figure>
+  </div>
+  <div class="stage">
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">The link detector misses paths that wrap inside boxed output. Find out why.</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>9 steps · read 1 · ran 2 · edited 1 file <span class="f">· 1 failed</span></div>
+          <div class="a">A path that breaks right after a <code>/</code> inside a box border is dropped, because the border ends the continuation.<br><br>• The join is in <code>links.rs</code>.<br>• The fixture is <code>tests/fixtures/boxed.txt</code>.</div>
+          <div class="note">Context compacted, was 182k tokens</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Opens at the newest message</b>, every time.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="a">• The fixture is <code>tests/fixtures/boxed.txt</code>.</div>
+          <div class="note">Context compacted, was 182k tokens</div>
+          <div class="u">Why does it break?</div>
+          <div class="a">The detector joins rows the terminal marks as soft-wrapped. Boxed output is hard-wrapped, so it takes the second path.</div>
+        </div>
+        <div class="dock"><div class="status"><i class="spin"></i>Working… <span class="el">6s</span><span class="what mono">read links.rs</span></div></div>
+        <div class="cmp"><div class="rw"><span class="in">Send a follow-up while it works</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq stop"><i></i></span></div></div>
+        <div class="kbd"><i></i><i></i><i></i></div>
+      </div>
+      <figcaption><b>Keyboard open.</b> The end of the conversation stays just above the field. What you send and what comes back are in view.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl top">
+          <div class="note">Loading earlier messages…</div>
+          <div class="u">Earlier question 17</div><div class="a">Earlier answer 17.</div>
+          <div class="u">Earlier question 18</div><div class="a">Earlier answer 18.</div>
+          <div class="u">Earlier question 19</div><div class="a">Earlier answer 19.</div>
+          <div class="u">Earlier question 20</div><div class="a">Earlier answer 20.</div>
+          <div class="u">Earlier question 21</div><div class="a">Earlier answer 21.</div>
+          <div class="u">Earlier question 22</div>
+          <div class="latest"><svg><use href="#i-down"/></svg>Latest<i class="dot"></i></div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Reading back.</b> Earlier messages load above and the message you were on does not move. <b>Latest</b> takes you back; its dot means something new arrived below.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S2 ============ -->
+<section id="s2">
+  <h2><span class="sid">S2</span>Tool calls grouped</h2>
+  <p>Problems 6 and 7. The same grouping and the same words as the desktop: a run of tool calls and thinking between two pieces of text becomes one line you can open. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-tools.webp" alt="Nine boxed tool rows"><figcaption><b>One turn.</b> Nine boxed rows between the question and the two-line answer.</figcaption></figure>
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-tool-open.webp" alt="Opened tool row repeating its command"><figcaption><b>The denied command, opened.</b> It shows the same command again and nothing else.</figcaption></figure>
+  </div>
+  <div class="stage">
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Earlier question 110</div>
+          <div class="a">Earlier answer 110.</div>
+          <div class="u">The link detector misses paths that wrap inside boxed output. Find out why.</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>9 steps · read 1 · ran 2 · edited 1 file <span class="f">· 1 failed</span></div>
+          <div class="a">A path that breaks right after a <code>/</code> inside a box border is dropped, because the border ends the continuation.<br><br>• The join is in <code>links.rs</code>.<br>• The fixture is <code>tests/fixtures/boxed.txt</code>.</div>
+          <div class="note">Context compacted, was 182k tokens</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>A finished turn.</b> One line for the nine steps. A failure is said on the line, so it is not hidden.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">The link detector misses paths that wrap inside boxed output. Find out why.</div>
+          <div class="steps"><svg><use href="#i-chevd"/></svg>9 steps · read 1 · ran 2 · edited 1 file <span class="f">· 1 failed</span></div>
+          <div class="rows mono">
+            <div class="r" style="font-style:italic;font-family:Roboto,system-ui"><span class="s" style="color:var(--dm)">Boxed output is hard-wrapped by the agent, so…</span></div>
+            <div class="r"><span class="v">read</span><span class="s">links.rs</span><span class="o">done</span></div>
+            <div class="r"><span class="v">search</span><span class="s">hard_wrap</span><span class="o">6 matches</span></div>
+            <div class="r"><span class="v">run</span><span class="s">cargo test -p terminal-interactions links</span><span class="o">14 passed</span></div>
+            <div class="r"><span class="v">fetch</span><span class="s">docs.rs/unicode-width</span><span class="o">done</span></div>
+            <div class="r"><span class="v">docs</span><span class="s">resolve-library-id unicode-width</span><span class="o">1 library</span></div>
+            <div class="r"><span class="v">agent</span><span class="s">Find the other callers</span><span class="o">3 files</span></div>
+            <div class="r"><span class="v">edit</span><span class="s">links.rs</span><span class="o">+3 <span style="color:var(--dgi)">−1</span></span></div>
+            <div class="r"><span class="v">run</span><span class="s">cargo clippy</span><span class="o f">exit 101</span></div>
+            <div class="r"><span class="v">todo</span><span class="s">Update the task list</span><span class="o">done</span></div>
+          </div>
+          <div class="a">A path that breaks right after a <code>/</code> inside a box border is dropped…</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>The line opened.</b> Plain rows, no boxes. A row opens only when it has output or a name that was cut short.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="a">• The fixture is <code>tests/fixtures/boxed.txt</code>.</div>
+          <div class="u">Why does it break?</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>3 steps so far</div>
+          <div class="rows mono">
+            <div class="r"><span class="v">run</span><span class="s">cargo test -p terminal-interactions links</span><span class="o w">running</span></div>
+          </div>
+        </div>
+        <div class="dock"><div class="status"><i class="spin"></i>Working… <span class="el">12s</span></div></div>
+        <div class="cmp"><div class="rw"><span class="in">Send a follow-up while it works</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq stop"><i></i></span></div></div>
+      </div>
+      <figcaption><b>While it works.</b> The count so far and the newest step. See D1.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S3 ============ -->
+<section id="s3">
+  <h2><span class="sid">S3</span>Working, waiting for you, compacting</h2>
+  <p>Problems 8 to 10. What the agent is doing, and anything it needs from you, moves out of the conversation and sits above the reply field, where scrolling and the keyboard cannot hide it. The phone starts reading the host's compacting flag. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-working.webp" alt="Working pill inside the conversation"><figcaption><b>Working.</b> A pill at the end of the conversation. Scroll up and it is gone.</figcaption></figure>
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-keyboard.webp" alt="Agent waiting on a question that is off screen"><figcaption><b>The agent is waiting on a question.</b> Nothing on this screen says so. The field still says "Reply".</figcaption></figure>
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-question.webp" alt="Question card at the end of the conversation"><figcaption><b>The question</b>, once you close the keyboard and scroll down to it.</figcaption></figure>
+  </div>
+  <div class="stage">
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl top">
+          <div class="u">Earlier question 96</div><div class="a">Earlier answer 96.</div>
+          <div class="u">Earlier question 97</div><div class="a">Earlier answer 97.</div>
+          <div class="u">Earlier question 98</div><div class="a">Earlier answer 98.</div>
+          <div class="u">Earlier question 99</div><div class="a">Earlier answer 99.</div>
+          <div class="u">Earlier question 100</div><div class="a">Earlier answer 100.</div>
+          <div class="latest"><svg><use href="#i-down"/></svg>Latest<i class="dot"></i></div>
+        </div>
+        <div class="dock"><div class="status"><i class="spin"></i>Thinking… <span class="el">42s</span><span class="what">7 steps so far</span></div></div>
+        <div class="cmp"><div class="rw"><span class="in">Send a follow-up while it works</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq stop"><i></i></span></div></div>
+      </div>
+      <figcaption><b>Scrolled up while it works.</b> The status line stays. It says "Working…", "Thinking…", "Waiting on 2 subagents…", "Compacting context…" or "Stopping…", with the time.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot b"></i>Waiting for you</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why does it break?</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>3 steps · read 1 · ran 1</div>
+          <div class="a">Boxed output is hard-wrapped, so it takes the second path. Before I change it, two things to settle.</div>
+        </div>
+        <div class="card">
+          <div class="ch"><span>How should the wrapped-path fix be scoped?</span><small>1 of 2</small><svg style="color:var(--ft)"><use href="#i-chevd"/></svg></div>
+          <div class="cb">
+            <div class="opt on"><i></i><div><b>Boxed output only</b><small>Strip box borders before joining rows. Smallest change.</small></div></div>
+            <div class="opt"><i></i><div><b>Any hard-wrapped path</b><small>Also join rows without a border.</small></div></div>
+            <div class="opt"><i></i><div><b>Other</b><small>Type your own answer.</small></div></div>
+            <div class="btns"><span class="btn p">Next</span><span class="btn g">Skip</span></div>
+          </div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Answer the card above</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>A question.</b> The card is fixed above the field; the conversation scrolls behind it. The arrow folds it to one line.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot b"></i>Waiting for you</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="a">Going with: Boxed output only, Unit tests. The fix is in <code>links.rs</code>.</div>
+          <div class="u">Run the full suite</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>1 step · searched 1</div>
+          <div class="a">The branch has to be pushed over the remote one.</div>
+        </div>
+        <div class="card ask">
+          <div class="ch"><span>Auto mode is asking: run this command?</span></div>
+          <div class="cb"><div class="cmdbox mono">git push --force origin gpui/chat</div><div class="btns"><span class="btn p">Allow</span><span class="btn">Deny</span></div></div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>A permission request</b>, in the same place.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot b"></i>Waiting for you</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why does it break?</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>3 steps · read 1 · ran 1</div>
+          <div class="a">Boxed output is hard-wrapped, so it takes the second path. Before I change it, two things to settle.</div>
+        </div>
+        <div class="waitbar"><span>The agent asked a question</span><b>Answer</b></div>
+        <div class="cmp"><div class="rw"><span class="in has">/btw what is a soft wrap?</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq"><svg><use href="#i-up"/></svg></span></div></div>
+        <div class="kbd"><i></i><i></i><i></i></div>
+      </div>
+      <figcaption><b>Folded</b>, by its arrow or by opening the keyboard, so there is room to read and type. One line still says the agent is waiting.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S4 ============ -->
+<section id="s4">
+  <h2><span class="sid">S4</span>Background tasks and subagents</h2>
+  <p>Problems 11 and 12. The host already sends all of this for the desktop. The phone starts reading it and draws it the way the desktop does: a chip on the reply field that opens a list, and a subagent row that says who is doing what. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-tools.webp" alt="Subagent row reading agent, Find the other callers"><figcaption><b>A subagent</b> is the row "agent · Find the other callers · 3 files". Background tasks are not drawn anywhere, so there is no picture of them.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Check every caller, and keep the dev server running.</div>
+          <div class="steps"><svg><use href="#i-chevd"/></svg>4 steps so far</div>
+          <div class="rows mono">
+            <div class="r"><span class="v">run</span><span class="s">pnpm dev</span><span class="o w">in background</span></div>
+            <div class="r"><span class="v">Explore</span><span class="s">Find the other callers</span><span class="o w">running</span></div>
+            <div class="r2">reading crates/terminal-interactions/src/wrap.rs · 12 tools · 48k tokens</div>
+            <div class="r"><span class="v">Explore</span><span class="s">Check the fixtures</span><span class="o">done</span></div>
+            <div class="r2">9 tools · 31k tokens · 41s</div>
+          </div>
+        </div>
+        <div class="dock"><div class="status"><i class="spin"></i>Waiting on 1 subagent… <span class="el">1m 04s</span></div>
+          <div class="chipline"><span class="chip"><svg><use href="#i-layers"/></svg>2 background tasks</span></div></div>
+        <div class="cmp"><div class="rw"><span class="in">Send a follow-up while it works</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq stop"><i></i></span></div></div>
+      </div>
+      <figcaption><b>Subagent rows</b> name the agent, say what it is doing now, and count its tool calls and tokens. A chip says how many tasks run in the background. It stays after the turn ends, for as long as they run.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Check every caller, and keep the dev server running.</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>4 steps so far</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+        <div class="scrim"></div>
+        <div class="sheet"><div class="grab"></div><h4>Background tasks</h4>
+          <div class="si"><svg><use href="#i-term"/></svg><div>pnpm dev<span class="sub">Command · 3m 12s</span></div><span class="x">Stop</span></div>
+          <div class="si"><svg><use href="#i-bot"/></svg><div>Find the other callers<span class="sub">Subagent · 1m 04s</span></div><span class="x">Stop</span></div>
+        </div>
+      </div>
+      <figcaption><b>The chip opened.</b> Each task with what it is and how long it has run. Stop shows where the agent can stop a task: Claude Code can, Codex cannot.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S5 ============ -->
+<section id="s5">
+  <h2><span class="sid">S5</span>Messages: copy, edit, fork, time, drafts</h2>
+  <p>Problems 13 to 17. Fork uses the action the desktop already has on the host. A draft is kept per chat until it is sent. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-edit.webp" alt="Editing after a long press"><figcaption><b>After a long press on "Run the full suite".</b> The banner covers the last reply, the keyboard is closed, and nothing marks which message is being edited. Holding a reply does nothing.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why does it break?</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>4 steps · read 1 · ran 1 · edited 1 file</div>
+          <div class="a">Going with: Boxed output only, Unit tests. The fix is in <code>links.rs</code>.</div>
+          <div class="u">Run the full suite</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>2 steps · searched 1 · ran 1 <span class="f">· 1 failed</span></div>
+          <div class="a">Not pushed. The remote branch is unchanged.</div>
+          <div class="acts"><svg><use href="#i-copy"/></svg><svg><use href="#i-fork"/></svg><span>6:01 PM</span></div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>The newest reply</b> has Copy and Fork under it, and its time.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl" style="padding-bottom:150px">
+          <div class="a">Going with: Boxed output only, Unit tests. The fix is in <code>links.rs</code>.</div>
+          <div class="u sel">Run the full suite</div>
+          <div class="a">Not pushed. The remote branch is unchanged.</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+        <div class="scrim" style="background:rgba(0,0,0,.3)"></div>
+        <div class="sheet"><div class="grab"></div>
+          <div class="si"><svg><use href="#i-copy"/></svg>Copy message<small>Today, 6:01 PM</small></div>
+          <div class="si"><svg><use href="#i-select"/></svg>Select text</div>
+          <div class="si"><svg><use href="#i-edit"/></svg><div>Edit and resend<span class="sub">Removes everything after it</span></div></div>
+          <div class="si"><svg><use href="#i-fork"/></svg><div>Fork from here<span class="sub">A new chat with the conversation up to this message</span></div></div>
+        </div>
+      </div>
+      <figcaption><b>Hold any message</b> for its actions. A reply gets Copy, Select text and Fork. Your own messages also get Edit and resend.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="a">Going with: Boxed output only, Unit tests. The fix is in <code>links.rs</code>.</div>
+          <div class="u sel">Run the full suite</div>
+          <div class="a" style="opacity:.45">Not pushed. The remote branch is unchanged.</div>
+        </div>
+        <div class="cmp"><div class="ban"><span>Editing an earlier message. Sending removes everything after it. Files on disk stay as they are.</span><b>Cancel</b></div><div class="rw"><span class="in has">Run the unit tests only</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq"><svg><use href="#i-up"/></svg></span></div></div>
+        <div class="kbd"><i></i><i></i><i></i></div>
+      </div>
+      <figcaption><b>Editing.</b> The keyboard opens, the message is outlined and what would be removed is dimmed. Back cancels the edit before it leaves the chat.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S6 ============ -->
+<section id="s6">
+  <h2><span class="sid">S6</span>Code, tables and lists in replies</h2>
+  <p>Problem 18. Chat gets its own reply renderer. Voice replies keep theirs. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">bash</div></div><span class="ib" style="border:1px solid var(--bd);width:26px;height:26px">♪</span><span class="ib" style="border:1px solid var(--bd);width:26px;height:26px">i</span></div>
+        <div class="tl top">
+          <div class="a">The join is one function:</div>
+          <div class="a rawmd"><span class="mono" style="color:var(--ks);font-size:11.5px">fn join(rows: &amp;[Row]) -&gt; String {
+    rows.iter().filter(|row| row.soft_wrapped || row.indented()).map(Row::text).collect()
+}</span></div>
+          <div class="a rawmd">| Case | Joined | Why |
+| --- | --- | --- |
+| Soft wrap | yes | The terminal marks it |
+| Boxed | no | The border ends it |</div>
+          <div class="a rawmd">1. Strip the border
+
+• left edge
+• right edge
+
+1. Join the rows</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Drawn from the code, not a screenshot.</b> Code has no box and wraps. A table is its raw lines. A list inside a list loses its indent, and the numbering after it starts again at 1.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl top">
+          <div class="a">The join is one function:</div>
+          <div class="codeb"><div class="ct"><span>rust</span><svg style="width:13px;height:13px"><use href="#i-copy"/></svg></div><pre>fn join(rows: &amp;[Row]) -&gt; String {
+    rows.iter().filter(|row| row.soft_wrap
+}</pre></div>
+          <div class="tbl"><div><span>Case</span><span>Joined</span><span>Why</span></div><div><span>Soft wrap</span><span>yes</span><span>The terminal marks it</span></div><div><span>Boxed</span><span>no</span><span>The border ends it</span></div></div>
+          <div class="a">1. Strip the border<br><span style="padding-left:16px">• left edge</span><br><span style="padding-left:16px">• right edge</span><br>2. Join the rows</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Code</b> in a box with its language and a copy button; long lines scroll sideways instead of wrapping. <b>Tables</b> as tables, scrolling sideways when wide. <b>Lists</b> keep their levels.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S7 ============ -->
+<section id="s7">
+  <h2><span class="sid">S7</span>Photos and files</h2>
+  <p>Problem 19. Showing what a message carries is small. Sending from the phone is the largest item on this page: it needs the photo and file pickers (two new native parts, so a new build of the app) and the phone has to learn the upload the desktop already does. The host needs no change for either.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">bash</div></div><span class="ib" style="border:1px solid var(--bd);width:26px;height:26px">♪</span><span class="ib" style="border:1px solid var(--bd);width:26px;height:26px">i</span></div>
+        <div class="tl">
+          <div class="u">Why is the header cut off here?</div>
+          <div class="a">The title has no minimum width, so the buttons push it out.</div>
+          <div class="u" style="min-height:30px;min-width:44px">&nbsp;</div>
+          <div class="a">That is the same bug on the narrow layout.</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Drawn from the code, not a screenshot.</b> Two messages sent from the desktop: one with a screenshot and text, one with a screenshot alone. The phone shows the text of the first and an empty bubble for the second.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="thumb big"></div>
+          <div class="u">Why is the header cut off here?</div>
+          <div class="a">The title has no minimum width, so the buttons push it out.</div>
+          <div class="thumb big"></div>
+          <div class="fchip sm"><svg><use href="#i-file"/></svg><div>layout.log<small>18 KB</small></div></div>
+          <div class="a">That is the same bug on the narrow layout.</div>
+        </div>
+        <div class="cmp"><div class="rw"><span class="rb"><svg><use href="#i-plus"/></svg></span><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+      </div>
+      <figcaption><b>Shown.</b> Images as thumbnails that open full screen; other files as a named chip. A plus button on the field.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl"><div class="a">That is the same bug on the narrow layout.</div></div>
+        <div class="cmp"><div class="rw"><span class="rb"><svg><use href="#i-plus"/></svg></span><span class="in">Reply</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+        <div class="scrim"></div>
+        <div class="sheet"><div class="grab"></div><h4>Attach</h4>
+          <div class="si"><svg><use href="#i-img"/></svg>Photo library</div>
+          <div class="si"><svg><use href="#i-cam"/></svg>Take a photo</div>
+          <div class="si"><svg><use href="#i-file"/></svg>File</div>
+        </div>
+      </div>
+      <figcaption><b>The plus button.</b></figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl"><div class="a">That is the same bug on the narrow layout.</div></div>
+        <div class="cmp">
+          <div class="att"><div class="thumb"></div><div class="thumb"><i class="bar"></i></div><div class="fchip"><svg><use href="#i-file"/></svg><div>layout.log<small>18 KB</small></div><svg style="width:12px;height:12px;color:var(--ft)"><use href="#i-x"/></svg></div></div>
+          <div class="rw"><span class="rb"><svg><use href="#i-plus"/></svg></span><span class="in has">And on the tablet?</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq off"><svg><use href="#i-up"/></svg></span></div></div>
+        <div class="kbd"><i></i><i></i><i></i></div>
+      </div>
+      <figcaption><b>Attached.</b> One is still uploading, so Send waits for it. The same size limits as the desktop.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S8 ============ -->
+<section id="s8">
+  <h2><span class="sid">S8</span>Header and Details</h2>
+  <p>Problems 20 and 21. The header gets a second line and drawn icons. Details names the place the way the desktop does and adds the branch and what changed, which means the phone starts asking the host for the Git summaries the desktop already asks for. No change on the host.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-details.webp" alt="Details sheet today"><figcaption><b>Details.</b> A raw address, the full path, and the controls. The header behind it says "bash".</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot w"></i>Working · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl">
+          <div class="u">Why does it break?</div>
+          <div class="steps"><svg><use href="#i-chev"/></svg>3 steps so far</div>
+        </div>
+        <div class="dock"><div class="status"><i class="spin"></i>Working… <span class="el">12s</span></div></div>
+        <div class="cmp"><div class="rw"><span class="in">Send a follow-up while it works</span><span class="rb"><svg><use href="#i-mic"/></svg></span><span class="sq stop"><i></i></span></div></div>
+      </div>
+      <figcaption><b>Header.</b> The second line says the state (Working, Waiting for you, Idle, Ended) and, per D7, the model and effort. Tapping the title opens Details. Headphones turn voice on. The title itself does not change: the agent's title when the host has one, else the window name.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">Wrapped links</div><div class="t2"><i class="dot"></i>Idle · Opus 5.5 · High</div></div><span class="ib"><svg><use href="#i-ear"/></svg></span><span class="ib"><svg><use href="#i-info"/></svg></span></div>
+        <div class="tl"></div>
+        <div class="scrim"></div>
+        <div class="sheet" style="top:96px"><div class="grab"></div><h4>Details</h4>
+          <div class="kv"><svg><use href="#i-host"/></svg>devbox</div>
+          <div class="kv"><svg><use href="#i-folder"/></svg><span class="mono">muxflow/apps/mobile</span></div>
+          <div class="kv"><svg><use href="#i-branch"/></svg><span class="mono">gpui/chat</span></div>
+          <div class="kv"><span style="width:14px"></span>Changes vs main <span class="g">+412</span> <span class="rd">−96</span><span class="m">14 files</span></div>
+          <div class="kv"><span style="width:14px"></span>Uncommitted <span class="g">+3</span> <span class="rd">−1</span><span class="m">1 file</span></div>
+          <div class="cap">Context</div>
+          <div class="kv" style="padding:0"><div class="meter"><i></i></div><span class="m" style="margin-left:6px">217k / 1M</span></div>
+          <div class="cap">Model</div><div class="pills"><span class="pill on">Opus 5.5</span><span class="pill">Fable 5.2</span><span class="pill">Sonnet 5.5</span></div>
+          <div class="cap">Effort</div><div class="pills"><span class="pill">Low</span><span class="pill">Medium</span><span class="pill on">High</span><span class="pill">Xhigh</span><span class="pill">Max</span></div>
+          <div class="cap">Permissions</div><div class="pills"><span class="pill on">Auto</span><span class="pill">Full</span></div>
+          <div class="cap">Speed</div><div class="pills"><span class="pill on">Standard</span><span class="pill">Fast</span></div>
+        </div>
+      </div>
+      <figcaption><b>Details.</b> The host by its label, the folder as repository plus path (or <code>~/…</code> outside one), the branch, and the two change counts the desktop shows. The controls are unchanged.</figcaption></figure>
+  </div>
+</section>
+
+<!-- ============ S9 ============ -->
+<section id="s9">
+  <h2><span class="sid">S9</span>Smaller things</h2>
+  <p>Problem 22, and two that need no picture.</p>
+  <div class="stage">
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-workspace.webp" alt="Workspace window list"><figcaption><b>Workspaces.</b> The row "0: bash / bash" is a chat. Nothing says so, or what state it is in.</figcaption></figure>
+    <figure><span class="lab new">Proposed</span>
+      <div class="phone" style="height:250px">
+        <div class="sb"><span>6:00</span><span>▾ ▮</span></div>
+        <div class="hd"><span class="ib"><svg><use href="#i-back"/></svg></span><div class="tt"><div class="t1">api</div></div></div>
+        <div class="wsrow"><span class="mark"><svg><use href="#i-folder"/></svg></span><div><b>Browse files</b></div></div>
+        <div class="wsrow"><span class="mark"><svg><use href="#i-term"/></svg></span><div><b>New terminal</b></div></div>
+        <div class="wsrow"><span class="mark"><svg><use href="#i-chat"/></svg></span><div><b>0: bash</b><small><i class="dot b"></i>Chat · Waiting for you</small></div></div>
+      </div>
+      <figcaption><b>A chat window says it is one</b>, with its state: Working, Waiting for you, or nothing when idle.</figcaption></figure>
+    <figure><span class="lab now">Now</span><img class="shot" src="mobile-chat-mock/now-voice.webp" alt="Voice mode with voice not set up"><figcaption><b>Voice turned on, voice not set up on the host.</b> The text field is gone and the bar that replaced it does nothing.</figcaption></figure>
+  </div>
+  <ul class="plain">
+    <li><b>Voice not set up.</b> Proposed: the "Set up voice" card shows, and the text field stays until voice can actually be used.</li>
+    <li><b>Send with nothing typed.</b> Today it is a faded blue square that looks half-pressed. Proposed: a plain grey one, as drawn throughout this page.</li>
+  </ul>
+</section>
+
+<!-- ============ not covered ============ -->
+<section id="left">
+  <h2>Not checked, and left as it is</h2>
+  <ul class="plain">
+    <li><b>iPhone.</b> Everything here was seen on Android. There is no Mac on this machine to run the iPhone build.</li>
+    <li><b>A real Claude Code or Codex chat.</b> I used the host's scripted chat so that nothing of yours was touched. Real replies are longer and messier than the script.</li>
+    <li><b>Notifications</b>, <b>voice with speech set up</b>, <b>a slow link</b> and the <b>Agents tab's rows for chats</b> (the test host had no agent hooks).</li>
+    <li><b>Left as it is:</b> switching an agent between chat and terminal stays a desktop setting. The controls for model, effort, permissions and speed stay in Details; D7 is only about showing the current ones.</li>
+  </ul>
+</section>
+
+<section id="decide">
+  <h2>Your answers</h2>
+  <p>Anything the questions do not cover:</p>
+  <textarea id="notes" rows="3" placeholder="Other problems you see on your phone that are not on this page, or anything else"></textarea>
+  <p style="margin-top:14px">The answers as text. It is what the Copy button copies; if copying fails, select all of it here.</p>
+  <textarea id="json" rows="10" readonly spellcheck="false"></textarea>
+</section>
+</main>
+
+<div class="abar">
+  <div class="pr"><span id="n">0</span> of <span id="t">0</span> answered<div class="mt"><i id="m"></i></div></div>
+  <button id="next">Next unanswered</button>
+  <button id="rec">Recommended for the rest</button>
+  <button id="copy" class="p">Copy answers</button>
+</div>
+
+<script>
+(function(){
+  var KEY='muxflow-mobile-chat-mock-v1';
+  var SECTIONS=[['S1','s1'],['S2','s2'],['S3','s3'],['S4','s4'],['S5','s5'],['S6','s6'],['S7','s7'],['S8','s8'],['S9','s9']];
+  /* id, question, section, options [value, label, detail]. The first option is the recommended one. */
+  var DECISIONS=[
+    ['D1','Tool calls while the agent is still working','s2',[['newest','The count so far and the newest step','Keeps the screen for the conversation. Tap the line for all of them.'],['all','Every step as it happens, folded when the turn ends','What the desktop does. On a phone a busy turn pushes your question off screen.']]],
+    ['D2','Where a question or permission request sits','s3',[['docked','Fixed above the reply field, foldable to one line','It cannot be missed and cannot be scrolled away.'],['inline-bar','In the conversation as today, plus a fixed "The agent asked a question" line that jumps to it']]],
+    ['D3','Stopping a background task from the phone','s4',[['stop','A Stop button per task, where the agent supports it'],['read-only','The list is read-only on the phone']]],
+    ['D4','Where message actions live','s5',[['hold-and-newest','Hold any message for a menu; the newest reply also shows Copy and Fork under it'],['hold','Hold only, nothing drawn under messages'],['every','An icon row under every message','The most visible and the most cluttered.']]],
+    ['D5','Fork from the phone','s5',[['yes','Yes: "Fork from here" opens the fork as a new chat'],['no','No: forking stays on the desktop']]],
+    ['D6','Photos and files','s7',[['both','Show them and send them','The large one: new native pickers and the upload, so a new build.'],['show','Show them now, send later','Small. Fixes the empty bubble; the plus button waits.'],['neither','Neither for now']]],
+    ['D7','Model and effort at a glance','s8',[['subtitle','On the header\'s second line, next to the state','No extra row; tapping it opens Details.'],['pills','A row of pills above the reply field, like the desktop','Costs a row of height that the keyboard already squeezes.'],['details','Only in Details, as today']]],
+    ['D8','Branch and changes in Details','s8',[['yes','Yes: branch, changes against the default branch, uncommitted'],['branch','The branch only'],['no','No']]],
+    ['D9','Loading earlier messages','s1',[['auto','By itself when you reach the top'],['button','Keep the "Load earlier messages" button, but hold your place']]]
+  ];
+  var state={sections:{},decisions:{},notes:''};
+  try{var saved=JSON.parse(localStorage.getItem(KEY)||'null');if(saved&&saved.sections&&saved.decisions)state=saved}catch(e){}
+  function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+  function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+  var cards=[],last=-1;
+  function card(kind,id,question,options){
+    var bag=state[kind];bag[id]=bag[id]||{answer:null,note:''};
+    var q=el('div','q');q.id='q-'+id.toLowerCase();
+    var qt=el('div','qt');qt.appendChild(el('span','qid',id));qt.appendChild(el('span','qq',question));
+    var st=el('span','qst','Not answered');qt.appendChild(st);q.appendChild(qt);
+    var all=kind==='decisions'?options.concat([['other','Something else']]):options;
+    all.forEach(function(o,i){
+      var lab=el('label');var inp=el('input');inp.type='radio';inp.name=kind+'-'+id;inp.value=o[0];inp.checked=bag[id].answer===o[0];
+      inp.addEventListener('change',function(){bag[id].answer=o[0];save();refresh()});
+      var txt=el('span');txt.appendChild(el('span',null,o[1]));
+      if(i===0&&kind==='decisions')txt.appendChild(el('span','tag y','Recommended'));
+      if(o[2])txt.appendChild(el('span','od',o[2]));
+      lab.appendChild(inp);lab.appendChild(txt);q.appendChild(lab);
+    });
+    var note=el('textarea');note.rows=1;note.placeholder='Note (optional)';note.value=bag[id].note||'';
+    note.addEventListener('input',function(){bag[id].note=note.value;save();refresh()});
+    q.appendChild(note);
+    cards.push({q:q,st:st,kind:kind,id:id,options:options,question:question,note:note});
+    return q;
+  }
+  SECTIONS.forEach(function(s){
+    var box=el('div','answers');box.appendChild(el('h3',null,'Your answers for '+s[0]));
+    box.appendChild(card('sections',s[0],'Is this section fine as drawn?',[['ok','Fine as drawn'],['change','Needs changes']]));
+    DECISIONS.forEach(function(d){if(d[2]===s[1])box.appendChild(card('decisions',d[0],d[1],d[3]))});
+    document.getElementById(s[1]).appendChild(box);
+  });
+  var notes=document.getElementById('notes'),json=document.getElementById('json');
+  notes.value=state.notes||'';notes.addEventListener('input',function(){state.notes=notes.value;save();refresh()});
+  function label(c,v){for(var i=0;i<c.options.length;i++)if(c.options[i][0]===v)return c.options[i][1];return v==='other'?'Something else':null}
+  function output(){
+    var out={doc:'mobile-chat-mock',sections:{},decisions:{},notes:state.notes||''};
+    cards.forEach(function(c){
+      var a=state[c.kind][c.id],row={question:c.question,answer:a.answer,label:label(c,a.answer)};
+      if(c.kind==='decisions')row.recommended=a.answer==null?null:a.answer===c.options[0][0];
+      if(a.note)row.note=a.note;
+      out[c.kind][c.id]=row;
+    });
+    return JSON.stringify(out,null,2);
+  }
+  function open(c){var a=state[c.kind][c.id];return a.answer==null||((a.answer==='other'||a.answer==='change')&&!a.note.trim())}
+  function refresh(){
+    var done=0;
+    cards.forEach(function(c){
+      var a=state[c.kind][c.id],need=a.answer!=null&&open(c);
+      c.q.classList.toggle('done',a.answer!=null&&!need);c.q.classList.toggle('need',need);
+      c.st.textContent=a.answer==null?'Not answered':need?'Add a note':'Answered';
+      c.note.placeholder=need?'Say what you want instead':'Note (optional)';
+      if(a.answer!=null)done++;
+    });
+    document.getElementById('n').textContent=done;document.getElementById('t').textContent=cards.length;
+    document.getElementById('m').style.width=(100*done/cards.length)+'%';
+    json.value=output();
+  }
+  function sync(){cards.forEach(function(c){var a=state[c.kind][c.id];c.q.querySelectorAll('input').forEach(function(i){i.checked=i.value===a.answer});c.note.value=a.note||''})}
+  document.getElementById('rec').addEventListener('click',function(){
+    cards.forEach(function(c){var a=state[c.kind][c.id];if(a.answer==null)a.answer=c.options[0][0]});save();sync();refresh();
+  });
+  document.getElementById('next').addEventListener('click',function(){
+    var left=cards.filter(open);
+    if(!left.length){document.getElementById('decide').scrollIntoView({behavior:'smooth'});return}
+    var next=left.filter(function(c){return cards.indexOf(c)>last})[0]||left[0];last=cards.indexOf(next);
+    next.q.scrollIntoView({behavior:'smooth',block:'center'});next.q.classList.add('flash');setTimeout(function(){next.q.classList.remove('flash')},1200);
+  });
+  var copy=document.getElementById('copy');
+  copy.addEventListener('click',function(){
+    var text=output();
+    function shown(ok){copy.textContent=ok?'Copied. Paste it to Claude':'Select the text above and copy it';copy.classList.toggle('ok',ok);
+      if(!ok){json.scrollIntoView({block:'center'});json.focus();json.select()}
+      setTimeout(function(){copy.textContent='Copy answers';copy.classList.remove('ok')},2600)}
+    function fallback(){json.value=text;json.focus();json.select();var ok=false;try{ok=document.execCommand('copy')}catch(e){}shown(ok)}
+    /* The clipboard API needs https or localhost; this page is often opened as a file. */
+    if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(text).then(function(){shown(true)},fallback);else fallback();
+  });
+  refresh();
+  /* A real chat is never half empty: fill the space above each drawn conversation with earlier messages. */
+  document.querySelectorAll('.tl:not(.top)').forEach(function(tl){
+    if(!tl.children.length)return;
+    for(var i=109;i>=103;i--){
+      var ans=el('div','a','Earlier answer '+i+'.'),ask=el('div','u','Earlier question '+i);
+      ans.style.opacity=ask.style.opacity='.55';
+      tl.insertBefore(ans,tl.firstChild);tl.insertBefore(ask,tl.firstChild);
+    }
+  });
+})();
+</script>
+</body>
+</html>

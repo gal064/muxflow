@@ -48,6 +48,9 @@ use registry::{
 
 /// A context menu is the one overlay that is not a Kit dialog.
 const POPUP_MENU_CONTEXT: &str = "PopupMenu";
+/// Kit's selectable text, a chat's or a Markdown preview's: it binds copy and
+/// select-all for itself.
+const TEXT_VIEW_CONTEXT: &str = "TextView";
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 type RowRun = Rc<dyn Fn(CommandId, &mut Window, &mut App)>;
@@ -290,12 +293,13 @@ fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
             .iter()
             .any(|context| context.contains(POPUP_MENU_CONTEXT));
     let pressed = shortcut_from_keystroke(&event.keystroke);
-    // The Live Markdown view is a text field too, though not a Kit input.
+    // The Live Markdown view is a text field too, though not a Kit input, and
+    // so is selectable text: its copy is not the terminal's.
     let has_input = window.has_focused_input(cx)
-        || event
-            .context_stack
-            .iter()
-            .any(|context| context.contains(live_markdown::view::KEY_CONTEXT));
+        || event.context_stack.iter().any(|context| {
+            context.contains(live_markdown::view::KEY_CONTEXT)
+                || context.contains(TEXT_VIEW_CONTEXT)
+        });
     let commands = cx.global::<Commands>();
     // A focused text field gets first refusal; a chord it does not bind
     // reaches the app, unless the app's command leaves it to the platform.

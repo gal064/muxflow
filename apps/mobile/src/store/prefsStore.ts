@@ -27,13 +27,13 @@ export interface PrefsPersisted {
   voicePlaybackRate: VoicePlaybackRate;
   /** Whether a new voice reply starts playing as soon as it arrives. */
   voiceAutoPlay: boolean;
-  /** The voice screen's talk pane takes most of the window. */
-  voiceBigPane: boolean;
-  /** Prevent screen sleep while the focused Voice screen is in the foreground. */
+  /** Prevent screen sleep while voice mode's talk pane shows. */
   voiceKeepAwake: boolean;
   /** Android: keep playing voice replies when the phone is turned off on the Voice screen. */
   voicePlayScreenOff: boolean;
   terminalFontSize: TerminalFontSize;
+  /** Voice mode's card on dictating from the reply field is done: Got it, or a first dictation. */
+  chatMicTipDone: boolean;
 }
 
 export interface PrefsState extends PrefsPersisted {
@@ -48,15 +48,15 @@ export interface PrefsActions {
   setAgentCommand(command: string): void;
   setVoicePlaybackRate(rate: VoicePlaybackRate): void;
   setVoiceAutoPlay(autoPlay: boolean): void;
-  setVoiceBigPane(big: boolean): void;
   setVoiceKeepAwake(keepAwake: boolean): void;
   setVoicePlayScreenOff(playScreenOff: boolean): void;
   setTerminalFontSize(size: TerminalFontSize): void;
+  setChatMicTipDone(): void;
 }
 
 export type PrefsStore = StoreApi<PrefsState & PrefsActions>;
 
-export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE };
+export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE, chatMicTipDone: false };
 
 /** Tolerates anything on disk: an unknown or missing field falls back to its default. */
 export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
@@ -69,10 +69,10 @@ export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
       agentCommand: typeof fields.agentCommand === "string" ? fields.agentCommand : DEFAULT_PREFS.agentCommand,
       voicePlaybackRate: isVoicePlaybackRate(fields.voicePlaybackRate) ? fields.voicePlaybackRate : DEFAULT_PREFS.voicePlaybackRate,
       voiceAutoPlay: typeof fields.voiceAutoPlay === "boolean" ? fields.voiceAutoPlay : DEFAULT_PREFS.voiceAutoPlay,
-      voiceBigPane: typeof fields.voiceBigPane === "boolean" ? fields.voiceBigPane : DEFAULT_PREFS.voiceBigPane,
       voiceKeepAwake: typeof fields.voiceKeepAwake === "boolean" ? fields.voiceKeepAwake : DEFAULT_PREFS.voiceKeepAwake,
       voicePlayScreenOff: typeof fields.voicePlayScreenOff === "boolean" ? fields.voicePlayScreenOff : DEFAULT_PREFS.voicePlayScreenOff,
       terminalFontSize: isTerminalFontSize(fields.terminalFontSize) ? fields.terminalFontSize : DEFAULT_PREFS.terminalFontSize,
+      chatMicTipDone: typeof fields.chatMicTipDone === "boolean" ? fields.chatMicTipDone : DEFAULT_PREFS.chatMicTipDone,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -85,8 +85,8 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
 
   return createStore<PrefsState & PrefsActions>((set, get) => {
     const persist = (): void => {
-      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff, terminalFontSize } = get();
-      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff, terminalFontSize } satisfies PrefsPersisted);
+      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceKeepAwake, voicePlayScreenOff, terminalFontSize, chatMicTipDone } = get();
+      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceKeepAwake, voicePlayScreenOff, terminalFontSize, chatMicTipDone } satisfies PrefsPersisted);
       writes = writes.then(
         () =>
           storage.setItem(PREFS_STORAGE_KEY, value).catch((error: unknown) => {
@@ -139,12 +139,6 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
         persist();
       },
 
-      setVoiceBigPane(big) {
-        if (get().voiceBigPane === big && get().hydrated) return;
-        set({ voiceBigPane: big, hydrated: true });
-        persist();
-      },
-
       setVoiceKeepAwake(keepAwake) {
         if (get().voiceKeepAwake === keepAwake && get().hydrated) return;
         set({ voiceKeepAwake: keepAwake, hydrated: true });
@@ -160,6 +154,12 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
       setTerminalFontSize(size) {
         if (get().terminalFontSize === size && get().hydrated) return;
         set({ terminalFontSize: size, hydrated: true });
+        persist();
+      },
+
+      setChatMicTipDone() {
+        if (get().chatMicTipDone && get().hydrated) return;
+        set({ chatMicTipDone: true, hydrated: true });
         persist();
       },
     };

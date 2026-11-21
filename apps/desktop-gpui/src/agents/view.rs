@@ -549,6 +549,7 @@ fn row_menu(row: &AgentListRow, cx: &App) -> Vec<Entry> {
         .disabled(!can_branch(row, cx))
         .into(),
     );
+    entries.push(super::history_view::snooze_entry(&row.agent, cx));
     entries.push(Entry::Separator);
     entries.extend(move_entries(row, cx));
     entries
@@ -1102,7 +1103,13 @@ impl RenderOnce for AgentsList {
                 let runtime = agents.runtime.read(cx);
                 let focus = &runtime.inputs.focus;
                 (
-                    hook_wiring_notice(&host_hook_wiring(runtime.adapters(&focus.host_profile_id))),
+                    if runtime.hook_setup_underway(&focus.host_profile_id) {
+                        None
+                    } else {
+                        hook_wiring_notice(&host_hook_wiring(
+                            runtime.adapters(&focus.host_profile_id),
+                        ))
+                    },
                     crate::settings::get(cx).agent_state_glyphs,
                     selected_agent_id_for_pane(
                         &rows,
@@ -1167,7 +1174,9 @@ impl RenderOnce for AgentsList {
                 .child(text)
                 .into_any_element()
         };
-        let mut body: Vec<AnyElement> = Vec::new();
+        // Snoozed sessions whose time came, above everything: nothing runs
+        // until one is clicked.
+        let mut body: Vec<AnyElement> = super::history_view::woke_rows(cx);
         if rows.is_empty() {
             // Under the filter this list is not the whole host, so it must not
             // claim to be: the bell still counts every agent.

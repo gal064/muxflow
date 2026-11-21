@@ -1,4 +1,4 @@
-//! The Settings dialog: six tabs over [`Prefs`](super::Prefs), with the
+//! The Settings dialog: seven tabs over [`Prefs`](super::Prefs), with the
 //! connection form on the first. Copy, order and behavior from
 //! `features/shell/SettingsDialog.tsx`.
 
@@ -30,7 +30,8 @@ use gpui_kit::{
 };
 
 use super::{
-    AgentSetupStatus, agent_setup, get, notifier, on_runtime,
+    AgentMode, AgentSetupStatus, agent_mode, agent_mode_change, agent_setup, get, notifier,
+    on_runtime,
     prefs::{AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
     update,
 };
@@ -68,15 +69,17 @@ pub enum Tab {
     Connection,
     Workspace,
     Terminal,
+    Agents,
     Appearance,
     Sounds,
     Accessibility,
 }
 
-const TABS: [(Tab, &str); 6] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Connection, "Connection"),
     (Tab::Workspace, "Workspace"),
     (Tab::Terminal, "Terminal"),
+    (Tab::Agents, "Agents"),
     (Tab::Appearance, "Appearance"),
     (Tab::Sounds, "Sounds"),
     (Tab::Accessibility, "Accessibility"),
@@ -173,6 +176,19 @@ pub fn notification_status_hint(status: Option<&str>) -> &'static str {
     }
 }
 
+/// What the agent mode does, or why it cannot be changed now.
+pub fn agent_mode_hint(mode: AgentMode) -> &'static str {
+    match mode.chat {
+        None => "Connect to this host to choose.",
+        Some(true) => {
+            "An agent you start in a terminal opens as a chat in the same tab. Agents already running stay as they are, and pi stays a terminal."
+        }
+        Some(false) => {
+            "An agent you start in a terminal runs there, as its own terminal interface. Agents already running stay as they are."
+        }
+    }
+}
+
 /// What the agent setup row says about itself, in the words of why it is off.
 pub fn agent_setup_hint(status: AgentSetupStatus) -> &'static str {
     if status.available {
@@ -237,6 +253,8 @@ pub struct SettingsDialog {
     font_size: Entity<InputState>,
     start_directory: Entity<InputState>,
     startup_command: Entity<InputState>,
+    /// The Snooze menu's wake times, comma separated.
+    snooze_times: Entity<InputState>,
     /// The host the two workspace fields describe: the one on screen.
     defaults_host: String,
     volume: Entity<SliderState>,
@@ -280,6 +298,12 @@ impl SettingsDialog {
             );
             input
         });
+        let snooze_times = cx.new(|cx| {
+            let mut input =
+                InputState::new(window, cx).placeholder("1h, 3h, tomorrow 09:00, mon 09:00");
+            input.set_value(prefs.snooze_times.join(", "), window, cx);
+            input
+        });
         let volume = cx.new(|_| {
             SliderState::new()
                 .min(0.)
@@ -306,6 +330,11 @@ impl SettingsDialog {
                     this.commit_defaults(window, cx);
                 }
             }),
+            cx.subscribe_in(&snooze_times, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_snooze_times(window, cx);
+                }
+            }),
             // The pointer; the keyboard and a screen reader go through `set_volume`.
             cx.subscribe_in(&volume, window, |_, _, event, window, cx| {
                 if let SliderEvent::Change(value) = event {
@@ -325,6 +354,8 @@ impl SettingsDialog {
         subscriptions.push(cx.on_release(|_, cx| {
             commands::update_context(cx, |context| context.has_host_profile = false);
         }));
+        // The host's answer to a change of its agent mode, or another host's.
+        subscriptions.push(cx.observe_global::<AgentMode>(|_, cx| cx.notify()));
         let mut this = Self {
             tab,
             controller,
@@ -332,6 +363,7 @@ impl SettingsDialog {
             font_size,
             start_directory,
             startup_command,
+            snooze_times,
             defaults_host,
             volume,
             volume_focus: cx.focus_handle().tab_stop(true),
@@ -404,12 +436,24 @@ impl SettingsDialog {
         );
     }
 
+    /// Keeps the times Snooze understands, in its spelling, and shows them so.
+    fn commit_snooze_times(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.snooze_times.read(cx).value().to_string();
+        let times = crate::agents::snooze::parse_list(&typed);
+        if times != get(cx).snooze_times {
+            let saved = times.clone();
+            update(move |prefs| prefs.snooze_times = saved, window, cx);
+        }
+        set_text(&self.snooze_times, times.join(", "), window, cx);
+    }
+
     /// Typed text counts when the dialog closes or the tab changes, not only on
     /// Enter or blur: a click on a checkbox or a button does not move focus out
     /// of a field, so blur alone would drop what was typed.
     fn commit_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_font_size(window, cx);
         self.commit_defaults(window, cx);
+        self.commit_snooze_times(window, cx);
     }
 
     fn select_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -802,6 +846,28 @@ impl SettingsDialog {
                         .child(hint("Sent to the first terminal once, right after the workspace is created.", cx)),
                 ),
         )
+        .child(self.snooze_section(cx))
+    }
+
+    /// Snooze's wake times, its own section of the Workspace tab.
+    fn snooze_section(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        v_flex()
+            .gap(ui(12.))
+            .child(legend("Snooze", cx))
+            .child(
+                v_flex()
+                    .gap(ui(4.))
+                    .child(caption("Wake times", cx))
+                    .child(
+                        Input::new(&self.snooze_times)
+                            .id("settings-snooze-times")
+                            .aria_label("Snooze wake times"),
+                    )
+                    .child(hint(
+                        "What an agent's Snooze menu offers, separated by commas: 30m, 3h, 18:30, tomorrow 09:00, mon 09:00. Pick a time… is always there too.",
+                        cx,
+                    )),
+            )
     }
 
     fn terminal_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -863,6 +929,94 @@ impl SettingsDialog {
                 |on, window, cx| update(|prefs| prefs.focus_follows_mouse = on, window, cx),
                 cx,
             ))
+    }
+
+    /// What the host on screen does with an agent started in a terminal. The
+    /// host keeps the choice, so it is the same from every device.
+    fn agents_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mode = agent_mode(cx);
+        let change = agent_mode_change(cx);
+        let host_label = self.controller.as_ref().map_or_else(
+            || "Local".to_owned(),
+            |controller| controller.read(cx).active_host_label(),
+        );
+        let off = mode.chat.is_none() || mode.changing || change.is_none();
+        let radio = |key: &'static str, label: &'static str| {
+            Radio::new(SharedString::from(format!("settings-agent-mode-{key}")))
+                .label(label)
+                .disabled(off)
+        };
+        v_flex()
+            .gap(ui(12.))
+            .child(agents_legend(&host_label, cx))
+            .child(
+                v_flex()
+                    .gap(ui(4.))
+                    .child(caption("New agents open as", cx))
+                    .child(
+                        div()
+                            .id("settings-agent-mode-group")
+                            .role(Role::RadioGroup)
+                            .aria_label("New agents open as")
+                            // The radio primitive does not emit a change for an
+                            // already selected choice. An explicit activation
+                            // still makes it the preference for future hosts.
+                            .on_click(move |_, _, cx| {
+                                if off {
+                                    return;
+                                }
+                                let mode = agent_mode(cx);
+                                if !mode.changing
+                                    && let Some(chat) = mode.chat
+                                {
+                                    crate::chat::set_agent_mode(chat, cx);
+                                }
+                            })
+                            .on_key_up(move |event, _, cx| {
+                                if off
+                                    || event.keystroke.modifiers.modified()
+                                    || !matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    return;
+                                }
+                                // An unchecked radio's synthesized click already
+                                // started its change before this ancestor bubbles.
+                                // Checked radios omit that callback, but an explicit
+                                // keyboard activation must remember their choice too.
+                                let mode = agent_mode(cx);
+                                if !mode.changing
+                                    && let Some(chat) = mode.chat
+                                {
+                                    crate::chat::set_agent_mode(chat, cx);
+                                }
+                            })
+                            .child(
+                                RadioGroup::horizontal("settings-agent-mode")
+                                    .children([
+                                        radio("Terminal", "Terminal"),
+                                        radio("Chat", "Chat (experimental)"),
+                                    ])
+                                    .selected_index(mode.chat.map(usize::from))
+                                    .disabled(off)
+                                    .on_change(move |index, window, cx| {
+                                        if let Some(change) = change.as_ref() {
+                                            change(*index == 1, window, cx);
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(hint(agent_mode_hint(mode), cx)),
+            )
+            .child(dialog::button(
+                Button::new("settings-agent-mode-all")
+                    .label("Apply to all hosts…")
+                    .disabled(off)
+                    .on_click(|_, window, cx| crate::chat::confirm_apply_to_all(window, cx)),
+                Action::Plain,
+                off,
+                &theme::palette(cx),
+            ))
+            .children(crate::chat::apply_result(cx).map(|message| hint(message.to_owned(), cx)))
     }
 
     fn appearance_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1059,6 +1213,13 @@ impl SettingsDialog {
     }
 }
 
+fn agents_legend(label: &str, cx: &App) -> impl IntoElement + use<> {
+    div()
+        .text_size(ui(TYPE_LABEL))
+        .text_color(theme::palette(cx).chrome_faint)
+        .child(format!("AGENTS ON {}", label.to_uppercase()))
+}
+
 fn legend_for_host(label: &str, cx: &App) -> impl IntoElement + use<> {
     div()
         .text_size(ui(TYPE_LABEL))
@@ -1138,6 +1299,7 @@ impl Render for SettingsDialog {
             Tab::Connection => div().children(self.form.clone()).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
             Tab::Terminal => self.terminal_tab(cx).into_any_element(),
+            Tab::Agents => self.agents_tab(cx).into_any_element(),
             Tab::Appearance => self.appearance_tab(cx).into_any_element(),
             Tab::Sounds => self.sounds_tab(window, cx).into_any_element(),
             Tab::Accessibility => self.accessibility_tab(cx).into_any_element(),

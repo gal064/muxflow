@@ -896,6 +896,14 @@ fn tab_menu(
                     .disabled(!can_mutate)
                     .into(),
             );
+            // The tab's agent, when it holds exactly one.
+            entries.extend(scope.as_ref().and_then(|scope| {
+                crate::agents::history_view::snooze_entry_for_window(
+                    &scope.host_profile_id,
+                    window_id,
+                    cx,
+                )
+            }));
             let (weak, window_id) = (weak.clone(), window_id.clone());
             entries.push(
                 Item::new(

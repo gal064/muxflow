@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
-import { agentDiagnostics, closeTmuxTarget, resolveTerminalFile, setPinnedTarget, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+import { ChatAction, ChatPermissionMode, ChatSpeed } from "./gen/chat_pb";
+import { CollisionPolicy, GitSummaryBase, Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
+import { HistoryAction } from "./gen/history_pb";
+import {
+  agentDiagnostics, cancelTerminalUpload, chatAnswer, chatClose, chatInterrupt, chatLoadOlder, chatOpen, chatRewind, chatSend, chatSetOptions, chatSideFork,
+  closeTmuxTarget, commitTerminalUpload, gitBranches, gitBranchSummary, historyList, historyResume, historySnooze, historyWake, prepareTerminalUpload, resolveTerminalFile, setPinnedTarget,
+  UPLOAD_CHUNK_BYTES, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe, writeTerminalUploadChunk,
+} from "./requests";
 
 describe("terminal file request builder", () => {
   it("binds the candidate to the exact pane route and host generation", () => {
@@ -21,6 +27,79 @@ describe("terminal file request builder", () => {
       expectedWindowId: "@5",
       expectedCwd: "/home/dev/project/src",
     });
+  });
+});
+
+// Field usage against the host's filesystem dispatcher and the desktop's
+// upload client: the transfer id is both ids, and nothing but the fields each
+// step reads is set.
+describe("terminal upload request builders", () => {
+  const id = "3e0f7a52-6f0b-4c36-9d55-0b1f5f1d2a77";
+
+  it("prepares under the file's own name, renaming on a collision", () => {
+    const request = prepareTerminalUpload(id, "shot.png", 2_621_440n);
+    expect(request.operation).toBe(Operation.PREPARE_TERMINAL_UPLOAD);
+    expect(request.file).toMatchObject({
+      operationId: id,
+      transferId: id,
+      destination: "shot.png",
+      sourceName: "shot.png",
+      totalBytes: 2_621_440n,
+      collisionPolicy: CollisionPolicy.RENAME,
+      largeUploadConfirmed: false,
+      imagePng: false,
+    });
+  });
+
+  it("writes a chunk at its offset", () => {
+    const content = new Uint8Array([1, 2, 3]);
+    const request = writeTerminalUploadChunk(id, 1_048_576n, 2_621_440n, content);
+    expect(request.operation).toBe(Operation.WRITE_TERMINAL_UPLOAD_CHUNK);
+    expect(request.file).toMatchObject({ operationId: id, transferId: id, offset: 1_048_576n, totalBytes: 2_621_440n });
+    expect(request.file?.content).toEqual(content);
+    expect(request.data.length).toBe(0);
+    expect(UPLOAD_CHUNK_BYTES).toBe(1024 * 1024);
+  });
+
+  it("commits with the size and the digest, and cancels by id alone", () => {
+    const commit = commitTerminalUpload(id, 2_621_440n, "af13");
+    expect(commit.operation).toBe(Operation.COMMIT_TERMINAL_UPLOAD);
+    expect(commit.file).toMatchObject({ operationId: id, transferId: id, totalBytes: 2_621_440n, blake3: "af13" });
+
+    const cancel = cancelTerminalUpload(id);
+    expect(cancel.operation).toBe(Operation.CANCEL_TERMINAL_UPLOAD);
+    expect(cancel.file).toMatchObject({ operationId: id, transferId: id, totalBytes: 0n, blake3: "", destination: "" });
+  });
+});
+
+// Field usage against the host's Git service (apps/host/src/service/git/branch.rs):
+// a read names the root, its token and the server, and nothing a mutation needs.
+describe("git request builders", () => {
+  it("asks for the summary against the default branch, or against HEAD", () => {
+    const branch = gitBranchSummary("op-1", "/work/repo", "file-v2:root", "server-a");
+    expect(branch.operation).toBe(Operation.GIT_BRANCH_SUMMARY);
+    expect(branch.git).toMatchObject({
+      operationId: "op-1",
+      root: "/work/repo",
+      rootToken: "file-v2:root",
+      expectedServerIdentity: "server-a",
+      summaryBase: GitSummaryBase.UNSPECIFIED,
+      repositoryId: "",
+      connectionEpoch: 0n,
+      expectedStatusGeneration: 0n,
+      watchId: "",
+    });
+    expect(branch.file).toBeUndefined();
+
+    const uncommitted = gitBranchSummary("op-2", "/work/repo", "file-v2:root", "server-a", GitSummaryBase.HEAD);
+    expect(uncommitted.operation).toBe(Operation.GIT_BRANCH_SUMMARY);
+    expect(uncommitted.git).toMatchObject({ operationId: "op-2", root: "/work/repo", rootToken: "file-v2:root", expectedServerIdentity: "server-a", summaryBase: GitSummaryBase.HEAD });
+  });
+
+  it("asks for the branch list", () => {
+    const request = gitBranches("op-3", "/work/repo", "file-v2:root", "server-a");
+    expect(request.operation).toBe(Operation.GIT_BRANCHES);
+    expect(request.git).toMatchObject({ operationId: "op-3", root: "/work/repo", rootToken: "file-v2:root", expectedServerIdentity: "server-a", summaryBase: GitSummaryBase.UNSPECIFIED, branch: "" });
   });
 });
 
@@ -106,5 +185,86 @@ describe("pin request builder", () => {
       .toMatchObject({ kind: TmuxActionKind.SET_PINNED, sessionId: "$1", windowId: "", pinned: true, expectedServerIdentity: "server-a", expectedGeneration: 0n });
     expect(setPinnedTarget({ kind: "window", sessionId: "$1", windowId: "@2" }, false, "server-a").tmuxAction)
       .toMatchObject({ kind: TmuxActionKind.SET_PINNED, sessionId: "$1", windowId: "@2", pinned: false });
+  });
+});
+
+// Field usage against apps/host/src/service/requests/chat_dispatch.rs: every
+// pane-scoped action names the pane and the server it was seen on, in
+// `Request.chat`, and nothing rides in `scope` or `data`.
+describe("chat request builders", () => {
+  const target = { paneId: "%7", expectedServerIdentity: "server-a" };
+
+  it("names the pane, the server and the action on every request", () => {
+    const requests = [
+      [chatOpen(target), ChatAction.OPEN],
+      [chatClose(target), ChatAction.CLOSE],
+      [chatSend(target, "hello", "m1"), ChatAction.SEND],
+      [chatInterrupt(target), ChatAction.INTERRUPT],
+      [chatAnswer(target, "q1", { skipped: true }), ChatAction.ANSWER],
+      [chatRewind(target, "m1"), ChatAction.REWIND],
+      [chatSetOptions(target, { model: "m" }), ChatAction.SET_OPTIONS],
+      [chatLoadOlder(target, "c1"), ChatAction.LOAD_OLDER],
+      [chatSideFork(target, "why?"), ChatAction.SIDE_FORK],
+    ] as const;
+    for (const [request, action] of requests) {
+      expect(request.operation).toBe(Operation.CHAT);
+      expect(request.chat).toMatchObject({ action, paneId: "%7", expectedServerIdentity: "server-a" });
+      expect(request.scope).toBe("");
+      expect(request.data.length).toBe(0);
+    }
+  });
+
+  it("carries each action's own fields", () => {
+    expect(chatSend(target, "hello", "m1").chat).toMatchObject({ text: "hello", clientMessageId: "m1" });
+    expect(chatSend(target, "hello", "m1").chat?.attachments).toEqual([]);
+    expect(chatRewind(target, "m1").chat?.itemId).toBe("m1");
+    expect(chatLoadOlder(target, "c1").chat?.olderCursor).toBe("c1");
+    expect(chatSideFork(target, "why?").chat?.text).toBe("why?");
+
+    const answer = chatAnswer(target, "q1", { answers: [{ questionId: "scope", optionIds: ["a", "b"], otherText: "c" }] }).chat;
+    expect(answer?.requestId).toBe("q1");
+    expect(answer?.answer?.answers[0]).toMatchObject({ questionId: "scope", optionIds: ["a", "b"], otherText: "c" });
+    expect(chatAnswer(target, "p1", { allow: true }).chat?.answer).toMatchObject({ allow: true, skipped: false });
+
+    // Unset options stay empty or unspecified, which the host reads as "keep".
+    const options = chatSetOptions(target, { speed: ChatSpeed.FAST }).chat?.options;
+    expect(options).toMatchObject({ model: "", effort: "", permission: ChatPermissionMode.UNSPECIFIED, speed: ChatSpeed.FAST });
+  });
+});
+
+describe("chat send with attachments", () => {
+  const target = { paneId: "%7", expectedServerIdentity: "server-a" };
+
+  it("names each uploaded file by its path and name, and leaves type and size to the host", () => {
+    const request = chatSend(target, "", "m2", [
+      { path: "/home/dev/.cache/muxflow/uploads/shot (1).png", name: "shot.png" },
+      { path: "/home/dev/.cache/muxflow/uploads/notes.txt", name: "notes.txt" },
+    ]);
+    expect(request.operation).toBe(Operation.CHAT);
+    expect(request.chat).toMatchObject({ action: ChatAction.SEND, text: "", clientMessageId: "m2" });
+    expect(request.chat?.attachments).toHaveLength(2);
+    expect(request.chat?.attachments[0]).toMatchObject({
+      path: "/home/dev/.cache/muxflow/uploads/shot (1).png",
+      name: "shot.png",
+      mediaType: "",
+      sizeBytes: 0n,
+    });
+    expect(request.chat?.attachments[1]).toMatchObject({ path: "/home/dev/.cache/muxflow/uploads/notes.txt", name: "notes.txt" });
+  });
+});
+
+describe("history request builders", () => {
+  const entry = { adapterId: "codex", nativeSessionId: "s1" };
+  const topology = { expectedServerIdentity: "server-a", expectedTopologyGeneration: 42n };
+
+  it("lists with no target, and names the session for every other action", () => {
+    const list = historyList();
+    expect(list.operation).toBe(Operation.SESSION_HISTORY);
+    expect(list.history).toMatchObject({ action: HistoryAction.LIST, adapterId: "", nativeSessionId: "" });
+
+    expect(historyResume(entry, topology).history).toMatchObject({ action: HistoryAction.RESUME, ...entry, ...topology });
+    expect(historySnooze(entry, 1_800_000_000_000n, topology).history)
+      .toMatchObject({ action: HistoryAction.SNOOZE, ...entry, ...topology, snoozeUntilUnixMillis: 1_800_000_000_000n });
+    expect(historyWake(entry).history).toMatchObject({ action: HistoryAction.WAKE, ...entry, snoozeUntilUnixMillis: 0n });
   });
 });

@@ -13,7 +13,7 @@ export function previewVoiceGesture(dx: number, dy: number): VoiceGestureDirecti
   return horizontalDirection(dx, dy, VOICE_GESTURE_PREVIEW_THRESHOLD);
 }
 
-/** A deliberate, primarily-horizontal move locks left and cancels right. */
-export function horizontalVoiceGesture(dx: number, dy: number): VoiceGestureDirection | undefined {
-  return horizontalDirection(dx, dy, VOICE_GESTURE_THRESHOLD);
+/** A deliberate, primarily-horizontal move locks left and cancels right. A narrower surface passes its own `threshold`. */
+export function horizontalVoiceGesture(dx: number, dy: number, threshold = VOICE_GESTURE_THRESHOLD): VoiceGestureDirection | undefined {
+  return horizontalDirection(dx, dy, threshold);
 }
