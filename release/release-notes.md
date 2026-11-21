@@ -1,4 +1,4 @@
-## GPUI desktop release candidate
+## GPUI desktop
 
 The desktop app now uses GPUI. Existing profiles, settings and install locations
 are retained. Linux needs a working Vulkan or OpenGL graphics driver.
@@ -9,9 +9,9 @@ third-party licence notices, and the unused KDE blur dependency is removed.
 Routine success toasts for closing tabs and other visible changes are suppressed;
 download results and failure notices remain.
 
-This draft candidate has automated test and package checks. Manual QA was
-skipped: Mac upgrade and Live Markdown checks, minimized CPU measurements, and
-physical trackpad/touchpad checks remain unverified. It is not a stable release.
+Phones need the 0.1.33 app or newer: 0.1.33 changed the host's protocol, so
+hosts from 0.1.33 on refuse older phone apps and older hosts refuse the new app.
+Update the Android app from the APK below; the iOS build is on TestFlight.
 
 ## Install
 
