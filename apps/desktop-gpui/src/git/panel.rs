@@ -1,0 +1,1688 @@
+//! The Source Control panel and its commit form. Port of `GitSidebar.tsx`,
+//! `GitCommitForm.tsx` and `useWorkspaceGit.ts`.
+//!
+//! The panel holds no watch of its own: it acquires the shared observation of
+//! the active pane's repository and draws whatever that has. Stage and discard
+//! are hover buttons on the row, as in VS Code's Source Control list; the
+//! right-click menu carries the same actions with words, and the palette's row
+//! commands act on the last row focused.
+
+use std::{collections::HashMap, rc::Rc};
+
+use gpui_kit::{
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    FontWeight, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton,
+    ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Window,
+    base::TestSupportExt,
+    component::{
+        Disableable, Icon, Sizable,
+        button::{Button, ButtonVariants},
+        h_flex,
+        input::{Enter, Textarea, TextareaState},
+        menu::{ContextMenuExt, DropdownMenu as _, PopupMenu},
+        v_flex,
+    },
+    div,
+    prelude::FluentBuilder,
+    px, relative, svg,
+};
+
+use crate::ui::icons::Glyph;
+use crate::{
+    commands::{self, RowCommandSource, RowSurface, dialogs, registry::CommandId},
+    context_menu::{Entry, Item, fill},
+    files::{icons::file_icon, wire::FileKind},
+    fonts,
+    terminal::integration::transfers::InternalPathDrag,
+    theme::{
+        self, Palette,
+        metrics::{RADIUS_CONTROL, TYPE_LABEL, TYPE_META, TYPE_SECONDARY, ui},
+    },
+    ui::surface_error::SurfaceError,
+};
+
+use super::{
+    client,
+    model::{
+        self, ChangeKind, CommandResult, GitScope, Live, Mutation, MutationKind, Outcome, RootInfo,
+        StatusEntry, StatusSnapshot, Target, Verb,
+    },
+    store::{GitRepositories, RepositoryState},
+};
+
+/// Key context around the commit message box.
+const COMMIT_CONTEXT: &str = "GitCommit";
+
+/// Tauri commits on Ctrl+Enter or Meta+Enter. The Kit gives the box only one
+/// of them per platform (Cmd+Enter on macOS), so Ctrl+Enter is added here,
+/// for this box alone; on Linux it repeats the Kit's own binding.
+pub(super) fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-enter",
+        Enter {
+            secondary: true,
+            shift: false,
+        },
+        Some(&format!("{COMMIT_CONTEXT} > Input")),
+    )]);
+}
+
+/// `box-shadow: inset 1px 0 0 color-mix(in srgb, var(--shadow) 22%, transparent)`.
+fn split_hairline(palette: &Palette) -> gpui_kit::Hsla {
+    let mut color = gpui_kit::Hsla::from(palette.shadow);
+    color.a *= 0.22;
+    color
+}
+
+/// Rows a group draws before "Show more", and how many each press adds.
+const FIRST_ROWS: usize = 200;
+const MORE_ROWS: usize = 500;
+
+/// What the panel observes: the active pane's root and the live link it can
+/// be reached over.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PanelContext {
+    pub root: Option<RootInfo>,
+    pub link: Live,
+    pub can_mutate: bool,
+    /// The active root's scope, when the link can carry a request.
+    pub scope: Option<GitScope>,
+}
+
+impl PanelContext {
+    pub fn new(root: Option<RootInfo>, link: Live, can_mutate: bool) -> Self {
+        let scope = root.as_ref().and_then(|root| model::git_scope(&link, root));
+        Self {
+            root,
+            link,
+            can_mutate,
+            scope,
+        }
+    }
+}
+
+pub enum PanelEvent {
+    /// For the app's status channel.
+    Message(String),
+    OpenDiff {
+        entry: StatusEntry,
+        target: Target,
+        status: Rc<StatusSnapshot>,
+        /// A single click's preview, which a double-click promotes.
+        preview: bool,
+    },
+}
+
+#[derive(Default)]
+struct CommitForm {
+    input: Option<Entity<TextareaState>>,
+    output: Option<(CommandResult, Verb)>,
+    error: Option<String>,
+    /// What has already settled: "Committed." survives a push that then failed.
+    note: Option<String>,
+    /// What is happening right now. Always cleared when the work ends.
+    progress: Option<String>,
+    busy: bool,
+    /// The message was committed; the field empties on the next draw.
+    clear: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Work {
+    Commit,
+    CommitAndPush,
+    Push,
+}
+
+/// A discard the user is being asked to confirm, with what it was decided on.
+#[derive(Clone)]
+pub(super) struct PendingDiscard {
+    entry: StatusEntry,
+    target: Target,
+    status: Rc<StatusSnapshot>,
+    key: String,
+}
+
+pub struct GitPanel {
+    store: Entity<GitRepositories>,
+    context: PanelContext,
+    key: Option<String>,
+    /// The row the palette means: the last one focused or right-clicked, by
+    /// path, since a refresh replaces every entry.
+    focused: Option<(String, Target)>,
+    /// Where staging or unstaging that row takes the keyboard: to the file in
+    /// its new group. Tauri's row went and left the keyboard in the panel;
+    /// here it would fall to the editor.
+    follow: Option<(String, Target)>,
+    /// The groups' scroll, which keeps a row the keyboard reaches in view.
+    scroll: ScrollHandle,
+    /// Whether the panel is on screen: only then do its rows answer the palette.
+    shown: bool,
+    /// What is being applied to each row, by path, while the host decides.
+    pending: HashMap<String, &'static str>,
+    limits: HashMap<&'static str, usize>,
+    form: CommitForm,
+    /// `workflow.git.panelPaint`: from showing or observing a repository to
+    /// drawing its first status. None unless the perf probe is on.
+    panel_paint: Option<crate::perf::PaintTicket>,
+    _store: Subscription,
+}
+
+impl EventEmitter<PanelEvent> for GitPanel {}
+
+/// A row's stop in the Tab order, and the row with its actions around it.
+#[derive(Clone)]
+struct RowFocus {
+    row: FocusHandle,
+    within: FocusHandle,
+}
+
+impl GitPanel {
+    pub fn new(store: Entity<GitRepositories>, cx: &mut Context<Self>) -> Self {
+        let observed = cx.observe(&store, |this, _, cx| {
+            this.publish_rows(cx);
+            cx.notify();
+        });
+        Self {
+            store,
+            context: PanelContext::default(),
+            key: None,
+            focused: None,
+            follow: None,
+            scroll: ScrollHandle::new(),
+            shown: false,
+            pending: HashMap::new(),
+            limits: HashMap::new(),
+            form: CommitForm::default(),
+            panel_paint: None,
+            _store: observed,
+        }
+    }
+
+    /// Follows the active pane's root. A different repository scope releases
+    /// the old observation and acquires the new one.
+    pub fn set_context(&mut self, context: PanelContext, cx: &mut Context<Self>) {
+        if context == self.context {
+            return;
+        }
+        let observable = context
+            .scope
+            .clone()
+            .filter(|_| context.root.as_ref().is_some_and(|root| root.git_worktree));
+        let wanted = observable.as_ref().map(GitScope::key);
+        if wanted != self.key {
+            let store = self.store.clone();
+            store.update(cx, |store, cx| {
+                if let Some(old) = self.key.take() {
+                    store.release(&old, cx);
+                }
+                self.key = observable.map(|scope| store.acquire(&scope, cx));
+            });
+            self.start_panel_paint();
+            self.limits.clear();
+            // Tauri unmounted the form with its repository: a message, error
+            // or output never carries over to another one. Work in flight
+            // keeps the form busy until it ends; it reports elsewhere.
+            self.form = CommitForm {
+                busy: self.form.busy,
+                ..CommitForm::default()
+            };
+        }
+        self.context = context;
+        self.publish_rows(cx);
+        cx.notify();
+    }
+
+    pub fn context(&self) -> &PanelContext {
+        &self.context
+    }
+
+    pub fn store(&self) -> &Entity<GitRepositories> {
+        &self.store
+    }
+
+    /// The active repository's status, for whatever else follows it.
+    pub fn status(&self, cx: &App) -> Option<Rc<StatusSnapshot>> {
+        self.state(cx).status
+    }
+
+    fn state(&self, cx: &App) -> RepositoryState {
+        self.key
+            .as_ref()
+            .map_or_else(RepositoryState::default, |key| {
+                self.store.read(cx).state(key)
+            })
+    }
+
+    /// Whether this repository can be written to at all; a row decides the rest.
+    fn unavailable(&self, state: &RepositoryState) -> bool {
+        !self.context.can_mutate
+            || self.context.scope.is_none()
+            || self.context.root.is_none()
+            || self.key.is_none()
+            || !state
+                .status
+                .as_ref()
+                .is_some_and(|status| status.authoritative)
+    }
+
+    fn message(&mut self, message: String, cx: &mut Context<Self>) {
+        cx.emit(PanelEvent::Message(message));
+    }
+
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.key.clone() {
+            let refreshing = self.store.update(cx, |store, cx| store.refresh(&key, cx));
+            cx.background_executor().spawn(refreshing).detach();
+        }
+    }
+
+    fn open(&mut self, entry: &StatusEntry, target: Target, preview: bool, cx: &mut Context<Self>) {
+        if let Some(status) = self.state(cx).status {
+            cx.emit(PanelEvent::OpenDiff {
+                entry: entry.clone(),
+                target,
+                status,
+                preview,
+            });
+        }
+    }
+
+    pub(super) fn focus_row(
+        &mut self,
+        entry: &StatusEntry,
+        target: Target,
+        cx: &mut Context<Self>,
+    ) {
+        let row = (entry.path.clone(), target);
+        // Re-selecting the same row is not a state change.
+        if self.focused.as_ref() != Some(&row) {
+            self.focused = Some(row);
+            self.follow = None;
+            self.publish_rows(cx);
+        }
+    }
+
+    /// Stage, unstage or discard one file. A refreshed row shows success, so
+    /// only a warning, an uncertain result, or a result for a repository no
+    /// longer shown becomes a notice.
+    pub(super) fn mutate_file(
+        &mut self,
+        entry: &StatusEntry,
+        target: Target,
+        kind: MutationKind,
+        captured: Option<Rc<StatusSnapshot>>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state(cx);
+        let (Some(key), Some(scope)) = (self.key.clone(), self.context.scope.clone()) else {
+            return;
+        };
+        let Some(status) = captured.or(state.status.clone()) else {
+            return;
+        };
+        if self.unavailable(&state) {
+            return;
+        }
+        let mut mutation = Mutation {
+            kind,
+            path: entry.path.clone(),
+            original_path: entry.original_path.clone(),
+            target,
+            expected_status_generation: status.generation,
+            expected_source_generation: status.source_generation.clone(),
+            hunk_index: None,
+            confirmation_token: None,
+        };
+        let repository_id = status.repository.id.clone();
+        if matches!(kind, MutationKind::StageFile | MutationKind::UnstageFile)
+            && self.focused == Some((entry.path.clone(), target))
+        {
+            let to = match target {
+                Target::Staged => Target::Unstaged,
+                Target::Unstaged => Target::Staged,
+            };
+            self.follow = Some((entry.path.clone(), to));
+        }
+        let (path, subject) = (
+            entry.path.clone(),
+            format!("{} {}", kind.label(), entry.display_path),
+        );
+        self.pending.insert(path.clone(), kind.pending_label());
+        cx.notify();
+        let transport = self.store.read(cx).transport();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                if kind.is_discard() {
+                    let token = client::prepare_discard(
+                        transport.clone(),
+                        scope.clone(),
+                        repository_id.clone(),
+                        mutation.clone(),
+                    )
+                    .await?;
+                    mutation.confirmation_token = Some(token);
+                }
+                client::mutate(transport, scope, repository_id, mutation).await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.pending.remove(&path);
+                match result {
+                    Ok(result) => {
+                        if !result.applied() {
+                            this.follow = None;
+                        }
+                        this.accept(&key, &result, cx);
+                        if model::needs_notice(&result) {
+                            this.message(model::result_message(&result, &subject), cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.follow = None;
+                        this.message(error, cx)
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn accept(&mut self, key: &str, result: &CommandResult, cx: &mut Context<Self>) {
+        if let Some(status) = result.status.clone() {
+            self.store
+                .update(cx, |store, cx| store.accept(key, status, cx));
+        }
+    }
+
+    /// What a discard is decided on, while it can be asked for at all.
+    pub(super) fn pending_discard(
+        &self,
+        entry: &StatusEntry,
+        target: Target,
+        cx: &App,
+    ) -> Option<PendingDiscard> {
+        let state = self.state(cx);
+        if self.unavailable(&state) {
+            return None;
+        }
+        Some(PendingDiscard {
+            entry: entry.clone(),
+            target,
+            status: state.status?,
+            key: self.key.clone()?,
+        })
+    }
+
+    /// Asks before a discard, through the same dialog from every way in.
+    fn request_discard(
+        &mut self,
+        entry: &StatusEntry,
+        target: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_discard(entry, target, cx) else {
+            return;
+        };
+        let this = cx.entity().downgrade();
+        dialogs::open_confirmation(
+            dialogs::Confirmation {
+                title: if entry.untracked {
+                    "Delete untracked file?"
+                } else {
+                    "Discard file changes?"
+                }
+                .into(),
+                detail: format!(
+                    "Discard {}? This cannot be undone by the app.",
+                    entry.display_path
+                )
+                .into(),
+                confirm_label: "Discard".into(),
+                destructive: true,
+                on_confirm: Rc::new(move |_, cx| {
+                    let pending = pending.clone();
+                    this.update(cx, |this, cx| this.confirm_discard(pending, cx))
+                        .ok();
+                }),
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// The dialog may have stayed open across a reconnect or a pane switch;
+    /// the discard is then for a repository connection that is gone.
+    pub(super) fn confirm_discard(&mut self, pending: PendingDiscard, cx: &mut Context<Self>) {
+        let same = self.key.as_deref() == Some(&pending.key)
+            && self
+                .state(cx)
+                .status
+                .as_ref()
+                .is_some_and(|status| status.repository.id == pending.status.repository.id);
+        if !same {
+            return self.message(
+                "Discard was cancelled because the repository connection changed.".into(),
+                cx,
+            );
+        }
+        self.mutate_file(
+            &pending.entry,
+            pending.target,
+            MutationKind::DiscardFile,
+            Some(pending.status),
+            cx,
+        );
+    }
+
+    fn row_action(
+        &mut self,
+        entry: &StatusEntry,
+        target: Target,
+        command: CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            "git.openDiff" => self.open(entry, target, false, cx),
+            "git.stage" => {
+                self.mutate_file(entry, Target::Unstaged, MutationKind::StageFile, None, cx)
+            }
+            "git.unstage" => {
+                self.mutate_file(entry, Target::Staged, MutationKind::UnstageFile, None, cx)
+            }
+            "git.discard" => self.request_discard(entry, target, window, cx),
+            _ => {}
+        }
+    }
+
+    /// The row commands the palette and shortcuts reach: the last row focused.
+    /// A hidden panel has no selected row, as an unmounted sidebar had none.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        let revealed = shown && !self.shown;
+        self.shown = shown;
+        if !shown {
+            self.focused = None;
+        }
+        // Tauri mounted the panel when it was shown, so its measurement
+        // started there: a hidden panel would count the time it stayed hidden.
+        if revealed || !shown {
+            self.start_panel_paint();
+        }
+        self.publish_rows(cx);
+    }
+
+    fn start_panel_paint(&mut self) {
+        self.panel_paint = self
+            .key
+            .as_ref()
+            .filter(|_| self.shown)
+            .and_then(|_| crate::perf::PaintTicket::start(&["workflow.git.panelPaint"]));
+    }
+
+    fn publish_rows(&self, cx: &mut Context<Self>) {
+        let state = self.state(cx);
+        let focused = self
+            .focused
+            .as_ref()
+            .filter(|_| self.shown)
+            .and_then(|(path, target)| {
+                let entry = state.status.as_ref()?.entry(path)?.clone();
+                Some((entry, *target))
+            });
+        let source = focused.map(|(entry, target)| {
+            let mut available: Vec<CommandId> = vec!["git.openDiff"];
+            if !self.unavailable(&state) && !entry.conflicted && !entry.submodule {
+                available.push(match target {
+                    Target::Staged => "git.unstage",
+                    Target::Unstaged => "git.stage",
+                });
+                available.push("git.discard");
+            }
+            let this = cx.entity().downgrade();
+            RowCommandSource {
+                available,
+                run: Rc::new(move |command, window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.row_action(&entry, target, command, window, cx)
+                    })
+                    .ok();
+                }),
+            }
+        });
+        commands::publish_row_commands(RowSurface::Git, source, cx);
+    }
+
+    // The commit form.
+
+    fn input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextareaState> {
+        if let Some(input) = &self.form.input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Commit message…")
+                .auto_grow(2, 8)
+        });
+        // Typing redraws only the field: nothing else here reads the message
+        // until it is sent.
+        self.form.input = Some(input.clone());
+        input
+    }
+
+    pub(super) fn message_text(&self, cx: &App) -> String {
+        self.form
+            .input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
+    fn staged_count(&self, cx: &App) -> usize {
+        self.state(cx).status.as_ref().map_or(0, |status| {
+            model::group_entries(&status.entries).staged.len()
+        })
+    }
+
+    pub(super) fn run(&mut self, work: Work, window: &mut Window, cx: &mut Context<Self>) {
+        if self.form.busy {
+            return;
+        }
+        self.form.error = None;
+        self.form.output = None;
+        self.form.note = None;
+        self.form.progress = None;
+        let message = self.message_text(cx);
+        let commits = work != Work::Push;
+        if commits && message.trim().is_empty() {
+            self.form.error = Some("Enter a commit message.".into());
+            cx.notify();
+            return;
+        }
+        let state = self.state(cx);
+        let (Some(key), Some(scope), Some(status)) = (
+            self.key.clone(),
+            self.context.scope.clone(),
+            state.status.clone(),
+        ) else {
+            if !commits {
+                self.form.error = Some("Git is not available right now.".into());
+            }
+            cx.notify();
+            return;
+        };
+        if self.unavailable(&state) {
+            if !commits {
+                self.form.error = Some("Git is not available right now.".into());
+            }
+            cx.notify();
+            return;
+        }
+        self.form.busy = true;
+        if !commits {
+            self.form.progress = Some("Pushing…".into());
+        }
+        cx.notify();
+        let transport = self.store.read(cx).transport();
+        let repository_id = status.repository.id.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut committed = false;
+            if commits {
+                let result = client::commit(
+                    transport.clone(),
+                    scope.clone(),
+                    repository_id.clone(),
+                    status.generation,
+                    message,
+                )
+                .await;
+                committed = this
+                    .update(cx, |this, cx| this.settled_commit(&key, result, work, cx))
+                    .unwrap_or(false);
+            }
+            if work == Work::Push || committed {
+                // The push is a mutation of its own and passes the guard its
+                // button has, now: a chained commit may have left the status
+                // resynchronizing, or the panel on another repository. It says
+                // which status it follows, which the commit has moved.
+                let generation = this
+                    .update(cx, |this, cx| {
+                        let state = this.state(cx);
+                        let ready =
+                            this.key.as_deref() == Some(key.as_str()) && !this.unavailable(&state);
+                        let generation = state.status.filter(|_| ready).map(|s| s.generation);
+                        if generation.is_none() {
+                            let error = "Git is not available right now.".to_owned();
+                            if this.key.as_deref() == Some(key.as_str()) {
+                                this.form.error = Some(error);
+                            } else {
+                                this.message(error, cx);
+                            }
+                        }
+                        generation
+                    })
+                    .ok()
+                    .flatten();
+                let Some(generation) = generation else {
+                    this.update(cx, |this, cx| {
+                        this.form.busy = false;
+                        this.form.progress = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                };
+                let result = client::push(transport, scope, repository_id, generation).await;
+                this.update(cx, |this, cx| {
+                    this.settled_push(&key, result, committed, cx)
+                })
+                .ok();
+            }
+            this.update(cx, |this, cx| {
+                // Whatever happened, nothing is in flight any more.
+                this.form.busy = false;
+                this.form.progress = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the commit happened, which is the only reason to then push.
+    fn settled_commit(
+        &mut self,
+        key: &str,
+        result: Result<CommandResult, String>,
+        work: Work,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) if self.key.as_deref() == Some(key) => {
+                self.form.error = Some(error);
+                return false;
+            }
+            Err(error) => {
+                self.message(error, cx);
+                return false;
+            }
+        };
+        self.accept(key, &result, cx);
+        let applied = result.applied();
+        if self.key.as_deref() != Some(key) {
+            // The form that asked is no longer this repository's.
+            if model::needs_notice(&result) {
+                self.message(model::result_message(&result, "Commit created."), cx);
+            }
+            return applied && work == Work::CommitAndPush;
+        }
+        match result.outcome {
+            Outcome::Applied => {
+                // The field is cleared where a window is at hand: the next draw.
+                self.form.clear = true;
+            }
+            Outcome::PartialOrUnknown => {
+                self.form.error =
+                    Some("Commit outcome is uncertain; inspect HEAD before retrying.".into());
+            }
+            _ => self.form.error = Some("Git did not create a commit.".into()),
+        }
+        self.form.output = Some((result, Verb::Commit));
+        if applied && work == Work::CommitAndPush {
+            self.form.note = Some("Committed.".into());
+            self.form.progress = Some("Pushing…".into());
+        }
+        cx.notify();
+        applied && work == Work::CommitAndPush
+    }
+
+    /// A push is never reported as having worked on the strength of the
+    /// request returning: the host says whether the remote accepted it.
+    fn settled_push(
+        &mut self,
+        key: &str,
+        result: Result<CommandResult, String>,
+        after_commit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) if self.key.as_deref() == Some(key) => {
+                self.form.error = Some(error);
+                return;
+            }
+            Err(error) => return self.message(error, cx),
+        };
+        self.accept(key, &result, cx);
+        if self.key.as_deref() != Some(key) {
+            if model::needs_notice(&result) {
+                let pushed = model::pushed_to(&result);
+                self.message(model::result_message(&result, &pushed), cx);
+            }
+            return;
+        }
+        match result.outcome {
+            Outcome::Applied => {
+                let already = if after_commit { "Committed. " } else { "" };
+                self.form.note = Some(format!("{already}{}", model::pushed_to(&result)));
+            }
+            Outcome::PartialOrUnknown => {
+                self.form.error =
+                    Some("Push outcome is unknown; check the remote before retrying.".into());
+            }
+            _ => self.form.error = Some("The remote did not accept the push.".into()),
+        }
+        self.form.output = Some((result, Verb::Push));
+        cx.notify();
+    }
+}
+
+fn quiet(text: impl Into<SharedString>, palette: &Palette) -> gpui_kit::Div {
+    div()
+        .px(ui(12.))
+        .py(ui(10.))
+        .text_size(ui(TYPE_SECONDARY))
+        .text_color(palette.chrome_faint)
+        .child(text.into())
+}
+
+/// `.surface-error` with no disclosure: a state the app words itself.
+fn alert_line(id: &'static str, text: String, palette: &Palette) -> impl IntoElement {
+    div()
+        .id(id)
+        .role(Role::Alert)
+        .px(ui(12.))
+        .py(ui(5.))
+        .bg(palette.danger_wash)
+        .text_color(palette.danger_ink)
+        .text_size(ui(TYPE_SECONDARY))
+        .child(text)
+}
+
+/// The Tauri group heading is an `h3`, so the browser's 1em margin (10.5px at the
+/// label size) sits on both sides of its 8px and 3px padding.
+/// The extra half pixel is the heading's taller line box in the capture; the
+/// bottom side needs none.
+const SECTION_LABEL_TOP: f32 = 8. + 10.5 + 0.5;
+const SECTION_LABEL_BOTTOM: f32 = 3. + 10.5;
+/// `line-height: normal` of the 12px mono face the rows use, which sets the
+/// 21px row pitch.
+const ROW_LINE: f32 = 1.3;
+
+/// `line-height: normal` of the sans face: GPUI's default is taller, which
+/// spread the heading and the rows.
+const PANEL_LINE: f32 = 1.21;
+
+fn state_color(kind: ChangeKind, conflicted: bool, palette: &Palette) -> gpui_kit::Rgba {
+    if conflicted {
+        return palette.chrome_faint;
+    }
+    match kind {
+        ChangeKind::Modified => palette.state_working,
+        ChangeKind::Added | ChangeKind::Copied => palette.term_2,
+        ChangeKind::Deleted => palette.danger,
+        ChangeKind::Untracked => palette.term_4,
+        ChangeKind::Renamed | ChangeKind::TypeChanged => palette.term_5,
+        _ => palette.chrome_faint,
+    }
+}
+
+/// What a dragged row looks like under the pointer.
+struct PathGhost(SharedString);
+
+impl Render for PathGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = theme::palette(cx);
+        div()
+            .px(ui(8.))
+            .py(ui(3.))
+            .rounded(ui(RADIUS_CONTROL))
+            .bg(palette.chrome_raised)
+            .border_1()
+            .border_color(palette.chrome_border)
+            .font_family(fonts::MONO)
+            .text_size(ui(12.))
+            .text_color(palette.chrome_ink)
+            .child(self.0.clone())
+    }
+}
+
+impl GitPanel {
+    fn render_empty(
+        &self,
+        detail: String,
+        retry: bool,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .id("git-panel")
+            .role(Role::Region)
+            .aria_label("Source Control")
+            .size_full()
+            .child(quiet(detail, palette).when(retry, |this| {
+                this.child(
+                    Button::new("git-retry")
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .label("Retry")
+                        .text_color(palette.accent)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                )
+            }))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_group(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        entries: &[&StatusEntry],
+        target: Target,
+        mutable: bool,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if entries.is_empty() {
+            return None;
+        }
+        let limit = self.limits.get(id).copied().unwrap_or(FIRST_ROWS);
+        let shown = &entries[..entries.len().min(limit)];
+        let remaining = entries.len() - shown.len();
+        let host = self
+            .context
+            .scope
+            .as_ref()
+            .map(|scope| (scope.host_profile_id.clone(), scope.server_identity.clone()));
+        let rows: Vec<AnyElement> = shown
+            .iter()
+            .map(|entry| self.render_row(entry, target, mutable, host.clone(), palette, window, cx))
+            .collect();
+        Some(
+            v_flex()
+                .id(id)
+                .role(Role::List)
+                .aria_label(title)
+                .child(
+                    div()
+                        .px(ui(12.))
+                        .pt(ui(SECTION_LABEL_TOP))
+                        .pb(ui(SECTION_LABEL_BOTTOM))
+                        .text_size(ui(TYPE_LABEL))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(palette.chrome_faint)
+                        .child(format!("{} · {}", title.to_uppercase(), entries.len())),
+                )
+                .children(rows)
+                .when(remaining > 0, |this| {
+                    this.child(
+                        div().px(ui(12.)).py(ui(4.)).child(
+                            Button::new(SharedString::from(format!("{id}-more")))
+                                .outline()
+                                .xsmall()
+                                .w_full()
+                                .label(format!("Show {} more…", remaining.min(MORE_ROWS)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let limit = this.limits.entry(id).or_insert(FIRST_ROWS);
+                                    *limit += MORE_ROWS;
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_row(
+        &self,
+        entry: &StatusEntry,
+        target: Target,
+        mutable: bool,
+        host: Option<(String, String)>,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let staged = target == Target::Staged;
+        let key = format!("{}-{}", model::target_name(target), entry.path);
+        // Each row is a stop in the Tab order, as Tauri's row buttons, and
+        // shows its actions while it or one of them holds the keyboard.
+        let row_focus = |key: &str, window: &mut Window, cx: &mut Context<Self>| {
+            window
+                .use_keyed_state(
+                    SharedString::from(format!("git-row-focus-{key}")),
+                    cx,
+                    |_, cx| RowFocus {
+                        row: cx.focus_handle().tab_stop(true),
+                        within: cx.focus_handle(),
+                    },
+                )
+                .read(cx)
+                .clone()
+        };
+        let focus = row_focus(&key, window, cx);
+        // Staged or unstaged from the keyboard, the file takes it to its new
+        // group in the frame its old row goes, before the keyboard is left to
+        // whatever claims it next.
+        let from = match target {
+            Target::Staged => Target::Unstaged,
+            Target::Unstaged => Target::Staged,
+        };
+        if self.follow == Some((entry.path.clone(), target))
+            && model::kind_for(entry, from) == ChangeKind::None
+        {
+            let left = row_focus(
+                &format!("{}-{}", model::target_name(from), entry.path),
+                window,
+                cx,
+            );
+            if left.within.contains_focused(window, cx) {
+                window.focus(&focus.row, cx);
+            }
+            // Focus within is read from the last frame, which has no new row:
+            // draw again so the row shows its actions as a reached row does.
+            cx.defer_in(window, |this, _, cx| {
+                this.follow = None;
+                cx.notify();
+            });
+        }
+        crate::context_menu::reveal_when_focused(
+            format!("git-row-reveal-{key}"),
+            &focus.row,
+            &self.scroll,
+            window,
+            cx,
+        );
+        let focused = focus.row.is_focused(window);
+        let within = focus.within.contains_focused(window, cx);
+        // Tabbing onto a row selects it, as a press does.
+        if focused && self.focused.as_ref() != Some(&(entry.path.clone(), target)) {
+            let entry = entry.clone();
+            cx.defer_in(window, move |this, _, cx| {
+                this.focus_row(&entry, target, cx)
+            });
+        }
+        let group = SharedString::from(format!("git-row-group-{key}"));
+        let (name, dir) = model::split_display_path(&entry.display_path);
+        let (shape, tint) = file_icon(name, FileKind::File, None, false);
+        let title = model::status_title(entry, target);
+        let code = model::status_code(entry, target);
+        let color = state_color(model::kind_for(entry, target), entry.conflicted, palette);
+        // A conflict is resolved elsewhere and a submodule pointer is
+        // read-only, so neither offers the buttons at all.
+        let offers_actions = mutable && !entry.conflicted && !entry.submodule;
+        let tooltip = SharedString::from(format!("{} · {title}", entry.display_path));
+        let weak = cx.entity().downgrade();
+        let (open, press, right) = (entry.clone(), entry.clone(), entry.clone());
+        let menu_entry = entry.clone();
+        let menu: crate::context_menu::Builder = Rc::new(
+            move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
+                let entries = weak
+                    .upgrade()
+                    .map(|panel| panel.read(cx).menu_entries(&menu_entry, target, &panel, cx))
+                    .unwrap_or_default();
+                fill(menu, &entries, window, cx)
+            },
+        );
+        let drag = entry
+            .absolute_path
+            .clone()
+            .zip(host)
+            .map(|(path, (profile, server))| InternalPathDrag {
+                host_profile_id: profile,
+                server_identity: server,
+                path,
+            });
+        let ghost = SharedString::from(name.to_owned());
+        let button = h_flex()
+            .id(SharedString::from(format!("git-row-{key}")))
+            .test_support()
+            .role(Role::Button)
+            .aria_label(entry.display_path.clone())
+            .track_focus(&focus.row)
+            // Not a listener: the menu reads the panel as it is built.
+            // Enter and Space click it, as a single press: the preview.
+            .on_key_down({
+                let menu = menu.clone();
+                move |event: &KeyDownEvent, window, cx| {
+                    if crate::context_menu::is_menu_key(&event.keystroke) {
+                        let menu = menu.clone();
+                        crate::context_menu::open(
+                            move |popup, window, cx| menu(popup, window, cx),
+                            window,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .w_full()
+            .items_center()
+            .gap(ui(6.))
+            .px(ui(12.))
+            .py(ui(3.))
+            .font_family(fonts::MONO)
+            .text_size(ui(12.))
+            .line_height(relative(ROW_LINE))
+            .text_color(palette.chrome_ink)
+            .group_hover(group.clone(), |style| style.bg(palette.chrome_hover))
+            // The conflict bar is the item's, and takes its width from the
+            // padding so the row stays aligned with the others.
+            .when(entry.conflicted, |this| this.pl(ui(10.)))
+            .tooltip({
+                let tooltip = tooltip.clone();
+                move |window, cx| {
+                    if crate::context_menu::is_open(window, cx) {
+                        cx.new(|_| gpui_kit::EmptyView).into()
+                    } else {
+                        gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                            .build(window, cx)
+                    }
+                }
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| this.focus_row(&press, target, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, _, cx| this.focus_row(&right, target, cx)),
+            )
+            .on_click(
+                cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
+                    this.open(&open, target, event.click_count() < 2, cx)
+                }),
+            )
+            .when_some(drag, |this, drag| {
+                this.on_drag(drag, move |_, _, _, cx| {
+                    cx.new(|_| PathGhost(ghost.clone()))
+                })
+            })
+            .child(
+                svg()
+                    .data(shape.svg())
+                    .size(ui(12.))
+                    .flex_none()
+                    .text_color(tint.color(palette)),
+            )
+            .child(div().min_w_0().truncate().child(name.to_owned()))
+            .when(!dir.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(ui(TYPE_META))
+                        .text_color(palette.chrome_faint)
+                        .child(dir.to_owned()),
+                )
+            })
+            .child(
+                div()
+                    .ml_auto()
+                    .w(ui(10.))
+                    .flex_none()
+                    .text_center()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .when(offers_actions, |this| {
+                        this.when(within, |this| this.invisible())
+                            .group_hover(group.clone(), |style| style.invisible())
+                    })
+                    .child(code),
+            );
+        let action = |id: String, icon: Glyph, label: &'static str| {
+            Button::new(SharedString::from(id))
+                .ghost()
+                .xsmall()
+                .compact()
+                .size(ui(20.))
+                .accessibility_label(label)
+                .tooltip(label)
+                .icon(Icon::new(icon).size(ui(12.)).text_color(palette.chrome_dim))
+        };
+        let actions = offers_actions.then(|| {
+            let (stage, discard) = (entry.clone(), entry.clone());
+            h_flex()
+                .absolute()
+                .right(ui(6.))
+                .top_0()
+                .bottom_0()
+                .items_center()
+                // Hidden actions are out of the Tab order, so they follow the
+                // row in it only while the row has the keyboard.
+                .when(!within, |this| this.invisible())
+                .group_hover(group.clone(), |style| style.visible())
+                // The actions sit over the row: a press on them is not a press
+                // on the row, which would open the diff.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    h_flex()
+                        .gap(ui(2.))
+                        .px(ui(2.))
+                        .rounded(ui(RADIUS_CONTROL))
+                        .bg(palette.chrome_hover)
+                        .child(
+                            action(
+                                format!("git-stage-{key}"),
+                                if staged { Glyph::Minus } else { Glyph::Plus },
+                                if staged { "Unstage file" } else { "Stage file" },
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if staged {
+                                        this.mutate_file(
+                                            &stage,
+                                            Target::Staged,
+                                            MutationKind::UnstageFile,
+                                            None,
+                                            cx,
+                                        )
+                                    } else {
+                                        this.mutate_file(
+                                            &stage,
+                                            Target::Unstaged,
+                                            MutationKind::StageFile,
+                                            None,
+                                            cx,
+                                        )
+                                    }
+                                },
+                            )),
+                        )
+                        .child(
+                            action(
+                                format!("git-discard-{key}"),
+                                Glyph::Discard,
+                                if entry.untracked {
+                                    "Delete untracked file"
+                                } else {
+                                    "Discard changes"
+                                },
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.request_discard(&discard, target, window, cx)
+                                },
+                            )),
+                        ),
+                )
+        });
+        let inset = if entry.conflicted { 28. } else { 30. };
+        let note = |text: String| {
+            div()
+                .pl(ui(inset))
+                .pr(ui(12.))
+                .pb(ui(3.))
+                .text_size(ui(TYPE_META))
+                .text_color(palette.chrome_faint)
+                .child(text)
+        };
+        let copied =
+            entry.index_kind == ChangeKind::Copied || entry.worktree_kind == ChangeKind::Copied;
+        v_flex()
+            .id(SharedString::from(format!("git-item-{key}")))
+            .group(group)
+            .role(Role::ListItem)
+            .when(entry.conflicted, |this| {
+                this.border_l_2().border_color(palette.danger)
+            })
+            .child(
+                div()
+                    .relative()
+                    .track_focus(&focus.within)
+                    .child(button)
+                    .children(actions)
+                    // A ring for the keyboard only, as Tauri's `:focus-visible`.
+                    .when(focused && window.last_input_was_keyboard(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .border_2()
+                                .border_color(palette.accent),
+                        )
+                    })
+                    .when(focused, |this| {
+                        this.child(crate::context_menu::anchor(&focus.row))
+                    })
+                    .context_menu(move |popup, window, cx| menu(popup, window, cx)),
+            )
+            .when_some(self.pending.get(&entry.path), |this, label| {
+                this.child(note((*label).to_owned()))
+            })
+            .when(entry.submodule, |this| {
+                this.child(note(format!(
+                    "submodule {} · actions unavailable",
+                    entry.submodule_state
+                )))
+            })
+            .when_some(entry.display_original_path.clone(), |this, original| {
+                this.child(note(format!(
+                    "{} from {original}",
+                    if copied { "copied" } else { "renamed" }
+                )))
+            })
+            .when(entry.symlink, |this| {
+                this.child(note("symbolic link".into()))
+            })
+            .when(entry.conflicted, |this| {
+                this.child(note(format!("conflict {}", entry.conflict_code)))
+            })
+            .into_any_element()
+    }
+
+    /// The labeled way to the row's actions, and the keyboard's.
+    fn menu_entries(
+        &self,
+        entry: &StatusEntry,
+        target: Target,
+        panel: &Entity<Self>,
+        cx: &App,
+    ) -> Vec<Entry> {
+        let run = |command: CommandId| {
+            let (panel, entry) = (panel.downgrade(), entry.clone());
+            move |window: &mut Window, cx: &mut App| {
+                panel
+                    .update(cx, |this, cx| {
+                        this.row_action(&entry, target, command, window, cx)
+                    })
+                    .ok();
+            }
+        };
+        let mut entries: Vec<Entry> = vec![Item::new("Open diff", run("git.openDiff")).into()];
+        let state = self.state(cx);
+        if !self.unavailable(&state) && !entry.conflicted {
+            entries.push(
+                match target {
+                    Target::Staged => Item::new("Unstage", run("git.unstage")),
+                    Target::Unstaged => Item::new("Stage", run("git.stage")),
+                }
+                .disabled(entry.submodule)
+                .into(),
+            );
+            entries.push(Entry::Separator);
+            entries.push(
+                Item::new(
+                    if entry.untracked {
+                        "Delete untracked file…"
+                    } else {
+                        "Discard changes…"
+                    },
+                    run("git.discard"),
+                )
+                .destructive()
+                .disabled(entry.submodule)
+                .into(),
+            );
+        }
+        entries
+    }
+
+    fn render_form(
+        &mut self,
+        status: &StatusSnapshot,
+        unavailable: bool,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let input = self.input(window, cx);
+        if std::mem::take(&mut self.form.clear) {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        let staged = self.staged_count(cx);
+        let busy = self.form.busy;
+        let nothing_staged = staged == 0;
+        let can_push = !unavailable && !status.repository.initial;
+        let status_line = [self.form.note.clone(), self.form.progress.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // `.split-button`: Commit and its caret are one control, with a hairline between
+        // the halves.
+        let more_disabled = unavailable || busy;
+        let more_actions = {
+            let this = cx.entity().downgrade();
+            let disabled = nothing_staged || !can_push;
+            move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
+                let this = this.clone();
+                let entries = [Item::new("Commit & Push", move |window, cx| {
+                    this.update(cx, |this, cx| this.run(Work::CommitAndPush, window, cx))
+                        .ok();
+                })
+                .disabled(disabled)
+                .into()];
+                fill(menu, &entries, window, cx)
+            }
+        };
+        let commit = h_flex()
+            .flex_1()
+            .min_w_0()
+            .child(
+                Button::new("git-commit-submit")
+                    .primary()
+                    .xsmall()
+                    .flex_1()
+                    .min_w_0()
+                    .rounded_tr(px(0.))
+                    .rounded_br(px(0.))
+                    .label(format!("Commit {staged} staged"))
+                    .disabled(unavailable || busy || nothing_staged)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.run(Work::Commit, window, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        Button::new("git-commit-more")
+                            .primary()
+                            .xsmall()
+                            .dropdown_caret(true)
+                            .accessibility_label("More commit actions")
+                            .disabled(more_disabled)
+                            .px(ui(7.))
+                            .rounded_tl(px(0.))
+                            .rounded_bl(px(0.))
+                            .dropdown_menu_with_anchor(Anchor::TopRight, more_actions),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(1.))
+                            .bg(split_hairline(palette)),
+                    ),
+            );
+        v_flex()
+            .id("git-commit")
+            .flex_none()
+            .gap(ui(6.))
+            .px(ui(12.))
+            .py(ui(8.))
+            .border_t_1()
+            .border_color(palette.chrome_hairline)
+            .child(
+                div()
+                    .key_context(COMMIT_CONTEXT)
+                    .capture_action(cx.listener(move |this, action: &Enter, window, cx| {
+                        if !action.secondary {
+                            return;
+                        }
+                        // The same condition the Commit button carries.
+                        cx.stop_propagation();
+                        if !unavailable && !this.form.busy && this.staged_count(cx) > 0 {
+                            this.run(Work::Commit, window, cx);
+                        }
+                    }))
+                    .child(
+                        Textarea::new(&input)
+                            .aria_label("Commit message")
+                            .disabled(unavailable)
+                            .text_size(ui(12.)),
+                    ),
+            )
+            .child(
+                h_flex().gap(ui(6.)).child(commit).child(
+                    Button::new("git-push")
+                        .outline()
+                        .xsmall()
+                        .bg(palette.chrome_raised)
+                        .text_color(palette.chrome_ink)
+                        // Kit replays the colors above inside its disabled state.
+                        .when(unavailable || busy || !can_push, |push| push.opacity(0.42))
+                        .label("Push")
+                        .accessibility_label("Push to upstream")
+                        .disabled(unavailable || busy || !can_push)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.run(Work::Push, window, cx)),
+                        ),
+                ),
+            )
+            .when(!status_line.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id("git-commit-status")
+                        .role(Role::Status)
+                        .text_size(ui(TYPE_SECONDARY))
+                        .text_color(palette.chrome_dim)
+                        .child(status_line),
+                )
+            })
+            .when_some(self.form.error.clone(), |this, error| {
+                this.child(SurfaceError::new("git-commit-error", error))
+            })
+            .when_some(self.form.output.as_ref(), |this, (result, verb)| {
+                let failed = !result.applied() || result.refresh_failed;
+                this.child(
+                    div()
+                        .id("git-output")
+                        .role(Role::Log)
+                        .aria_label(format!("Git {} output", verb.name().to_lowercase()))
+                        .max_h(ui(96.))
+                        .overflow_y_scroll()
+                        .p(ui(6.))
+                        .rounded(ui(3.))
+                        .bg(palette.chrome_bg)
+                        .font_family(fonts::MONO)
+                        .text_size(ui(TYPE_META))
+                        .text_color(if failed {
+                            palette.danger_ink
+                        } else {
+                            palette.term_2
+                        })
+                        .child(model::command_details(result, *verb)),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+impl Render for GitPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = theme::palette(cx);
+        let state = self.state(cx);
+        if state.status.is_some() {
+            crate::perf::after_next_frame(self.panel_paint.take(), window);
+        }
+        let Some(root) = &self.context.root else {
+            return self.render_empty(
+                "Select a terminal pane to discover its repository.".into(),
+                false,
+                &palette,
+                cx,
+            );
+        };
+        if !root.git_worktree {
+            return self.render_empty(
+                "The active pane is outside a Git worktree.".into(),
+                false,
+                &palette,
+                cx,
+            );
+        }
+        let Some(status) = state.status.clone() else {
+            let (detail, retry) = match &state.error {
+                Some(error) => (format!("Git unavailable: {error}"), true),
+                None if state.loading && self.key.is_some() => {
+                    ("Reading Git status…".into(), false)
+                }
+                None => ("Git status is unavailable.".into(), true),
+            };
+            return self.render_empty(detail, retry, &palette, cx);
+        };
+        if status.oversized {
+            let reason = status.error.clone().unwrap_or_else(|| {
+                "The host bounded this snapshot to keep the terminal connection responsive.".into()
+            });
+            return self.render_empty(
+                format!(
+                    "Repository status is too large. {reason} {} entries were detected.",
+                    status.total_entry_count
+                ),
+                true,
+                &palette,
+                cx,
+            );
+        }
+        let unavailable = self.unavailable(&state);
+        let groups = model::group_entries(&status.entries);
+        let clean = groups.is_empty();
+        let lists: Vec<AnyElement> = [
+            (
+                "git-conflicts",
+                "Merge changes",
+                &groups.conflicts,
+                Target::Unstaged,
+            ),
+            ("git-staged", "Staged", &groups.staged, Target::Staged),
+            ("git-changes", "Changes", &groups.unstaged, Target::Unstaged),
+            (
+                "git-untracked",
+                "Untracked",
+                &groups.untracked,
+                Target::Unstaged,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(id, title, entries, target)| {
+            self.render_group(
+                id,
+                title,
+                entries,
+                target,
+                !unavailable,
+                &palette,
+                window,
+                cx,
+            )
+        })
+        .collect();
+        let form = self.render_form(&status, unavailable, &palette, window, cx);
+        v_flex()
+            .id("git-panel")
+            .test_support()
+            .role(Role::Region)
+            .aria_label("Source Control")
+            .size_full()
+            .line_height(relative(PANEL_LINE))
+            .min_h_0()
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(ui(6.))
+                    .px(ui(12.))
+                    .py(ui(7.))
+                    .border_b_1()
+                    .border_color(palette.chrome_hairline)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(ui(2.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(ui(12.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(palette.chrome_ink)
+                                    .child(model::head_label(&status.repository).to_owned()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(fonts::MONO)
+                                    .text_size(ui(TYPE_META))
+                                    .text_color(palette.chrome_faint)
+                                    .child(status.repository.worktree_root.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new("git-refresh")
+                            .ghost()
+                            .xsmall()
+                            .compact()
+                            .w(ui(22.))
+                            .accessibility_label("Refresh Git status")
+                            .tooltip("Refresh Git status")
+                            .icon(
+                                Icon::new(Glyph::Refresh)
+                                    .size(ui(14.))
+                                    .text_color(palette.chrome_dim),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    ),
+            )
+            .when_some(state.error.clone(), |this, error| {
+                this.child(SurfaceError::new("git-error", error))
+            })
+            .when(status.copy_detection_incomplete, |this| {
+                this.child(
+                    div()
+                        .id("git-copy-note")
+                        .role(Role::Status)
+                        .px(ui(12.))
+                        .py(ui(5.))
+                        .text_size(ui(TYPE_SECONDARY))
+                        .text_color(palette.chrome_dim)
+                        .child("Copy detection was bounded for this large change set; some copies may appear as additions."),
+                )
+            })
+            .when(!status.authoritative, |this| {
+                this.child(alert_line(
+                    "git-resync",
+                    "Git status is resynchronizing. Mutations are disabled.".into(),
+                    &palette,
+                ))
+            })
+            .child(
+                v_flex()
+                    .id("git-status-groups")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(lists)
+                    .when(clean, |this| {
+                        this.child(quiet("Working tree clean.", &palette))
+                    }),
+            )
+            .child(form)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+impl GitPanel {
+    pub(super) fn set_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input(window, cx);
+        let text = text.to_owned();
+        input.update(cx, |input, cx| input.set_value(text, window, cx));
+    }
+
+    /// The commit form's error, settled note and progress line.
+    pub(super) fn form_state(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.form.error.clone(),
+            self.form.note.clone(),
+            self.form.progress.clone(),
+        )
+    }
+}

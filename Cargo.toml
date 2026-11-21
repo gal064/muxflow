@@ -1,12 +1,38 @@
 [workspace]
 members = [
-  "apps/desktop/src-tauri",
+  "apps/desktop-gpui",
   "apps/host",
+  "crates/desktop-core",
   "crates/protocol",
+  "crates/terminal-interactions",
   "crates/tmux-control",
   "crates/phase0-core",
+  "crates/terminal-engine",
+  "crates/live-markdown",
 ]
+# Vendored crates keep their own upstream formatting and are not linted here.
+exclude = ["vendor/gpui-pre-macos", "vendor/gpui-pre-linux", "vendor/markdown", "vendor/multiversion-macros"]
 resolver = "2"
+
+# GPUI's macOS backend at gpui-kit's pin (gpui-pre-macos 0.3.11, and still in
+# 0.3.12) calls `Option::map_or_default`, which Rust 1.97.1 stable does not
+# have. Remove when a released gpui-pre-macos builds on stable. See
+# vendor/gpui-pre-macos/VENDORED.md.
+#
+# markdown 1.0.0 panics ("mismatched (non-jsx)") on a list item that ends in
+# unclosed fenced code followed by another item, which typing in Live or
+# opening such a file in Preview reaches. Remove when a released markdown
+# fixes it. See vendor/markdown/VENDORED.md.
+#
+# multiversion-macros 0.8.1 (exr's dependency on x86) expands in a random order,
+# so two builds of the Linux package differ. Remove when a release fixes it.
+# See vendor/multiversion-macros/VENDORED.md.
+[patch.crates-io]
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# Remove the unused KDE blur fallback and its non-permissive protocol bindings.
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+markdown = { path = "vendor/markdown" }
+multiversion-macros = { path = "vendor/multiversion-macros" }
 
 [workspace.package]
 edition = "2024"
@@ -14,7 +40,7 @@ rust-version = "1.97.1"
 
 # A development build runs the same control parser, protocol codec and hashing
 # as a release build, and at opt-level 0 those are slow enough to be mistaken
-# for product latency — every measurement taken against `tauri dev` was really
+# for product latency — every measurement taken against an unoptimised build was really
 # measuring the compiler. Level 1 on our own crates keeps builds quick and
 # debugging usable; dependencies are compiled once, so they get full
 # optimisation.

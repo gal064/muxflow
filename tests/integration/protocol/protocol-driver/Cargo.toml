@@ -3,6 +3,7 @@ name = "protocol-test-driver"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "protocol-test-driver"
 
 [dependencies]
 anyhow = "1"

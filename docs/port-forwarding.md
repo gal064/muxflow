@@ -2,7 +2,7 @@
 
 A **Ports** tab in the right panel, beside Files and Git. Type a port and it is
 forwarded from the SSH host to the same port on this machine. Only the desktop
-(React + Tauri) changes: the wire protocol and the host helper do not, so mobile
+changes: the wire protocol and the host helper do not, so mobile
 is untouched and `PROTOCOL_MAJOR` does not move.
 
 ## Decisions
@@ -39,7 +39,7 @@ is untouched and `PROTOCOL_MAJOR` does not move.
 
 ## Forwarding (Rust)
 
-New module `apps/desktop/src-tauri/src/connection/ports.rs`.
+New module `crates/desktop-core/src/connection/ports.rs`.
 
 One process per forward, built from `ssh_base` so it shares keepalives,
 `BatchMode` and `ConnectTimeout` with every other lane:

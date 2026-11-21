@@ -4,7 +4,7 @@
 every push to `main`, uses no secrets, and holds only checks that are
 deterministic on a hosted runner: the privacy scan, version agreement,
 formatting, warning-free Clippy, the Rust workspace tests on Linux and macOS,
-the test-only crates outside the workspace, a bounded parser fuzz smoke, the
+the Linux and macOS package builds, the test-only crates outside the workspace, a bounded parser fuzz smoke, the
 TypeScript checks and tests, committed generated code, and the voice sidecar
 contracts. The Docker SSH suites, the transfer and scale matrices, performance,
 and packaged desktop journeys are not part of it; they are the manual
@@ -167,18 +167,31 @@ The `release` environment holds these secrets:
 ## Architectures and artifacts
 
 `release/linux/build-package.sh` creates a deterministic rootless archive for
-the requested architecture. The archive contains the desktop, a Debian 12
+the requested architecture. The archive contains the GPUI desktop (installed
+as `bin/muxflow`), a Debian 12
 baseline remote helper, desktop integration, installer/uninstaller, and a
 SHA-256 manifest. Docker is required for the conservative helper build unless a
-separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied.
+separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied. Both package
+scripts also need `cargo-about` 0.9.3 for the licence notices
+(`cargo install --locked --features cli cargo-about@0.9.3`; see
+`docs/third-party.md`). The desktop builds
+on ubuntu-24.04 (glibc 2.39, which `verify-package.sh` enforces) with
+`pkg-config libxkbcommon-x11-dev libasound2-dev libfontconfig-dev` installed. At run time it needs
+`libxkbcommon-x11-0`, `libasound2t64` and `libvulkan1` plus a Vulkan driver.
 
 ```sh
 SOURCE_DATE_EPOCH=1704067200 release/linux/build-package.sh x86_64
 release/linux/verify-package.sh tmp/release/muxflow-*-linux-x86_64.tar.gz
 ```
 
-ARM64 uses `aarch64-unknown-linux-gnu` and requires the Rust target, an ARM64
-linker, and an ARM64 GTK/WebKitGTK sysroot. If those prerequisites are absent,
+On a machine with a newer glibc than the release runner, `verify-package.sh`
+refuses the desktop on purpose. For a local build, run
+`release/linux/build-and-install.sh`: it builds the package and installs it
+into `~/.local` (or `ADE_INSTALL_PREFIX`) without that check.
+
+ARM64 is built natively on an ARM64 runner with the same packages. Building it
+on another host uses `aarch64-unknown-linux-gnu` and requires the Rust target,
+an ARM64 linker, and ARM64 copies of the libraries above. If those are absent,
 the script exits 69 with an `ARM64_BLOCKER` message. Until a verified artifact
 exists, ARM64 remains an unverified release lane; an x86-only environment must
 never relabel x86 output.
@@ -187,8 +200,7 @@ never relabel x86 output.
 
 Set `SOURCE_DATE_EPOCH` to a fixed release epoch. The package uses sorted paths,
 fixed mtimes, numeric ownership, deterministic gzip headers, Rust path remapping,
-and an internal file manifest. The builder also reorders Vite's concurrently
-written asset tree before Tauri embedding. `tests/release/run-package.sh` builds
+and an internal file manifest. `tests/release/run-package.sh` builds
 from two different checkout and target paths, requires identical archive
 digests, runs the packaged helper on Debian 12, and then exercises confined
 clean install, upgrade, rollback, and uninstall from an isolated home/prefix.
@@ -212,7 +224,7 @@ SHA-256 sums.
 # macOS release
 
 Run `release/macos/build-package.sh` on an Apple-Silicon Mac with Xcode,
-Node 24, pnpm 11, Rust 1.97.1, and Docker. The script creates an arm64 `.app`
+Node 24, Rust 1.97.1, cargo-about 0.9.3, uv, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
 ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
 `MUXFLOW_LINUX_HELPERS_DIR`, which needs no Docker), and runs
@@ -242,6 +254,6 @@ Published releases currently use the ad-hoc seal. The Developer ID path is
 ready but unexercised until the Apple credentials exist; adding them to the
 `release` environment is all it takes.
 
-No entitlements are requested: the app loads no unsigned code, WebKit runs
-JIT in its own processes, and the desktop does not use the microphone. The
+No entitlements are requested: the app loads no unsigned code and does not JIT,
+and the desktop does not use the microphone. The
 package remains `APPLE_SILICON_ONLY`.

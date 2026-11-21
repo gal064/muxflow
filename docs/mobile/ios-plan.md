@@ -549,7 +549,7 @@ GitHub Actions build path.
 - [Mobile contract validation](../../apps/mobile/src/protocol/contract.ts),
   [mobile handshake](../../apps/mobile/src/protocol/HostConnection.ts), and
   [shared Rust contract](../../crates/protocol/src/lib.rs).
-- [Desktop helper artifact comparison](../../apps/desktop/src-tauri/src/connection/helper.rs).
+- [Desktop helper artifact comparison](../../crates/desktop-core/src/connection/helper.rs).
 - [Shared terminal interactions](../../packages/terminal-interactions).
 - [Current CI](../../.github/workflows/ci.yml) and
   [release workflow](../../.github/workflows/release.yml).
