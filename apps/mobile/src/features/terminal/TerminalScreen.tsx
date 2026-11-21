@@ -421,6 +421,7 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
               draft={draft}
               editing={false}
               inputRef={field}
+              inputTestID="terminal-input"
               mic={agentPresent || voiceMode ? {
                 on: voiceMode,
                 // In voice mode before voice is ready (not set up, not connected) the mic is the way out.

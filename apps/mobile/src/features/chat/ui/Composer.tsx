@@ -48,6 +48,8 @@ export interface ComposerProps {
   plain?: boolean | undefined;
   /** The field lost the focus. */
   onBlur?: (() => void) | undefined;
+  /** The field's test id, for UI flows that type into it. */
+  inputTestID?: string | undefined;
 }
 
 export interface ComposerAttach {
@@ -111,6 +113,7 @@ export function Composer(props: ComposerProps) {
             placeholderTextColor={colors.chromeFaint}
             ref={props.inputRef}
             style={styles.input}
+            testID={props.inputTestID}
             value={draft}
           />
           {mic ? <ComposerMic dictation={dictation} disabled={disabled} on={mic.on} onTap={mic.onTap} sendRefusal={dictationRefusal} /> : null}
