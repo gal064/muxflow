@@ -97,4 +97,19 @@ describe.skipIf(!availability.available)(`live random workspace, no tmux server 
     // What the bar checks before it opens the terminal.
     expect(isConnectionScopeCurrent(opened.scope, () => connection)).toBe(true);
   }, 60_000);
+
+  it("starts the server with an agent and types its command into the new pane", async () => {
+    // The previous case left a server running; end it again on the same connection.
+    harness.tmux(["kill-server"]);
+    await waitFor("no tmux server", () => (connection.serverIdentity === NO_TMUX_SERVER && store.getState().connection.state === "connected" ? true : undefined));
+
+    const opened = await openInRandom(connection, store, { kind: "agent", directory: harness.workDir, command: "echo muxflow-agent-ok", getCurrentConnection: () => connection });
+    expect(opened.createdWorkspace).toBe(true);
+    await expect(opened.commandDelivery).resolves.toEqual({ ok: true });
+    // The line ran in the pane: its output is there, not only the echo of the typing.
+    await waitFor("the command's output in the pane", () => {
+      const lines = harness.tmux(["capture-pane", "-p", "-t", opened.paneId]).split("\n");
+      return lines.some((line) => line.trim() === "muxflow-agent-ok") ? true : undefined;
+    });
+  }, 60_000);
 });

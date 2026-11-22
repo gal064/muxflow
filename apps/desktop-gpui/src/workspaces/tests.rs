@@ -3522,6 +3522,22 @@ fn focused_button(shell: &mut Shell, labels: &[&'static str]) -> Option<&'static
     })
 }
 
+/// The strip's tab that holds the keyboard, by label, and whether it is the
+/// selected one.
+fn focused_strip_tab(shell: &mut Shell) -> Option<(String, bool)> {
+    shell.visual.update(|window, _| {
+        window
+            .find_all_by_role(Role::Tab)
+            .into_iter()
+            .filter(|tab| tab.path().contains(&"workspace-tabs".into()))
+            .find(|tab| tab.focused() == Some(true))
+            .map(|tab| {
+                let label = tab.label().unwrap_or_default().to_owned();
+                (label, tab.selected() == Some(true))
+            })
+    })
+}
+
 #[gpui_kit::test]
 fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut TestAppContext) {
     let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
@@ -3559,7 +3575,9 @@ fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut
     expected.reverse();
     assert_eq!(walked, expected);
 
-    // On from the list to the strip, then the documents' close buttons.
+    // On from the list to the strip's active tab, its one stop, though
+    // "Close main.rs" comes before it: the next Tab leaves the strip.
+    shell.click("workspace-tab-app:b");
     shell
         .visual
         .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
@@ -3572,12 +3590,18 @@ fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut
             .update(|window, cx| workspaces.read(cx).strip_focus.contains_focused(window, cx))
     });
     assert!(strip.is_some(), "Tab reaches the tab strip");
+    assert_eq!(focused_strip_tab(&mut shell), Some(("lib.rs".into(), true)));
     shell.visual.simulate_keystrokes("tab");
     shell.settle();
     assert_eq!(
-        focused_button(&mut shell, &["Close main.rs"]),
-        Some("Close main.rs")
+        focused_button(&mut shell, &["Close main.rs", "Close lib.rs"]),
+        None
     );
+    let left = shell
+        .visual
+        .update(|window, cx| !workspaces.read(cx).strip_focus.contains_focused(window, cx));
+    assert!(left, "one Tab leaves the strip");
+    shell.click("workspace-tab-terminal:@1");
 
     // Past the start of the window the panel's tabs come, as the last stops in
     // Tauri's page did; the arrows select a surface, wrapping.
@@ -3645,10 +3669,17 @@ fn the_strip_selects_tabs_and_opens_their_menu_from_the_keyboard(cx: &mut TestAp
     let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
     let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
     let workspaces = shell.workspaces();
+    // The active tab is a document after another, whose close button the
+    // keyboard passes.
+    shell.click("workspace-tab-app:b");
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
     shell
         .visual
         .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_strip(window, cx)));
     shell.settle();
+    assert_eq!(focused_strip_tab(&mut shell), Some(("lib.rs".into(), true)));
     // Kit's tab takes Enter as a click on its release: a full press.
     let enter = |shell: &mut Shell| {
         shell.visual.update(|window, cx| window.press("enter", cx));
@@ -3676,12 +3707,10 @@ fn the_strip_selects_tabs_and_opens_their_menu_from_the_keyboard(cx: &mut TestAp
     assert!(open, "the menu key opens the tab's menu");
     shell.visual.simulate_keystrokes("escape");
     shell.settle();
-    let back = shell
-        .visual
-        .update(|window, cx| workspaces.read(cx).strip_focus.contains_focused(window, cx));
-    assert!(
-        back,
-        "closing the menu hands the keyboard back to the strip"
+    assert_eq!(
+        focused_strip_tab(&mut shell),
+        Some(("server".into(), true)),
+        "closing the menu hands the keyboard back to the tab"
     );
     // The region is named for the workspace on screen, as in Tauri.
     shell.visual.update(|window, _| {

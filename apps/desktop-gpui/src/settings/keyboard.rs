@@ -279,6 +279,39 @@ impl KeyboardSettings {
         cx.notify();
     }
 
+    /// The rows the search and the Changed filter leave.
+    fn shown(
+        &self,
+        platform: Platform,
+        overrides: &ShortcutOverrides,
+        cx: &App,
+    ) -> Vec<&'static CommandDefinition> {
+        let query = self.search.read(cx).value().to_string();
+        COMMANDS
+            .iter()
+            .filter(|command| {
+                (!self.changed_only || is_changed(command, platform, overrides))
+                    && matches_search(command, &query, platform, overrides)
+            })
+            .collect()
+    }
+
+    /// After a button that goes with what it did: the keyboard to the row's
+    /// keys, or to the search when the Changed filter dropped the row.
+    fn return_focus(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        let (platform, overrides) = Self::keymap(cx);
+        let shown = self
+            .shown(platform, &overrides, cx)
+            .iter()
+            .any(|command| command.id == id);
+        match self.keys_focus.get(id).filter(|_| shown) {
+            Some(keys) => keys.focus(window, cx),
+            None => self
+                .search
+                .update(cx, |search, cx| search.focus(window, cx)),
+        }
+    }
+
     fn keymap(cx: &App) -> (Platform, ShortcutOverrides) {
         let commands = cx.global::<Commands>();
         (commands.platform(), commands.overrides().clone())
@@ -486,6 +519,7 @@ impl KeyboardSettings {
                                 .accessibility_label(format!("Reset {}", command.title))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.reset(id, window, cx);
+                                    this.return_focus(id, window, cx);
                                 })),
                         )
                     })),
@@ -510,16 +544,23 @@ impl KeyboardSettings {
                             let choice = |id: &'static str, label: &'static str| {
                                 Button::new(id).outline().xsmall().compact().label(label)
                             };
-                            this.child(choice("shortcut-swap", "Swap").on_click(
-                                cx.listener(|this, _, window, cx| this.resolve(false, window, cx)),
-                            ))
-                            .child(choice("shortcut-replace", "Replace").on_click(
-                                cx.listener(|this, _, window, cx| this.resolve(true, window, cx)),
-                            ))
+                            this.child(choice("shortcut-swap", "Swap").on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.resolve(false, window, cx);
+                                    this.return_focus(id, window, cx);
+                                },
+                            )))
+                            .child(choice("shortcut-replace", "Replace").on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.resolve(true, window, cx);
+                                    this.return_focus(id, window, cx);
+                                },
+                            )))
                             .child(
                                 choice("shortcut-cancel", "Cancel").on_click(cx.listener(
-                                    |this, _, _, cx| {
+                                    move |this, _, window, cx| {
                                         this.notice = None;
+                                        this.return_focus(id, window, cx);
                                         cx.notify();
                                     },
                                 )),
@@ -534,14 +575,7 @@ impl Render for KeyboardSettings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::palette(cx);
         let (platform, overrides) = Self::keymap(cx);
-        let query = self.search.read(cx).value().to_string();
-        let shown: Vec<&'static CommandDefinition> = COMMANDS
-            .iter()
-            .filter(|command| {
-                (!self.changed_only || is_changed(command, platform, &overrides))
-                    && matches_search(command, &query, platform, &overrides)
-            })
-            .collect();
+        let shown = self.shown(platform, &overrides, cx);
         for command in &shown {
             self.keys_focus
                 .entry(command.id)

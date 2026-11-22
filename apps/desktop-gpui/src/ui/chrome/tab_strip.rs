@@ -366,6 +366,9 @@ impl RenderOnce for TabStrip {
                                     format!("close-{}", tab.key),
                                     format!("Close {}", tab.title),
                                 )
+                                // The strip is one Tab stop; the keyboard
+                                // closes from the menu or with the shortcut.
+                                .tab_stop(false)
                                 .icon(
                                     Icon::new(Glyph::Close)
                                         .size(ui(11.))

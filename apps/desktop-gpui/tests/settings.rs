@@ -929,6 +929,29 @@ fn a_taken_chord_asks_and_swap_replace_or_cancel_resolve_it(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_rows_buttons_hand_the_keyboard_back_to_its_keys_or_the_search(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    let focused = |cx: &mut TestAppContext, id: &'static str| {
+        with_window(handle, cx, |window, _| {
+            window.find(id).focused() == Some(true)
+        })
+    };
+    record(handle, "session.new", "secondary-t", cx);
+    click(handle, "shortcut-cancel", cx);
+    assert!(focused(cx, "shortcut-keys-session.new"), "after Cancel");
+    record(handle, "session.new", "secondary-t", cx);
+    click(handle, "shortcut-swap", cx);
+    assert!(focused(cx, "shortcut-keys-session.new"), "after Swap");
+    // Reset leaves the Changed list: the search takes the keyboard.
+    click(handle, "settings-shortcuts-changed", cx);
+    click(handle, "shortcut-reset-commands.show", cx);
+    let search = with_window(handle, cx, |window, _| {
+        window.find_by_label("Search shortcuts").focused()
+    });
+    assert_eq!(search, Some(true), "after a reset the filter hides");
+}
+
+#[gpui_kit::test]
 fn backspace_removes_a_binding(cx: &mut TestAppContext) {
     let (_dir, state, handle) = open_keyboard(cx);
     record(handle, "window.new", "backspace", cx);

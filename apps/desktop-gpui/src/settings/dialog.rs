@@ -1083,7 +1083,6 @@ impl SettingsDialog {
             .children(crate::chat::apply_result(cx).map(|message| hint(message.to_owned(), cx)))
     }
 
-    /// Where ⌘1–9 jump, over every command's shortcut.
     /// Where ⌘1–9 jump, over every command's shortcut. It fills the body,
     /// `height`, and only the shortcut list scrolls inside it.
     fn keyboard_tab(&self, height: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {

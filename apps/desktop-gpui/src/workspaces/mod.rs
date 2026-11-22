@@ -2027,8 +2027,10 @@ impl Workspaces {
         cx.notify();
     }
 
-    /// `focus.tabs`: the strip, on its active tab. Kit owns the tabs' focus;
-    /// the list's one stop, its selected tab, is the first stop inside it.
+    /// `focus.tabs`: the strip, on its active tab. Kit keeps each tab's focus
+    /// handle in its own keyed state, out of reach, but makes the selected tab
+    /// the list's one stop; the pin and close buttons are no stops, so it is
+    /// the first stop after the list's own handle.
     pub fn focus_strip(&mut self, window: &mut GpuiWindow, cx: &mut Context<Self>) {
         self.strip_focus.focus(window, cx);
         window.focus_next(cx);
@@ -2300,8 +2302,6 @@ impl RowKeys {
     }
 }
 
-/// Moves the tab strip's cursor by a key, as Tauri's strip moves focus: Left
-/// and Right step, Home and End jump. `None` when the key is not one of those.
 /// The interactions that end when the pane they produced or showed paints.
 fn pane_paint_span(kind: ActionKind) -> Option<crate::perf::PaneSpan> {
     use crate::perf::PaneSpan;
