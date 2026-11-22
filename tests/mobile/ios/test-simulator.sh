@@ -96,7 +96,4 @@ maestro --device "$device_id" test --format junit --output "$evidence/quick-crea
   --test-output-dir "$evidence/quick-create" tests/mobile/ios/quick-create.yaml
 # The bar created the workspace on the host, not only in the app's list.
 tmux -L "$ADE_TMUX_SOCKET_NAME" has-session -t "=random"
-# TEMPORARY (QA screenshots for this branch): remove before merge.
-maestro --device "$device_id" test --format junit --output "$evidence/qa-walkthrough.xml" \
-  --test-output-dir "$evidence/qa-walkthrough" tests/mobile/ios/qa-walkthrough.yaml || true
 xcrun simctl io "$device_id" screenshot "$evidence/final.png"
