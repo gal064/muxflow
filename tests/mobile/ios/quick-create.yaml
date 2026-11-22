@@ -9,10 +9,20 @@ appId: dev.muxflow.mobile
       text: Esc
       enabled: true
     timeout: 30000
-- tapOn:
-    id: BackButton
-- tapOn:
-    id: BackButton
+# The terminal draws its own header, whose back control is labelled Back;
+# the workspace screen under it uses the native back button.
+- tapOn: '^Back$'
+- runFlow:
+    when:
+      notVisible:
+        id: quick-new-terminal
+    commands:
+      - tapOn:
+          id: BackButton
+          optional: true
+      - tapOn:
+          text: '^Back$'
+          optional: true
 - extendedWaitUntil:
     visible:
       id: quick-new-terminal
@@ -32,8 +42,18 @@ appId: dev.muxflow.mobile
             enabled: true
           timeout: 30000
 - takeScreenshot: quick-create-terminal
-- tapOn:
-    id: BackButton
+- tapOn: '^Back$'
+# Back lands on the tabs or, if the app pushed the workspace first, on it.
+- runFlow:
+    when:
+      notVisible: '^Workspaces.*'
+    commands:
+      - tapOn:
+          id: BackButton
+          optional: true
+      - tapOn:
+          text: '^Back$'
+          optional: true
 - retry:
     maxRetries: 1
     commands:
