@@ -74,6 +74,7 @@ pub fn adapter_fallback(adapter_id: &str) -> &'static str {
         "codex" => "Codex",
         "claude-code" => "Claude",
         "pi" => "Pi",
+        "opencode" => "OpenCode",
         _ => "Agent",
     }
 }
