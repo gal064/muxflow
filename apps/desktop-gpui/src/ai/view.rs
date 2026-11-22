@@ -19,7 +19,7 @@ use gpui_kit::{
     },
     div,
     prelude::FluentBuilder as _,
-    px,
+    px, relative,
 };
 
 use crate::theme::{
@@ -114,31 +114,27 @@ impl Render for AiPanel {
         }
 
         let this = cx.entity().downgrade();
-        let header =
-            h_flex()
-                .gap(ui(8.))
-                .items_center()
-                .flex_wrap()
-                .child(
-                    div()
-                        .text_size(ui(TYPE_LABEL))
-                        .text_color(p.chrome_dim)
-                        .child("Ask about"),
-                )
-                .child(
-                    div()
-                        .id("ai-sources")
-                        .role(Role::Group)
-                        .aria_label("What the assistant is shown")
-                        .child(h_flex().gap(ui(8.)).children(
-                            super::context::AI_SOURCES.iter().map(|source| {
-                                let checked = sources.contains(source);
-                                let source = *source;
-                                let toggle = this.clone();
-                                Checkbox::new(SharedString::from(format!(
-                                    "ai-source-{}",
-                                    source.id()
-                                )))
+        let header = h_flex()
+            .gap(ui(8.))
+            .items_center()
+            .flex_wrap()
+            .child(
+                div()
+                    .text_size(ui(TYPE_LABEL))
+                    .text_color(p.chrome_dim)
+                    .child("Ask about"),
+            )
+            .child(
+                div()
+                    .id("ai-sources")
+                    .role(Role::Group)
+                    .aria_label("What the assistant is shown")
+                    .child(h_flex().gap(ui(8.)).flex_wrap().children(
+                        super::context::AI_SOURCES.iter().map(|source| {
+                            let checked = sources.contains(source);
+                            let source = *source;
+                            let toggle = this.clone();
+                            Checkbox::new(SharedString::from(format!("ai-source-{}", source.id())))
                                 .label(source.label())
                                 .checked(checked)
                                 .on_change(move |_, _, cx| {
@@ -147,25 +143,25 @@ impl Render for AiPanel {
                                         cx.notify();
                                     });
                                 })
-                            }),
-                        )),
+                        }),
+                    )),
+            )
+            .when(!turns.is_empty() && !streaming && key.is_some(), |row| {
+                let clear = this.clone();
+                let clear_key = key.clone().unwrap_or_default();
+                row.child(
+                    div()
+                        .ml_auto()
+                        .id("ai-clear")
+                        .text_size(ui(TYPE_LABEL))
+                        .text_color(p.chrome_dim)
+                        .cursor_pointer()
+                        .child("Clear")
+                        .on_click(move |_, _, cx| {
+                            let _ = clear.update(cx, |panel, cx| panel.clear(&clear_key, cx));
+                        }),
                 )
-                .when(!turns.is_empty() && !streaming && key.is_some(), |row| {
-                    let clear = this.clone();
-                    let clear_key = key.clone().unwrap_or_default();
-                    row.child(
-                        div()
-                            .ml_auto()
-                            .id("ai-clear")
-                            .text_size(ui(TYPE_LABEL))
-                            .text_color(p.chrome_dim)
-                            .cursor_pointer()
-                            .child("Clear")
-                            .on_click(move |_, _, cx| {
-                                let _ = clear.update(cx, |panel, cx| panel.clear(&clear_key, cx));
-                            }),
-                    )
-                });
+            });
 
         let setup_note = (!configured && !no_host).then(|| {
             v_flex()
@@ -485,16 +481,21 @@ fn turn_bubble(turn: &AiTurn, thinking: bool, p: &Palette) -> impl IntoElement {
         })
 }
 
+/// The one message a tab with nothing to show yet. The note is wide prose, so
+/// it sits in a block as wide as the panel and wraps there: a row-centered
+/// text takes its intrinsic width and paints over the neighboring panes,
+/// which nothing clips.
 fn empty_note(text: &'static str, p: &Palette) -> impl IntoElement {
-    div()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px(ui(12.))
-        .text_size(ui(TYPE_META))
-        .text_color(p.chrome_faint)
-        .child(text)
+    div().flex_1().min_h_0().flex().items_center().child(
+        div()
+            .w_full()
+            .px(ui(12.))
+            .text_center()
+            .text_size(ui(TYPE_META))
+            .text_color(p.chrome_faint)
+            .line_height(relative(1.5))
+            .child(text),
+    )
 }
 
 /// The clock stamp under a bubble, in the user's locale and clock.
