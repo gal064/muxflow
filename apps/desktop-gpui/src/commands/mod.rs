@@ -22,7 +22,6 @@ pub mod keymap;
 pub mod palette;
 pub mod quick_open;
 pub mod registry;
-pub mod shortcut_editor;
 
 use std::{collections::HashMap, rc::Rc, time::Duration};
 
@@ -273,6 +272,8 @@ fn field_yields(event: &KeystrokeEvent, cx: &App) -> bool {
 }
 
 fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
+    // A chord typed with ⌘ held is not a look at the agents' numbers.
+    crate::ui::shell::end_modifier_hold(window, cx);
     // A window with no Kit root (some tests) has no overlays or inputs to consult.
     if window.root::<Root>().flatten().is_none() {
         return;
@@ -359,7 +360,6 @@ pub fn init(cx: &mut App) {
 
     on_command("commands.show", cx, palette::open);
     on_command("workspaces.switch", cx, quick_open::open);
-    on_command("shortcuts.configure", cx, shortcut_editor::open);
 
     cx.intercept_keystrokes(on_keystroke).detach();
     cx.observe_new::<Shell>(|_, window, cx| {

@@ -51,7 +51,7 @@ type DialogAction = Box<dyn Fn(&mut Window, &mut App)>;
 /// Key context around a dialog's controls. The Kit binds Enter to the dialog
 /// itself, ahead of the focused control; shadowing that here lets Enter reach
 /// the control, as it does in the Tauri dialogs.
-const CONTROLS: &str = "ConnectionDialogControls";
+pub(crate) const CONTROLS: &str = "ConnectionDialogControls";
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("enter", NoAction, Some(CONTROLS))]);

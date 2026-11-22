@@ -127,7 +127,7 @@ const SOURCE_CONTROL: &str = "Source control";
 /// take Ctrl+D (EOF) or Ctrl+E (end-of-line), or collide with another binding,
 /// the Linux default is Ghostty's instead.
 #[rustfmt::skip]
-pub static COMMANDS: [CommandDefinition; 84] = [
+pub static COMMANDS: [CommandDefinition; 85] = [
     command("commands.show", "Show command palette", APPLICATION).keys("Meta+Shift+P", "Ctrl+Shift+P"),
     command("workspaces.switch", "Quick Open…", APPLICATION).keys("Meta+P", "Ctrl+P"),
     command("shortcuts.configure", "Configure keyboard shortcuts", APPLICATION),
@@ -145,6 +145,7 @@ pub static COMMANDS: [CommandDefinition; 84] = [
     command("focus.forward", "Forward", VIEW).keys("Meta+]", "Ctrl+]"),
     command("agents.jumpUnread", "Jump to the agent that needs you", AGENTS).keys("Meta+Shift+U", "Ctrl+Shift+U"),
     command("agents.history", "Show session history", AGENTS).keys("Meta+K", "Ctrl+K"),
+    command("agents.newInRandom", "New agent session in random", AGENTS).keys("Meta+Shift+N", "Ctrl+Shift+N").mutates(),
     command("agents.toggleSort", "Cycle agent ordering (priority → workspace → pinned)", AGENTS),
     command("agents.focusRow", "Focus the selected agent's pane", AGENTS).requires(Requires::Row),
     command("agents.renameRow", "Rename the selected agent's tab…", AGENTS).requires(Requires::Row),
@@ -198,17 +199,18 @@ pub static COMMANDS: [CommandDefinition; 84] = [
     command("git.stage", "Stage the selected change", SOURCE_CONTROL).requires(Requires::Row),
     command("git.unstage", "Unstage the selected change", SOURCE_CONTROL).requires(Requires::Row),
     command("git.discard", "Discard the selected change…", SOURCE_CONTROL).requires(Requires::Row),
-    // ⌘1–9 selects workspaces and ⌃1–9 selects tabs on macOS. Linux follows the
-    // ⌘→Ctrl rule for workspaces, which leaves tabs Alt+N, Ghostty's selector.
-    command("workspace.select1", "Go to workspace 1", WORKSPACE).keys("Meta+1", "Ctrl+1").hidden(),
-    command("workspace.select2", "Go to workspace 2", WORKSPACE).keys("Meta+2", "Ctrl+2").hidden(),
-    command("workspace.select3", "Go to workspace 3", WORKSPACE).keys("Meta+3", "Ctrl+3").hidden(),
-    command("workspace.select4", "Go to workspace 4", WORKSPACE).keys("Meta+4", "Ctrl+4").hidden(),
-    command("workspace.select5", "Go to workspace 5", WORKSPACE).keys("Meta+5", "Ctrl+5").hidden(),
-    command("workspace.select6", "Go to workspace 6", WORKSPACE).keys("Meta+6", "Ctrl+6").hidden(),
-    command("workspace.select7", "Go to workspace 7", WORKSPACE).keys("Meta+7", "Ctrl+7").hidden(),
-    command("workspace.select8", "Go to workspace 8", WORKSPACE).keys("Meta+8", "Ctrl+8").hidden(),
-    command("workspace.select9", "Go to workspace 9", WORKSPACE).keys("Meta+9", "Ctrl+9").hidden(),
+    // ⌘1–9 selects workspaces, or agents (Settings › Keyboard), and ⌃1–9
+    // selects tabs on macOS. Linux follows the ⌘→Ctrl rule for workspaces,
+    // which leaves tabs Alt+N, Ghostty's selector.
+    command("workspace.select1", "Go to workspace or agent 1", WORKSPACE).keys("Meta+1", "Ctrl+1").hidden(),
+    command("workspace.select2", "Go to workspace or agent 2", WORKSPACE).keys("Meta+2", "Ctrl+2").hidden(),
+    command("workspace.select3", "Go to workspace or agent 3", WORKSPACE).keys("Meta+3", "Ctrl+3").hidden(),
+    command("workspace.select4", "Go to workspace or agent 4", WORKSPACE).keys("Meta+4", "Ctrl+4").hidden(),
+    command("workspace.select5", "Go to workspace or agent 5", WORKSPACE).keys("Meta+5", "Ctrl+5").hidden(),
+    command("workspace.select6", "Go to workspace or agent 6", WORKSPACE).keys("Meta+6", "Ctrl+6").hidden(),
+    command("workspace.select7", "Go to workspace or agent 7", WORKSPACE).keys("Meta+7", "Ctrl+7").hidden(),
+    command("workspace.select8", "Go to workspace or agent 8", WORKSPACE).keys("Meta+8", "Ctrl+8").hidden(),
+    command("workspace.select9", "Go to workspace or agent 9", WORKSPACE).keys("Meta+9", "Ctrl+9").hidden(),
     command("tab.select1", "Go to tab 1", TERMINAL_TAB).keys("Ctrl+1", "Alt+1").requires(Requires::Session).hidden(),
     command("tab.select2", "Go to tab 2", TERMINAL_TAB).keys("Ctrl+2", "Alt+2").requires(Requires::Session).hidden(),
     command("tab.select3", "Go to tab 3", TERMINAL_TAB).keys("Ctrl+3", "Alt+3").requires(Requires::Session).hidden(),
@@ -224,7 +226,7 @@ pub fn command_by_id(id: &str) -> Option<&'static CommandDefinition> {
     COMMANDS.iter().find(|command| command.id == id)
 }
 
-/// The palette's commands. The shortcut editor reaches all of [`COMMANDS`].
+/// The palette's commands. Settings › Keyboard reaches all of [`COMMANDS`].
 pub fn palette_commands() -> impl Iterator<Item = &'static CommandDefinition> {
     COMMANDS.iter().filter(|command| !command.palette_hidden)
 }
@@ -327,9 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_lists_66_and_hides_only_the_positional_selectors() {
-        assert_eq!(COMMANDS.len(), 84);
-        assert_eq!(palette_commands().count(), 66);
+    fn the_palette_lists_67_and_hides_only_the_positional_selectors() {
+        assert_eq!(COMMANDS.len(), 85);
+        assert_eq!(palette_commands().count(), 67);
         for command in COMMANDS.iter().filter(|command| command.palette_hidden) {
             assert!(
                 command.id.starts_with("workspace.select") || command.id.starts_with("tab.select"),

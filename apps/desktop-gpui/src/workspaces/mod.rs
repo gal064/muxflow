@@ -28,7 +28,7 @@ mod tests;
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -101,6 +101,9 @@ pub struct Latency {
 
 /// A reading older than this says nothing about the link now.
 const LATENCY_STALE_AFTER: Duration = Duration::from_secs(60);
+/// The workspace New agent session in random opens its tabs in, by exact name.
+pub const RANDOM_WORKSPACE: &str = "random";
+
 /// How long, and how often, a new workspace's startup command is retried.
 const STARTUP_WAIT: Duration = Duration::from_secs(10);
 const STARTUP_RETRY: Duration = Duration::from_millis(250);
@@ -250,6 +253,9 @@ pub struct Workspaces {
     protected_app_tab: Option<ProtectedAppTab>,
     host_selection: Option<HostSelection>,
     pending_create: Option<PendingCreate>,
+    /// Hosts a New agent session in random is being created on: a second
+    /// press waits for the first.
+    random_in_flight: HashSet<String>,
     bulk_closing: bool,
     context: Option<commands::ContextFields>,
     /// The window's terminal, set by the chrome that owns it.
@@ -259,13 +265,10 @@ pub struct Workspaces {
     /// Each row's own stop in the Tab order, as Tauri's row buttons are, by
     /// row key.
     row_focus: HashMap<String, FocusHandle>,
-    /// The tab strip takes focus as one stop, as Tauri's roving tablist does;
-    /// the arrows then move a cursor through its tabs.
+    /// The tab strip's list, not itself a stop: Kit's tab list is one stop,
+    /// as Tauri's roving tablist is, and moves the keyboard through its tabs.
+    /// Whether focus is inside this is whether the strip has the keyboard.
     pub strip_focus: FocusHandle,
-    pub strip_cursor: Option<usize>,
-    /// The tabs' order the cursor was set against: a cursor is a place in
-    /// that order, which a move or a close changes under it.
-    cursor_order: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -299,14 +302,13 @@ impl Workspaces {
                 protected_app_tab: None,
                 host_selection: None,
                 pending_create: None,
+                random_in_flight: HashSet::new(),
                 bulk_closing: false,
                 context: None,
                 terminal: None,
                 list_focus: cx.focus_handle(),
                 row_focus: HashMap::default(),
-                strip_focus: cx.focus_handle().tab_stop(true),
-                strip_cursor: None,
-                cursor_order: 0,
+                strip_focus: cx.focus_handle().tab_stop(false),
                 _subscriptions: subscriptions,
             }
         });
@@ -610,17 +612,6 @@ impl Workspaces {
             self.latency = None;
         }
         self.retire_pending(cx);
-        let order = {
-            let mut hasher = std::hash::DefaultHasher::new();
-            for tab in &view.tabs {
-                std::hash::Hash::hash(&tab.key, &mut hasher);
-            }
-            std::hash::Hasher::finish(&hasher)
-        };
-        if order != self.cursor_order {
-            self.cursor_order = order;
-            self.strip_cursor = None;
-        }
         self.surface_terminal_on_host_switch(&view, cx);
         self.record_history(&view);
         self.finish_host_handoffs(&view, cx);
@@ -732,10 +723,6 @@ impl Workspaces {
             };
             if self.last_point.as_ref() != Some(&point) {
                 self.last_point = Some(point.clone());
-                // The strip's cursor starts again from what is now active, as
-                // Tauri's roving tab stop does: one left on an old tab would
-                // send Enter somewhere the user no longer is.
-                self.strip_cursor = None;
                 let expected = self.expected.take();
                 if !expected.is_some_and(|expected| landed_at(&expected, &point)) {
                     self.history.visit(point);
@@ -1693,44 +1680,13 @@ impl Workspaces {
     }
 
     pub fn create_window(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let view = self.view(cx);
-        let Some(scope) = view.scope.clone() else {
-            return;
-        };
-        let host = view.host.clone();
-        let intent = self.begin_intent(true);
-        self.supersede_queued(None, cx);
-        let key = self.new_pending(&host, Some(session_id.to_owned()), "New window".into());
-        cx.notify();
-        let task = self.perform(
-            &host,
-            TmuxAction::session(ActionKind::CreateWindow, session_id),
+        self.create(
+            Some(session_id.to_owned()),
+            String::new(),
+            String::new(),
             None,
-            Feedback::Visible,
             cx,
-        );
-        let session_id = session_id.to_owned();
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                let created = result
-                    .ok()
-                    .filter(|_| this.scope_current(&host, &scope, cx));
-                let Some(created) = created.filter(|created| created.window_id.is_some()) else {
-                    this.withdraw_pending(key);
-                    cx.notify();
-                    return;
-                };
-                let session = created.session_id.clone().unwrap_or(session_id);
-                // Upgraded, not withdrawn: the ack names the window, but the
-                // snapshot holding it has not arrived.
-                this.upgrade_pending(key, Some(session.clone()), created.window_id.clone());
-                if this.intents == intent {
-                    this.commit_local(&host, &session, created.window_id.as_deref(), None, cx);
-                }
-            })
-            .ok();
-        })
+        )
         .detach();
     }
 
@@ -1738,63 +1694,176 @@ impl Workspaces {
     /// startup command is sent once, here, to the pane the host named: no
     /// reconnect or reselection has a path back to it.
     pub fn create_workspace(&mut self, name: String, cx: &mut Context<Self>) {
-        let view = self.view(cx);
-        let Some(scope) = view.scope.clone() else {
-            return;
-        };
-        let host = view.host.clone();
-        let defaults = crate::settings::get(cx).defaults_for(&host);
-        let intent = self.begin_intent(true);
-        self.supersede_queued(None, cx);
-        let title = if name.is_empty() {
-            "New session".to_owned()
-        } else {
-            name.clone()
-        };
-        let key = self.new_pending(&host, None, title);
-        cx.notify();
-        let action = TmuxAction {
-            name,
-            directory: defaults.directory.unwrap_or_default(),
-            // Born pinned while the list shows pinned only, or it would drop
-            // out of the sidebar on the first switch away.
-            pinned: self.pinned_only,
-            ..TmuxAction::new(ActionKind::CreateSession)
-        };
-        let task = self.perform(&host, action, None, Feedback::Visible, cx);
+        let defaults = crate::settings::get(cx).defaults_for(&self.view(cx).host);
         let startup = defaults
             .startup_command
-            .filter(|command| !command.is_empty());
+            .filter(|command| !command.is_empty())
+            .map(|command| {
+                (
+                    command,
+                    "Workspace created, but the startup command could not be sent",
+                )
+            });
+        self.create(
+            None,
+            name,
+            defaults.directory.unwrap_or_default(),
+            startup,
+            cx,
+        )
+        .detach();
+    }
+
+    /// New agent session in random: a tab in the active host's workspace named
+    /// exactly `random`, made first if there is none, running that host's agent
+    /// command. `false` when the host has no agent command, and nothing is sent.
+    pub fn new_agent_in_random(&mut self, cx: &mut Context<Self>) -> bool {
+        let view = self.view(cx);
+        let host = view.host.clone();
+        let defaults = crate::settings::get(cx).defaults_for(&host);
+        let Some(command) = defaults.agent_command else {
+            self.report(
+                "Set an agent command for this host in Settings › Workspace",
+                cx,
+            );
+            return false;
+        };
+        if view.scope.is_none() || !self.random_in_flight.insert(host.clone()) {
+            return true;
+        }
+        // Raw names: a session name is never glyph-stripped. One made since the
+        // last snapshot is known by its placeholder, which the ack named.
+        let existing = view
+            .snapshot
+            .sessions
+            .iter()
+            .find(|session| session.name == RANDOM_WORKSPACE)
+            .map(|session| session.id.clone())
+            .or_else(|| {
+                self.pending
+                    .as_ref()
+                    .filter(|(pending_host, pending)| {
+                        *pending_host == host && pending.title == RANDOM_WORKSPACE
+                    })
+                    .and_then(|(_, pending)| pending.session_id.clone())
+            });
+        let made_workspace = existing.is_none();
+        let task = self.create(
+            existing,
+            RANDOM_WORKSPACE.to_owned(),
+            defaults.directory.unwrap_or_default(),
+            Some((
+                command,
+                "Agent session created, but its command could not be sent",
+            )),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let created = task.await;
+            this.update(cx, |this, cx| {
+                this.random_in_flight.remove(&host);
+                if created && made_workspace {
+                    this.report("Created the random workspace", cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    /// The one create path: a workspace named `name` (`session_id` absent) or
+    /// a tab in one, on the active host, starting in `directory` (empty leaves
+    /// it to the host). `command`, with the words for its failure, is typed into the
+    /// pane the host made. The shell goes to what was made unless the user
+    /// asked for something else meanwhile. Resolves to whether it was made.
+    fn create(
+        &mut self,
+        session_id: Option<String>,
+        name: String,
+        directory: String,
+        command: Option<(String, &'static str)>,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        let view = self.view(cx);
+        let Some(scope) = view.scope.clone() else {
+            return Task::ready(false);
+        };
+        let host = view.host.clone();
+        let intent = self.begin_intent(true);
+        self.supersede_queued(None, cx);
+        let title = match &session_id {
+            Some(_) => "New window".to_owned(),
+            None if name.is_empty() => "New session".to_owned(),
+            None => name.clone(),
+        };
+        let key = self.new_pending(&host, session_id.clone(), title);
+        cx.notify();
+        let action = match &session_id {
+            // A tab takes its name from what runs in it.
+            Some(session) => TmuxAction {
+                directory,
+                ..TmuxAction::session(ActionKind::CreateWindow, session)
+            },
+            None => TmuxAction {
+                name,
+                directory,
+                // Born pinned while the list shows pinned only, or it would
+                // drop out of the sidebar on the first switch away.
+                pinned: self.pinned_only,
+                ..TmuxAction::new(ActionKind::CreateSession)
+            },
+        };
+        let task = self.perform(&host, action, None, Feedback::Visible, cx);
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
                 let created = result
                     .ok()
                     .filter(|_| this.scope_current(&host, &scope, cx));
-                let Some((created, session)) =
-                    created.and_then(|c| c.session_id.clone().map(|s| (c, s)))
-                else {
+                // A tab is known by its window, a workspace by its session.
+                let landed = created.and_then(|created| {
+                    let session = match &session_id {
+                        Some(asked) => created
+                            .window_id
+                            .as_ref()
+                            .map(|_| created.session_id.clone().unwrap_or_else(|| asked.clone())),
+                        None => created.session_id.clone(),
+                    }?;
+                    Some((created, session))
+                });
+                let Some((created, session)) = landed else {
                     this.withdraw_pending(key);
                     cx.notify();
-                    return;
+                    return false;
                 };
+                // Upgraded, not withdrawn: the ack names the window, but the
+                // snapshot holding it has not arrived.
                 this.upgrade_pending(key, Some(session.clone()), created.window_id.clone());
-                if let (Some(command), Some(pane)) = (startup, created.pane_id.clone()) {
-                    this.send_startup(host.clone(), pane, command, cx);
+                if let (Some((command, failure)), Some(pane)) = (command, created.pane_id.clone()) {
+                    this.send_startup(host.clone(), pane, command, failure, cx);
                 }
                 if this.intents == intent {
                     this.commit_local(&host, &session, created.window_id.as_deref(), None, cx);
                 }
+                true
             })
-            .ok();
+            .unwrap_or(false)
         })
-        .detach();
     }
 
-    /// Types a new workspace's startup command into its first pane. When
-    /// creating it started the tmux server, the host is still reconnecting,
-    /// so a refusal is tried again for a while before it is reported.
-    fn send_startup(&self, host: String, pane: String, command: String, cx: &mut Context<Self>) {
+    /// Types a command into a new pane: a workspace's startup command, or an
+    /// agent. When creating it started the tmux server, the host is still
+    /// reconnecting, so a refusal is tried again for a while before it is
+    /// reported, after `failure`.
+    fn send_startup(
+        &self,
+        host: String,
+        pane: String,
+        command: String,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         // Shell text, sent verbatim: escaping it would change the command.
         let input = format!("{command}\n").into_bytes();
         cx.spawn(async move |this, cx| {
@@ -1813,10 +1882,7 @@ impl Workspaces {
                 };
                 if waited >= STARTUP_WAIT {
                     this.update(cx, |this, cx| {
-                        this.report(
-                            format!("Workspace created, but the startup command could not be sent: {error}"),
-                            cx,
-                        )
+                        this.report(format!("{failure}: {error}"), cx)
                     })
                     .ok();
                     return;
@@ -1961,25 +2027,13 @@ impl Workspaces {
         cx.notify();
     }
 
-    /// The strip's keyboard cursor, else the active tab.
-    pub fn strip_position(&self, cx: &App) -> Option<usize> {
-        self.strip_cursor.or_else(|| {
-            let view = self.view(cx);
-            view.tabs
-                .iter()
-                .position(|tab| Some(&tab.key) == view.active_key.as_ref())
-        })
-    }
-
-    /// `focus.tabs`: the strip, with its cursor on the active tab.
+    /// `focus.tabs`: the strip, on its active tab. Kit keeps each tab's focus
+    /// handle in its own keyed state, out of reach, but makes the selected tab
+    /// the list's one stop; the pin and close buttons are no stops, so it is
+    /// the first stop after the list's own handle.
     pub fn focus_strip(&mut self, window: &mut GpuiWindow, cx: &mut Context<Self>) {
-        let view = self.view(cx);
-        self.strip_cursor = view
-            .tabs
-            .iter()
-            .position(|tab| Some(&tab.key) == view.active_key.as_ref())
-            .or((!view.tabs.is_empty()).then_some(0));
         self.strip_focus.focus(window, cx);
+        window.focus_next(cx);
         cx.notify();
     }
 
@@ -2245,20 +2299,6 @@ impl RowKeys {
             next.focus(window, cx);
         }
         true
-    }
-}
-
-/// Moves the tab strip's cursor by a key, as Tauri's strip moves focus: Left
-/// and Right step, Home and End jump. `None` when the key is not one of those.
-pub fn moved_cursor(cursor: Option<usize>, len: usize, key: &str) -> Option<usize> {
-    let last = len.checked_sub(1)?;
-    let current = cursor.unwrap_or(0).min(last);
-    match key {
-        "home" => Some(0),
-        "end" => Some(last),
-        "left" => Some(current.saturating_sub(1)),
-        "right" => Some((current + 1).min(last)),
-        _ => None,
     }
 }
 

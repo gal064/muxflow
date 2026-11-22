@@ -10,7 +10,7 @@
 
 use std::{rc::Rc, sync::Arc, time::Duration};
 
-use desktop_core::app_state::{AppTabRecord, DockSide};
+use desktop_core::app_state::{AppTabRecord, DockSide, NumberKeys};
 use gpui_kit::{App, Context, Entity, Task, WeakEntity, Window};
 use tmux_control::{Pane, Session, TmuxSnapshot, Window as TmuxWindow};
 
@@ -67,6 +67,7 @@ impl Target {
 /// The commands this module answers.
 const SHELL_COMMANDS: &[CommandId] = &[
     "session.new",
+    "agents.newInRandom",
     "session.rename",
     "session.moveLeft",
     "session.moveRight",
@@ -619,6 +620,14 @@ pub fn run(
         return;
     };
     if let Some(index) = selection_index(id, "workspace.select") {
+        if crate::settings::get(cx).number_keys == NumberKeys::Agents {
+            // What a click on that row does.
+            if let Some(row) = crate::agents::numbered_rows(cx).get(index - 1) {
+                crate::agents::open_row(row, cx);
+                super::focus_terminal(this, window, cx);
+            }
+            return;
+        }
         this.update(cx, |this, cx| this.select_workspace_by_index(index - 1, cx));
         return;
     }
@@ -666,6 +675,13 @@ pub fn run(
     }
     match id {
         "session.new" => return dialog::open(this, window, cx),
+        "agents.newInRandom" => {
+            if !this.update(cx, |this, cx| this.new_agent_in_random(cx)) {
+                let controller = this.read(cx).controller.clone();
+                crate::settings::dialog::open_on_agent_command(controller, window, cx);
+            }
+            return;
+        }
         "window.closeNonAgent" => {
             return this.update(cx, |this, cx| {
                 let view = this.view(cx);

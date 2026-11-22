@@ -1,5 +1,5 @@
 import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FlatList, Keyboard, PixelRatio, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import { FlatList, Keyboard, PixelRatio, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent, type ViewInstance } from "react-native";
 
 import { ChatItemKind, type ChatItem } from "../../../protocol/gen/chat_pb";
 import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
@@ -55,7 +55,7 @@ export interface ChatTimelineProps {
 }
 
 /** The height `view` is laid out at now, where the renderer can say at once. It cannot in a test, or for a view that is gone. */
-function heightNow(view: View | null): number | undefined {
+function heightNow(view: ViewInstance | null): number | undefined {
   let height: number | undefined;
   view?.measure((_x, _y, _width, measured) => {
     if (measured > 0) height = measured;
@@ -200,7 +200,7 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
     }, 0);
   }, []);
 
-  const hold = useCallback((key: string, cell: View | null) => {
+  const hold = useCallback((key: string, cell: ViewInstance | null) => {
     const from = heightNow(cell) ?? heights.current.get(key);
     const start = offset.current;
     // Away from the end, the list itself holds everything but its newest row
@@ -266,8 +266,8 @@ export function ChatTimeline({ rows, older, onLoadOlder, onRetryOlder, canEdit, 
     <TimelineOpenContext.Provider value={timeline}>
       <View style={styles.wrap}>
         <FlatList
-          ListFooterComponent={older === "none" || older === "more" ? null : <OlderRow older={older} onRetry={onRetryOlder} />}
-          ListHeaderComponent={tail ? <View style={styles.cell}>{tail}</View> : null}
+          ListFooterComponent={older === "none" || older === "more" ? undefined : <OlderRow older={older} onRetry={onRetryOlder} />}
+          ListHeaderComponent={tail ? <View style={styles.cell}>{tail}</View> : undefined}
           contentContainerStyle={styles.content}
           data={rows}
           inverted
@@ -357,7 +357,7 @@ interface MessageRowProps {
 
 const RowView = memo(function RowView({ row, canEdit, onEdit, onHold, marked, dimmed, under }: MessageRowProps & { row: TimelineRow; dimmed: boolean }) {
   const timeline = useContext(TimelineOpenContext);
-  const view = useRef<View>(null);
+  const view = useRef<ViewInstance>(null);
   const cell = useMemo(() => ({ key: row.key, view }), [row.key]);
   // Only a row that can open says how tall it is: a tap on it is what changes that.
   const opens = row.kind === "steps" || (row.kind === "item" && isStep(row.item));

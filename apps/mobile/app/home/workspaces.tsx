@@ -12,6 +12,7 @@ import { ListRow } from "../../src/ui/components/ListRow";
 import { pinnedDividers } from "../../src/store/selectors";
 import { useSession } from "../../src/ui/hooks";
 import { colors, metrics, typeScale } from "../../src/ui/tokens";
+import { QuickCreateBar } from "../../src/features/terminal/QuickCreateBar";
 import { WorkspaceActionsSheet } from "../../src/features/terminal/WorkspaceActionsSheet";
 import type { Session } from "../../src/store/sessionStore";
 
@@ -37,10 +38,10 @@ export default function WorkspacesScreen() {
   return (
     <>
     <FlatList
-      contentContainerStyle={sessions.length === 0 ? styles.fill : undefined}
+      contentContainerStyle={sessions.length === 0 ? styles.fill : styles.content}
       data={sessions}
       keyExtractor={(session) => session.id}
-      ListEmptyComponent={state.connection.state === "connected" ? <EmptyState heading="No workspaces" lines={["tmux has no sessions on this host."]} /> : null}
+      ListEmptyComponent={state.connection.state === "connected" ? <EmptyState heading="No workspaces" lines={["tmux has no sessions on this host."]} /> : undefined}
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
       renderItem={({ item, index }) => {
         // The desktop's workspace row: the bar takes the loudest waiting
@@ -65,6 +66,7 @@ export default function WorkspacesScreen() {
       }}
       style={styles.list}
     />
+    <QuickCreateBar />
     <WorkspaceActionsSheet
       onDismiss={() => setActionsFor(null)}
       sessionId={actionsFor?.id}
@@ -79,6 +81,8 @@ export default function WorkspacesScreen() {
 
 const styles = StyleSheet.create({
   list: { backgroundColor: colors.chromeBg, flex: 1 },
-  fill: { flexGrow: 1 },
+  fill: { flexGrow: 1, paddingBottom: metrics.quickCreateClearance },
+  // The last row stays clear of the New agent | New terminal bar.
+  content: { paddingBottom: metrics.quickCreateClearance },
   waiting: { fontSize: typeScale.meta, fontWeight: "600" },
 });

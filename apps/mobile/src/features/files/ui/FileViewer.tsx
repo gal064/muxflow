@@ -115,7 +115,7 @@ type Inbound = { t?: unknown; href?: unknown };
  * links are opened by the phone instead.
  */
 function MarkdownView({ source }: { source: string }) {
-  const webView = useRef<WebView>(null);
+  const webView = useRef<WebView<object>>(null);
   const ready = useRef(false);
 
   // `render` is idempotent, so posting it from both `ready` and `onLoadEnd`
@@ -157,8 +157,10 @@ function MarkdownView({ source }: { source: string }) {
     return false;
   }, []);
 
+  // react-native-webview 14.0.1 declares `WebView<P = undefined>`, which makes its props `never` (upstream #3970); name the generic.
+
   return (
-    <WebView
+    <WebView<object>
       ref={webView}
       allowFileAccess={false}
       allowFileAccessFromFileURLs={false}

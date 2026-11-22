@@ -21,7 +21,7 @@ export interface TerminalWebViewHandle {
  */
 export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (message: FromPageMessage) => void; onLoadEnd?: () => void }>(
   function TerminalWebView({ onMessage, onLoadEnd }, ref) {
-    const webview = useRef<WebView>(null);
+    const webview = useRef<WebView<object>>(null);
     useImperativeHandle(ref, () => ({
       send(message) {
         webview.current?.injectJavaScript(`window.${PAGE_RECEIVE_FUNCTION} && window.${PAGE_RECEIVE_FUNCTION}(${JSON.stringify(message)}); true;`);
@@ -37,8 +37,9 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (m
       const message = parseFromPageMessage(event.nativeEvent.data);
       if (message) onMessage(message);
     }, [onMessage]);
+    // react-native-webview 14.0.1 declares `WebView<P = undefined>`, which makes its props `never` (upstream #3970); name the generic.
     return (
-      <WebView
+      <WebView<object>
         allowFileAccess={false}
         allowsBackForwardNavigationGestures={false}
         androidLayerType="hardware"

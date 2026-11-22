@@ -751,8 +751,7 @@ fn a_failed_install_opens_the_release_page(cx: &mut TestAppContext) {
 fn the_same_problem_shows_again_after_it_was_dismissed(cx: &mut TestAppContext) {
     let (_dir, handle) = app_window(cx);
     // A workspace refused twice for the same directory is two refusals.
-    let message =
-        "tmux_action_rejected: workspace start directory /x does not exist or is not a directory";
+    let message = "tmux_action_rejected: start directory /x does not exist or is not a directory";
     let count = |cx: &mut TestAppContext| {
         with_window(handle, cx, |window, cx| window.notifications(cx).len())
     };

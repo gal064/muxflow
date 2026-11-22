@@ -22,6 +22,7 @@
 //! the window geometry another module saved in between.
 
 pub mod dialog;
+pub mod keyboard;
 pub mod prefs;
 
 use std::{

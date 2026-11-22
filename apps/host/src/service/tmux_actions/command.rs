@@ -84,7 +84,7 @@ pub(in crate::service) fn escaped_format_literal(value: &str) -> String {
     value.replace('#', "##")
 }
 
-/// The configured start directory, or the reason the workspace is not created.
+/// The configured start directory, or the reason nothing is created there.
 ///
 /// Judged here, on the machine that owns the path, and before anything is
 /// spawned. `~` is expanded against this host process's environment because
@@ -93,12 +93,12 @@ pub(in crate::service) fn escaped_format_literal(value: &str) -> String {
 /// than resolved against whatever this process's cwd happens to be.
 pub(in crate::service) fn resolved_start_directory(directory: &str) -> anyhow::Result<String> {
     if directory.contains('\0') || directory.chars().any(char::is_control) {
-        bail!("workspace start directory must not contain control characters");
+        bail!("start directory must not contain control characters");
     }
     let expanded = if directory == "~" || directory.starts_with("~/") {
         let home = std::env::var("HOME").unwrap_or_default();
         if home.is_empty() {
-            bail!("workspace start directory uses ~ but the home directory is unknown");
+            bail!("start directory uses ~ but the home directory is unknown");
         }
         format!("{home}{}", &directory[1..])
     } else {
@@ -106,10 +106,10 @@ pub(in crate::service) fn resolved_start_directory(directory: &str) -> anyhow::R
     };
     let path = std::path::Path::new(&expanded);
     if !path.is_absolute() {
-        bail!("workspace start directory {expanded} must be an absolute path");
+        bail!("start directory {expanded} must be an absolute path");
     }
     if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-        bail!("workspace start directory {expanded} does not exist or is not a directory");
+        bail!("start directory {expanded} does not exist or is not a directory");
     }
     // Existing is not the same as enterable, and the difference is the failure
     // this check exists to prevent: `metadata` needs only search permission on
@@ -118,7 +118,7 @@ pub(in crate::service) fn resolved_start_directory(directory: &str) -> anyhow::R
     // pane in $HOME instead — a workspace created somewhere the user did not
     // ask for, with nothing said about it.
     if !searchable(path) {
-        bail!("workspace start directory {expanded} cannot be entered");
+        bail!("start directory {expanded} cannot be entered");
     }
     Ok(expanded)
 }
@@ -139,14 +139,20 @@ pub(super) fn configure_new_window(
     command: &mut std::process::Command,
     action: &v1::TmuxAction,
 ) -> anyhow::Result<()> {
+    // A requested directory is judged as `new-session` judges one. Without one,
+    // tmux resolves the target session's active pane path at execution time.
+    let directory = if action.directory.is_empty() {
+        "#{pane_current_path}".to_owned()
+    } else {
+        escaped_format_literal(&resolved_start_directory(&action.directory)?)
+    };
     command.args([
         "new-window",
         "-P",
         "-F",
         "#{window_id}",
-        // Resolve the active pane path in the target session at execution time.
         "-c",
-        "#{pane_current_path}",
+        &directory,
         "-t",
         &action.session_id,
     ]);
@@ -864,6 +870,50 @@ mod tests {
         // Before the name, and long before the shell: the whole argv is one
         // command, so the directory and the session name land together.
         assert!(index < args.iter().position(|argument| argument == "-s").unwrap());
+    }
+
+    fn window_args(action: &v1::TmuxAction) -> anyhow::Result<Vec<String>> {
+        let mut command = std::process::Command::new("tmux");
+        configure_new_window(&mut command, action)?;
+        Ok(command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect())
+    }
+
+    #[test]
+    fn new_window_starts_in_a_requested_directory() {
+        let directory = std::env::temp_dir();
+        let args = window_args(&v1::TmuxAction {
+            session_id: "$1".into(),
+            directory: directory.to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let index = args.iter().position(|argument| argument == "-c").unwrap();
+        assert_eq!(args[index + 1], directory.to_string_lossy());
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument == "#{pane_current_path}")
+        );
+    }
+
+    /// The same checks as `new-session`, before anything runs: a window is
+    /// never opened somewhere other than where it was asked for.
+    #[test]
+    fn new_window_refuses_a_directory_it_cannot_stand_behind() {
+        let refused = |directory: &str| {
+            window_args(&v1::TmuxAction {
+                session_id: "$1".into(),
+                directory: directory.into(),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(refused("relative/path").contains("absolute"));
+        assert!(refused("/nonexistent-muxflow-start-directory").contains("does not exist"));
     }
 
     #[test]
