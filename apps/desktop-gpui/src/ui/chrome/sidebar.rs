@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use desktop_core::app_state::AgentSortMode;
+use desktop_core::app_state::{AgentSortMode, NumberKeys};
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
     KeyDownEvent, MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, ScrollHandle,
@@ -133,7 +133,7 @@ pub(crate) fn phase_color(phase: ConnectionPhase, cx: &App) -> Rgba {
 }
 
 /// One workspace's row. `index` is its flat place in the list, which is the
-/// number beside it and what ⌘1–9 selects; `moves` says whether it can move up
+/// number beside it and what ⌘1–9 selects while they select workspaces; `moves` says whether it can move up
 /// and down among its own host's rows. Its menu comes back with it, for the
 /// keyboard to open.
 fn workspace_row(
@@ -253,6 +253,7 @@ fn workspace_row(
     let agents = row.agents.clone();
     let prefs = crate::settings::get(cx);
     let (compact, glyphs) = (prefs.compact_workspaces, prefs.agent_state_glyphs);
+    let numbered = prefs.number_keys == NumberKeys::Workspaces;
     // The row's own colour, which a mark's badge is ringed with.
     let ring = if selected {
         palette.accent
@@ -455,7 +456,7 @@ fn workspace_row(
                         .min_w_0()
                         .items_center()
                         .gap(ui(6.))
-                        .when(index < 9, |this| {
+                        .when(index < 9 && numbered, |this| {
                             this.child(
                                 div()
                                     .flex_none()

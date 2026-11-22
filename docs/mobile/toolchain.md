@@ -15,18 +15,18 @@ source apps/mobile/scripts/env.sh
 | JDK (Eclipse Temurin, HotSpot) | `17.0.20.1+1` | `~/.local/jdk-17` |
 | Android SDK command-line tools | `19.0` (`commandlinetools-linux-13114758`) | `~/Android/Sdk/cmdline-tools/latest` |
 | Android SDK Platform-Tools (`adb`) | `37.0.1` | `~/Android/Sdk/platform-tools` |
-| Android SDK Platform 36 | rev 2 | `~/Android/Sdk/platforms/android-36` |
+| Android SDK Platform 37 | rev 2 | `~/Android/Sdk/platforms/android-37.0` |
 | Android SDK Platform 35 | rev 2 | `~/Android/Sdk/platforms/android-35` |
-| Android SDK Build-Tools 36 | `36.0.0` | `~/Android/Sdk/build-tools/36.0.0` |
+| Android SDK Build-Tools 37 | `37.0.0` | `~/Android/Sdk/build-tools/37.0.0` |
 | Android SDK Build-Tools 35 | `35.0.0` | `~/Android/Sdk/build-tools/35.0.0` |
 | Android NDK | `27.1.12297006` | `~/Android/Sdk/ndk/27.1.12297006` |
 | CMake | `3.22.1` | `~/Android/Sdk/cmake/3.22.1` |
 | Android Emulator | `37.1.11` | `~/Android/Sdk/emulator` |
 | Emulator system image (x86_64, API 35) | `system-images;android-35;google_apis;x86_64` rev 9 | `~/Android/Sdk/system-images/android-35/...` |
 
-Platform 36 is the one the Expo SDK 57 template compiles against; platform 35
+Platform 37 is the one the Expo SDK 58 template compiles against; platform 35
 and its system image are there for the emulator. The NDK and CMake are pulled
-in on the first build by the React Native 0.86 Gradle plugin, which compiles
+in on the first build by the React Native 0.88 Gradle plugin, which compiles
 `react-native-reanimated`, `react-native-gesture-handler` and the RN core from
 C++ — they are listed because they are on disk and take ~3.5 GB, not because
 anything in `apps/mobile` calls them directly.
@@ -75,8 +75,8 @@ yes | sdkmanager --licenses
 # SDK packages
 sdkmanager --install \
   "platform-tools" \
-  "platforms;android-36" "platforms;android-35" \
-  "build-tools;36.0.0" "build-tools;35.0.0" \
+  "platforms;android-37.0" "platforms;android-35" \
+  "build-tools;37.0.0" "build-tools;35.0.0" \
   "emulator" "system-images;android-35;google_apis;x86_64"
 ```
 

@@ -420,7 +420,7 @@ mod tests {
     fn treats_a_hosts_coded_rejection_as_a_problem_even_without_a_word_boundary() {
         assert_eq!(
             severity(
-                "tmux_action_rejected: workspace start directory /x does not exist or is not a directory"
+                "tmux_action_rejected: start directory /x does not exist or is not a directory"
             ),
             Some(Severity::Problem)
         );

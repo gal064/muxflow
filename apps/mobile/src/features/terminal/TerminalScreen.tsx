@@ -1,7 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Linking, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Keyboard, Linking, Pressable, StyleSheet, Text, TextInput, View, type TextInputInstance } from "react-native";
 import Animated, { KeyboardState, useAnimatedKeyboard, useAnimatedReaction, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import { runOnJS } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -338,7 +338,7 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
   const voiceParts = agentPresent || voiceMode ? voice.parts : undefined;
   const voicePane = voiceMode && voiceParts?.ready === true;
   // The talk pane's keyboard button leaves voice mode for the reply field, so the field takes the focus.
-  const field = useRef<TextInput>(null);
+  const field = useRef<TextInputInstance>(null);
   const wasVoicePane = useRef(voicePane);
   useEffect(() => {
     if (wasVoicePane.current && !voiceMode) field.current?.focus();

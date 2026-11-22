@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from "react-native";
 
 import { colors, fixedChromeText, typeScale } from "../../../ui/tokens";
 import type { AttachmentEntry } from "../attach/attachmentQueue";
@@ -20,7 +20,7 @@ export interface AttachStripProps {
  * away.
  */
 export function AttachStrip({ entries, onRemove }: AttachStripProps) {
-  const strip = useRef<ScrollView>(null);
+  const strip = useRef<ScrollViewInstance>(null);
   // A chip just added is at the end of the row: the row is taken to it, so
   // its upload, or why it was refused, is in view.
   const count = useRef(entries.length);

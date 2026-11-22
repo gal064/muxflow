@@ -1,5 +1,5 @@
 import type { ReactNode, Ref } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputInstance } from "react-native";
 
 import type { ChatCommand } from "../../../protocol/gen/chat_pb";
 import { ArrowUpIcon } from "../../../ui/components/MediaIcons";
@@ -35,7 +35,7 @@ export interface ComposerProps {
   /** The field took the focus. */
   onFocus?: (() => void) | undefined;
   /** The field itself, for whoever has to focus it: starting an edit does. */
-  inputRef?: Ref<TextInput> | undefined;
+  inputRef?: Ref<TextInputInstance> | undefined;
   /** The mic: a tap turns voice mode on (off when `on`), a hold dictates. Absent hides it. */
   mic?: { on: boolean; onTap: () => void; dictation: ComposerDictation | undefined } | undefined;
   /** Attaching files. Absent hides the plus button: the agent takes none. */

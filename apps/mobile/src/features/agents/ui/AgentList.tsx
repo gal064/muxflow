@@ -54,7 +54,7 @@ export function AgentList({ onOpen, onLongPress, onTalk, refreshing, onRefresh, 
       data={items}
       extraData={animate}
       keyExtractor={(item) => item.key}
-      ListEmptyComponent={empty}
+      ListEmptyComponent={empty ?? undefined}
       ListHeaderComponent={
         <>
           <NotificationsOffBanner />
@@ -226,8 +226,9 @@ const TOGGLE_INSET = 2;
 
 const styles = StyleSheet.create({
   list: { backgroundColor: colors.chromeBg, flex: 1 },
-  fill: { flexGrow: 1 },
-  content: { paddingBottom: 24 },
+  fill: { flexGrow: 1, paddingBottom: metrics.quickCreateClearance },
+  // The last row and its Talk button stay clear of the New agent | New terminal bar.
+  content: { paddingBottom: metrics.quickCreateClearance },
   heading: {
     alignItems: "center",
     flexDirection: "row",

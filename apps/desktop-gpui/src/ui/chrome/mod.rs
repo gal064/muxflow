@@ -157,6 +157,8 @@ impl Chrome {
             });
         }
         register_commands(&chrome.downgrade(), cx);
+        let prefs = chrome.read(cx).prefs.clone();
+        publish_agent_order(&prefs, cx);
         chrome
     }
 
@@ -321,6 +323,7 @@ impl Chrome {
     /// Writes [`Prefs`] over the saved state, one write at a time.
     fn save(&mut self, cx: &mut Context<Self>) {
         cx.notify();
+        publish_agent_order(&self.prefs, cx);
         {
             let mut queue = self.saves.lock().unwrap();
             queue.pending = Some(self.prefs.clone());
@@ -386,6 +389,14 @@ fn register_commands(chrome: &WeakEntity<Chrome>, cx: &mut App) {
             chrome.show_surface(surface, cx)
         });
     }
+}
+
+/// What ⌘1–9 read to follow the agent list, kept in step with it.
+fn publish_agent_order(prefs: &Prefs, cx: &mut App) {
+    cx.set_global(crate::agents::AgentListOrder {
+        sort: prefs.agent_sort,
+        pinned_only: prefs.pinned_only,
+    });
 }
 
 fn set_divider(prefs: &mut Prefs, divider: Divider, value: f32) {

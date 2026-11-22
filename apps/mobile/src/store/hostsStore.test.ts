@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HOSTS_STORAGE_KEY,
   createHostsStore,
+  defaultDirectoryOf,
   hostAddress,
   hostLabel,
+  isStartDirectory,
   parsePersisted,
   type HostsStorage,
 } from "./hostsStore";
@@ -129,6 +131,37 @@ describe("hostsStore", () => {
     store.getState().setTrustedHostKeyFingerprint(saved.id, "SHA256:abc");
     store.getState().updateHost(saved.id, { ...draft, port: 2222 });
     expect(store.getState().hosts[0]?.trustedHostKeyFingerprint).toBeNull();
+  });
+
+  it("round-trips a per-host default directory, kept unless the draft names one", async () => {
+    const first = fakeSecureStore();
+    const store = createHostsStore(first.storage);
+    await store.getState().hydrate();
+    const plain = store.getState().addHost(draft);
+    expect(plain).not.toHaveProperty("defaultDirectory");
+    expect(defaultDirectoryOf(plain)).toBe("~");
+    const saved = store.getState().addHost({ ...draft, host: "other", defaultDirectory: "  ~/work  " });
+    expect(saved.defaultDirectory).toBe("~/work");
+    // The host form sends no directory: the saved one stays.
+    store.getState().updateHost(saved.id, { ...draft, host: "other", label: "Other" });
+    expect(store.getState().hosts[1]).toMatchObject({ label: "Other", defaultDirectory: "~/work" });
+    store.getState().updateHost(plain.id, { ...draft, defaultDirectory: "/srv/code" });
+    await vi.waitFor(() => expect(JSON.parse(first.values.get(HOSTS_STORAGE_KEY) ?? "{}").hosts?.[0]?.defaultDirectory).toBe("/srv/code"));
+
+    const reopened = createHostsStore({ getItem: async (key) => first.values.get(key) ?? null, setItem: async () => undefined });
+    await reopened.getState().hydrate();
+    expect(reopened.getState().hosts.map((host) => host.defaultDirectory)).toEqual(["/srv/code", "~/work"]);
+    expect(defaultDirectoryOf(reopened.getState().hosts[0])).toBe("/srv/code");
+
+    // Empty clears it, and a value from before this field reads back without one.
+    store.getState().updateHost(saved.id, { ...draft, host: "other", label: "Other", defaultDirectory: " " });
+    expect(store.getState().hosts[1]).not.toHaveProperty("defaultDirectory");
+    expect(parsePersisted('{"hosts":[{"id":"a","host":"h","user":"u","defaultDirectory":7}]}').hosts[0]).not.toHaveProperty("defaultDirectory");
+  });
+
+  it("accepts only start directories the host can use", () => {
+    for (const ok of ["", "  ", "~", "~/work", "/srv/code", " /tmp "]) expect(isStartDirectory(ok)).toBe(true);
+    for (const bad of ["work", "./work", "~work", "../x", "~user/x"]) expect(isStartDirectory(bad)).toBe(false);
   });
 
   it("labels and addresses hosts the way §9.1 and §9.8 show them", () => {

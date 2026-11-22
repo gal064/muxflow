@@ -62,7 +62,7 @@ export function chatImages(paneId: string): ChatImages {
       if (!directory.exists) directory.create({ intermediates: true });
       shown += 1;
       const file = new File(directory, `${Date.now().toString(36)}-${shown}.${EXTENSIONS[image.mediaType] ?? "img"}`);
-      file.write(image.bytes);
+      await file.write(image.bytes);
       return { uri: file.uri };
     },
     release(uri) {

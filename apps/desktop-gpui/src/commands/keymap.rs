@@ -61,6 +61,7 @@ pub fn is_safe_shortcut(shortcut: &str) -> bool {
 
 /// Unsafe, or naming a key GPUI has no name for, such as `Meta+Shift+BMeta+B`:
 /// that one would never match a press and would drop out of the menus.
+#[cfg(test)]
 pub fn unsafe_shortcut_bindings(overrides: &ShortcutOverrides) -> Vec<CommandId> {
     COMMANDS
         .iter()

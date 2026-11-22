@@ -1,7 +1,7 @@
-# gpui-pre-linux 0.3.11
+# gpui-pre-linux 0.3.12
 
 Vendored from the crates.io release, under Apache-2.0 (see `LICENSE-APACHE`).
-The workspace patches this exact version; the gpui-kit pin is unchanged.
+The workspace patches this exact version, the one `gpui-kit` 0.10.0 pins.
 
 There are two code changes.
 

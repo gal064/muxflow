@@ -45,6 +45,8 @@ towards the smallest change and written down here.
 | Android minSdk | 26 | **26** | Pinned through `expo-build-properties`; the RN 0.86 default is 24. |
 | Kotlin | bundled with the SDK's template | **2.2.20** | Expo SDK 57 default; not overridden. |
 
+**Upgraded 2026-11-21 to Expo SDK 58.0.26.** The upgrade brings React Native 0.88.1, React 19.3.0, react-native-webview 14.0.1, reanimated 4.7.1, gesture-handler 3.3.0, TypeScript 7.0.2, vitest 5.1.1, @bufbuild 2.17.0 / buf 1.75.0 and Android compileSdk 37. SDK 58 fixes the `expo-modules-jsi` Xcode 26 annotation upstream, so that patch is gone. The reanimated keyboard patch was ported to 4.7.1. `apps/mobile/package.json` is the source of truth; the table above records the original choice.
+
 Every runtime dependency is pinned exactly (no `~`, no `^`) so that a fresh
 `pnpm install` on another machine resolves to the same tree.
 

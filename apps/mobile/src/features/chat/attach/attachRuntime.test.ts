@@ -48,7 +48,7 @@ vi.mock("expo-file-system", () => {
     get size(): number {
       return disk.get(this.uri)?.length ?? 0;
     }
-    write(bytes: Uint8Array): void {
+    async write(bytes: Uint8Array): Promise<void> {
       disk.set(this.uri, bytes);
     }
     delete(): void {

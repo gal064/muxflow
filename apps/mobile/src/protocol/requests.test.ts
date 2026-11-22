@@ -4,7 +4,7 @@ import { CollisionPolicy, GitSummaryBase, Operation, TmuxActionKind, VoiceProvid
 import { HistoryAction } from "./gen/history_pb";
 import {
   agentDiagnostics, cancelTerminalUpload, chatAnswer, chatClose, chatInterrupt, chatLoadOlder, chatOpen, chatRewind, chatSend, chatSetOptions, chatSideFork,
-  closeTmuxTarget, commitTerminalUpload, gitBranches, gitBranchSummary, historyList, historyResume, historySnooze, historyWake, prepareTerminalUpload, resolveTerminalFile, setPinnedTarget,
+  closeTmuxTarget, commitTerminalUpload, createSession, createWindow, gitBranches, gitBranchSummary, historyList, historyResume, historySnooze, historyWake, prepareTerminalUpload, resolveTerminalFile, setPinnedTarget,
   UPLOAD_CHUNK_BYTES, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe, writeTerminalUploadChunk,
 } from "./requests";
 
@@ -167,6 +167,21 @@ describe("voice request builders", () => {
 // The host refuses an unconfirmed close (`require_confirmation` in
 // apps/host/src/service/tmux_actions.rs), and a pinned generation would come
 // back stale_topology under an animating pane title.
+describe("create request builders", () => {
+  it("creates a named session whose first pane starts in the directory", () => {
+    const request = createSession("random", "~/work", "server-a", 7n);
+    expect(request.operation).toBe(Operation.TMUX_ACTION);
+    expect(request.tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_SESSION, name: "random", directory: "~/work", sessionId: "", windowId: "", pinned: false, expectedServerIdentity: "server-a", expectedGeneration: 7n });
+  });
+
+  it("creates a window in a session, in the directory when one is given", () => {
+    const request = createWindow("$4", "server-a", 8n, "/srv");
+    expect(request.operation).toBe(Operation.TMUX_ACTION);
+    expect(request.tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_WINDOW, sessionId: "$4", directory: "/srv", name: "", expectedServerIdentity: "server-a", expectedGeneration: 8n });
+    expect(createWindow("$4", "server-a", 8n).tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_WINDOW, sessionId: "$4", directory: "" });
+  });
+});
+
 describe("close request builder", () => {
   it("sends a confirmed, generation-free close for each target kind", () => {
     expect(closeTmuxTarget({ kind: "pane", sessionId: "$1", windowId: "@2", paneId: "%3" }, "server-a").tmuxAction)
