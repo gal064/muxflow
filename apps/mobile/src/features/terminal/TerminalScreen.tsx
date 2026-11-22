@@ -77,16 +77,16 @@ function logKeyboardState(paneId: string, event: "focus" | "blur" | "state", sta
 export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  // Expo SDK 57 is edge-to-edge on Android, where adjustResize no longer
+  // Expo is edge-to-edge on Android, where adjustResize no longer
   // shrinks the window and RN's Keyboard events under-report the height.
   // Reanimated reads the IME inset itself; padding by it keeps the chips and
   // input bar visible and shrinks the WebView, which re-measures and sends
   // RESIZE_TERMINAL (§7.6 step 6).
-  const keyboard = useAnimatedKeyboard({ isStatusBarTranslucentAndroid: true, isNavigationBarTranslucentAndroid: true });
+  const keyboard = useAnimatedKeyboard();
   const inputFocused = useSharedValue(false);
   const keyboardPadding = useAnimatedStyle(() => ({
     paddingBottom: terminalKeyboardInset(insets.bottom, keyboard.height.value, inputFocused.value),
-  }), [insets.bottom]);
+  }));
   // Observe lifecycle edges only. The reaction reads just `state`, so there is
   // no work during the per-frame height animation and at most four JS log
   // calls per open/close cycle.
@@ -95,7 +95,6 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
     (state, previous) => {
       if (state !== previous) runOnJS(logKeyboardState)(paneId, "state", state, keyboard.height.value);
     },
-    [paneId],
   );
   useFocusEffect(useCallback(() => {
     logKeyboardState(paneId, "focus", keyboard.state.value, keyboard.height.value);
