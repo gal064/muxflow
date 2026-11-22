@@ -1,14 +1,16 @@
 //! The window's own title bar, the same size as the Tauri one. It scales, except
 //! on macOS, where it is sized around the fixed traffic lights.
 //!
-//! With tabs in the bar it is as tall as the tab strip it replaces, and the
-//! window controls lead instead of trailing.
+//! With tabs in the bar it is as tall as the tab strip it replaces. Which end
+//! the app-drawn window buttons sit on is Settings' `windowButtonsSide`: the
+//! macOS end leads with close first, the Windows end trails with close last.
 //!
 //! Kit's `TitleBar` is not used because its window controls carry no AccessKit
 //! role. T2.5 owns Linux decoration selection and the macOS window details.
 
 use std::{mem, sync::OnceLock};
 
+use desktop_core::app_state::WindowButtonsSide;
 use gpui_kit::{
     AnyElement, App, Decorations, DefiniteLength, Entity, Hsla, InteractiveElement, IntoElement,
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, RenderOnce, Rgba, Role, SharedString,
@@ -145,6 +147,11 @@ impl RenderOnce for TitleBar {
         let show_controls = should_show_window_controls(window);
         let (height, left_inset) = bar_geometry(self.tabs_in_bar);
         let tabs_in_bar = self.tabs_in_bar;
+        // Settings > Appearance picks which end the app-drawn buttons sit on.
+        // Only Muxflow's own buttons ever move: macOS traffic lights and
+        // tiling-desktop bare windows are covered by `show_controls`.
+        let buttons_lead = show_controls
+            && crate::settings::get(cx).window_buttons_side == WindowButtonsSide::Left;
 
         h_flex()
             .id("title-bar")
@@ -155,8 +162,8 @@ impl RenderOnce for TitleBar {
             .justify_between()
             .h(height)
             .pl(left_inset)
-            // Tabs in the bar keep the controls in the content's lead.
-            .pr(if tabs_in_bar || show_controls {
+            // Tabs in the bar keep the controls in the content's lead or rails.
+            .pr(if tabs_in_bar || (show_controls && !buttons_lead) {
                 ui(0.)
             } else {
                 ui(6.)
@@ -178,6 +185,10 @@ impl RenderOnce for TitleBar {
                 }),
             )
             .child(drag_tracker(drag))
+            // macOS style leads the plain bar with the buttons, close first.
+            .when(buttons_lead && !tabs_in_bar, |this| {
+                this.child(WindowControls::leading())
+            })
             .child(
                 div()
                     .flex_1()
@@ -189,7 +200,8 @@ impl RenderOnce for TitleBar {
             .when(cfg!(target_os = "linux"), |this| {
                 this.child(menu_button(cx))
             })
-            .when(show_controls && !tabs_in_bar, |this| {
+            // Windows style ends the plain bar with the buttons, close last.
+            .when(show_controls && !tabs_in_bar && !buttons_lead, |this| {
                 this.child(WindowControls::trailing())
             })
     }

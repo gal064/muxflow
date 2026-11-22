@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use desktop_core::app_state::{
     AgentSoundMode, AgentSoundPreferences, AppTabViewMode, MarkdownAppearance, NumberKeys,
-    PersistedAppState, ThemePreference, WorkspaceDefaults,
+    PersistedAppState, ThemePreference, WindowButtonsSide, WorkspaceDefaults,
 };
 
 pub const TERMINAL_FONT_SIZE_MIN: u8 = 10;
@@ -42,6 +42,9 @@ pub struct Prefs {
     pub terminal_application_clipboard: bool,
     pub focus_follows_mouse: bool,
     pub tabs_in_title_bar: bool,
+    /// Which end the app-drawn window buttons sit on. macOS traffic lights and
+    /// tiling-desktop bare windows never move; only Muxflow's own buttons do.
+    pub window_buttons_side: WindowButtonsSide,
     pub compact_workspaces: bool,
     pub agent_state_glyphs: bool,
     pub markdown_appearance: MarkdownAppearance,
@@ -101,6 +104,7 @@ impl Prefs {
             terminal_application_clipboard: shell.terminal_application_clipboard.unwrap_or(true),
             focus_follows_mouse: shell.focus_follows_mouse,
             tabs_in_title_bar: shell.tabs_in_title_bar.unwrap_or(true),
+            window_buttons_side: shell.window_buttons_side.unwrap_or(WindowButtonsSide::Left),
             compact_workspaces: shell.compact_workspaces.unwrap_or(true),
             agent_state_glyphs: shell.agent_state_glyphs,
             markdown_appearance: shell
@@ -159,6 +163,7 @@ impl Prefs {
         shell.terminal_application_clipboard = Some(self.terminal_application_clipboard);
         shell.focus_follows_mouse = self.focus_follows_mouse;
         shell.tabs_in_title_bar = Some(self.tabs_in_title_bar);
+        shell.window_buttons_side = Some(self.window_buttons_side);
         shell.compact_workspaces = Some(self.compact_workspaces);
         shell.agent_state_glyphs = self.agent_state_glyphs;
         shell.markdown_appearance = Some(self.markdown_appearance);
@@ -249,6 +254,7 @@ mod tests {
                 terminal_application_clipboard: true,
                 focus_follows_mouse: false,
                 tabs_in_title_bar: true,
+                window_buttons_side: WindowButtonsSide::Left,
                 compact_workspaces: true,
                 agent_state_glyphs: false,
                 markdown_appearance: MarkdownAppearance::Default,
@@ -276,6 +282,7 @@ mod tests {
             "terminalApplicationClipboard": false,
             "focusFollowsMouse": true,
             "tabsInTitleBar": false,
+            "windowButtonsSide": "right",
             "compactWorkspaces": false,
             "agentStateGlyphs": true,
             "markdownAppearance": "dark",
@@ -288,6 +295,7 @@ mod tests {
         assert_eq!(prefs.terminal_font_size, 16);
         assert!(!prefs.copy_on_select && !prefs.clean_wrapped_commands);
         assert!(!prefs.terminal_application_clipboard && !prefs.tabs_in_title_bar);
+        assert_eq!(prefs.window_buttons_side, WindowButtonsSide::Right);
         assert!(prefs.focus_follows_mouse && prefs.agent_state_glyphs);
         assert!(!prefs.compact_workspaces);
         assert_eq!(prefs.markdown_appearance, MarkdownAppearance::Dark);

@@ -2,6 +2,7 @@
 //! tabs in the bar it splits into the app's own controls over the sidebar and
 //! the tabs over the workspace; without them it is one full-width bar.
 
+use desktop_core::app_state::WindowButtonsSide;
 use gpui_kit::{
     AnyElement, App, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
     RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, WeakEntity,
@@ -47,6 +48,12 @@ impl RenderOnce for TitleContent {
         let chrome = entity.read(cx);
         let rails = chrome.rails(window);
         let in_title_bar = chrome.tabs_in_title_bar();
+        // Settings > Appearance picks the end: macOS style leads with close
+        // first, Windows style ends the rails with close last. Only Muxflow's
+        // own buttons move; macOS lights and tiling-desktop bare windows do
+        // not exist here.
+        let show_controls = should_show_window_controls(window);
+        let buttons_left = crate::settings::get(cx).window_buttons_side == WindowButtonsSide::Left;
         let workspaces = chrome.workspaces().clone();
         let (name, can_back, can_forward, can_create) = {
             let state = workspaces.read(cx);
@@ -297,7 +304,7 @@ impl RenderOnce for TitleContent {
                 .when(rails.sidebar_open, |this| {
                     this.min_w(ui(rails.sidebar_width))
                 })
-                .when(should_show_window_controls(window), |this| {
+                .when(show_controls && buttons_left, |this| {
                     this.child(WindowControls::leading())
                 })
                 .child(
@@ -336,11 +343,21 @@ impl RenderOnce for TitleContent {
                 .child(
                     group()
                         .pl(ui(4.))
-                        .pr(ui(6.))
+                        .pr(if show_controls && !buttons_left {
+                            ui(0.)
+                        } else {
+                            ui(6.)
+                        })
                         .border_l_1()
                         .border_color(palette.chrome_hairline)
                         .child(sidebar_toggle())
-                        .child(panel_toggle()),
+                        .child(panel_toggle())
+                        // Windows style ends the rails with the window
+                        // buttons, inside the rails so the far edge stays
+                        // theirs alone.
+                        .when(show_controls && !buttons_left, |this| {
+                            this.child(WindowControls::trailing())
+                        }),
                 )
                 .into_any_element()
         } else {
