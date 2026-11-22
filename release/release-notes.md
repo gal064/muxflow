@@ -1,17 +1,19 @@
-## GPUI desktop
+## Quick sessions and shortcuts
 
-The desktop app now uses GPUI. Existing profiles, settings and install locations
-are retained. Linux needs a working Vulkan or OpenGL graphics driver.
+Settings › Keyboard lets you change the desktop's shortcuts. Another setting
+chooses whether ⌘1–9 (Ctrl+1–9 on Linux) jumps to workspaces or to agents;
+with agents, holding ⌘ (Ctrl on Linux) shows each agent's number. ⌘⇧N (Ctrl+Shift+N on Linux)
+starts the host's agent command in a workspace named "random", creating it if
+needed. The agent command is set per host in the desktop.
 
-Live Markdown table editing keeps the caret in its cell after whitespace edits.
-Enter adds a line inside a cell; Tab moves between cells. Packages include
-third-party licence notices, and the unused KDE blur dependency is removed.
-Routine success toasts for closing tabs and other visible changes are suppressed;
-download results and failure notices remain.
+The phone app has a New agent | New terminal bar at the bottom of the Agents and
+Workspaces tabs. Both open in "random", in the host's Default directory, which
+you set in Settings.
 
-Phones need the 0.1.33 app or newer: 0.1.33 changed the host's protocol, so
-hosts from 0.1.33 on refuse older phone apps and older hosts refuse the new app.
-Update the Android app from the APK below; the iOS build is on TestFlight.
+The iOS app is now built with the iOS 27 SDK on Expo 58 and React Native 0.88.
+Phones need the 0.1.33 app or newer, as before; this release does not change the
+protocol. Update the Android app from the APK below; the iOS build is on
+TestFlight.
 
 ## Install
 
