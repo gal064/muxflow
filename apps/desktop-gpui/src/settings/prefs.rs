@@ -43,6 +43,9 @@ pub struct Prefs {
     pub focus_follows_mouse: bool,
     pub tabs_in_title_bar: bool,
     pub compact_workspaces: bool,
+    /// Reopen the remembered workspaces when a host's tmux server comes back
+    /// without them. Off until asked, and turning it off discards the record.
+    pub restore_workspaces: bool,
     pub agent_state_glyphs: bool,
     pub markdown_appearance: MarkdownAppearance,
     pub default_markdown_view: AppTabViewMode,
@@ -102,6 +105,7 @@ impl Prefs {
             focus_follows_mouse: shell.focus_follows_mouse,
             tabs_in_title_bar: shell.tabs_in_title_bar.unwrap_or(true),
             compact_workspaces: shell.compact_workspaces.unwrap_or(true),
+            restore_workspaces: shell.restore_workspaces,
             agent_state_glyphs: shell.agent_state_glyphs,
             markdown_appearance: shell
                 .markdown_appearance
@@ -160,6 +164,7 @@ impl Prefs {
         shell.focus_follows_mouse = self.focus_follows_mouse;
         shell.tabs_in_title_bar = Some(self.tabs_in_title_bar);
         shell.compact_workspaces = Some(self.compact_workspaces);
+        shell.restore_workspaces = self.restore_workspaces;
         shell.agent_state_glyphs = self.agent_state_glyphs;
         shell.markdown_appearance = Some(self.markdown_appearance);
         shell.default_markdown_view = Some(self.default_markdown_view);
@@ -250,6 +255,7 @@ mod tests {
                 focus_follows_mouse: false,
                 tabs_in_title_bar: true,
                 compact_workspaces: true,
+                restore_workspaces: false,
                 agent_state_glyphs: false,
                 markdown_appearance: MarkdownAppearance::Default,
                 default_markdown_view: AppTabViewMode::Split,
@@ -277,6 +283,7 @@ mod tests {
             "focusFollowsMouse": true,
             "tabsInTitleBar": false,
             "compactWorkspaces": false,
+            "restoreWorkspaces": true,
             "agentStateGlyphs": true,
             "markdownAppearance": "dark",
             "defaultMarkdownView": "source",
@@ -290,6 +297,7 @@ mod tests {
         assert!(!prefs.terminal_application_clipboard && !prefs.tabs_in_title_bar);
         assert!(prefs.focus_follows_mouse && prefs.agent_state_glyphs);
         assert!(!prefs.compact_workspaces);
+        assert!(prefs.restore_workspaces);
         assert_eq!(prefs.markdown_appearance, MarkdownAppearance::Dark);
         assert_eq!(prefs.default_markdown_view, AppTabViewMode::Source);
         assert!(prefs.enabled_panel_extensions.is_empty());

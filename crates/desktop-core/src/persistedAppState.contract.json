@@ -95,6 +95,7 @@
     "newHostChat": true,
     "newWorkspaceHostProfileId": "ssh-remote-linux",
     "defaultMarkdownView": "live",
+    "restoreWorkspaces": true,
     "windowGeometry": {
       "x": 20,
       "y": 30,
@@ -122,6 +123,29 @@
     "ssh-remote-linux": {
       "directory": "/srv/checkout",
       "startupCommand": "tail -f /var/log/build.log"
+    }
+  },
+  "workspaceRestore": {
+    "local": {
+      "workspaces": [
+        {
+          "name": "project",
+          "tabs": [
+            { "directory": "/work/project" },
+            { "directory": "/work/project/api" }
+          ]
+        },
+        {
+          "name": "scratch",
+          "tabs": [ {} ]
+        }
+      ],
+      "selectedSessionName": "project"
+    },
+    "ssh-remote-linux": {
+      "workspaces": [
+        { "name": "deploy", "tabs": [ { "directory": "/srv/checkout" } ] }
+      ]
     }
   }
 }

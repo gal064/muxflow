@@ -871,6 +871,15 @@ impl SettingsDialog {
             |on, window, cx| update(|prefs| prefs.compact_workspaces = on, window, cx),
             cx,
         ));
+        tab = tab.child(setting_check(
+            "settings-restore-workspaces",
+            "Reopen workspaces after a restart",
+            prefs.restore_workspaces,
+            false,
+            Some("Remembers the workspaces open on each host and the directory of every tab. When a host's tmux server comes back without them, after a machine restart or a kill-server, they are created again at those directories, and the app lands on the workspace you left. An ordinary app restart changes nothing: the terminals are still running, and nothing is recreated."),
+            |on, window, cx| update(|prefs| prefs.restore_workspaces = on, window, cx),
+            cx,
+        ));
         // One entry per extension this build has.
         tab = tab.child(setting_check(
             "settings-extension-automations",

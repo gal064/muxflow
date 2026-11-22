@@ -21,6 +21,7 @@ pub mod focus_history;
 pub mod model;
 pub mod moves;
 pub mod navigation;
+mod restore;
 pub mod rows;
 
 #[cfg(test)]
@@ -35,7 +36,10 @@ use std::{
 };
 
 use desktop_core::{
-    app_state::{AppTabRecord, DockSide, PersistedAppState, update_app_state},
+    app_state::{
+        AppTabRecord, DockSide, PersistedAppState, WorkspaceRestoreHost, load_app_state,
+        update_app_state,
+    },
     connection::ConnectionSpec,
     platform,
 };
@@ -180,6 +184,16 @@ enum Feedback {
     Silent,
 }
 
+/// The snapshot and record one workspace restore was planned against, read on
+/// the main thread before the creates round-trip.
+struct RestoreStart {
+    profile_id: String,
+    snapshot: Arc<TmuxSnapshot>,
+    remembered: Option<WorkspaceRestoreHost>,
+    /// The workspace the user was on when the host was last captured.
+    selected_name: Option<String>,
+}
+
 /// What a move commits once it lands.
 #[derive(Clone, Debug)]
 struct Intent {
@@ -269,6 +283,8 @@ pub struct Workspaces {
     /// as Tauri's roving tablist is, and moves the keyboard through its tabs.
     /// Whether focus is inside this is whether the strip has the keyboard.
     pub strip_focus: FocusHandle,
+    /// Workspace restore: the record, the epochs it has acted on, the store.
+    restore: restore::Tracker,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -280,6 +296,11 @@ impl Workspaces {
                 this.publish_context(cx);
                 cx.notify();
             })];
+            // Turning restore on or off takes effect at once, not at the
+            // next snapshot.
+            subscriptions.push(cx.observe_global::<crate::settings::Settings>(|this, cx| {
+                this.workspace_restore_tick(cx);
+            }));
             if let Some(controller) = &controller {
                 subscriptions
                     .push(cx.observe(controller, |this, _, cx| this.controller_changed(cx)));
@@ -309,6 +330,7 @@ impl Workspaces {
                 list_focus: cx.focus_handle(),
                 row_focus: HashMap::default(),
                 strip_focus: cx.focus_handle().tab_stop(false),
+                restore: restore::Tracker::default(),
                 _subscriptions: subscriptions,
             }
         });
@@ -615,8 +637,218 @@ impl Workspaces {
         self.surface_terminal_on_host_switch(&view, cx);
         self.record_history(&view);
         self.finish_host_handoffs(&view, cx);
+        self.workspace_restore_tick(cx);
         self.publish_context(cx);
         cx.notify();
+    }
+
+    /// One pass of workspace restore, the port of `useWorkspaceRestore`'s two
+    /// effects. Restore starts once per link epoch; capture runs only against
+    /// links whose restore has settled, so a fresh server's first, empty
+    /// snapshot never overwrites the record the restore is about to act on.
+    /// Nothing reads or writes the record before the saved state has loaded.
+    fn workspace_restore_tick(&mut self, cx: &mut Context<Self>) {
+        let enabled = crate::settings::get(cx).restore_workspaces;
+        if !self.restore.loaded {
+            self.restore.loaded = true;
+            if let Some(core) = cx.try_global::<Core>() {
+                self.restore.store = Some(core.app_state.clone());
+                match load_app_state(&core.app_state) {
+                    Ok(state) => self.restore.records = state.workspace_restore,
+                    // A broken file is write-frozen; keep records in memory
+                    // only, so a restore still has what this session saw.
+                    Err(_) => self.restore.records.clear(),
+                }
+            }
+        }
+        if !enabled {
+            // Turning the feature off discards the record with it, so
+            // switching it back on a month later reopens what is open now.
+            if !self.restore.records.is_empty() {
+                self.restore.records.clear();
+                self.clear_restored_records();
+            }
+            return;
+        }
+        let Some(controller) = self.controller.clone() else {
+            return;
+        };
+        let mut starts = Vec::new();
+        let mut captures = Vec::new();
+        for link in controller.read(cx).links() {
+            let live = link.host_state.phase == ConnectionPhase::Connected
+                && link.host_state.server_identity.is_some();
+            if !live {
+                continue;
+            }
+            let selected_name = link
+                .active_session_id
+                .as_deref()
+                .and_then(|id| link.host_state.session(id))
+                .map(|session| session.name.as_str());
+            if self
+                .restore
+                .begin_restore(&link.profile_id, link.connection_epoch)
+            {
+                starts.push(RestoreStart {
+                    profile_id: link.profile_id.clone(),
+                    snapshot: link.host_state.snapshot.clone(),
+                    remembered: self.restore.records.get(&link.profile_id).cloned(),
+                    selected_name: selected_name.map(str::to_owned),
+                });
+            } else if self
+                .restore
+                .restore_settled(&link.profile_id, link.connection_epoch)
+            {
+                let captured = restore::capture(&link.host_state.snapshot, selected_name);
+                if restore::record_changed(self.restore.records.get(&link.profile_id), &captured) {
+                    captures.push((link.profile_id.clone(), captured));
+                }
+            }
+        }
+        if !captures.is_empty() {
+            self.record_captures(captures);
+        }
+        for start in starts {
+            self.start_restore(start, cx);
+        }
+    }
+
+    /// Folds fresh captures into the record and persists the changes in one
+    /// write. A host with nothing open leaves no record at all, so the saved
+    /// file says "nothing remembered" the same way for a fresh install and
+    /// for someone who closed every workspace.
+    fn record_captures(&mut self, captures: Vec<(String, WorkspaceRestoreHost)>) {
+        let Some(store) = self.restore.store.clone() else {
+            return;
+        };
+        let mut changes = Vec::new();
+        for (profile_id, captured) in captures {
+            let empty = restore::is_empty(&captured);
+            let entry = (!empty).then(|| captured.clone());
+            if empty {
+                self.restore.records.remove(&profile_id);
+            } else {
+                self.restore.records.insert(profile_id.clone(), captured);
+            }
+            changes.push((profile_id, entry));
+        }
+        platform::spawn(async move {
+            let saved = update_app_state(&store, move |state| {
+                for (profile_id, entry) in changes {
+                    match entry {
+                        None => {
+                            state.workspace_restore.remove(&profile_id);
+                        }
+                        Some(entry) => {
+                            state.workspace_restore.insert(profile_id, entry);
+                        }
+                    }
+                }
+            })
+            .await;
+            if let Err(error) = saved {
+                eprintln!("muxflow: could not save the workspace restore record: {error}");
+            }
+        });
+    }
+
+    fn clear_restored_records(&mut self) {
+        let Some(store) = self.restore.store.clone() else {
+            return;
+        };
+        platform::spawn(async move {
+            let saved = update_app_state(&store, move |state| {
+                state.workspace_restore.clear();
+            })
+            .await;
+            if let Err(error) = saved {
+                eprintln!("muxflow: could not clear the workspace restore record: {error}");
+            }
+        });
+    }
+
+    /// Creates the remembered workspaces one host lost, then lands the shell
+    /// on the remembered workspace if that host is still the one on screen.
+    fn start_restore(&mut self, start: RestoreStart, cx: &mut Context<Self>) {
+        let plans = restore::plan(start.remembered.as_ref(), &start.snapshot);
+        let RestoreStart {
+            profile_id,
+            selected_name,
+            ..
+        } = start;
+        cx.spawn(async move |this, cx| {
+            let mut created: HashMap<String, String> = HashMap::new();
+            for entry in plans {
+                // A refusal (a remembered directory that is gone) leaves that
+                // one workspace unrestored; the rest of the plan still runs,
+                // and the action pipeline has already recorded the refusal.
+                let Ok(task) = this.update(cx, |this, cx| {
+                    let mut action = TmuxAction::new(actions::ActionKind::CreateSession);
+                    action.name = entry.name.clone();
+                    if let Some(Some(directory)) = entry.directories.first() {
+                        action.directory = directory.clone();
+                    }
+                    this.perform(&profile_id, action, None, Feedback::Silent, cx)
+                }) else {
+                    return;
+                };
+                let Ok(result) = task.await else { continue };
+                let Some(session_id) = result.session_id else {
+                    continue;
+                };
+                created.insert(entry.name, session_id.clone());
+                for directory in entry.directories.iter().skip(1) {
+                    let directory = directory.clone();
+                    let Ok(task) = this.update(cx, |this, cx| {
+                        let mut action =
+                            TmuxAction::session(actions::ActionKind::CreateWindow, &session_id);
+                        if let Some(directory) = directory {
+                            action.directory = directory;
+                        }
+                        this.perform(&profile_id, action, None, Feedback::Silent, cx)
+                    }) else {
+                        return;
+                    };
+                    task.await.ok();
+                }
+            }
+            // The restore outlives several round trips and the user can
+            // switch hosts under it: a selection aimed at a host that is no
+            // longer on screen would reach the wrong facade.
+            if let Some(name) = selected_name {
+                let _ = this.update(cx, |this, cx| {
+                    let Some(controller) = &this.controller else {
+                        return;
+                    };
+                    if controller.read(cx).active_profile_id() != profile_id {
+                        return;
+                    }
+                    let Some(link) = controller.read(cx).link(&profile_id) else {
+                        return;
+                    };
+                    // The create's ack is the earliest truth about a session
+                    // whose snapshot has not landed yet.
+                    let found = link
+                        .host_state
+                        .snapshot
+                        .sessions
+                        .iter()
+                        .find(|session| session.name == name)
+                        .map(|session| session.id.clone())
+                        .or_else(|| created.get(&name).cloned());
+                    if let Some(session_id) = found
+                        && link.active_session_id.as_deref() != Some(session_id.as_str())
+                    {
+                        this.select_session(&session_id, cx);
+                    }
+                });
+            }
+            let _ = this.update(cx, |this, _| {
+                this.restore.in_flight.remove(&profile_id);
+            });
+        })
+        .detach();
     }
 
     /// A different connection: what was in flight belongs to the old one.
