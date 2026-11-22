@@ -678,12 +678,7 @@ pub fn run(
         "agents.newInRandom" => {
             if !this.update(cx, |this, cx| this.new_agent_in_random(cx)) {
                 let controller = this.read(cx).controller.clone();
-                crate::settings::dialog::open_with(
-                    crate::settings::dialog::Tab::Workspace,
-                    controller,
-                    window,
-                    cx,
-                );
+                crate::settings::dialog::open_on_agent_command(controller, window, cx);
             }
             return;
         }

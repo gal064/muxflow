@@ -132,7 +132,7 @@ static REASON_SUMMARY: Table = LazyLock::new(|| {
         // does not.
         (
             r"(?i)\bstart directory",
-            "The start directory set for new workspaces and tabs is not a directory on this host. Change it under Settings → Workspace.",
+            "The start directory set for new workspaces and tabs is not a directory on this host. Change it under Settings › Workspace.",
         ),
         (
             r"(?i)no such file or directory|os error 2|does not exist|is no longer available",

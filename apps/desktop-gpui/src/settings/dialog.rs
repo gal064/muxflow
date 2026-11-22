@@ -7,9 +7,9 @@ use desktop_core::{
     notifications::{emit_test_notification, notification_permission_status},
 };
 use gpui_kit::{
-    AccessibleAction, App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
-    Orientation, ParentElement, Pixels, Point, Render, Role, ScrollHandle, SharedString, Styled,
-    Subscription, Window,
+    AccessibleAction, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    KeyDownEvent, Orientation, ParentElement, Pixels, Point, Render, Role, ScrollHandle,
+    SharedString, Styled, Subscription, Window,
     accesskit::ActionData,
     base::{SliderIndicator, SliderThumb, SliderTrack, TestSupportExt},
     component::{
@@ -44,7 +44,7 @@ use crate::{
     connection_ui::{
         ConnectionUi,
         controller::ConnectionController,
-        dialog::{ConnectionForm, confirm_delete_host, controls},
+        dialog::{CONTROLS, ConnectionForm, confirm_delete_host, controls},
     },
     theme::{
         self,
@@ -149,7 +149,32 @@ pub fn open_with(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_view(tab, controller, window, cx);
+}
+
+/// Opens Settings on Workspace with the keyboard in the Agent command field,
+/// scrolled into view: what ⌘⇧N asks for while it has no command to run.
+pub fn open_on_agent_command(
+    controller: Option<Entity<ConnectionController>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let view = open_view(Tab::Workspace, controller, window, cx);
+    view.update(cx, |this, cx| {
+        this.agent_command
+            .update(cx, |field, cx| field.focus(window, cx));
+        this.reveal_agent_command = true;
+    });
+}
+
+fn open_view(
+    tab: Tab,
+    controller: Option<Entity<ConnectionController>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<SettingsDialog> {
     let view = cx.new(|cx| SettingsDialog::new(tab, controller, window, cx));
+    let shown = view.clone();
     window.open_dialog(cx, move |dialog, window, cx| {
         dialog::place(dialog::card(dialog, &theme::palette(cx)), window)
             .close_button(false)
@@ -172,6 +197,7 @@ pub fn open_with(
             .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
             .child(view.clone())
     });
+    shown
 }
 
 /// Which words the notification permission line takes.
@@ -278,6 +304,8 @@ pub struct SettingsDialog {
     keyboard: Entity<KeyboardSettings>,
     /// The body's scroll, back at the top for each tab.
     body_scroll: ScrollHandle,
+    /// The Agent command field is still to be scrolled into view.
+    reveal_agent_command: bool,
     /// The Snooze menu's wake times, comma separated.
     snooze_times: Entity<InputState>,
     /// The host the workspace fields describe: the one on screen.
@@ -406,6 +434,7 @@ impl SettingsDialog {
             agent_command,
             keyboard,
             body_scroll: ScrollHandle::new(),
+            reveal_agent_command: false,
             snooze_times,
             defaults_host,
             volume,
@@ -828,6 +857,7 @@ pub fn agent_setup_row(cx: &App) -> impl IntoElement + use<> {
 impl SettingsDialog {
     fn workspace_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let prefs = get(cx).clone();
+        let agent_focus = self.agent_command.focus_handle(cx);
         let host_label = self.controller.as_ref().map_or_else(
             || "Local".to_owned(),
             |controller| controller.read(cx).active_host_label(),
@@ -900,6 +930,8 @@ impl SettingsDialog {
                 )
                 .child(
                     v_flex()
+                        .relative()
+                        .child(crate::context_menu::anchor(&agent_focus))
                         .gap(ui(5.))
                         .child(caption("Agent command", cx))
                         .child(
@@ -1384,6 +1416,17 @@ impl Render for SettingsDialog {
             .min(window.viewport_size().height * DIALOG_MAX_VIEWPORT);
         let max_body =
             (max_dialog - ui(CHROME_HEIGHT).to_pixels(rem)).max(ui(BODY_MIN_HEIGHT).to_pixels(rem));
+        // Its first frame draws the field where it is; a later one reads it.
+        if self.reveal_agent_command {
+            let focus = self.agent_command.focus_handle(cx);
+            if self.tab != Tab::Workspace
+                || crate::context_menu::scroll_to_row(&focus, &self.body_scroll, window, cx)
+            {
+                self.reveal_agent_command = false;
+            } else {
+                window.request_animation_frame();
+            }
+        }
         let body = match self.tab {
             Tab::Connection => div().children(self.form.clone()).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
@@ -1401,6 +1444,9 @@ impl Render for SettingsDialog {
             .id("settings-dialog")
             .role(Role::Dialog)
             .aria_label("Settings")
+            // Enter goes to the focused control: the Kit's dialog binding
+            // would take it first and confirm nothing, as `on_ok` declines.
+            .key_context(CONTROLS)
             // `.settings-dialog > header`.
             .child(
                 v_flex()

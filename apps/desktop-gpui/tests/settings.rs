@@ -926,6 +926,17 @@ fn a_taken_chord_asks_and_swap_replace_or_cancel_resolve_it(cx: &mut TestAppCont
     click(handle, "shortcut-cancel", cx);
     assert_eq!(overrides(cx), before);
     assert!(alerts(handle, cx).is_empty());
+
+    // A row with no shortcut has nothing to give: no Swap, only Replace.
+    record(handle, "view.showPorts", "secondary-t", cx);
+    assert_eq!(
+        alerts(handle, cx),
+        [format!("{taken} is used by New workspace.")]
+    );
+    with_window(handle, cx, |window, _| {
+        assert!(window.try_find("shortcut-swap").is_none());
+        assert!(window.try_find("shortcut-replace").is_some());
+    });
 }
 
 #[gpui_kit::test]
@@ -949,6 +960,59 @@ fn a_rows_buttons_hand_the_keyboard_back_to_its_keys_or_the_search(cx: &mut Test
         window.find_by_label("Search shortcuts").focused()
     });
     assert_eq!(search, Some(true), "after a reset the filter hides");
+
+    // Backspace that takes a row back to its default drops it from the
+    // Changed list too; the keyboard stays in Settings, and Escape closes it.
+    click(handle, "settings-shortcuts-changed", cx);
+    record(handle, "view.showPorts", "secondary-alt-j", cx);
+    click(handle, "settings-shortcuts-changed", cx);
+    record(handle, "view.showPorts", "backspace", cx);
+    let search = with_window(handle, cx, |window, _| {
+        window.find_by_label("Search shortcuts").focused()
+    });
+    assert_eq!(search, Some(true), "after Backspace the filter hides");
+    press(handle, "escape", cx);
+    assert!(!dialog_open(handle, cx));
+}
+
+/// Tabs until `id` holds the keyboard; Settings keeps Tab inside it.
+fn tab_to(handle: AnyWindowHandle, id: &'static str, cx: &mut TestAppContext) {
+    for _ in 0..200 {
+        let there = with_window(handle, cx, |window, _| {
+            window.try_find(id).and_then(|element| element.focused()) == Some(true)
+        });
+        if there {
+            return;
+        }
+        press(handle, "tab", cx);
+    }
+    panic!("Tab never reaches {id}");
+}
+
+#[gpui_kit::test]
+fn enter_presses_the_keyboard_tabs_buttons(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    record(handle, "session.new", "secondary-t", cx);
+    tab_to(handle, "shortcut-swap", cx);
+    press(handle, "enter", cx);
+    assert_eq!(
+        overrides(cx).get("session.new"),
+        Some(&Some(format!("{PRIMARY}+T"))),
+        "Enter swaps"
+    );
+    tab_to(handle, "shortcut-reset-commands.show", cx);
+    press(handle, "enter", cx);
+    assert!(
+        !overrides(cx).contains_key("commands.show"),
+        "Enter resets the row"
+    );
+    tab_to(handle, "settings-shortcuts-restore", cx);
+    press(handle, "enter", cx);
+    assert_eq!(
+        overrides(cx),
+        ShortcutOverrides::new(),
+        "Enter restores all"
+    );
 }
 
 #[gpui_kit::test]
