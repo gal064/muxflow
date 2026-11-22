@@ -51,6 +51,8 @@ serde.workspace = true
 serde_json.workspace = true
 # The Git diff view draws a whole-file patch with Kit's `Diff`.
 similar = "2.7"
+# The assistant's model calls, the same blocking client `update_check` uses.
+ureq = "3"
 tokio.workspace = true
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 terminal-engine = { path = "../../crates/terminal-engine" }

@@ -39,6 +39,7 @@
 //! baseline in [`ui`].
 
 pub mod agents;
+pub mod ai;
 pub mod app;
 pub mod automations;
 pub mod chat;

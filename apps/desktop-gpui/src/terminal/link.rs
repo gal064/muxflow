@@ -17,6 +17,11 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::{
+    grid::Dimensions as _,
+    index::{Column, Line},
+    term::cell::Flags,
+};
 use gpui_kit::{App, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity};
 use terminal_engine::{Command, EngineOutput, GridSize};
 
@@ -241,6 +246,41 @@ impl TerminalLink {
         if let Some(pane) = self.pane(pane_id) {
             pane.update(cx, update);
         }
+    }
+
+    /// A pane's screen as plain text, the newest `max_rows` rows of its
+    /// terminal buffer, oldest first. `None` when no mounted terminal holds
+    /// that pane. Port of `readPaneScreen`: this is how the assistant reads
+    /// what a pane actually says instead of guessing.
+    pub fn screen_text(&self, pane_id: &str, max_rows: usize, cx: &App) -> Option<String> {
+        let terminal = self.pane(pane_id)?.read(cx).terminal()?.clone();
+        let term = terminal.lock();
+        let total = term.grid().history_size() + term.screen_lines();
+        let take = max_rows.max(1).min(total);
+        let bottom = term.bottommost_line().0;
+        let mut rows: Vec<String> = Vec::with_capacity(take);
+        for offset in 0..take {
+            // `Line(0)` is the viewport's top row and positive lines walk down
+            // to the bottommost one; the history sits below zero, so the walk
+            // from the bottom passes into the scrollback wherever the pane's
+            // own scroll happens to sit.
+            let line = Line(bottom - take as i32 + 1 + offset as i32);
+            let mut text = String::new();
+            for column in 0..term.columns() {
+                let cell = &term.grid()[line][Column(column)];
+                // A wide glyph's second half is a spacer: the glyph is the
+                // cell before it.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            rows.push(text.trim_end().to_owned());
+        }
+        while rows.last().is_some_and(|row| row.is_empty()) {
+            rows.pop();
+        }
+        Some(rows.join("\n").replace('\u{a0}', " "))
     }
 
     fn scoped_key(&self, pane_id: &str) -> String {

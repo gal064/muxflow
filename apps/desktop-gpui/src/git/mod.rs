@@ -76,6 +76,13 @@ fn body(window: &mut Window, cx: &mut App) -> AnyElement {
     panel.into_any_element()
 }
 
+/// What the assistant is shown: the status the Git tab holds for the host on
+/// screen, when it holds one.
+pub fn current_status(cx: &App) -> Option<Rc<StatusSnapshot>> {
+    let git = cx.try_global::<Git>()?;
+    git.panel.read(cx).status(cx)
+}
+
 /// The panel's rows answer the palette only while the panel is on screen.
 struct Shown(WeakEntity<GitPanel>);
 

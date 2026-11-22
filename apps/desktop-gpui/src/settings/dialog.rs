@@ -1,4 +1,4 @@
-//! The Settings dialog: eight tabs over [`Prefs`](super::Prefs), with the
+//! The Settings dialog: nine tabs over [`Prefs`](super::Prefs), with the
 //! connection form on the first and the shortcuts on Keyboard. Copy, order
 //! and behavior from `features/shell/SettingsDialog.tsx`.
 
@@ -14,9 +14,10 @@ use gpui_kit::{
     base::{SliderIndicator, SliderThumb, SliderTrack, TestSupportExt},
     component::{
         ActiveTheme, Disableable, Sizable, WindowExt,
-        button::Button,
+        button::{Button, ButtonVariants as _},
         checkbox::Checkbox,
         dialog::DialogFooter,
+        h_flex,
         input::{Input, InputEvent, InputState},
         radio::{Radio, RadioGroup},
         slider::{SliderEvent, SliderState},
@@ -32,7 +33,7 @@ use super::{
     AgentMode, AgentSetupStatus, agent_mode, agent_mode_change, agent_setup, get,
     keyboard::KeyboardSettings,
     notifier, on_runtime,
-    prefs::{AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
+    prefs::{AI_EXTENSION, AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
     update,
 };
 use crate::ui::{
@@ -52,8 +53,8 @@ use crate::{
     },
 };
 
-/// Wide enough for the eight section tabs on one row.
-const DIALOG_WIDTH: f32 = 720.;
+/// Wide enough for the nine section tabs on one row.
+const DIALOG_WIDTH: f32 = 800.;
 /// Between the rows of a tab: roomier than Tauri's 12px, which read as crowded.
 const SETTINGS_ROW_GAP: f32 = 16.;
 /// `.settings-dialog { max-height: min(640px, 78vh) }`.
@@ -69,6 +70,7 @@ const BODY_MIN_HEIGHT: f32 = 120.;
 pub enum Tab {
     Connection,
     Workspace,
+    Assistant,
     Terminal,
     Agents,
     Keyboard,
@@ -77,9 +79,10 @@ pub enum Tab {
     Accessibility,
 }
 
-const TABS: [(Tab, &str); 8] = [
+const TABS: [(Tab, &str); 9] = [
     (Tab::Connection, "Connection"),
     (Tab::Workspace, "Workspace"),
+    (Tab::Assistant, "Assistant"),
     (Tab::Terminal, "Terminal"),
     (Tab::Agents, "Agents"),
     (Tab::Keyboard, "Keyboard"),
@@ -308,6 +311,15 @@ pub struct SettingsDialog {
     reveal_agent_command: bool,
     /// The Snooze menu's wake times, comma separated.
     snooze_times: Entity<InputState>,
+    /// Settings → Assistant: the three fields, committed on Enter or blur like
+    /// every other persisted text field here.
+    ai_base_url: Entity<InputState>,
+    ai_model: Entity<InputState>,
+    ai_api_key: Entity<InputState>,
+    /// The endpoint's answer to the last `GET /models`, its error kept as a
+    /// line under the button rather than a dialog.
+    assistant_models: Option<Result<Vec<String>, String>>,
+    assistant_fetching: bool,
     /// The host the workspace fields describe: the one on screen.
     defaults_host: String,
     volume: Entity<SliderState>,
@@ -367,6 +379,23 @@ impl SettingsDialog {
             input.set_value(prefs.snooze_times.join(", "), window, cx);
             input
         });
+        let ai_base_url = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("http://127.0.0.1:11434/v1");
+            input.set_value(prefs.ai_base_url.clone(), window, cx);
+            input
+        });
+        let ai_model = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("qwen2.5-coder:32b");
+            input.set_value(prefs.ai_model.clone(), window, cx);
+            input
+        });
+        let ai_api_key = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .placeholder("Only for hosted providers")
+                .masked(true);
+            input.set_value(prefs.ai_api_key.clone(), window, cx);
+            input
+        });
         let volume = cx.new(|_| {
             SliderState::new()
                 .min(0.)
@@ -403,6 +432,21 @@ impl SettingsDialog {
                     this.commit_snooze_times(window, cx);
                 }
             }),
+            cx.subscribe_in(&ai_base_url, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_assistant(window, cx);
+                }
+            }),
+            cx.subscribe_in(&ai_model, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_assistant(window, cx);
+                }
+            }),
+            cx.subscribe_in(&ai_api_key, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_assistant(window, cx);
+                }
+            }),
             // The pointer; the keyboard and a screen reader go through `set_volume`.
             cx.subscribe_in(&volume, window, |_, _, event, window, cx| {
                 if let SliderEvent::Change(value) = event {
@@ -436,6 +480,11 @@ impl SettingsDialog {
             body_scroll: ScrollHandle::new(),
             reveal_agent_command: false,
             snooze_times,
+            ai_base_url,
+            ai_model,
+            ai_api_key,
+            assistant_models: None,
+            assistant_fetching: false,
             defaults_host,
             volume,
             volume_focus: cx.focus_handle().tab_stop(true),
@@ -528,13 +577,73 @@ impl SettingsDialog {
         set_text(&self.snooze_times, times.join(", "), window, cx);
     }
 
-    /// Typed text counts when the dialog closes or the tab changes, not only on
+    /// The three Assistant fields, saved together: a half-typed endpoint is
+    /// never what the AI tab should call, and the model list belongs to the
+    /// endpoint it was fetched from.
+    fn commit_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let base_url = self.ai_base_url.read(cx).value().trim().to_owned();
+        let model = self.ai_model.read(cx).value().trim().to_owned();
+        let api_key = self.ai_api_key.read(cx).value().to_string();
+        let current = get(cx);
+        if base_url != current.ai_base_url {
+            // A different server answers a different `GET /models`; the old
+            // list would be a suggestion list for the wrong machine.
+            self.assistant_models = None;
+        }
+        if base_url != current.ai_base_url
+            || model != current.ai_model
+            || api_key != current.ai_api_key
+        {
+            update(
+                move |prefs| {
+                    prefs.ai_base_url = base_url;
+                    prefs.ai_model = model;
+                    prefs.ai_api_key = api_key;
+                },
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Ask the endpoint what it serves. The saved values are what the button
+    /// asks with — the same call the AI tab will make, not a draft of it.
+    fn fetch_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assistant_fetching {
+            return;
+        }
+        self.commit_assistant(window, cx);
+        let settings = get(cx);
+        if settings.ai_base_url.trim().is_empty() {
+            return;
+        }
+        let settings = crate::ai::engine::ChatSettings {
+            base_url: settings.ai_base_url.clone(),
+            model: settings.ai_model.clone(),
+            api_key: settings.ai_api_key.clone(),
+        };
+        self.assistant_fetching = true;
+        self.assistant_models = None;
+        let asking = crate::ai::engine::list_models(settings);
+        cx.spawn(async move |this, cx| {
+            let answer = asking.await;
+            this.update(cx, |this, cx| {
+                this.assistant_fetching = false;
+                this.assistant_models = Some(answer);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Enter or blur: a click on a checkbox or a button does not move focus out
     /// of a field, so blur alone would drop what was typed.
     fn commit_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_font_size(window, cx);
         self.commit_defaults(window, cx);
         self.commit_snooze_times(window, cx);
+        self.commit_assistant(window, cx);
     }
 
     fn select_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -883,6 +992,17 @@ impl SettingsDialog {
             },
             cx,
         ));
+        tab = tab.child(setting_check(
+            "settings-extension-ai",
+            "Show AI assistant",
+            prefs.panel_extension_enabled(AI_EXTENSION),
+            false,
+            Some("Adds an AI tab to the right panel: ask an OpenAI-compatible model about the current session; it is shown what the Files, Git, Ports and Automations tabs hold."),
+            |on, window, cx| {
+                update(|prefs| prefs.set_panel_extension(AI_EXTENSION, on), window, cx);
+            },
+            cx,
+        ));
         tab.child(
             v_flex()
                 .gap(ui(5.))
@@ -961,6 +1081,103 @@ impl SettingsDialog {
                     )
                     .child(hint(
                         "What an agent's Snooze menu offers, separated by commas: 30m, 3h, 18:30, tomorrow 09:00, mon 09:00. Pick a time… is always there too.",
+                        cx,
+                    )),
+            )
+    }
+
+    /// Settings → Assistant: the OpenAI-compatible endpoint the AI tab calls,
+    /// the model to ask, and the key it answers with. The request leaves from
+    /// this computer, never through a connected host; one field set serves
+    /// Ollama, MLX and vLLM at home and a hosted API alike, because the shape
+    /// is fixed to the OpenAI chat contract.
+    fn assistant_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let fetching = self.assistant_fetching;
+        let has_endpoint = !self.ai_base_url.read(cx).value().trim().is_empty();
+        let models = self.assistant_models.as_ref();
+        v_flex()
+            .gap(ui(SETTINGS_ROW_GAP))
+            .child(
+                v_flex()
+                    .gap(ui(5.))
+                    .child(caption("Endpoint", cx))
+                    .child(
+                        Input::new(&self.ai_base_url)
+                            .id("settings-ai-base-url")
+                            .aria_label("Assistant endpoint"),
+                    )
+                    .child(hint(
+                        "An OpenAI-compatible server's base URL, usually ending in /v1. The call goes from this computer straight to it — never through a connected host.",
+                        cx,
+                    )),
+            )
+            .child(
+                v_flex()
+                    .gap(ui(5.))
+                    .child(caption("Model", cx))
+                    .child(
+                        Input::new(&self.ai_model)
+                            .id("settings-ai-model")
+                            .aria_label("Assistant model"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(ui(8.))
+                            .items_center()
+                            .child(
+                                Button::new("settings-ai-fetch-models")
+                                    .label(if fetching { "Fetching…" } else { "Fetch models" })
+                                    .disabled(fetching || !has_endpoint)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.fetch_models(window, cx);
+                                    })),
+                            )
+                            .children(models.map(|answer| match answer {
+                                Ok(ids) => note(
+                                    if ids.len() == 1 {
+                                        "One model on this server.".to_owned()
+                                    } else {
+                                        format!("{} models on this server.", ids.len())
+                                    },
+                                    cx,
+                                )
+                                .into_any_element(),
+                                Err(reason) => note(
+                                    format!("The model list could not be fetched: {reason}"),
+                                    cx,
+                                )
+                                .into_any_element(),
+                            })),
+                    )
+                    // React offered the fetched ids as a datalist; here each is
+                    // a chip that puts itself in the field. The field still
+                    // takes anything typed into it: a server can serve a model
+                    // it will not list.
+                    .children(models.and_then(|answer| answer.as_ref().ok()).map(|ids| {
+                        h_flex().flex_wrap().gap(ui(6.)).children(ids.iter().map(|id| {
+                            let id = id.clone();
+                            Button::new(SharedString::from(format!("settings-ai-model-{id}")))
+                                .text()
+                                .xsmall()
+                                .label(id.clone())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    set_text(&this.ai_model, id.clone(), window, cx);
+                                    this.commit_assistant(window, cx);
+                                }))
+                        }))
+                    })),
+            )
+            .child(
+                v_flex()
+                    .gap(ui(5.))
+                    .child(caption("API key", cx))
+                    .child(
+                        Input::new(&self.ai_api_key)
+                            .id("settings-ai-api-key")
+                            .aria_label("Assistant API key"),
+                    )
+                    .child(hint(
+                        "Sent to the endpoint above as a bearer token, and nowhere else. It is stored in this app's own state file, which is written so only your user can read it; a local model server needs none.",
                         cx,
                     )),
             )
@@ -1430,6 +1647,7 @@ impl Render for SettingsDialog {
         let body = match self.tab {
             Tab::Connection => div().children(self.form.clone()).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
+            Tab::Assistant => self.assistant_tab(cx).into_any_element(),
             Tab::Terminal => self.terminal_tab(cx).into_any_element(),
             Tab::Agents => self.agents_tab(cx).into_any_element(),
             // The body's padding, top and bottom, is outside what it fills.

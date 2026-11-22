@@ -337,4 +337,24 @@ impl PortsPanel {
 /// The panel, once the app has one.
 pub struct Ports(pub Entity<PortsPanel>);
 
+impl PortsPanel {
+    /// What the assistant is shown for one host: its own forwards, and the
+    /// newest detection for it when the panel has one. The Ports tab polls, so
+    /// this is what the person sees rather than a fresh `ss` at question time.
+    pub fn context_state(&self, profile_id: &str) -> (Vec<PortForward>, Option<Vec<DetectedPort>>) {
+        let forwards = self
+            .forwards
+            .iter()
+            .filter(|forward| forward.profile_id == profile_id)
+            .cloned()
+            .collect();
+        let detected = self
+            .detection
+            .as_ref()
+            .filter(|found| found.profile_id == profile_id)
+            .map(|found| found.ports.clone());
+        (forwards, detected)
+    }
+}
+
 impl gpui_kit::Global for Ports {}

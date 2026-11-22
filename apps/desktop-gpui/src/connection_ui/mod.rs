@@ -99,6 +99,7 @@ pub fn start(cx: &mut App) -> Result<(), String> {
     crate::chat::start(controller.clone(), backend.clone(), cx);
     crate::git::start(controller.clone(), backend, cx);
     crate::ports::start(controller.clone(), cx);
+    crate::ai::start(controller.clone(), cx);
 
     let (sender, mut resumed) = mpsc::unbounded();
     power_events::start(Arc::new(ResumeSink(sender)));

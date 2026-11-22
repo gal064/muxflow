@@ -671,6 +671,7 @@ fn each_settings_section_is_found_by_role_and_name_and_pressed(cx: &mut TestAppC
     let sections = [
         "Connection",
         "Workspace",
+        "Assistant",
         "Terminal",
         "Agents",
         "Keyboard",

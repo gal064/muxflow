@@ -27,7 +27,7 @@ pub const AGENTS_RATIO_MAX: f32 = 0.75;
 /// Panel surfaces that every build has, after which come enabled extensions.
 pub const BUILT_IN_SURFACES: [(&str, &str); 3] =
     [("files", "Files"), ("git", "Git"), ("ports", "Ports")];
-const EXTENSION_LABELS: [(&str, &str); 1] = [("automations", "Automations")];
+const EXTENSION_LABELS: [(&str, &str); 2] = [("automations", "Automations"), ("ai", "AI")];
 
 /// The chrome's preferences, in memory and on disk as part of [`ShellPreferences`].
 #[derive(Clone, Debug, PartialEq)]
