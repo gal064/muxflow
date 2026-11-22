@@ -197,7 +197,10 @@ impl RenderOnce for TitleBar {
                     .overflow_hidden()
                     .child(self.content),
             )
-            .when(cfg!(target_os = "linux"), |this| {
+            // The plain bar ends here: with tabs in the bar the menu belongs
+            // inside the content, where its place is between the rail toggles
+            // and the window buttons rather than past both.
+            .when(cfg!(target_os = "linux") && !tabs_in_bar, |this| {
                 this.child(menu_button(cx))
             })
             // Windows style ends the plain bar with the buttons, close last.

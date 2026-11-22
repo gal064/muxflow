@@ -18,6 +18,7 @@ use gpui_kit::{
     px,
 };
 
+use crate::menus::menu_button;
 use crate::ui::icons::Glyph;
 use crate::{
     commands,
@@ -352,6 +353,12 @@ impl RenderOnce for TitleContent {
                         .border_color(palette.chrome_hairline)
                         .child(sidebar_toggle())
                         .child(panel_toggle())
+                        // The app menu keeps the far right on macOS-style
+                        // bars; when the window buttons move to this end they
+                        // take it, and the menu steps in ahead of them.
+                        .when(cfg!(target_os = "linux"), |this| {
+                            this.child(menu_button(cx))
+                        })
                         // Windows style ends the rails with the window
                         // buttons, inside the rails so the far edge stays
                         // theirs alone.
