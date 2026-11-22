@@ -5,7 +5,7 @@
 
 use std::{rc::Rc, time::Duration};
 
-use desktop_core::app_state::AgentSortMode;
+use desktop_core::app_state::{AgentSortMode, NumberKeys};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, EmptyView, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, RenderOnce,
@@ -795,11 +795,39 @@ fn row_action(
         .child(svg().data(icon).size(ui(12.)).text_color(ink))
 }
 
+/// A row's number while ⌘ is held, in the slot its mark has otherwise: an
+/// accent chip, inverted on the selected row, which is accent already.
+fn number_badge(number: usize, selected: bool, palette: &Palette) -> AnyElement {
+    let (fill, digit) = if selected {
+        (palette.accent_ink, palette.accent)
+    } else {
+        (palette.accent, palette.accent_ink)
+    };
+    div()
+        .id(SharedString::from(format!("agent-number-{number}")))
+        .test_support()
+        .flex_none()
+        .size(ui(15.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(ui(4.))
+        .bg(fill)
+        .font_family(fonts::MONO)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(ui(TYPE_META))
+        .text_color(digit)
+        .child(number.to_string())
+        .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn agent_row(
     row: &AgentListRow,
     key: &str,
     selected: bool,
     glyphs: bool,
+    number: Option<usize>,
     keys: RowKeys,
     window: &Window,
     cx: &App,
@@ -896,15 +924,18 @@ fn agent_row(
                 }
             }
         })
-        .child(agent_mark(
-            &row.agent.adapter_id,
-            row.state,
-            glyphs,
-            if selected { ink } else { dim },
-            background,
-            selected,
-            cx,
-        ))
+        .child(match number {
+            Some(number) => number_badge(number, selected, &palette),
+            None => agent_mark(
+                &row.agent.adapter_id,
+                row.state,
+                glyphs,
+                if selected { ink } else { dim },
+                background,
+                selected,
+                cx,
+            ),
+        })
         .when(!row.location.host_letter.is_empty(), |this| {
             this.child(host_letter(&row.location.host_letter, selected, &palette))
         })
@@ -1022,6 +1053,8 @@ fn heading(
     cx: &App,
 ) -> AnyElement {
     let palette = theme::palette(cx);
+    let badges = crate::settings::get(cx).number_keys == NumberKeys::Agents
+        && crate::ui::shell::modifier_hold_showing(cx);
     h_flex()
         .id(SharedString::from(format!("agent-heading-{text}-{count}")))
         .role(Role::Heading)
@@ -1038,11 +1071,14 @@ fn heading(
             this.child(state_indicator(state, glyphs, palette.chrome_dim, cx))
         })
         .child(div().min_w_0().truncate().child(text))
-        .child(
-            div()
-                .text_color(palette.chrome_faint)
-                .child(count.to_string()),
-        )
+        // Not while the rows show their numbers: it would read as one.
+        .when(!badges, |this| {
+            this.child(
+                div()
+                    .text_color(palette.chrome_faint)
+                    .child(count.to_string()),
+            )
+        })
         .when_some(tooltip, |this, tip| {
             this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
         })
@@ -1066,7 +1102,7 @@ pub struct AgentsList {
 }
 
 /// The rows in the order [`AgentsList`] draws them under `sort`.
-fn display_order(rows: &[AgentListRow], sort: AgentSortMode) -> Vec<&AgentListRow> {
+pub(crate) fn display_order(rows: &[AgentListRow], sort: AgentSortMode) -> Vec<&AgentListRow> {
     match sort {
         AgentSortMode::Workspace => {
             let groups = group_by_workspace(rows);
@@ -1088,6 +1124,15 @@ fn display_order(rows: &[AgentListRow], sort: AgentSortMode) -> Vec<&AgentListRo
             .flat_map(|(_, _, group)| group)
             .collect(),
     }
+}
+
+/// The rows ⌘1–9 reach, first to last: those drawn, in drawing order, that
+/// lead to a live pane.
+pub(crate) fn numbered(rows: &[AgentListRow], sort: AgentSortMode) -> Vec<&AgentListRow> {
+    display_order(rows, sort)
+        .into_iter()
+        .filter(|row| row.routable)
+        .collect()
 }
 
 impl RenderOnce for AgentsList {
@@ -1162,8 +1207,36 @@ impl RenderOnce for AgentsList {
                 .unwrap_or(0);
             RowKeys::for_rows(&handles, at)
         };
+        // Shown only while ⌘ is held, and only when ⌘1–9 reach agents: the
+        // workspace rows carry their numbers otherwise.
+        let numbers: Vec<String> = if crate::settings::get(cx).number_keys == NumberKeys::Agents
+            && crate::ui::shell::modifier_hold_showing(cx)
+        {
+            numbered(&rows, self.sort)
+                .into_iter()
+                .take(9)
+                .map(row_key)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let number_of = |row: &AgentListRow| {
+            numbers
+                .iter()
+                .position(|key| *key == row_key(row))
+                .map(|at| at + 1)
+        };
         let agent_row = |row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &App| {
-            agent_row(row, key, selected, glyphs, keys_for(row), window, cx)
+            agent_row(
+                row,
+                key,
+                selected,
+                glyphs,
+                number_of(row),
+                keys_for(row),
+                window,
+                cx,
+            )
         };
         let quiet = |text: &'static str| {
             div()
@@ -2123,8 +2196,56 @@ mod tests {
             let keys = workspaces::RowKeys::for_rows(std::slice::from_ref(&self.1), 0);
             div()
                 .w(gpui_kit::px(240.))
-                .child(agent_row(&self.0, "a", true, false, keys, window, cx))
+                .child(agent_row(&self.0, "a", true, false, None, keys, window, cx))
         }
+    }
+
+    /// ⌘1–9 count the rows in the order each sort draws them, skipping those
+    /// with no live pane.
+    #[test]
+    fn the_numbers_follow_each_sort_and_skip_unroutable_rows() {
+        use crate::agents::{
+            list::{AgentLocation, PriorityBucket},
+            model::fixtures,
+        };
+
+        // Built in the list's order; `$2` is a pinned workspace.
+        let row = |id: &str, session: &str, bucket, pinned, routable| {
+            let agent = AgentRecord {
+                id: id.into(),
+                session_id: session.into(),
+                ..fixtures::agent()
+            };
+            AgentListRow {
+                state: DisplayState::Idle,
+                bucket,
+                location: AgentLocation {
+                    workspace_pinned: session == "$2",
+                    ..AgentLocation::unlisted(&agent)
+                },
+                routable,
+                pinned,
+                agent,
+            }
+        };
+        let rows = [
+            row("a", "$1", PriorityBucket::Working, false, true),
+            row("b", "$2", PriorityBucket::Idle, false, true),
+            row("c", "$1", PriorityBucket::Blocked, true, true),
+            row("d", "$2", PriorityBucket::Blocked, false, false),
+        ];
+        let ids = |sort| {
+            numbered(&rows, sort)
+                .into_iter()
+                .map(|row| row.agent.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        // Pinned workspaces' groups first, then by workspace.
+        assert_eq!(ids(AgentSortMode::Workspace), ["b", "a", "c"]);
+        // Pinned, by tab or workspace, above the rest.
+        assert_eq!(ids(AgentSortMode::Pinned), ["b", "c", "a"]);
+        // Blocked, Working, Recent, Idle.
+        assert_eq!(ids(AgentSortMode::Status), ["c", "a", "b"]);
     }
 
     /// Tauri's `.agent-button { width: 100% }`, with `.row-actions` over it.

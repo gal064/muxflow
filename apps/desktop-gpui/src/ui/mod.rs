@@ -59,3 +59,35 @@ pub mod title_bar;
 pub mod toast;
 pub mod toolbar;
 pub mod visibility;
+
+/// Where Kit's tab list moves the keyboard from tab `at` of `len` on this
+/// key, so a list whose selection follows its focus can select the same tab:
+/// Left and Right wrap past the ends, Home and End go to the first and last,
+/// skipping tabs that are not `enabled`. `None` for any other key, or one
+/// held with a modifier, which Kit leaves alone too.
+pub fn kit_tab_step(
+    at: usize,
+    len: usize,
+    event: &gpui_kit::KeyDownEvent,
+    enabled: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    if event.keystroke.modifiers.modified() {
+        return None;
+    }
+    let enabled: Vec<usize> = (0..len).filter(|index| enabled(*index)).collect();
+    let (first, last) = (*enabled.first()?, *enabled.last()?);
+    match event.keystroke.key.as_str() {
+        "left" => Some(
+            enabled
+                .iter()
+                .rev()
+                .copied()
+                .find(|ix| *ix < at)
+                .unwrap_or(last),
+        ),
+        "right" => Some(enabled.iter().copied().find(|ix| *ix > at).unwrap_or(first)),
+        "home" => Some(first),
+        "end" => Some(last),
+        _ => None,
+    }
+}

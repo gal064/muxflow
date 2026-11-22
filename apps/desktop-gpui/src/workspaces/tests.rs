@@ -24,7 +24,6 @@ use tmux_control::{Pane, TmuxSnapshot};
 use super::{
     Workspaces, current,
     model::fixtures::{pane, session, window},
-    moved_cursor,
 };
 use crate::{
     app::{self, Core},
@@ -773,7 +772,7 @@ fn creating_a_workspace_sends_its_startup_command_once(cx: &mut TestAppContext) 
     // Set in Settings, and in force at once.
     shell.visual.update(|window, cx| {
         crate::settings::update(
-            |prefs| prefs.set_workspace_defaults("local", Some("/repo"), Some("make dev")),
+            |prefs| prefs.set_workspace_defaults("local", Some("/repo"), Some("make dev"), None),
             window,
             cx,
         );
@@ -798,7 +797,7 @@ fn a_startup_command_waits_for_a_host_still_reconnecting(cx: &mut TestAppContext
     shell.host.state().refused_inputs = 3;
     shell.visual.update(|window, cx| {
         crate::settings::update(
-            |prefs| prefs.set_workspace_defaults("local", None, Some("make dev")),
+            |prefs| prefs.set_workspace_defaults("local", None, Some("make dev"), None),
             window,
             cx,
         );
@@ -815,6 +814,119 @@ fn a_startup_command_waits_for_a_host_still_reconnecting(cx: &mut TestAppContext
         shell.host.state().inputs,
         [("%9".to_owned(), b"make dev\n".to_vec())]
     );
+}
+
+/// [`world`] with a third workspace named `random`, on screen elsewhere.
+fn world_with_random() -> TmuxSnapshot {
+    let mut world = world("@1");
+    world.sessions.push(session("$5", "random", 2));
+    world.windows.push(window("@5", "$5", 0, "zsh", true));
+    world.panes.push(Pane {
+        active: true,
+        ..pane("%5", "@5", "$5", (0, 0, 80, 24))
+    });
+    world
+}
+
+/// The active host's directory and agent command, as Settings sets them.
+fn set_agent_defaults(shell: &mut Shell, host: &'static str, command: Option<&'static str>) {
+    shell.visual.update(|window, cx| {
+        crate::settings::update(
+            |prefs| prefs.set_workspace_defaults(host, Some("/repo"), Some("make dev"), command),
+            window,
+            cx,
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_new_agent_session_creates_random_when_there_is_none(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    set_agent_defaults(&mut shell, "local", Some("codex"));
+    shell.run("agents.newInRandom");
+    let create = shell.host.last("createSession");
+    assert_eq!(create["name"], "random");
+    assert_eq!(create["directory"], "/repo");
+    // The agent is the start: the startup command is not typed.
+    assert_eq!(
+        shell.host.state().inputs,
+        [("%9".to_owned(), b"codex\n".to_vec())]
+    );
+    assert_eq!(shell.status(), "Created the random workspace");
+    // The shell goes to it.
+    assert_eq!(shell.view().host, "local");
+    let workspaces = shell.workspaces();
+    let session = shell.visual.update(|_, cx| {
+        workspaces
+            .read(cx)
+            .controller()
+            .and_then(|controller| controller.read(cx).link("local").cloned())
+            .and_then(|link| link.active_session_id.clone())
+    });
+    assert_eq!(session.as_deref(), Some("$9"));
+}
+
+#[gpui_kit::test]
+fn a_new_agent_session_opens_a_tab_in_an_existing_random(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    shell.publish(vec![snapshot_frame(2, &world_with_random())]);
+    set_agent_defaults(&mut shell, "local", Some("codex"));
+    shell.run("agents.newInRandom");
+    assert!(!shell.host.kinds().contains(&"createSession".to_owned()));
+    let create = shell.host.last("createWindow");
+    assert_eq!(create["session_id"], "$5");
+    assert_eq!(create["directory"], "/repo");
+    assert_eq!(create["name"], "", "a tab is named for what runs in it");
+    assert_eq!(
+        shell.host.state().inputs,
+        [("%8".to_owned(), b"codex\n".to_vec())]
+    );
+    assert_ne!(shell.status(), "Created the random workspace");
+}
+
+#[gpui_kit::test]
+fn a_new_agent_session_without_an_agent_command_sends_nothing(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    set_agent_defaults(&mut shell, "local", None);
+    let before = shell.host.kinds().len();
+    shell.run("agents.newInRandom");
+    assert_eq!(shell.host.kinds().len(), before);
+    assert_eq!(
+        shell.status(),
+        "Set an agent command for this host in Settings › Workspace"
+    );
+    // Settings opens with the keyboard in the field the command is set in,
+    // scrolled into view.
+    assert!(shell.dialog_open());
+    shell.settle();
+    shell.visual.update(|window, _| {
+        let field = window.find("settings-agent-command");
+        assert_eq!(field.focused(), Some(true));
+        let (field, body) = (field.bounds(), window.find("settings-body").bounds());
+        assert!(
+            field.top() >= body.top() && field.bottom() <= body.bottom(),
+            "{field:?} in {body:?}"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_second_press_while_one_is_in_flight_sends_nothing(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    set_agent_defaults(&mut shell, "local", Some("codex"));
+    shell.host.state().hold = true;
+    shell.run("agents.newInRandom");
+    shell.run("agents.newInRandom");
+    assert_eq!(shell.count("createSession"), 1);
+    shell.release();
+    assert_eq!(shell.host.state().inputs.len(), 1);
+    // Acked but not yet in a snapshot: the next press opens a tab in the
+    // session the first one made, rather than asking tmux for a second.
+    shell.host.state().hold = false;
+    shell.run("agents.newInRandom");
+    assert_eq!(shell.count("createSession"), 1);
+    assert_eq!(shell.host.last("createWindow")["session_id"], "$9");
+    assert_eq!(shell.host.state().inputs.len(), 2);
 }
 
 #[gpui_kit::test]
@@ -1101,14 +1213,31 @@ fn focus_follows_the_mouse_onto_the_docked_document_and_back(cx: &mut TestAppCon
 }
 
 #[test]
-fn a_moving_cursor_stays_in_its_list() {
-    assert_eq!(moved_cursor(None, 3, "right"), Some(1));
-    assert_eq!(moved_cursor(Some(2), 3, "right"), Some(2));
-    assert_eq!(moved_cursor(Some(2), 3, "home"), Some(0));
-    assert_eq!(moved_cursor(Some(0), 3, "end"), Some(2));
-    assert_eq!(moved_cursor(Some(1), 3, "left"), Some(0));
-    assert_eq!(moved_cursor(Some(1), 3, "up"), None);
-    assert_eq!(moved_cursor(None, 0, "right"), None);
+fn the_keyboard_moves_through_a_tab_list_as_kits_does() {
+    fn step(at: usize, key: &'static str, enabled: &dyn Fn(usize) -> bool) -> Option<usize> {
+        let event = gpui_kit::KeyDownEvent {
+            keystroke: gpui_kit::Keystroke::parse(key).unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        crate::ui::kit_tab_step(at, 4, &event, enabled)
+    }
+    let all = |_: usize| true;
+    assert_eq!(step(0, "right", &all), Some(1));
+    assert_eq!(step(3, "right", &all), Some(0), "wraps past the last");
+    assert_eq!(step(0, "left", &all), Some(3), "wraps before the first");
+    assert_eq!(step(2, "home", &all), Some(0));
+    assert_eq!(step(0, "end", &all), Some(3));
+    assert_eq!(step(1, "up", &all), None);
+    assert_eq!(
+        step(1, "shift-right", &all),
+        None,
+        "Kit ignores a modified key"
+    );
+    // A pending tab is skipped.
+    let settled = |index: usize| index != 2;
+    assert_eq!(step(1, "right", &settled), Some(3));
+    assert_eq!(step(0, "end", &|index: usize| index != 3), Some(2));
 }
 
 #[test]
@@ -1132,6 +1261,7 @@ mod agent_seams {
     use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
     use desktop_core::{app_state::AgentSortMode, connection::agent::AgentCommand};
+    use gpui_kit::test::TestEventExt as _;
 
     use super::*;
     use crate::{
@@ -1426,6 +1556,124 @@ mod agent_seams {
             listed(&mut shell, true),
             [row("in-notes", "L", "Local"), row("in-main", "L", "Local")]
         );
+    }
+
+    /// The local host with an agent in each of `main`'s windows and one in
+    /// `notes`, with ⌘1–9 set to reach agents.
+    fn three_agents_in_agents_mode(cx: &mut TestAppContext) -> Shell {
+        let mut shell = shell(cx, json!([]), json!({}));
+        shell.publish(vec![frame(10, "terminal", &1u64.to_be_bytes())]);
+        start_agents(
+            &mut shell,
+            HashMap::from([(
+                "client-1",
+                vec![
+                    agent("first", "local", ("$1", "main", "@1", "%1")),
+                    agent("second", "local", ("$1", "main", "@2", "%3")),
+                    agent("third", "local", ("$2", "notes", "@3", "%4")),
+                ],
+            )]),
+        );
+        shell.visual.update(|window, cx| {
+            crate::settings::update(
+                |prefs| prefs.number_keys = desktop_core::app_state::NumberKeys::Agents,
+                window,
+                cx,
+            );
+        });
+        shell.settle();
+        shell
+    }
+
+    #[gpui_kit::test]
+    fn in_agents_mode_a_number_opens_that_agent(cx: &mut TestAppContext) {
+        let mut shell = three_agents_in_agents_mode(cx);
+        let numbered = shell.visual.update(|_, cx| {
+            agents::numbered_rows(cx)
+                .into_iter()
+                .map(|row| row.agent.id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(numbered, ["first", "second", "third"]);
+        shell
+            .visual
+            .update(|window, cx| window.press("secondary-3", cx));
+        shell.settle();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%4");
+        assert_eq!(
+            shell.place().0,
+            "$2",
+            "not the third workspace: there is none"
+        );
+    }
+
+    /// With the list showing pinned workspaces only, the numbers reach only
+    /// the agents it draws: here the workspace on screen, as none is pinned.
+    #[gpui_kit::test]
+    fn pinned_only_numbers_only_the_agents_the_list_draws(cx: &mut TestAppContext) {
+        let mut shell = three_agents_in_agents_mode(cx);
+        let numbered = |shell: &mut Shell| {
+            shell.visual.update(|_, cx| {
+                agents::numbered_rows(cx)
+                    .into_iter()
+                    .map(|row| row.agent.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(numbered(&mut shell), ["first", "second", "third"]);
+        shell.run("workspaces.showPinnedOnly");
+        assert_eq!(numbered(&mut shell), ["first", "second"]);
+    }
+
+    fn numbers_shown(shell: &mut Shell) -> Vec<String> {
+        shell.visual.update(|window, _| {
+            window
+                .elements()
+                .into_iter()
+                .filter_map(|element| element.path().last().map(|id| id.to_string()))
+                .filter(|id| id.contains("agent-number-"))
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn holding_the_platform_key_shows_the_agents_numbers_until_a_key(cx: &mut TestAppContext) {
+        let mut shell = three_agents_in_agents_mode(cx);
+        shell.run("focus.workspaces");
+        let hold = |shell: &mut Shell| {
+            shell.visual.update(|window, cx| {
+                let alone = gpui_kit::Modifiers::secondary_key(cx);
+                window.change_modifiers(alone, cx);
+            });
+            shell.visual.run_until_parked();
+        };
+        let wait = |shell: &mut Shell, millis: u64| {
+            shell
+                .visual
+                .executor()
+                .advance_clock(Duration::from_millis(millis));
+            shell.visual.run_until_parked();
+        };
+        hold(&mut shell);
+        wait(&mut shell, 300);
+        assert!(numbers_shown(&mut shell).is_empty(), "not before 400 ms");
+        wait(&mut shell, 100);
+        assert_eq!(numbers_shown(&mut shell).len(), 3);
+        // A chord typed with it ends the hold.
+        shell
+            .visual
+            .update(|window, cx| window.press("secondary-9", cx));
+        shell.visual.run_until_parked();
+        assert!(numbers_shown(&mut shell).is_empty());
+
+        // Another modifier with it is no hold at all.
+        shell.visual.update(|window, cx| {
+            let mut chord = gpui_kit::Modifiers::secondary_key(cx);
+            chord.shift = true;
+            window.change_modifiers(chord, cx);
+        });
+        wait(&mut shell, 500);
+        assert!(numbers_shown(&mut shell).is_empty());
     }
 
     #[gpui_kit::test]
@@ -2889,12 +3137,30 @@ mod multi_host {
     }
 
     #[gpui_kit::test]
+    fn a_random_workspace_on_another_host_is_not_used(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        shell.publish_to(1, vec![snapshot_frame(5, &super::world_with_random())]);
+        super::set_agent_defaults(&mut shell, "local", Some("codex"));
+        assert_eq!(active_host(&mut shell), "local");
+        shell.run("agents.newInRandom");
+        assert_eq!(shell.count("createWindow"), 0);
+        let create = shell.host.last("createSession");
+        assert_eq!(create["client"], "client-1");
+        assert_eq!(create["name"], "random");
+    }
+
+    #[gpui_kit::test]
     fn a_workspace_is_created_on_the_host_picked_in_the_dialog(cx: &mut TestAppContext) {
         let mut shell = two_hosts(cx);
         shell.visual.update(|window, cx| {
             crate::settings::update(
                 |prefs| {
-                    prefs.set_workspace_defaults("remote", Some("/srv/work"), Some("git status"))
+                    prefs.set_workspace_defaults(
+                        "remote",
+                        Some("/srv/work"),
+                        Some("git status"),
+                        None,
+                    )
                 },
                 window,
                 cx,
@@ -3266,6 +3532,22 @@ fn focused_button(shell: &mut Shell, labels: &[&'static str]) -> Option<&'static
     })
 }
 
+/// The strip's tab that holds the keyboard, by label, and whether it is the
+/// selected one.
+fn focused_strip_tab(shell: &mut Shell) -> Option<(String, bool)> {
+    shell.visual.update(|window, _| {
+        window
+            .find_all_by_role(Role::Tab)
+            .into_iter()
+            .filter(|tab| tab.path().contains(&"workspace-tabs".into()))
+            .find(|tab| tab.focused() == Some(true))
+            .map(|tab| {
+                let label = tab.label().unwrap_or_default().to_owned();
+                (label, tab.selected() == Some(true))
+            })
+    })
+}
+
 #[gpui_kit::test]
 fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut TestAppContext) {
     let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
@@ -3303,7 +3585,9 @@ fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut
     expected.reverse();
     assert_eq!(walked, expected);
 
-    // On from the list to the strip, then the documents' close buttons.
+    // On from the list to the strip's active tab, its one stop, though
+    // "Close main.rs" comes before it: the next Tab leaves the strip.
+    shell.click("workspace-tab-app:b");
     shell
         .visual
         .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
@@ -3313,15 +3597,21 @@ fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut
         shell.settle();
         shell
             .visual
-            .update(|window, cx| workspaces.read(cx).strip_focus.is_focused(window))
+            .update(|window, cx| workspaces.read(cx).strip_focus.contains_focused(window, cx))
     });
     assert!(strip.is_some(), "Tab reaches the tab strip");
+    assert_eq!(focused_strip_tab(&mut shell), Some(("lib.rs".into(), true)));
     shell.visual.simulate_keystrokes("tab");
     shell.settle();
     assert_eq!(
-        focused_button(&mut shell, &["Close main.rs"]),
-        Some("Close main.rs")
+        focused_button(&mut shell, &["Close main.rs", "Close lib.rs"]),
+        None
     );
+    let left = shell
+        .visual
+        .update(|window, cx| !workspaces.read(cx).strip_focus.contains_focused(window, cx));
+    assert!(left, "one Tab leaves the strip");
+    shell.click("workspace-tab-terminal:@1");
 
     // Past the start of the window the panel's tabs come, as the last stops in
     // Tauri's page did; the arrows select a surface, wrapping.
@@ -3353,6 +3643,35 @@ fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut
         Some(true),
         "Right wraps to the first"
     );
+    shell.visual.simulate_keystrokes("end");
+    shell.settle();
+    assert_eq!(
+        shell.selected("Automations"),
+        Some(true),
+        "End shows the last"
+    );
+    shell.visual.simulate_keystrokes("home");
+    shell.settle();
+    assert_eq!(shell.selected("Files"), Some(true), "Home shows the first");
+    // One stop: Tab leaves the panel's tabs, the last stops, and Shift+Tab
+    // comes back to the one shown.
+    let on_panel_tab = |shell: &mut Shell| {
+        shell.visual.update(|window, _| {
+            window
+                .find_all_by_role(Role::Tab)
+                .into_iter()
+                .filter(|tab| tab.path().contains(&"panel-tabs".into()))
+                .find(|tab| tab.focused() == Some(true))
+                .and_then(|tab| tab.label().map(str::to_owned))
+        })
+    };
+    assert_eq!(on_panel_tab(&mut shell).as_deref(), Some("Files"));
+    shell.visual.simulate_keystrokes("tab");
+    shell.settle();
+    assert_eq!(on_panel_tab(&mut shell), None);
+    shell.visual.simulate_keystrokes("shift-tab");
+    shell.settle();
+    assert_eq!(on_panel_tab(&mut shell).as_deref(), Some("Files"));
 }
 
 #[gpui_kit::test]
@@ -3360,14 +3679,27 @@ fn the_strip_selects_tabs_and_opens_their_menu_from_the_keyboard(cx: &mut TestAp
     let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
     let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
     let workspaces = shell.workspaces();
+    // The active tab is a document after another, whose close button the
+    // keyboard passes.
+    shell.click("workspace-tab-app:b");
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
     shell
         .visual
         .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_strip(window, cx)));
     shell.settle();
-    shell.visual.simulate_keystrokes("end enter");
+    assert_eq!(focused_strip_tab(&mut shell), Some(("lib.rs".into(), true)));
+    // Kit's tab takes Enter as a click on its release: a full press.
+    let enter = |shell: &mut Shell| {
+        shell.visual.update(|window, cx| window.press("enter", cx));
+    };
+    shell.visual.simulate_keystrokes("end");
+    enter(&mut shell);
     shell.settle();
     assert_eq!(shell.selected("lib.rs"), Some(true));
-    shell.visual.simulate_keystrokes("home right enter");
+    shell.visual.simulate_keystrokes("home right");
+    enter(&mut shell);
     shell.settle();
     assert_eq!(shell.selected("server"), Some(true));
     assert_eq!(shell.selected("lib.rs"), Some(false));
@@ -3385,12 +3717,10 @@ fn the_strip_selects_tabs_and_opens_their_menu_from_the_keyboard(cx: &mut TestAp
     assert!(open, "the menu key opens the tab's menu");
     shell.visual.simulate_keystrokes("escape");
     shell.settle();
-    let back = shell
-        .visual
-        .update(|window, cx| workspaces.read(cx).strip_focus.is_focused(window));
-    assert!(
-        back,
-        "closing the menu hands the keyboard back to the strip"
+    assert_eq!(
+        focused_strip_tab(&mut shell),
+        Some(("server".into(), true)),
+        "closing the menu hands the keyboard back to the tab"
     );
     // The region is named for the workspace on screen, as in Tauri.
     shell.visual.update(|window, _| {

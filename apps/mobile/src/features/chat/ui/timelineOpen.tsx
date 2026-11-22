@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, useSyncExternalStore, type RefObject } from "react";
-import type { View } from "react-native";
+import type { ViewInstance } from "react-native";
 
 // What the reader has opened in the conversation: steps lines, thoughts and
 // tool rows. It is kept by the conversation and not by the rows, because the
@@ -41,7 +41,7 @@ export interface TimelineOpen {
    * `cell`. Answers what to call once the change is drawn; the conversation
    * then keeps the tapped line where it was on screen.
    */
-  hold: (key: string, cell: View | null) => () => void;
+  hold: (key: string, cell: ViewInstance | null) => () => void;
   /** The row `key` is laid out `height` tall. */
   laidOut: (key: string, height: number) => void;
 }
@@ -52,7 +52,7 @@ export const TimelineOpenContext = createContext<TimelineOpen>({ groups: new Ope
 /** The list row something is drawn in. */
 export interface TimelineCell {
   key: string;
-  view: RefObject<View | null>;
+  view: RefObject<ViewInstance | null>;
 }
 
 export const TimelineCellContext = createContext<TimelineCell>({ key: "", view: { current: null } });

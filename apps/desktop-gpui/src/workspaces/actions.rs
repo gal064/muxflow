@@ -98,7 +98,8 @@ pub struct TmuxAction {
     /// workspace already pinned.
     pub pinned: bool,
     pub confirmed: bool,
-    /// Where a created workspace's first pane starts, resolved on the host.
+    /// Where a created workspace's first pane, or a created tab, starts,
+    /// resolved on the host.
     pub directory: String,
     pub target_pane_id: String,
     pub target_session_id: String,

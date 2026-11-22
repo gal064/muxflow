@@ -131,8 +131,8 @@ static REASON_SUMMARY: Table = LazyLock::new(|| {
         // Configuration, not a file just clicked: Settings helps, a refresh
         // does not.
         (
-            r"(?i)workspace start directory",
-            "The start directory configured for new workspaces is not a directory on this host. Change it under Settings → Workspace.",
+            r"(?i)\bstart directory",
+            "The start directory set for new workspaces and tabs is not a directory on this host. Change it under Settings › Workspace.",
         ),
         (
             r"(?i)no such file or directory|os error 2|does not exist|is no longer available",
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn points_a_refused_start_directory_at_settings() {
         let text = summarize(
-            "tmux_action_rejected: workspace start directory /nope does not exist or is not a directory",
+            "tmux_action_rejected: start directory /nope does not exist or is not a directory",
         );
         assert!(text.summary.contains("Settings"));
         assert!(!text.summary.contains("Refresh"));

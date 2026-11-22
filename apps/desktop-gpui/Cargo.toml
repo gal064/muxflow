@@ -26,11 +26,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 desktop-core = { path = "../../crates/desktop-core" }
 dirs = "6"
 futures = "0.3"
-# Exact pin: gpui-kit pins the matching gpui-pre snapshot (0.3.11). `gpui-fast`
+# Exact pin: gpui-kit pins the matching gpui-pre snapshot (0.3.12). `gpui-fast`
 # stays off (see docs/history/gpui-migration/gpui-migration.md).
 # The grammars the editor highlights, one feature each so `cargo deny` sees
 # every grammar crate. JSON comes with `tree-sitter` itself.
-gpui-kit = { version = "=0.9.0", default-features = true, features = [
+gpui-kit = { version = "=0.10.0", default-features = true, features = [
   "tree-sitter-bash",
   "tree-sitter-css",
   "tree-sitter-html",
@@ -60,7 +60,7 @@ tmux-control = { path = "../../crates/tmux-control" }
 uuid.workspace = true
 
 [dev-dependencies]
-gpui-kit = { version = "=0.9.0", default-features = true, features = ["test-support"] }
+gpui-kit = { version = "=0.10.0", default-features = true, features = ["test-support"] }
 tempfile = "3"
 
 # A real offscreen render through GPUI's headless renderer, so it needs a

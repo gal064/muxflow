@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { BackHandler, Platform, type TextInput } from "react-native";
+import { BackHandler, Platform, type TextInputInstance } from "react-native";
 
 import { ChatTurnState, type ChatItem } from "../../../protocol/gen/chat_pb";
 import type { ChatPane } from "../chatModel";
@@ -53,7 +53,7 @@ export interface MessageActionsInput {
 
 export interface MessageActions {
   /** For the reply field: starting an edit focuses it. */
-  field: RefObject<TextInput | null>;
+  field: RefObject<TextInputInstance | null>;
   /** Starts editing `item`, and brings the keyboard up. */
   edit: (item: ChatItem) => void;
   /** Back: out of an edit first, and only then out of the chat. */
@@ -116,7 +116,7 @@ export function useMessageActions(input: MessageActionsInput): MessageActions {
   const close = useCallback(() => setHeldId(""), []);
 
   // ---- editing ----
-  const field = useRef<TextInput>(null);
+  const field = useRef<TextInputInstance>(null);
   const focusWanted = useRef(false);
   const focusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(focusTimer.current), []);

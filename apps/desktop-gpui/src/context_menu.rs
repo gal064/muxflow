@@ -255,27 +255,42 @@ fn reveal(focus: &FocusHandle, scroll: &ScrollHandle, window: &mut Window) {
     // The first frame draws the row where it is; the second reads it.
     window.on_next_frame(move |window, _| {
         window.on_next_frame(move |window, cx| {
-            let row = cx.try_global::<Anchor>().and_then(|anchor| {
-                let rows = anchor.0.borrow();
-                rows.iter()
-                    .find(|(row, _)| *row == focus)
-                    .map(|(_, bounds)| *bounds)
-            });
-            let (Some(row), view) = (row, scroll.bounds()) else {
-                return;
-            };
-            let mut offset = scroll.offset();
-            if row.top() < view.top() {
-                offset.y += view.top() - row.top();
-            } else if row.bottom() > view.bottom() {
-                offset.y -= row.bottom() - view.bottom();
-            } else {
-                return;
+            if let Some(focus) = focus.upgrade() {
+                scroll_to_row(&focus, &scroll, window, cx);
             }
-            scroll.set_offset(offset);
-            window.refresh();
         })
     });
+}
+
+/// Scrolls `scroll` now so the row `focus` holds, where it was last drawn with
+/// [`anchor`], is in view. False when the row has not been drawn yet.
+pub fn scroll_to_row(
+    focus: &FocusHandle,
+    scroll: &ScrollHandle,
+    window: &mut Window,
+    cx: &App,
+) -> bool {
+    let focus = focus.downgrade();
+    let row = cx.try_global::<Anchor>().and_then(|anchor| {
+        let rows = anchor.0.borrow();
+        rows.iter()
+            .find(|(row, _)| *row == focus)
+            .map(|(_, bounds)| *bounds)
+    });
+    let (Some(row), view) = (row, scroll.bounds()) else {
+        return false;
+    };
+    let mut offset = scroll.offset();
+    if row.top() < view.top() {
+        offset.y += view.top() - row.top();
+    } else if row.bottom() > view.bottom() {
+        offset.y -= row.bottom() - view.bottom();
+    } else {
+        return true;
+    }
+    scroll.set_offset(offset);
+    window.refresh();
+    true
 }
 
 /// Opens a menu from the keyboard, under the row the focused surface marked
@@ -285,21 +300,36 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_under(None, build, window, cx);
+}
+
+/// [`open`], under `row` when the caller knows it: a row that holds the focus
+/// itself, as a tab in Kit's tab list does, draws no [`anchor`].
+pub fn open_under(
+    row: Option<Bounds<Pixels>>,
+    build: impl FnOnce(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu,
+    window: &mut Window,
+    cx: &mut App,
+) {
     // The key inside a pointer's menu reaches the row under it: one menu.
     if is_open(window, cx) {
         return;
     }
     let opener = window.focused(cx);
-    let marked = cx
-        .try_global::<Anchor>()
-        .zip(opener.as_ref())
-        .and_then(|(anchor, opener)| {
-            let rows = anchor.0.borrow();
-            rows.iter()
-                .find(|(row, _)| row == opener)
-                .map(|(_, bounds)| point(bounds.left() + px(8.), bounds.bottom()))
-        });
-    let at = marked.unwrap_or_else(|| window.mouse_position());
+    let marked = row.or_else(|| {
+        cx.try_global::<Anchor>()
+            .zip(opener.as_ref())
+            .and_then(|(anchor, opener)| {
+                let rows = anchor.0.borrow();
+                rows.iter()
+                    .find(|(row, _)| row == opener)
+                    .map(|(_, bounds)| *bounds)
+            })
+    });
+    let at = marked.map_or_else(
+        || window.mouse_position(),
+        |bounds| point(bounds.left() + px(8.), bounds.bottom()),
+    );
     let menu = PopupMenu::build(window, cx, |menu, window, cx| {
         // Kit gives focus back to the action context as the menu closes.
         let menu = match &opener {

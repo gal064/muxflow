@@ -24,14 +24,14 @@ export function localFileSource(uri: string, known: { name?: string; size?: numb
       const handle = file.open(FileMode.ReadOnly);
       try {
         handle.offset = offset;
-        const first = handle.readBytes(length);
+        const first = await handle.readBytes(length);
         if (first.length === length) return first;
         // A read may answer fewer bytes than asked before the end of the file.
         const bytes = new Uint8Array(length);
         bytes.set(first);
         let filled = first.length;
         while (filled < length) {
-          const more = handle.readBytes(length - filled);
+          const more = await handle.readBytes(length - filled);
           if (more.length === 0) break;
           bytes.set(more, filled);
           filled += more.length;

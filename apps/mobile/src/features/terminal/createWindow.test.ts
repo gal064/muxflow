@@ -1,11 +1,11 @@
 import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostConnection } from "../../protocol/HostConnection";
-import { EventKind, HostEventSchema, Operation, ResponseSchema, TmuxActionResultSchema } from "../../protocol/gen/envelope_pb";
+import { EventKind, HostEventSchema, Operation, ResponseSchema, TmuxActionKind, TmuxActionResultSchema } from "../../protocol/gen/envelope_pb";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import { logLines, logStore } from "../../session/log";
-import { createAgentWindow, createTerminalWindow, isConnectionScopeCurrent } from "./createWindow";
+import { NO_TMUX_SERVER, STALE_TOPOLOGY_WAIT_MS, MissingAgentCommandError, createAgentWindow, createTerminalWindow, findRandomSession, isConnectionScopeCurrent, openInRandom } from "./createWindow";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
 
@@ -168,5 +168,142 @@ describe("New agent create-then-send", () => {
     second.transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@4" }) }) }, { requestId: missingFrame!.requestId }));
     await expect(missingPane).rejects.toMatchObject({ code: "missing_result" });
     expect(second.transport.drain()).toHaveLength(0);
+  });
+});
+
+describe("New agent and New terminal in random (quick-session plan §4.2)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    logStore.getState().clear();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const withRandom = { sessions: [
+    { id: "$1", name: "primary", windowCount: 1, attachedClients: 0, order: 0 },
+    { id: "$4", name: "random", windowCount: 1, attachedClients: 0, order: 1 },
+  ] };
+
+  async function connectedWith(overrides: Parameters<typeof topologySnapshot>[0] = {}, identity = "server-a") {
+    const store = createSessionStore();
+    const transport = new FakeTransport();
+    const connection = new HostConnection({ dial: async () => transport, nextConnectionEpoch: () => 1, store });
+    connection.connect();
+    await settle();
+    transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ serverIdentity: identity }) }, { requestId: 1n }));
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot({ generation: 7n, serverIdentity: identity, ...overrides }) }) }, { requestId: 2n }));
+    transport.drain();
+    return { store, transport, connection };
+  }
+
+  function request(frame: ReturnType<FakeTransport["drain"]>[number] | undefined) {
+    if (frame?.payload.case !== "request") throw new Error("expected a request");
+    return { requestId: frame.requestId, value: frame.payload.value };
+  }
+
+  it("creates the random workspace in the directory when it is missing", async () => {
+    const { store, transport, connection } = await connectedWith();
+    expect(findRandomSession(store)).toBeUndefined();
+    const pending = openInRandom(connection, store, { kind: "terminal", directory: "~/work", getCurrentConnection: () => connection });
+    const sent = request(transport.drain()[0]);
+    expect(sent.value.tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_SESSION, name: "random", directory: "~/work", sessionId: "", expectedServerIdentity: "server-a", expectedGeneration: 7n });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { sessionId: "$5", windowId: "@6", paneId: "%7" }) }) }, { requestId: sent.requestId }));
+    const opened = await pending;
+    expect(opened).toMatchObject({ sessionId: "$5", windowId: "@6", paneId: "%7", createdWorkspace: true });
+    expect(opened.commandDelivery).toBeUndefined();
+    expect(transport.drain()).toHaveLength(0);
+  });
+
+  it("opens a window in the existing random workspace, matched by exact name", async () => {
+    const { store, transport, connection } = await connectedWith({ sessions: [
+      { id: "$1", name: "Random", windowCount: 1, attachedClients: 0, order: 0 },
+      { id: "$2", name: "random ✳", windowCount: 1, attachedClients: 0, order: 1 },
+      { id: "$4", name: "random", windowCount: 1, attachedClients: 0, order: 2 },
+    ] });
+    const pending = openInRandom(connection, store, { kind: "agent", directory: "/srv", command: "codex", getCurrentConnection: () => connection });
+    const sent = request(transport.drain()[0]);
+    expect(sent.value.tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_WINDOW, sessionId: "$4", directory: "/srv", name: "", expectedGeneration: 7n });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@8", paneId: "%8" }) }) }, { requestId: sent.requestId }));
+    const opened = await pending;
+    expect(opened).toMatchObject({ sessionId: "$4", windowId: "@8", paneId: "%8", createdWorkspace: false });
+    const input = request(transport.drain()[0]);
+    expect(input.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%8" });
+    expect(new TextDecoder().decode(input.value.data)).toBe("codex\n");
+    transport.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: input.requestId }));
+    await expect(opened.commandDelivery).resolves.toEqual({ ok: true });
+  });
+
+  it("retries once on stale_topology and looks the workspace up again", async () => {
+    const { store, transport, connection } = await connectedWith();
+    const pending = openInRandom(connection, store, { kind: "terminal", directory: "~", getCurrentConnection: () => connection });
+    const first = request(transport.drain()[0]);
+    expect(first.value.tmuxAction?.kind).toBe(TmuxActionKind.CREATE_SESSION);
+    transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "topology changed" }) }, { requestId: first.requestId }));
+    await settle();
+    // Another client made `random` meanwhile: the retry opens a window in it.
+    transport.feed(hostEnvelope({ case: "event", value: create(HostEventSchema, { kind: EventKind.TOPOLOGY_SNAPSHOT, snapshot: topologySnapshot({ generation: 8n, ...withRandom }) }) }, { sequence: 1n }));
+    await settle();
+    const second = request(transport.drain()[0]);
+    expect(second.value.tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_WINDOW, sessionId: "$4", directory: "~", expectedGeneration: 8n });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@9", paneId: "%9" }) }) }, { requestId: second.requestId }));
+    await expect(pending).resolves.toMatchObject({ sessionId: "$4", paneId: "%9", createdWorkspace: false });
+
+    const again = openInRandom(connection, store, { kind: "terminal", directory: "~", getCurrentConnection: () => connection });
+    const stale = (requestId: bigint) => transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "again" }) }, { requestId }));
+    stale(request(transport.drain()[0]).requestId);
+    await vi.advanceTimersByTimeAsync(STALE_TOPOLOGY_WAIT_MS);
+    stale(request(transport.drain()[0]).requestId);
+    await expect(again).rejects.toMatchObject({ code: "stale_topology" });
+    expect(transport.drain()).toHaveLength(0);
+  });
+
+  it("sends nothing for an agent without a command", async () => {
+    const { store, transport, connection } = await connectedWith(withRandom);
+    await expect(openInRandom(connection, store, { kind: "agent", directory: "~", command: "  ", getCurrentConnection: () => connection })).rejects.toBeInstanceOf(MissingAgentCommandError);
+    await expect(openInRandom(connection, store, { kind: "agent", directory: "~", getCurrentConnection: () => connection })).rejects.toBeInstanceOf(MissingAgentCommandError);
+    expect(transport.drain()).toHaveLength(0);
+  });
+
+  it("on a host with no tmux server, creates random and keeps the scope across the server it started", async () => {
+    const { store, transport, connection } = await connectedWith({ sessions: [], windows: [], panes: [] }, NO_TMUX_SERVER);
+    const pending = openInRandom(connection, store, { kind: "agent", directory: "~", command: "codex", getCurrentConnection: () => connection });
+    const sent = request(transport.drain()[0]);
+    expect(sent.value.tmuxAction).toMatchObject({ kind: TmuxActionKind.CREATE_SESSION, name: "random", expectedServerIdentity: NO_TMUX_SERVER });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { sessionId: "$0", windowId: "@0", paneId: "%0" }) }) }, { requestId: sent.requestId }));
+    const opened = await pending;
+    expect(opened.createdWorkspace).toBe(true);
+    // The command goes out at once, before the new server's snapshot lands.
+    const input = request(transport.drain()[0]);
+    expect(input.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%0" });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: input.requestId }));
+    await expect(opened.commandDelivery).resolves.toEqual({ ok: true });
+    // The snapshot from the server the create started: still the same scope.
+    transport.feed(hostEnvelope({ case: "event", value: create(HostEventSchema, { kind: EventKind.TOPOLOGY_SNAPSHOT, snapshot: topologySnapshot({ generation: 8n, serverIdentity: "server-b" }) }) }, { sequence: 1n }));
+    await settle();
+    expect(connection.serverIdentity).toBe("server-b");
+    expect(isConnectionScopeCurrent(opened.scope, () => connection)).toBe(true);
+  });
+
+  it("accepts only the move from no server to a server", async () => {
+    const { connection } = await connectedWith();
+    const scope = { connection, connectionEpoch: connection.connectionEpoch, sessionId: "$1" };
+    expect(isConnectionScopeCurrent({ ...scope, serverIdentity: NO_TMUX_SERVER }, () => connection)).toBe(true);
+    expect(isConnectionScopeCurrent({ ...scope, serverIdentity: "server-a" }, () => connection)).toBe(true);
+    expect(isConnectionScopeCurrent({ ...scope, serverIdentity: "server-old" }, () => connection)).toBe(false);
+    const empty = await connectedWith({ sessions: [], windows: [], panes: [] }, NO_TMUX_SERVER);
+    const ended = { connection: empty.connection, connectionEpoch: empty.connection.connectionEpoch, sessionId: "$1" };
+    expect(isConnectionScopeCurrent({ ...ended, serverIdentity: "server-a" }, () => empty.connection)).toBe(false);
+  });
+
+  it("does not type the agent command across a replaced connection", async () => {
+    const { store, transport, connection } = await connectedWith();
+    let current: HostConnection | null = connection;
+    const pending = openInRandom(connection, store, { kind: "agent", directory: "~", command: "codex", getCurrentConnection: () => current });
+    const sent = request(transport.drain()[0]);
+    current = null;
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { sessionId: "$5", windowId: "@6", paneId: "%7" }) }) }, { requestId: sent.requestId }));
+    const opened = await pending;
+    await expect(opened.commandDelivery).resolves.toMatchObject({ ok: false, error: expect.any(Error) });
+    expect(transport.drain()).toHaveLength(0);
+    expect(isConnectionScopeCurrent(opened.scope, () => connection)).toBe(true);
   });
 });

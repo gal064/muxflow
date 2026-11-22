@@ -134,12 +134,31 @@ export function agentMarkSeen(agentId: string, attentionGeneration: bigint, expe
   });
 }
 
-export function createWindow(sessionId: string, expectedServerIdentity: string, expectedGeneration: bigint): Request {
+/**
+ * `directory` is where the window starts; empty keeps the host's choice (the
+ * current pane's path).
+ */
+export function createWindow(sessionId: string, expectedServerIdentity: string, expectedGeneration: bigint, directory = ""): Request {
   return create(RequestSchema, {
     operation: Operation.TMUX_ACTION,
     tmuxAction: create(TmuxActionSchema, {
       kind: TmuxActionKind.CREATE_WINDOW,
       sessionId,
+      expectedServerIdentity,
+      expectedGeneration,
+      directory,
+    }),
+  });
+}
+
+/** A new tmux session named `name` whose first pane starts in `directory` (absolute or `~`). */
+export function createSession(name: string, directory: string, expectedServerIdentity: string, expectedGeneration: bigint): Request {
+  return create(RequestSchema, {
+    operation: Operation.TMUX_ACTION,
+    tmuxAction: create(TmuxActionSchema, {
+      kind: TmuxActionKind.CREATE_SESSION,
+      name,
+      directory,
       expectedServerIdentity,
       expectedGeneration,
     }),

@@ -235,12 +235,26 @@ pub struct ShellPreferences {
     /// `None` is not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snooze_times: Option<Vec<String>>,
+    /// What ⌘1–9 jumps to. `None` is "never set": workspaces. GPUI only, so
+    /// left out of the frontend's contract as `snooze_times` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_keys: Option<NumberKeys>,
 }
 
-/// What a new workspace on one host profile starts with.
+/// What ⌘1–9 select: the sidebar's workspaces, or its agents in list order.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NumberKeys {
+    #[default]
+    Workspaces,
+    Agents,
+}
+
+/// What a new workspace on one host profile starts with, and the agent a
+/// quick agent session runs there.
 ///
-/// Both halves are per host and both are optional, because a filesystem path
-/// and a shell command are statements about one machine. Absent means the
+/// Every field is per host and optional, because a filesystem path and a
+/// shell command are statements about one machine. Absent means the
 /// behaviour this app had before the setting existed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +263,8 @@ pub struct WorkspaceDefaults {
     pub directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -482,6 +498,9 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
         }
         if let Some(startup_command) = defaults.startup_command.as_deref() {
             validate_text("workspace startup command", startup_command, false)?;
+        }
+        if let Some(agent_command) = defaults.agent_command.as_deref() {
+            validate_text("workspace agent command", agent_command, false)?;
         }
     }
     let mut ids = HashSet::new();
@@ -785,6 +804,7 @@ mod tests {
                     scale_factor_milli: Some(2_000),
                 }),
                 snooze_times: Some(vec!["30m".into(), "tomorrow 08:30".into()]),
+                number_keys: Some(NumberKeys::Agents),
             },
             commands: CommandPreferences {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),
@@ -795,6 +815,7 @@ mod tests {
                 WorkspaceDefaults {
                     directory: Some("/work/projects".into()),
                     startup_command: Some("git status".into()),
+                    agent_command: Some("codex".into()),
                 },
             )]),
         }
@@ -1033,6 +1054,7 @@ mod tests {
             Some(&WorkspaceDefaults {
                 directory: Some("/work/projects".into()),
                 startup_command: Some("git status".into()),
+                agent_command: Some("codex".into()),
             })
         );
         assert_eq!(

@@ -1,16 +1,15 @@
-//! The Settings dialog: seven tabs over [`Prefs`](super::Prefs), with the
-//! connection form on the first. Copy, order and behavior from
-//! `features/shell/SettingsDialog.tsx`.
-
-use std::rc::Rc;
+//! The Settings dialog: eight tabs over [`Prefs`](super::Prefs), with the
+//! connection form on the first and the shortcuts on Keyboard. Copy, order
+//! and behavior from `features/shell/SettingsDialog.tsx`.
 
 use desktop_core::{
-    app_state::{AgentSoundMode, AppTabViewMode, MarkdownAppearance, ThemePreference},
+    app_state::{AgentSoundMode, AppTabViewMode, MarkdownAppearance, NumberKeys, ThemePreference},
     notifications::{emit_test_notification, notification_permission_status},
 };
 use gpui_kit::{
-    AccessibleAction, App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
-    Orientation, ParentElement, Render, Role, SharedString, Styled, Subscription, Window,
+    AccessibleAction, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    KeyDownEvent, Orientation, ParentElement, Pixels, Point, Render, Role, ScrollHandle,
+    SharedString, Styled, Subscription, Window,
     accesskit::ActionData,
     base::{SliderIndicator, SliderThumb, SliderTrack, TestSupportExt},
     component::{
@@ -30,8 +29,9 @@ use gpui_kit::{
 };
 
 use super::{
-    AgentMode, AgentSetupStatus, agent_mode, agent_mode_change, agent_setup, get, notifier,
-    on_runtime,
+    AgentMode, AgentSetupStatus, agent_mode, agent_mode_change, agent_setup, get,
+    keyboard::KeyboardSettings,
+    notifier, on_runtime,
     prefs::{AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
     update,
 };
@@ -44,7 +44,7 @@ use crate::{
     connection_ui::{
         ConnectionUi,
         controller::ConnectionController,
-        dialog::{ConnectionForm, confirm_delete_host, controls},
+        dialog::{CONTROLS, ConnectionForm, confirm_delete_host, controls},
     },
     theme::{
         self,
@@ -52,7 +52,8 @@ use crate::{
     },
 };
 
-const DIALOG_WIDTH: f32 = 620.;
+/// Wide enough for the eight section tabs on one row.
+const DIALOG_WIDTH: f32 = 720.;
 /// Between the rows of a tab: roomier than Tauri's 12px, which read as crowded.
 const SETTINGS_ROW_GAP: f32 = 16.;
 /// `.settings-dialog { max-height: min(640px, 78vh) }`.
@@ -70,16 +71,18 @@ pub enum Tab {
     Workspace,
     Terminal,
     Agents,
+    Keyboard,
     Appearance,
     Sounds,
     Accessibility,
 }
 
-const TABS: [(Tab, &str); 7] = [
+const TABS: [(Tab, &str); 8] = [
     (Tab::Connection, "Connection"),
     (Tab::Workspace, "Workspace"),
     (Tab::Terminal, "Terminal"),
     (Tab::Agents, "Agents"),
+    (Tab::Keyboard, "Keyboard"),
     (Tab::Appearance, "Appearance"),
     (Tab::Sounds, "Sounds"),
     (Tab::Accessibility, "Accessibility"),
@@ -97,6 +100,11 @@ const MARKDOWN_APPEARANCES: [(MarkdownAppearance, &str); 3] = [
     (MarkdownAppearance::Dark, "Dark"),
 ];
 
+const NUMBER_KEYS: [(NumberKeys, &str); 2] = [
+    (NumberKeys::Workspaces, "Workspaces"),
+    (NumberKeys::Agents, "Agents"),
+];
+
 const MARKDOWN_VIEWS: [(AppTabViewMode, &str); 4] = [
     (AppTabViewMode::Source, "Source"),
     (AppTabViewMode::Live, "Live"),
@@ -110,6 +118,14 @@ pub fn init(cx: &mut App) {
     commands::on_command("settings.show", cx, |window, cx| {
         open_with(
             Tab::Connection,
+            cx.try_global::<ConnectionUi>().map(|ui| ui.0.clone()),
+            window,
+            cx,
+        );
+    });
+    commands::on_command("shortcuts.configure", cx, |window, cx| {
+        open_with(
+            Tab::Keyboard,
             cx.try_global::<ConnectionUi>().map(|ui| ui.0.clone()),
             window,
             cx,
@@ -133,17 +149,47 @@ pub fn open_with(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_view(tab, controller, window, cx);
+}
+
+/// Opens Settings on Workspace with the keyboard in the Agent command field,
+/// scrolled into view: what ⌘⇧N asks for while it has no command to run.
+pub fn open_on_agent_command(
+    controller: Option<Entity<ConnectionController>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let view = open_view(Tab::Workspace, controller, window, cx);
+    view.update(cx, |this, cx| {
+        this.agent_command
+            .update(cx, |field, cx| field.focus(window, cx));
+        this.reveal_agent_command = true;
+    });
+}
+
+fn open_view(
+    tab: Tab,
+    controller: Option<Entity<ConnectionController>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<SettingsDialog> {
     let view = cx.new(|cx| SettingsDialog::new(tab, controller, window, cx));
+    let shown = view.clone();
     window.open_dialog(cx, move |dialog, window, cx| {
         dialog::place(dialog::card(dialog, &theme::palette(cx)), window)
             .close_button(false)
             .p_0()
             // Enter belongs to the focused control, not to a default button.
             .on_ok(|_, _, _| false)
-            // Escape closes without Done; typed text still has to count.
+            // Escape closes without Done; typed text still has to count. While
+            // a shortcut is being recorded it ends the recording instead.
             .on_cancel({
                 let view = view.clone();
                 move |_, window, cx| {
+                    let keyboard = view.read(cx).keyboard.clone();
+                    if keyboard.update(cx, |keyboard, cx| keyboard.cancel_recording(window, cx)) {
+                        return false;
+                    }
                     view.update(cx, |this, cx| this.commit_pending(window, cx));
                     true
                 }
@@ -151,6 +197,7 @@ pub fn open_with(
             .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
             .child(view.clone())
     });
+    shown
 }
 
 /// Which words the notification permission line takes.
@@ -253,9 +300,15 @@ pub struct SettingsDialog {
     font_size: Entity<InputState>,
     start_directory: Entity<InputState>,
     startup_command: Entity<InputState>,
+    agent_command: Entity<InputState>,
+    keyboard: Entity<KeyboardSettings>,
+    /// The body's scroll, back at the top for each tab.
+    body_scroll: ScrollHandle,
+    /// The Agent command field is still to be scrolled into view.
+    reveal_agent_command: bool,
     /// The Snooze menu's wake times, comma separated.
     snooze_times: Entity<InputState>,
-    /// The host the two workspace fields describe: the one on screen.
+    /// The host the workspace fields describe: the one on screen.
     defaults_host: String,
     volume: Entity<SliderState>,
     volume_focus: FocusHandle,
@@ -298,6 +351,16 @@ impl SettingsDialog {
             );
             input
         });
+        let agent_command = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("None");
+            input.set_value(
+                defaults.agent_command.clone().unwrap_or_default(),
+                window,
+                cx,
+            );
+            input
+        });
+        let keyboard = cx.new(|cx| KeyboardSettings::new(window, cx));
         let snooze_times = cx.new(|cx| {
             let mut input =
                 InputState::new(window, cx).placeholder("1h, 3h, tomorrow 09:00, mon 09:00");
@@ -326,6 +389,11 @@ impl SettingsDialog {
                 }
             }),
             cx.subscribe_in(&startup_command, window, |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_defaults(window, cx);
+                }
+            }),
+            cx.subscribe_in(&agent_command, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     this.commit_defaults(window, cx);
                 }
@@ -363,6 +431,10 @@ impl SettingsDialog {
             font_size,
             start_directory,
             startup_command,
+            agent_command,
+            keyboard,
+            body_scroll: ScrollHandle::new(),
+            reveal_agent_command: false,
             snooze_times,
             defaults_host,
             volume,
@@ -411,6 +483,12 @@ impl SettingsDialog {
                 window,
                 cx,
             );
+            set_text(
+                &self.agent_command,
+                defaults.agent_command.unwrap_or_default(),
+                window,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -428,9 +506,12 @@ impl SettingsDialog {
     fn commit_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let directory = self.start_directory.read(cx).value().to_string();
         let command = self.startup_command.read(cx).value().to_string();
+        let agent = self.agent_command.read(cx).value().to_string();
         let host = self.defaults_host.clone();
         update(
-            |prefs| prefs.set_workspace_defaults(&host, Some(&directory), Some(&command)),
+            |prefs| {
+                prefs.set_workspace_defaults(&host, Some(&directory), Some(&command), Some(&agent))
+            },
             window,
             cx,
         );
@@ -459,6 +540,7 @@ impl SettingsDialog {
     fn select_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_pending(window, cx);
         self.tab = tab;
+        self.body_scroll.set_offset(Point::default());
         if tab == Tab::Sounds && self.notification_status.is_none() {
             self.check_notifications(cx);
         }
@@ -775,6 +857,7 @@ pub fn agent_setup_row(cx: &App) -> impl IntoElement + use<> {
 impl SettingsDialog {
     fn workspace_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let prefs = get(cx).clone();
+        let agent_focus = self.agent_command.focus_handle(cx);
         let host_label = self.controller.as_ref().map_or_else(
             || "Local".to_owned(),
             |controller| controller.read(cx).active_host_label(),
@@ -844,6 +927,19 @@ impl SettingsDialog {
                                 .aria_label("Workspace startup command"),
                         )
                         .child(hint("Sent to the first terminal once, right after the workspace is created.", cx)),
+                )
+                .child(
+                    v_flex()
+                        .relative()
+                        .child(crate::context_menu::anchor(&agent_focus))
+                        .gap(ui(5.))
+                        .child(caption("Agent command", cx))
+                        .child(
+                            Input::new(&self.agent_command)
+                                .id("settings-agent-command")
+                                .aria_label("Agent command"),
+                        )
+                        .child(hint(agent_command_hint(cx), cx)),
                 ),
         )
         .child(self.snooze_section(cx))
@@ -1017,6 +1113,38 @@ impl SettingsDialog {
                 &theme::palette(cx),
             ))
             .children(crate::chat::apply_result(cx).map(|message| hint(message.to_owned(), cx)))
+    }
+
+    /// Where ⌘1–9 jump, over every command's shortcut. It fills the body,
+    /// `height`, and only the shortcut list scrolls inside it.
+    fn keyboard_tab(&self, height: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let number_keys = get(cx).number_keys;
+        let (caption_text, hold) = match commands::registry::Platform::current() {
+            commands::registry::Platform::Mac => ("⌘1–9 jumps to", "Hold ⌘ to see agent numbers."),
+            commands::registry::Platform::Linux => {
+                ("Ctrl+1–9 jumps to", "Hold Ctrl to see agent numbers.")
+            }
+        };
+        v_flex()
+            .h(height)
+            .gap(ui(SETTINGS_ROW_GAP))
+            .child(
+                v_flex()
+                    .flex_none()
+                    .gap(ui(5.))
+                    .child(caption(caption_text, cx))
+                    .child(radios(
+                        "settings-number-keys",
+                        caption_text,
+                        &NUMBER_KEYS,
+                        number_keys,
+                        |keys, window, cx| update(|prefs| prefs.number_keys = keys, window, cx),
+                    ))
+                    .when(number_keys == NumberKeys::Agents, |this| {
+                        this.child(hint(hold, cx))
+                    }),
+            )
+            .child(div().flex_1().min_h_0().child(self.keyboard.clone()))
     }
 
     fn appearance_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1213,6 +1341,26 @@ impl SettingsDialog {
     }
 }
 
+/// What the agent command is for, named by the shortcut that runs it.
+fn agent_command_hint(cx: &App) -> String {
+    let commands = cx.global::<commands::Commands>();
+    let keys = commands::registry::command_by_id("agents.newInRandom")
+        .and_then(|command| {
+            commands::keymap::shortcut_for(command, commands.platform(), commands.overrides())
+        })
+        .and_then(|shortcut| {
+            commands::glyphs::shortcut_glyphs(Some(shortcut), commands.platform())
+        });
+    match keys {
+        Some(keys) => format!(
+            "Runs in a new tab of the random workspace when you press {keys}. Empty, {keys} brings you here instead."
+        ),
+        None => {
+            "Runs in a new tab of the random workspace from New agent session in random.".to_owned()
+        }
+    }
+}
+
 fn agents_legend(label: &str, cx: &App) -> impl IntoElement + use<> {
     div()
         .text_size(ui(TYPE_LABEL))
@@ -1231,18 +1379,9 @@ impl Render for SettingsDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::palette(cx);
         // `.segment` is 11.5px; Kit's smallest tab is 12px.
-        // One Tab stop, the section shown, as Tauri's roving tablist; the
-        // arrows select the next section and take the keyboard to it, wrapping.
-        let focus: Rc<[FocusHandle]> = (0..TABS.len())
-            .map(|ix| {
-                window
-                    .use_keyed_state(("settings-tab-focus", ix), cx, |_, cx| cx.focus_handle())
-                    .read(cx)
-                    .clone()
-                    .tab_stop(TABS[ix].0 == self.tab)
-            })
-            .collect();
-        let accent = palette.accent;
+        // One Tab stop, the section shown, as Tauri's roving tablist. Kit's tab
+        // list moves the keyboard to the next tab, wrapping, and rings it; the
+        // arrows, Home and End here also select it, as Tauri's do.
         let tabs = TabBar::new("settings-tabs")
             .segmented()
             .xsmall()
@@ -1251,38 +1390,20 @@ impl Render for SettingsDialog {
                     .position(|(tab, _)| *tab == self.tab)
                     .unwrap_or(0),
             )
-            .children(TABS.iter().enumerate().map(|(ix, (_, label))| {
-                // A ring for the keyboard only, as Tauri's `:focus-visible`.
-                let held = focus[ix].is_focused(window) && window.last_input_was_keyboard();
-                let focus = focus.clone();
-                TabItem::new()
-                    .label(*label)
-                    .track_focus(&focus[ix])
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                        // From the section shown, as Tauri moves.
-                        let at = TABS
-                            .iter()
-                            .position(|(tab, _)| *tab == this.tab)
-                            .unwrap_or(0);
-                        let next = match event.keystroke.key.as_str() {
-                            "left" => (at + TABS.len() - 1) % TABS.len(),
-                            "right" => (at + 1) % TABS.len(),
-                            _ => return,
+            .children(TABS.iter().enumerate().map(|(at, (_, label))| {
+                TabItem::new().label(*label).on_key_down(cx.listener(
+                    move |this, event: &KeyDownEvent, window, cx| {
+                        // The tab Kit's list moves the keyboard to next, from
+                        // this focused one.
+                        let Some(next) = crate::ui::kit_tab_step(at, TABS.len(), event, |_| true)
+                        else {
+                            return;
                         };
+                        // Not stopped: the list takes the focus along, and
+                        // the section follows it.
                         this.select_tab(TABS[next].0, window, cx);
-                        focus[next].focus(window, cx);
-                        cx.stop_propagation();
-                    }))
-                    .when(held, |tab| {
-                        tab.relative().child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .border_2()
-                                .border_color(accent)
-                                .rounded(ui(4.)),
-                        )
-                    })
+                    },
+                ))
             }))
             .on_click(cx.listener(|this, index: &usize, window, cx| {
                 if let Some((tab, _)) = TABS.get(*index) {
@@ -1295,11 +1416,26 @@ impl Render for SettingsDialog {
             .min(window.viewport_size().height * DIALOG_MAX_VIEWPORT);
         let max_body =
             (max_dialog - ui(CHROME_HEIGHT).to_pixels(rem)).max(ui(BODY_MIN_HEIGHT).to_pixels(rem));
+        // Its first frame draws the field where it is; a later one reads it.
+        if self.reveal_agent_command {
+            let focus = self.agent_command.focus_handle(cx);
+            if self.tab != Tab::Workspace
+                || crate::context_menu::scroll_to_row(&focus, &self.body_scroll, window, cx)
+            {
+                self.reveal_agent_command = false;
+            } else {
+                window.request_animation_frame();
+            }
+        }
         let body = match self.tab {
             Tab::Connection => div().children(self.form.clone()).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
             Tab::Terminal => self.terminal_tab(cx).into_any_element(),
             Tab::Agents => self.agents_tab(cx).into_any_element(),
+            // The body's padding, top and bottom, is outside what it fills.
+            Tab::Keyboard => self
+                .keyboard_tab(max_body - ui(32.).to_pixels(rem), cx)
+                .into_any_element(),
             Tab::Appearance => self.appearance_tab(cx).into_any_element(),
             Tab::Sounds => self.sounds_tab(window, cx).into_any_element(),
             Tab::Accessibility => self.accessibility_tab(cx).into_any_element(),
@@ -1308,6 +1444,9 @@ impl Render for SettingsDialog {
             .id("settings-dialog")
             .role(Role::Dialog)
             .aria_label("Settings")
+            // Enter goes to the focused control: the Kit's dialog binding
+            // would take it first and confirm nothing, as `on_ok` declines.
+            .key_context(CONTROLS)
             // `.settings-dialog > header`.
             .child(
                 v_flex()
@@ -1336,8 +1475,10 @@ impl Render for SettingsDialog {
             .child(
                 div()
                     .id("settings-body")
+                    .test_support()
                     .max_h(max_body)
                     .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
                     .p(ui(16.))
                     .child(body),
             )

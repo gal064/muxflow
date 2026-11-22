@@ -137,8 +137,8 @@ pub struct TmuxActionWire {
     target_window_id: String,
     #[serde(default)]
     relative_position: WindowRelativePositionWire,
-    /// The created session's start directory, resolved on the host. Empty
-    /// means "wherever tmux would have started it".
+    /// Where a created session's first pane, or a created window, starts,
+    /// resolved on the host. Empty means "wherever tmux would have started it".
     #[serde(default)]
     directory: String,
     /// The pane `joinPane` places `pane_id` beside.

@@ -65,19 +65,19 @@ impl RenderOnce for RightPanel {
             .map_or("Files", |(_, label)| label.as_str())
             .to_owned();
         // One stop in the Tab order on the selected segment, as Tauri's
-        // roving tabindex: the arrows select the next segment, wrapping.
+        // roving tabindex. Kit's tab list owns it and moves the keyboard with
+        // the arrows, Home and End; the segment shown follows. This handle
+        // only tells whether the keyboard is in the list.
         let focus = window
             .use_keyed_state("panel-tabs-focus", cx, |_, cx| {
-                cx.focus_handle().tab_stop(true)
+                cx.focus_handle().tab_stop(false)
             })
             .read(cx)
             .clone();
-        let held = focus.is_focused(window);
+        let held = focus.contains_focused(window, cx);
         // A ring for the keyboard only, as Tauri's `:focus-visible`.
         let keyboard = window.last_input_was_keyboard();
-        let ids: Vec<String> = self.surfaces.iter().map(|(id, _)| id.clone()).collect();
-        let at = ids.iter().position(|id| *id == self.surface);
-        let keys = self.chrome.clone();
+        let ids: Rc<[String]> = self.surfaces.iter().map(|(id, _)| id.clone()).collect();
         v_flex()
             .id("right-panel")
             .test_support()
@@ -96,21 +96,6 @@ impl RenderOnce for RightPanel {
                     .aria_label("Panel surface")
                     .aria_size_of_set(tab_count)
                     .track_focus(&focus)
-                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.modifiers.modified() || ids.is_empty() {
-                            return;
-                        }
-                        let current = at.unwrap_or(0);
-                        let next = match event.keystroke.key.as_str() {
-                            "left" => (current + ids.len() - 1) % ids.len(),
-                            "right" => (current + 1) % ids.len(),
-                            _ => return,
-                        };
-                        let surface = ids[next].clone();
-                        keys.update(cx, |chrome, cx| chrome.show_surface(&surface, cx))
-                            .ok();
-                        cx.stop_propagation();
-                    })
                     .flex()
                     .items_stretch()
                     .h(ui(BAR_HEIGHT))
@@ -126,12 +111,28 @@ impl RenderOnce for RightPanel {
                                 let selected = *id == self.surface;
                                 let chrome = self.chrome.clone();
                                 let surface = id.clone();
+                                let (keys, ids) = (self.chrome.clone(), ids.clone());
                                 Tab::new(format!("panel-tab-{id}"))
                                     .selected(selected)
                                     .accessibility_label(label.clone())
                                     // AccessKit counts from zero.
                                     .set_position(index, tab_count)
-                                    .when(selected && held, |tab| tab.aria_active_descendant())
+                                    // Kit moves the keyboard; the segment
+                                    // it moves to is shown.
+                                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                                        let next = crate::ui::kit_tab_step(
+                                            index,
+                                            ids.len(),
+                                            event,
+                                            |_| true,
+                                        );
+                                        if let Some(surface) = next.map(|next| &ids[next]) {
+                                            keys.update(cx, |chrome, cx| {
+                                                chrome.show_surface(surface, cx)
+                                            })
+                                            .ok();
+                                        }
+                                    })
                                     .on_click(move |_, _, cx| {
                                         chrome
                                             .update(cx, |chrome, cx| {
