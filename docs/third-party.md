@@ -15,8 +15,8 @@ one root crate at a time. It fails if a crate's licence cannot be determined.
 Where a crate offers Apache-2.0, that text is shipped. Missing packaged notices
 are recovered from pinned upstream revisions in `release/licenses`, with their
 sources and checksums in `release/license-notices.json`. The generator refuses
-an unrecorded version or a changed notice. Seahash and realfft publish MIT
-declarations without copyright notices; their exact declarations accompany the
+an unrecorded version or a changed notice. Seahash publishes an MIT
+declaration without a copyright notice; its exact declaration accompanies the
 standard MIT text, with no invented attribution. The Rust standard
 library, which every binary includes, is named in the file's header. The packages' `verify-package.sh` scripts refuse a
 package without the file. Install `cargo-about` with
