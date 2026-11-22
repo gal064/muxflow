@@ -263,8 +263,13 @@ fn reveal(focus: &FocusHandle, scroll: &ScrollHandle, window: &mut Window) {
 }
 
 /// Scrolls `scroll` now so the row `focus` holds, where it was last drawn with
-/// [`anchor`], is in view. For a row already on the page.
-pub fn scroll_to_row(focus: &FocusHandle, scroll: &ScrollHandle, window: &mut Window, cx: &App) {
+/// [`anchor`], is in view. False when the row has not been drawn yet.
+pub fn scroll_to_row(
+    focus: &FocusHandle,
+    scroll: &ScrollHandle,
+    window: &mut Window,
+    cx: &App,
+) -> bool {
     let focus = focus.downgrade();
     let row = cx.try_global::<Anchor>().and_then(|anchor| {
         let rows = anchor.0.borrow();
@@ -273,7 +278,7 @@ pub fn scroll_to_row(focus: &FocusHandle, scroll: &ScrollHandle, window: &mut Wi
             .map(|(_, bounds)| *bounds)
     });
     let (Some(row), view) = (row, scroll.bounds()) else {
-        return;
+        return false;
     };
     let mut offset = scroll.offset();
     if row.top() < view.top() {
@@ -281,10 +286,11 @@ pub fn scroll_to_row(focus: &FocusHandle, scroll: &ScrollHandle, window: &mut Wi
     } else if row.bottom() > view.bottom() {
         offset.y -= row.bottom() - view.bottom();
     } else {
-        return;
+        return true;
     }
     scroll.set_offset(offset);
     window.refresh();
+    true
 }
 
 /// Opens a menu from the keyboard, under the row the focused surface marked

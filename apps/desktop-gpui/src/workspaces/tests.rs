@@ -895,9 +895,19 @@ fn a_new_agent_session_without_an_agent_command_sends_nothing(cx: &mut TestAppCo
         shell.status(),
         "Set an agent command for this host in Settings › Workspace"
     );
-    // Settings opens, where the command is set.
+    // Settings opens with the keyboard in the field the command is set in,
+    // scrolled into view.
     assert!(shell.dialog_open());
-    assert!(shell.shows("Agent command"));
+    shell.settle();
+    shell.visual.update(|window, _| {
+        let field = window.find("settings-agent-command");
+        assert_eq!(field.focused(), Some(true));
+        let (field, body) = (field.bounds(), window.find("settings-body").bounds());
+        assert!(
+            field.top() >= body.top() && field.bottom() <= body.bottom(),
+            "{field:?} in {body:?}"
+        );
+    });
 }
 
 #[gpui_kit::test]

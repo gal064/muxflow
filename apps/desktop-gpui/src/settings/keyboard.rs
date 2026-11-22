@@ -296,8 +296,8 @@ impl KeyboardSettings {
             .collect()
     }
 
-    /// After a button that goes with what it did: the keyboard to the row's
-    /// keys, or to the search when the Changed filter dropped the row.
+    /// After what removes the control that had the keyboard: the keyboard to
+    /// the row's keys, or to the search when the Changed filter dropped the row.
     fn return_focus(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         let (platform, overrides) = Self::keymap(cx);
         let shown = self
@@ -341,6 +341,7 @@ impl KeyboardSettings {
             "backspace" if bare => {
                 self.stop_recording(window, cx);
                 self.save(with_binding(&overrides, id, None, platform), window, cx);
+                self.return_focus(id, window, cx);
                 return;
             }
             _ => {}
@@ -359,6 +360,7 @@ impl KeyboardSettings {
         }
         self.stop_recording(window, cx);
         self.offer(id, &shortcut, window, cx);
+        self.return_focus(id, window, cx);
     }
 
     fn offer(
@@ -527,6 +529,7 @@ impl KeyboardSettings {
             .when_some(notice, |this, notice| {
                 let text = Self::notice_text(&notice, command, platform, overrides);
                 let choices = matches!(notice, RowNotice::Conflict { .. });
+                let swappable = shortcut.is_some();
                 this.child(
                     h_flex()
                         .id(SharedString::from(format!("shortcut-notice-{id}")))
@@ -544,12 +547,16 @@ impl KeyboardSettings {
                             let choice = |id: &'static str, label: &'static str| {
                                 Button::new(id).outline().xsmall().compact().label(label)
                             };
-                            this.child(choice("shortcut-swap", "Swap").on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.resolve(false, window, cx);
-                                    this.return_focus(id, window, cx);
-                                },
-                            )))
+                            // With nothing of its own to give, Swap would
+                            // be Replace.
+                            this.when(swappable, |this| {
+                                this.child(choice("shortcut-swap", "Swap").on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.resolve(false, window, cx);
+                                        this.return_focus(id, window, cx);
+                                    },
+                                )))
+                            })
                             .child(choice("shortcut-replace", "Replace").on_click(cx.listener(
                                 move |this, _, window, cx| {
                                     this.resolve(true, window, cx);
