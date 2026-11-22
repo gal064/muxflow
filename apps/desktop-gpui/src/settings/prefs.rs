@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use desktop_core::app_state::{
-    AgentSoundMode, AgentSoundPreferences, AppTabViewMode, MarkdownAppearance, PersistedAppState,
-    ThemePreference, WorkspaceDefaults,
+    AgentSoundMode, AgentSoundPreferences, AppTabViewMode, MarkdownAppearance, NumberKeys,
+    PersistedAppState, ThemePreference, WorkspaceDefaults,
 };
 
 pub const TERMINAL_FONT_SIZE_MIN: u8 = 10;
@@ -53,6 +53,8 @@ pub struct Prefs {
     pub workspace_defaults: BTreeMap<String, WorkspaceDefaults>,
     /// The Snooze menu's wake times, in `agents::snooze`'s spelling.
     pub snooze_times: Vec<String>,
+    /// What ⌘1–9 jumps to.
+    pub number_keys: NumberKeys,
 }
 
 /// A terminal size typed or stored, held to what Settings offers.
@@ -128,6 +130,10 @@ impl Prefs {
                             .startup_command
                             .as_deref()
                             .and_then(usable_workspace_default),
+                        agent_command: defaults
+                            .agent_command
+                            .as_deref()
+                            .and_then(usable_workspace_default),
                     };
                     (!host.is_empty() && usable != WorkspaceDefaults::default())
                         .then(|| (host.clone(), usable))
@@ -136,6 +142,7 @@ impl Prefs {
             snooze_times: crate::agents::snooze::parse_list(
                 &shell.snooze_times.as_deref().unwrap_or_default().join(","),
             ),
+            number_keys: shell.number_keys.unwrap_or_default(),
         }
     }
 
@@ -160,6 +167,7 @@ impl Prefs {
         shell.agent_sounds = Some(self.agent_sounds);
         shell.new_host_chat = Some(self.new_host_chat);
         shell.snooze_times = Some(self.snooze_times.clone());
+        shell.number_keys = Some(self.number_keys);
         state.workspace_defaults = self.workspace_defaults.clone();
     }
 
@@ -170,13 +178,15 @@ impl Prefs {
             .unwrap_or_default()
     }
 
-    /// Edits one host's entry and keeps the other hosts' untouched. An empty
-    /// field clears its half, and a host left with nothing drops out of the map.
+    /// Edits one host's entry and keeps the other hosts' untouched. `None`
+    /// leaves a field alone, an empty one clears it, and a host left with
+    /// nothing drops out of the map.
     pub fn set_workspace_defaults(
         &mut self,
         host_profile_id: &str,
         directory: Option<&str>,
         startup_command: Option<&str>,
+        agent_command: Option<&str>,
     ) {
         let mut merged = self.defaults_for(host_profile_id);
         if let Some(directory) = directory {
@@ -184,6 +194,9 @@ impl Prefs {
         }
         if let Some(command) = startup_command {
             merged.startup_command = usable_workspace_default(command);
+        }
+        if let Some(command) = agent_command {
+            merged.agent_command = usable_workspace_default(command);
         }
         if merged == WorkspaceDefaults::default() {
             self.workspace_defaults.remove(host_profile_id);
@@ -247,6 +260,7 @@ mod tests {
                 snooze_times: crate::agents::snooze::DEFAULT_TIMES
                     .map(str::to_owned)
                     .to_vec(),
+                number_keys: NumberKeys::Workspaces,
             }
         );
     }
@@ -326,8 +340,8 @@ mod tests {
     #[test]
     fn workspace_defaults_are_per_host_trimmed_and_cleared_by_an_empty_field() {
         let mut prefs = Prefs::from_state(&state_from(serde_json::json!({})));
-        prefs.set_workspace_defaults("local", Some("  /work  "), None);
-        prefs.set_workspace_defaults("ssh-a", None, Some("htop"));
+        prefs.set_workspace_defaults("local", Some("  /work  "), None, None);
+        prefs.set_workspace_defaults("ssh-a", None, Some("htop"), Some(" codex "));
         assert_eq!(
             prefs.defaults_for("local").directory.as_deref(),
             Some("/work")
@@ -336,12 +350,16 @@ mod tests {
             prefs.defaults_for("ssh-a").startup_command.as_deref(),
             Some("htop")
         );
-        prefs.set_workspace_defaults("local", None, Some("ls"));
+        assert_eq!(
+            prefs.defaults_for("ssh-a").agent_command.as_deref(),
+            Some("codex")
+        );
+        prefs.set_workspace_defaults("local", None, Some("ls"), None);
         assert_eq!(
             prefs.defaults_for("local").directory.as_deref(),
             Some("/work")
         );
-        prefs.set_workspace_defaults("local", Some("   "), Some(""));
+        prefs.set_workspace_defaults("local", Some("   "), Some(""), None);
         assert!(!prefs.workspace_defaults.contains_key("local"));
         assert!(prefs.workspace_defaults.contains_key("ssh-a"));
         let long = "x".repeat(MAX_WORKSPACE_DEFAULT_LENGTH + 10);
@@ -359,9 +377,28 @@ mod tests {
             WorkspaceDefaults {
                 directory: Some("   ".into()),
                 startup_command: None,
+                agent_command: Some(" ".into()),
             },
         );
         assert!(Prefs::from_state(&state).workspace_defaults.is_empty());
+    }
+
+    #[test]
+    fn the_number_keys_and_an_agent_command_survive_a_save() {
+        let mut state = state_from(serde_json::json!({}));
+        let mut prefs = Prefs::from_state(&state);
+        assert_eq!(prefs.number_keys, NumberKeys::Workspaces);
+        prefs.number_keys = NumberKeys::Agents;
+        prefs.set_workspace_defaults("local", None, None, Some("claude"));
+        prefs.apply_to(&mut state);
+        let saved = serde_json::to_value(&state).unwrap();
+        assert_eq!(saved["shell"]["numberKeys"], "agents");
+        assert_eq!(
+            saved["workspaceDefaults"]["local"],
+            serde_json::json!({ "agentCommand": "claude" })
+        );
+        let reread: PersistedAppState = serde_json::from_value(saved).unwrap();
+        assert_eq!(Prefs::from_state(&reread), prefs);
     }
 
     #[test]

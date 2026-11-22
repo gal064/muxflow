@@ -60,7 +60,7 @@ fn the_positional_selectors_go_to_one_through_nine() {
         };
         check(
             format!("workspace.select{digit}"),
-            format!("Go to workspace {digit}"),
+            format!("Go to workspace or agent {digit}"),
             format!("Meta+{digit}"),
             format!("Ctrl+{digit}"),
         );
@@ -71,9 +71,11 @@ fn the_positional_selectors_go_to_one_through_nine() {
             format!("Alt+{digit}"),
         );
     }
-    // Plus the one command the Tauri app does not have: History.
+    // Plus the two commands the Tauri app does not have: History and New
+    // agent session in random.
     assert!(command_by_id("agents.history").is_some());
-    assert_eq!(COMMANDS.len(), 65 + 1 + 18);
+    assert!(command_by_id("agents.newInRandom").is_some());
+    assert_eq!(COMMANDS.len(), 65 + 2 + 18);
 }
 
 /// id, macOS key, Linux key, `-` for none.
@@ -89,6 +91,7 @@ focus.back Meta+[ Ctrl+[
 focus.forward Meta+] Ctrl+]
 agents.jumpUnread Meta+Shift+U Ctrl+Shift+U
 agents.history Meta+K Ctrl+K
+agents.newInRandom Meta+Shift+N Ctrl+Shift+N
 session.new Meta+N Ctrl+N
 tab.previous Meta+Shift+[ Ctrl+Shift+[
 tab.next Meta+Shift+] Ctrl+Shift+]
@@ -127,7 +130,7 @@ fn the_default_keymaps_are_pinned() {
         assert_eq!(shown(Platform::Mac), mac, "{} on macOS", command.id);
         assert_eq!(shown(Platform::Linux), linux, "{} on Linux", command.id);
     }
-    assert_eq!(pinned.len(), 31);
+    assert_eq!(pinned.len(), 32);
 }
 
 #[test]
@@ -249,7 +252,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
     press(handle, "secondary-shift-p", cx);
     assert!(dialog_open(handle, cx));
     with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 66);
+        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 67);
         for command in palette_commands() {
             // The title bar may name a control the same as a command.
             let rows = window.find_all_by_label(command.title);
@@ -558,101 +561,6 @@ fn startup_repairs_a_collision_saves_it_and_says_so(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let notices = with_window(handle, cx, |window, cx| window.notifications(cx).len());
     assert_eq!(notices, 1);
-}
-
-#[gpui_kit::test]
-fn shortcut_editor_edits_conflicts_and_saves(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_state(dir.path(), serde_json::json!({}));
-    let handle = open_app(&path, cx);
-    with_window(handle, cx, |window, cx| {
-        commands::run("shortcuts.configure", window, cx);
-    });
-    cx.run_until_parked();
-    let field = "Shortcut for Show command palette";
-    let done_disabled = |handle, cx: &mut TestAppContext| {
-        with_window(handle, cx, |window, _| {
-            window.find_by_label("Done").disabled() == Some(true)
-        })
-    };
-    with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::TextInput).len(), 84);
-        let value = window.find_by_label(field).value().map(str::to_owned);
-        assert_eq!(value.as_deref(), Some(&*format!("{PRIMARY}+Shift+P")));
-    });
-    assert!(!done_disabled(handle, cx));
-
-    // Typing onto another command's chord conflicts and blocks Done.
-    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
-    type_text(handle, &format!("{PRIMARY}+T"), cx);
-    assert!(done_disabled(handle, cx));
-    with_window(handle, cx, |window, _| {
-        let alert = window.find_all_by_role(Role::Alert);
-        assert_eq!(alert.len(), 1);
-    });
-
-    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
-    type_text(handle, &format!("{PRIMARY}+J"), cx);
-    assert!(!done_disabled(handle, cx));
-    with_window(handle, cx, |window, cx| {
-        window.click("shortcut-editor-done", cx)
-    });
-    cx.run_until_parked();
-    let expected: ShortcutOverrides =
-        HashMap::from([("commands.show".to_owned(), Some(format!("{PRIMARY}+J")))]);
-    wait_for_overrides(&path, &expected);
-    assert!(!dialog_open(handle, cx));
-    press(handle, "secondary-j", cx);
-    assert!(dialog_open(handle, cx));
-}
-
-#[gpui_kit::test]
-fn tab_brings_the_focused_shortcut_field_into_view(cx: &mut TestAppContext) {
-    let (_dir, handle) = no_state(cx);
-    with_window(handle, cx, |window, cx| {
-        commands::run("shortcuts.configure", window, cx);
-    });
-    cx.run_until_parked();
-    for _ in 0..40 {
-        press(handle, "tab", cx);
-    }
-    with_window(handle, cx, |window, _| {
-        let focused = window
-            .find_all_by_role(Role::TextInput)
-            .into_iter()
-            .find(|field| field.focused() == Some(true))
-            .expect("a focused field");
-        assert!(
-            focused.bounds().bottom() <= px(800.),
-            "{:?}",
-            focused.bounds()
-        );
-    });
-}
-
-#[gpui_kit::test]
-fn shortcut_editor_shows_a_removed_binding_as_empty_and_restores(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_state(dir.path(), serde_json::json!({ "workspace.select1": null }));
-    let handle = open_app(&path, cx);
-    with_window(handle, cx, |window, cx| {
-        commands::run("shortcuts.configure", window, cx);
-    });
-    cx.run_until_parked();
-    let field = "Shortcut for Go to workspace 1";
-    with_window(handle, cx, |window, cx| {
-        assert_eq!(window.find_by_label(field).value(), Some(""));
-        window.click("shortcut-editor-restore", cx);
-    });
-    cx.run_until_parked();
-    with_window(handle, cx, |window, _| {
-        let expected = if cfg!(target_os = "macos") {
-            "Meta+1"
-        } else {
-            "Ctrl+1"
-        };
-        assert_eq!(window.find_by_label(field).value(), Some(expected));
-    });
 }
 
 fn open_confirmation(
@@ -1137,99 +1045,6 @@ fn typing_moves_the_palette_selection_back_to_the_first_row(cx: &mut TestAppCont
     assert!(rows[1..].iter().all(|row| row.1 == Some(false)));
 }
 
-fn open_shortcut_editor(handle: AnyWindowHandle, cx: &mut TestAppContext) {
-    with_window(handle, cx, |window, cx| {
-        commands::run("shortcuts.configure", window, cx);
-    });
-    cx.run_until_parked();
-}
-
-fn done_disabled(handle: AnyWindowHandle, cx: &mut TestAppContext) -> bool {
-    with_window(handle, cx, |window, _| {
-        window.find_by_label("Done").disabled() == Some(true)
-    })
-}
-
-fn saved_overrides(path: &Path) -> ShortcutOverrides {
-    let store = AppStateStore::load(path.to_owned());
-    load_app_state(&store).unwrap().commands.shortcut_overrides
-}
-
-#[gpui_kit::test]
-fn shortcut_editor_refuses_a_binding_without_a_modifier(cx: &mut TestAppContext) {
-    let (_dir, handle) = no_state(cx);
-    open_shortcut_editor(handle, cx);
-    // The first field, Show command palette, has focus.
-    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
-    type_text(handle, "K", cx);
-    assert!(done_disabled(handle, cx));
-    with_window(handle, cx, |window, _| {
-        let alerts = window.find_all_by_role(Role::Alert);
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(
-            alerts[0].label(),
-            Some("Shortcuts must include Ctrl, Alt, or Meta. Unsafe bindings are not saved.")
-        );
-    });
-}
-
-#[gpui_kit::test]
-fn clearing_a_shortcut_field_saves_the_binding_removed(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_state(dir.path(), serde_json::json!({}));
-    let handle = open_app(&path, cx);
-    open_shortcut_editor(handle, cx);
-    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
-    press(handle, "backspace", cx);
-    assert!(!done_disabled(handle, cx));
-    with_window(handle, cx, |window, cx| {
-        window.click("shortcut-editor-done", cx)
-    });
-    cx.run_until_parked();
-    let expected: ShortcutOverrides = HashMap::from([("commands.show".to_owned(), None)]);
-    wait_for_overrides(&path, &expected);
-    press(handle, "secondary-shift-p", cx);
-    assert!(!dialog_open(handle, cx), "the palette has no shortcut now");
-}
-
-#[gpui_kit::test]
-fn escape_closes_the_shortcut_editor_without_saving(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_state(dir.path(), serde_json::json!({}));
-    let handle = open_app(&path, cx);
-    open_shortcut_editor(handle, cx);
-    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
-    type_text(handle, &format!("{PRIMARY}+J"), cx);
-    press(handle, "escape", cx);
-    assert!(!dialog_open(handle, cx));
-    // Give a save, were one started, time to land.
-    for _ in 0..10 {
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(saved_overrides(&path), ShortcutOverrides::new());
-    press(handle, "secondary-j", cx);
-    assert!(!dialog_open(handle, cx));
-    press(handle, "secondary-shift-p", cx);
-    assert!(
-        dialog_open(handle, cx),
-        "the old binding still opens the palette"
-    );
-}
-
-#[gpui_kit::test]
-fn the_shortcut_editor_close_button_is_named_and_closes(cx: &mut TestAppContext) {
-    let (_dir, handle) = no_state(cx);
-    open_shortcut_editor(handle, cx);
-    with_window(handle, cx, |window, cx| {
-        let close = window.find_by_label("Close keyboard shortcuts");
-        assert_eq!(close.role(), Some(Role::Button));
-        window.click("shortcut-editor-close", cx);
-    });
-    cx.run_until_parked();
-    assert!(!dialog_open(handle, cx));
-}
-
 fn focused_field_window(
     cx: &mut TestAppContext,
 ) -> (AnyWindowHandle, gpui_kit::Entity<InputState>) {
@@ -1549,32 +1364,4 @@ fn quick_open_says_what_it_lists_and_how_the_search_went(cx: &mut TestAppContext
         let status = window.find_by_label("Search limited—narrow your query.");
         assert_eq!(status.role(), Some(Role::Status));
     });
-}
-
-#[gpui_kit::test]
-fn a_narrow_window_stacks_each_shortcut_field_under_its_title(cx: &mut TestAppContext) {
-    let (_dir, handle) = no_state(cx);
-    open_shortcut_editor(handle, cx);
-    let field = |cx: &mut TestAppContext| {
-        with_window(handle, cx, |window, _| {
-            let bounds = window
-                .find_by_label("Shortcut for Show command palette")
-                .bounds();
-            (bounds.origin.x, bounds.size.width)
-        })
-    };
-    // Beside the title: a fixed column on the right of a 620 px dialog.
-    let (x, _) = field(cx);
-    assert!(x > gpui_kit::px(400.), "{x:?}");
-    cx.simulate_window_resize(
-        handle,
-        gpui_kit::size(gpui_kit::px(500.), gpui_kit::px(700.)),
-    );
-    cx.run_until_parked();
-    // Under it, as wide as the row.
-    let (x, width) = field(cx);
-    assert!(
-        x < gpui_kit::px(60.) && width > gpui_kit::px(300.),
-        "{x:?} {width:?}"
-    );
 }

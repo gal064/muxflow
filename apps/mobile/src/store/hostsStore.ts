@@ -19,6 +19,8 @@ export interface SavedHost {
   /** Incremented on every connection attempt (§7.3); the ClientHello carries it. */
   connectionEpoch: number;
   lastConnectedAtMs: number | null;
+  /** Where New agent and New terminal start the `random` workspace on this host. Absent means `~`. */
+  defaultDirectory?: string;
 }
 
 /** The fields §9.2's form collects. */
@@ -27,6 +29,8 @@ export interface HostDraft {
   port: number;
   user: string;
   label: string;
+  /** Absent keeps the saved value; empty clears it. */
+  defaultDirectory?: string;
 }
 
 export interface HostsPersisted {
@@ -133,7 +137,25 @@ function parseHost(raw: unknown): SavedHost | null {
       typeof value.lastConnectedAtMs === "number" && Number.isFinite(value.lastConnectedAtMs)
         ? value.lastConnectedAtMs
         : null,
+    ...withDefaultDirectory(typeof value.defaultDirectory === "string" ? value.defaultDirectory : undefined),
   };
+}
+
+/** A trimmed, non-empty directory, or nothing: empty is never stored. */
+function withDefaultDirectory(directory: string | undefined): { defaultDirectory?: string } {
+  const trimmed = directory?.trim() ?? "";
+  return trimmed.length > 0 ? { defaultDirectory: trimmed } : {};
+}
+
+/** Empty (meaning `~`), absolute, `~` or under `~/`: the forms the host accepts as a start directory. */
+export function isStartDirectory(directory: string): boolean {
+  const trimmed = directory.trim();
+  return trimmed === "" || trimmed === "~" || trimmed.startsWith("/") || trimmed.startsWith("~/");
+}
+
+/** The directory a new `random` workspace or window starts in on this host. */
+export function defaultDirectoryOf(host: Pick<SavedHost, "defaultDirectory"> | undefined): string {
+  return host?.defaultDirectory ?? "~";
 }
 
 export function createHostsStore(storage: HostsStorage): HostsStore {
@@ -196,6 +218,7 @@ export function createHostsStore(storage: HostsStorage): HostsStore {
           trustedHostKeyFingerprint: null,
           connectionEpoch: 0,
           lastConnectedAtMs: null,
+          ...withDefaultDirectory(draft.defaultDirectory),
         };
         set((state) => ({ hosts: [...state.hosts, host] }));
         persist();
@@ -210,10 +233,12 @@ export function createHostsStore(storage: HostsStorage): HostsStore {
           // changed under the same address, not for a row the user edited. A
           // host key belongs to host:port, so a new user name is not a move.
           const moved = address.host !== host.host || address.port !== host.port;
+          const { defaultDirectory: _previous, ...rest } = host;
           return {
-            ...host,
+            ...rest,
             ...address,
             label: hostLabel(draft),
+            ...withDefaultDirectory(draft.defaultDirectory === undefined ? host.defaultDirectory : draft.defaultDirectory),
             ...(moved ? { trustedHostKeyFingerprint: null } : {}),
           };
         });

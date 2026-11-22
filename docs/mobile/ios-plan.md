@@ -626,7 +626,9 @@ current mobile live terminal/file suites also passed against the actual
 SHA-256-verified Linux helper asset from the published `v0.1.9` release. There
 are no wire changes in this implementation and the major remains 4.
 
-`.github/workflows/ios.yml` selects Xcode 26.6 on `macos-26`. It runs the native
+`.github/workflows/ios.yml` selects Xcode 27.1 on the `xcode-27` runner image:
+from April 2027 App Store Connect accepts only builds made with the iOS 27 SDK
+(ITMS-90725 on build 9). It runs the native
 engine harness, builds a standalone simulator app with local ad hoc signing,
 then drives
 host setup, host-key trust, terminal input, Markdown and foreground reconnect
@@ -656,7 +658,9 @@ keepalives. That run's app build failed in ExpoModulesJSI before simulator
 installation, so it supplies no UI evidence. SDK 57 requires Xcode 26.4+;
 the job now selects 26.6. A narrow package patch removes invalid ownership
 annotations from the pinned ExpoModulesJSI constructors, as described in the
-[upstream issue](https://github.com/expo/expo/issues/49214). The next
+[upstream issue](https://github.com/expo/expo/issues/49214). SDK 58 ships
+the upstream fix (the annotation moved to static `create` functions in
+expo-modules-jsi 58.0.23), so the patch was removed with that upgrade. The next
 [run 37179091744](https://github.com/gal064/muxflow/actions/runs/37179091744)
 compiled the native Swift/Objective-C module for both simulator architectures,
 then failed because Expo's app provider imported the vendored libssh2 pod as

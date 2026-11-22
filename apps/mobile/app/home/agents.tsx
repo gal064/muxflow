@@ -13,6 +13,7 @@ import { log } from "../../src/session/log";
 import type { Agent } from "../../src/store/sessionStore";
 import { EmptyState } from "../../src/ui/components/EmptyState";
 import { useSession } from "../../src/ui/hooks";
+import { QuickCreateBar } from "../../src/features/terminal/QuickCreateBar";
 import { WorkspaceActionsSheet } from "../../src/features/terminal/WorkspaceActionsSheet";
 import { snoozeBlocked, wakeLabel } from "../../src/features/history/historyModel";
 import { historyClient } from "../../src/features/history/historyRuntime";
@@ -122,6 +123,7 @@ export default function AgentsScreen() {
   return (
     <>
       <AgentList empty={connected ? empty : null} onLayout={onLayout} onLongPress={setActionsFor} onOpen={open} onRefresh={onRefresh} onTalk={talk} refreshing={refreshing} />
+      <QuickCreateBar />
       <WorkspaceActionsSheet
         onClosed={actionsClosed}
         onDismiss={() => setActionsFor(null)}

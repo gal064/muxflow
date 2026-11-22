@@ -92,4 +92,8 @@ maestro --device "$device_id" test --format junit --output "$evidence/key-auth.x
 wait_for_marker ios-e2e.marker ran
 tmux -L "$ADE_TMUX_SOCKET_NAME" capture-pane -p -t primary > "$evidence/key-terminal.txt"
 rg 'ios-e2e-ok' "$evidence/key-terminal.txt"
+maestro --device "$device_id" test --format junit --output "$evidence/quick-create.xml" \
+  --test-output-dir "$evidence/quick-create" tests/mobile/ios/quick-create.yaml
+# The bar created the workspace on the host, not only in the app's list.
+tmux -L "$ADE_TMUX_SOCKET_NAME" has-session -t "=random"
 xcrun simctl io "$device_id" screenshot "$evidence/final.png"

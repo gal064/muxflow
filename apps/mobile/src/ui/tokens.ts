@@ -29,15 +29,22 @@ export const metrics = {
   windowRowHeight: 64,
   actionRowHeight: 48,
   fileRowHeight: 52,
+  /** New agent | New terminal, floating above the tab bar (quick-session plan §4.3). */
+  quickCreateBarHeight: 48,
+  quickCreateBarWidth: 300,
+  quickCreateBarGap: 16,
+  /** What a list under that bar leaves free at its end: the bar and a gap either side. */
+  quickCreateClearance: 80,
   attentionEdgeBarWidth: 3,
   hairlineWidth: 1,
 } as const;
 
-/** Corner radii in dp (§10.1): 8 on cards and pills, 12 on sheets. */
+/** Corner radii in dp (§10.1): 8 on cards and pills, 12 on sheets and the quick-create bar. */
 export const radii = {
   card: 8,
   pill: 8,
   sheet: 12,
+  quickCreateBar: 12,
 } as const;
 
 /** Type scale in sp, from the per-screen specs in §9. */

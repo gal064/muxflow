@@ -10,14 +10,15 @@ use std::{
 
 use desktop_core::app_state::{AppStateStore, ThemePreference, load_app_state};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, Role, TestAppContext, Window, WindowBounds,
-    WindowOptions,
+    AnyWindowHandle, App, AppContext, Bounds, Role, ScrollDelta, TestAppContext, Window,
+    WindowBounds, WindowOptions,
     component::{Theme, WindowExt},
     point, px, size,
     test::{TestQueryExt, TestWindowExt},
 };
 use muxflow_gpui::{
     app::{self, Core},
+    commands::{self, Commands, keymap::ShortcutOverrides},
     settings::{self, Prefs},
     theme::Appearance,
     ui::shell::Shell,
@@ -73,8 +74,43 @@ fn press(handle: AnyWindowHandle, stroke: &str, cx: &mut TestAppContext) {
 }
 
 fn click(handle: AnyWindowHandle, id: &'static str, cx: &mut TestAppContext) {
+    reveal(handle, id, cx);
     with_window(handle, cx, |window, cx| window.click(id, cx));
     cx.run_until_parked();
+}
+
+/// Scrolls what holds `id`, the shortcut list or else the Settings body,
+/// until `id` is in view, as a person would before clicking it.
+fn reveal(handle: AnyWindowHandle, id: &'static str, cx: &mut TestAppContext) {
+    for _ in 0..80 {
+        let below = with_window(handle, cx, |window, _| {
+            let target = window.find(id);
+            let scroller = scroller(&target);
+            (!target.visible()).then(|| {
+                (
+                    target.bounds().origin.y > window.find(scroller).bounds().origin.y,
+                    scroller,
+                )
+            })
+        });
+        let Some((below, scroller)) = below else {
+            return;
+        };
+        let step = if below { px(-80.) } else { px(80.) };
+        with_window(handle, cx, |window, cx| {
+            window.scroll(scroller, ScrollDelta::Pixels(point(px(0.), step)), cx)
+        });
+        cx.run_until_parked();
+    }
+    panic!("{id} never scrolled into view");
+}
+
+fn scroller(target: &gpui_kit::test::ElementSnapshot) -> &'static str {
+    if target.path().contains(&"settings-shortcuts".into()) {
+        "settings-shortcuts"
+    } else {
+        "settings-body"
+    }
 }
 
 /// Clicks the tab with this name. The app has a "Workspace" region too, so the
@@ -146,7 +182,7 @@ fn saved(cx: &mut TestAppContext, path: &Path, check: impl Fn(&Value) -> bool) -
 }
 
 #[gpui_kit::test]
-fn the_shortcut_and_the_gear_open_settings_with_its_seven_tabs(cx: &mut TestAppContext) {
+fn the_shortcut_and_the_gear_open_settings_with_its_eight_tabs(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = write_state(dir.path(), json!({}));
     let handle = open_app(&state, cx);
@@ -159,6 +195,7 @@ fn the_shortcut_and_the_gear_open_settings_with_its_seven_tabs(cx: &mut TestAppC
             "Workspace",
             "Terminal",
             "Agents",
+            "Keyboard",
             "Appearance",
             "Sounds",
             "Accessibility",
@@ -436,9 +473,11 @@ fn workspace_defaults_are_per_host_and_an_empty_field_clears_them(cx: &mut TestA
 
     type_into(handle, "settings-start-directory", "  /work  ", cx);
     type_into(handle, "settings-startup-command", "htop", cx);
+    type_into(handle, "settings-agent-command", "codex", cx);
     let defaults = prefs(cx).defaults_for("local");
     assert_eq!(defaults.directory.as_deref(), Some("/work"));
     assert_eq!(defaults.startup_command.as_deref(), Some("htop"));
+    assert_eq!(defaults.agent_command.as_deref(), Some("codex"));
     let value = saved(cx, &state, |value| {
         value["workspaceDefaults"]["local"]["startupCommand"] == json!("htop")
     });
@@ -447,8 +486,14 @@ fn workspace_defaults_are_per_host_and_an_empty_field_clears_them(cx: &mut TestA
         json!("/work")
     );
 
+    assert_eq!(
+        value["workspaceDefaults"]["local"]["agentCommand"],
+        json!("codex")
+    );
+
     type_into(handle, "settings-start-directory", "", cx);
     type_into(handle, "settings-startup-command", "", cx);
+    type_into(handle, "settings-agent-command", "", cx);
     saved(cx, &state, |value| value["workspaceDefaults"] == json!({}));
 }
 
@@ -627,6 +672,7 @@ fn each_settings_section_is_found_by_role_and_name_and_pressed(cx: &mut TestAppC
         "Workspace",
         "Terminal",
         "Agents",
+        "Keyboard",
         "Appearance",
         "Sounds",
         "Accessibility",
@@ -692,4 +738,330 @@ fn tab_reaches_the_sections_as_one_stop_and_the_arrows_move_between_them(cx: &mu
     press(handle, "shift-tab", cx);
     press(handle, "right", cx);
     assert_ne!(selected(cx).as_deref(), Some("Sounds"));
+}
+
+#[gpui_kit::test]
+fn home_and_end_select_the_section_they_move_to(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let handle = open_app(&state, cx);
+    open_settings(handle, Some("Accessibility"), cx);
+    // The section that is shown, and the one the keyboard is on.
+    let sections = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            let tabs: Vec<_> = window
+                .find_all_by_role(Role::Tab)
+                .into_iter()
+                .filter(|tab| tab.path().contains(&"settings-tabs".into()))
+                .collect();
+            let label = |want: fn(&gpui_kit::test::ElementSnapshot) -> bool| {
+                tabs.iter()
+                    .find(|tab| want(tab))
+                    .and_then(|tab| tab.label().map(str::to_owned))
+            };
+            (
+                label(|tab| tab.selected() == Some(true)),
+                label(|tab| tab.focused() == Some(true)),
+            )
+        })
+    };
+    let reached = (0..20).any(|_| {
+        press(handle, "tab", cx);
+        sections(cx).1.is_some()
+    });
+    assert!(reached, "Tab reaches a section");
+    press(handle, "home", cx);
+    let first = Some("Connection".to_owned());
+    assert_eq!(sections(cx), (first.clone(), first));
+    press(handle, "end", cx);
+    let last = Some("Accessibility".to_owned());
+    assert_eq!(sections(cx), (last.clone(), last));
+}
+
+// Settings › Keyboard.
+
+/// The primary modifier, in stored form.
+const PRIMARY: &str = if cfg!(target_os = "macos") {
+    "Meta"
+} else {
+    "Ctrl"
+};
+
+fn overrides(cx: &mut TestAppContext) -> ShortcutOverrides {
+    cx.read(|cx| cx.global::<Commands>().overrides().clone())
+}
+
+/// Settings open on Keyboard, as the palette's command opens it.
+fn open_keyboard(cx: &mut TestAppContext) -> (tempfile::TempDir, PathBuf, AnyWindowHandle) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let handle = open_app(&state, cx);
+    with_window(handle, cx, |window, cx| {
+        commands::run("shortcuts.configure", window, cx)
+    });
+    cx.run_until_parked();
+    (dir, state, handle)
+}
+
+/// Clicks a row's keys and presses `stroke` into the recorder.
+fn record(handle: AnyWindowHandle, id: &str, stroke: &str, cx: &mut TestAppContext) {
+    let keys: &'static str = Box::leak(format!("shortcut-keys-{id}").into_boxed_str());
+    click(handle, keys, cx);
+    with_window(handle, cx, |window, _| {
+        assert_eq!(window.find("shortcut-recorder").focused(), Some(true));
+    });
+    press(handle, stroke, cx);
+}
+
+fn alerts(handle: AnyWindowHandle, cx: &mut TestAppContext) -> Vec<String> {
+    with_window(handle, cx, |window, _| {
+        window
+            .find_all_by_role(Role::Alert)
+            .into_iter()
+            .filter_map(|alert| alert.label().map(str::to_owned))
+            .collect()
+    })
+}
+
+fn dialog_open(handle: AnyWindowHandle, cx: &mut TestAppContext) -> bool {
+    with_window(handle, cx, |window, cx| window.has_active_dialog(cx))
+}
+
+#[gpui_kit::test]
+fn configure_shortcuts_opens_settings_on_keyboard(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    assert!(dialog_open(handle, cx));
+    with_window(handle, cx, |window, _| {
+        let keyboard = window
+            .find_all_by_role(Role::Tab)
+            .into_iter()
+            .find(|tab| tab.label() == Some("Keyboard"))
+            .expect("a Keyboard section");
+        assert_eq!(keyboard.selected(), Some(true));
+        assert!(window.try_find_by_label("Search shortcuts").is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_recorded_chord_is_saved_and_live_at_once(cx: &mut TestAppContext) {
+    let (_dir, state, handle) = open_keyboard(cx);
+    record(handle, "session.new", "secondary-j", cx);
+    let chord = format!("{PRIMARY}+J");
+    assert_eq!(
+        overrides(cx),
+        ShortcutOverrides::from([
+            ("commands.show".to_owned(), Some("Ctrl+Shift+J".to_owned())),
+            ("session.new".to_owned(), Some(chord.clone())),
+        ])
+    );
+    saved(cx, &state, |value| {
+        value["commands"]["shortcutOverrides"]["session.new"] == json!(chord)
+    });
+    assert!(dialog_open(handle, cx), "recording never runs a command");
+}
+
+#[gpui_kit::test]
+fn a_chord_without_a_command_modifier_is_refused_on_its_row(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    let before = overrides(cx);
+    record(handle, "session.new", "k", cx);
+    assert_eq!(
+        alerts(handle, cx),
+        [if cfg!(target_os = "macos") {
+            "Shortcuts need ⌘, ⌥ or ⌃."
+        } else {
+            "Shortcuts need Ctrl, Alt or Super."
+        }]
+    );
+    assert_eq!(overrides(cx), before);
+    // Still recording: the next chord is taken.
+    press(handle, "secondary-j", cx);
+    assert_eq!(
+        overrides(cx).get("session.new"),
+        Some(&Some(format!("{PRIMARY}+J")))
+    );
+    assert!(alerts(handle, cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_taken_chord_asks_and_swap_replace_or_cancel_resolve_it(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    let before = overrides(cx);
+    // New workspace onto New terminal tab's chord.
+    record(handle, "session.new", "secondary-t", cx);
+    let (taken, own) = if cfg!(target_os = "macos") {
+        ("⌘T", "⌘N")
+    } else {
+        ("Ctrl+T", "Ctrl+N")
+    };
+    assert_eq!(
+        alerts(handle, cx),
+        [format!(
+            "{taken} is used by New terminal tab. Swap gives it {own}."
+        )]
+    );
+    assert_eq!(overrides(cx), before, "nothing is written before a choice");
+    click(handle, "shortcut-swap", cx);
+    let after = overrides(cx);
+    assert_eq!(
+        after.get("session.new"),
+        Some(&Some(format!("{PRIMARY}+T")))
+    );
+    assert_eq!(after.get("window.new"), Some(&Some(format!("{PRIMARY}+N"))));
+    assert!(alerts(handle, cx).is_empty());
+
+    // Toggle right panel onto Toggle sidebar's chord, which loses it.
+    record(handle, "view.togglePanel", "secondary-b", cx);
+    click(handle, "shortcut-replace", cx);
+    let after = overrides(cx);
+    assert_eq!(
+        after.get("view.togglePanel"),
+        Some(&Some(format!("{PRIMARY}+B")))
+    );
+    assert_eq!(after.get("view.toggleSidebar"), Some(&None));
+
+    // Cancel writes nothing.
+    let before = overrides(cx);
+    record(handle, "session.new", "secondary-p", cx);
+    click(handle, "shortcut-cancel", cx);
+    assert_eq!(overrides(cx), before);
+    assert!(alerts(handle, cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn backspace_removes_a_binding(cx: &mut TestAppContext) {
+    let (_dir, state, handle) = open_keyboard(cx);
+    record(handle, "window.new", "backspace", cx);
+    assert_eq!(overrides(cx).get("window.new"), Some(&None));
+    saved(cx, &state, |value| {
+        value["commands"]["shortcutOverrides"]
+            .as_object()
+            .is_some_and(|map| map.get("window.new") == Some(&Value::Null))
+    });
+}
+
+#[gpui_kit::test]
+fn escape_while_recording_ends_the_recording_and_keeps_settings_open(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    let before = overrides(cx);
+    record(handle, "session.new", "escape", cx);
+    assert!(dialog_open(handle, cx), "Settings stays open");
+    with_window(handle, cx, |window, _| {
+        assert!(
+            window
+                .try_find_by_label("Press the new shortcut for New workspace")
+                .is_none()
+        );
+    });
+    // The keyboard is back on the row's keys.
+    with_window(handle, cx, |window, _| {
+        assert_eq!(
+            window.find("shortcut-keys-session.new").focused(),
+            Some(true)
+        );
+    });
+    assert_eq!(overrides(cx), before);
+    press(handle, "escape", cx);
+    assert!(!dialog_open(handle, cx), "a second Escape closes Settings");
+}
+
+#[gpui_kit::test]
+fn a_row_resets_and_restore_all_brings_back_every_default(cx: &mut TestAppContext) {
+    let (_dir, state, handle) = open_keyboard(cx);
+    // The saved state moved Show command palette off its default.
+    click(handle, "shortcut-reset-commands.show", cx);
+    assert_eq!(overrides(cx), ShortcutOverrides::new());
+
+    record(handle, "session.new", "secondary-j", cx);
+    record(handle, "window.new", "backspace", cx);
+    assert_eq!(overrides(cx).len(), 2);
+    click(handle, "settings-shortcuts-restore", cx);
+    assert_eq!(overrides(cx), ShortcutOverrides::new());
+    saved(cx, &state, |value| {
+        value["commands"]["shortcutOverrides"] == json!({})
+    });
+}
+
+#[gpui_kit::test]
+fn search_and_the_changed_filter_narrow_the_list(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    let shown = |cx: &mut TestAppContext, title: &str| {
+        let prefix = format!("Shortcut for {title}:");
+        with_window(handle, cx, |window, _| {
+            window.elements().iter().any(|element| {
+                element
+                    .label()
+                    .is_some_and(|label| label.starts_with(&prefix))
+            })
+        })
+    };
+    assert!(shown(cx, "Toggle pane zoom") && shown(cx, "New workspace"));
+    click(handle, "settings-shortcuts-search", cx);
+    with_window(handle, cx, |window, cx| window.input("zoom", cx));
+    cx.run_until_parked();
+    assert!(shown(cx, "Toggle pane zoom"));
+    assert!(!shown(cx, "New workspace"));
+
+    press(handle, "secondary-a", cx);
+    press(handle, "backspace", cx);
+    click(handle, "settings-shortcuts-changed", cx);
+    assert!(
+        shown(cx, "Show command palette"),
+        "changed by the saved state"
+    );
+    assert!(!shown(cx, "New workspace"));
+}
+
+#[gpui_kit::test]
+fn the_number_keys_choice_is_saved(cx: &mut TestAppContext) {
+    let (_dir, state, handle) = open_keyboard(cx);
+    assert_eq!(
+        prefs(cx).number_keys,
+        desktop_core::app_state::NumberKeys::Workspaces
+    );
+    pick(handle, "settings-number-keys", 1, cx);
+    assert_eq!(
+        prefs(cx).number_keys,
+        desktop_core::app_state::NumberKeys::Agents
+    );
+    saved(cx, &state, |value| {
+        value["shell"]["numberKeys"] == json!("agents")
+    });
+}
+
+#[gpui_kit::test]
+fn tab_brings_the_focused_shortcut_into_view(cx: &mut TestAppContext) {
+    let (_dir, _, handle) = open_keyboard(cx);
+    for _ in 0..40 {
+        press(handle, "tab", cx);
+    }
+    with_window(handle, cx, |window, _| {
+        let list = window.find("settings-shortcuts").bounds();
+        let focused = window
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element.path().last().is_some_and(|id| {
+                    let id = id.to_string();
+                    id.contains("shortcut-keys-") && !id.contains("shortcut-keys-cell-")
+                })
+            })
+            .find(|keys| keys.focused() == Some(true))
+            .expect("a shortcut's keys have the keyboard");
+        let keys = focused.bounds();
+        assert!(
+            keys.top() >= list.top() && keys.bottom() <= list.bottom(),
+            "{keys:?} in {list:?}"
+        );
+        // Far enough down that the list had to move: its first row is gone.
+        let first = window
+            .elements()
+            .into_iter()
+            .find(|keys| {
+                let list = "settings-shortcuts".into();
+                keys.path().contains(&list) && keys.path().last() != Some(&list)
+            })
+            .expect("a first row");
+        assert!(!first.visible(), "the list scrolled");
+    });
 }

@@ -97,7 +97,7 @@
     "ios": {
       "bundleIdentifier": "dev.muxflow.mobile",
       "icon": "./assets/icon.png",
-      "buildNumber": "9",
+      "buildNumber": "10",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,

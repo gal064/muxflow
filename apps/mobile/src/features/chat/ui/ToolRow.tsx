@@ -1,5 +1,5 @@
 import { memo, useCallback, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type NativeSyntheticEvent, type StyleProp, type TextLayoutEventData, type TextStyle } from "react-native";
+import { Pressable, StyleSheet, Text, View, type StyleProp, type TextLayoutEvent, type TextStyle } from "react-native";
 
 import { ChatItemKind, ChatToolKind, ChatToolStatus, type ChatItem, type ChatTool } from "../../../protocol/gen/chat_pb";
 import { colors, fonts, typeScale } from "../../../ui/tokens";
@@ -29,7 +29,7 @@ const ROW_SLOP = { bottom: (44 - ROW_HEIGHT) / 2, top: (44 - ROW_HEIGHT) / 2 } a
  * drawn line cannot say so itself: it reports the text it was given, whole.
  */
 function CutProbe({ children, style, onCut }: { children: string; style: StyleProp<TextStyle>; onCut: (cut: boolean) => void }) {
-  const onTextLayout = useCallback((event: NativeSyntheticEvent<TextLayoutEventData>) => onCut(event.nativeEvent.lines.length > 1), [onCut]);
+  const onTextLayout = useCallback((event: TextLayoutEvent) => onCut(event.nativeEvent.lines.length > 1), [onCut]);
   return (
     <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" numberOfLines={2} onTextLayout={onTextLayout} style={[style, styles.probe]}>
       {children}

@@ -1,7 +1,7 @@
 import Constants from "expo-constants";
 import { Stack } from "expo-router";
-import { useEffect } from "react";
-import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useStore } from "zustand";
 
 import { TERMINAL_FONT_SIZES } from "../src/features/terminal/sizing";
@@ -9,6 +9,7 @@ import { openAppUpdates, updateStore } from "../src/features/update";
 import { refreshAgents } from "../src/features/agents/refresh";
 import { agentModeLabel } from "../src/features/chat/chatModel";
 import { useSession } from "../src/ui/hooks";
+import { findHost, hostsStore, isStartDirectory, type SavedHost } from "../src/store/hostsStore";
 import { prefsStore } from "../src/store/prefsStore";
 import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 
@@ -22,13 +23,16 @@ export default function SettingsScreen() {
   const downloading = useStore(updateStore, (state) => state.downloading);
   const connected = useSession((state) => state.connection.state === "connected");
   const agentMode = useSession((state) => state.agentMode);
+  const connectedHostId = useSession((state) => (state.connection.state === "connected" ? state.connection.host?.id : undefined));
+  const connectedHost = useStore(hostsStore, (state) => findHost(state, connectedHostId));
   // The host tells only the desktop that set it; its next agent snapshot carries the mode.
   useEffect(() => {
     if (connected) void refreshAgents();
   }, [connected]);
   return (
-    <View style={styles.root}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={styles.root}>
       <Stack.Screen options={{ title: "Settings" }} />
+      <Text {...fixedChromeText} style={styles.sectionHeading}>New sessions</Text>
       <View style={styles.section}>
         <Text {...fixedChromeText} style={styles.label}>Agent command</Text>
         <TextInput
@@ -44,6 +48,7 @@ export default function SettingsScreen() {
         />
         <Text style={styles.help}>New agent starts this command in a new terminal window. Shell options and arguments are allowed.</Text>
       </View>
+      {connectedHost ? <DefaultDirectory host={connectedHost} key={connectedHost.id} /> : null}
       {connected && agentMode !== "unknown" ? (
         <View accessible accessibilityLabel={`Agents start as ${agentModeLabel(agentMode)}. Change it on your desktop app.`} style={styles.settingRow}>
           <View style={styles.settingCopy}>
@@ -111,6 +116,50 @@ export default function SettingsScreen() {
           </Text>
         )}
       </View>
+    </ScrollView>
+  );
+}
+
+/** Where New agent and New terminal start the `random` workspace on the connected host. */
+function DefaultDirectory({ host }: { host: SavedHost }) {
+  const [draft, setDraft] = useState(host.defaultDirectory ?? "");
+  const [refused, setRefused] = useState(false);
+  const latest = useRef(draft);
+  latest.current = draft;
+  // Written on blur, on Done and when Settings closes with the field still focused.
+  // A relative path is never saved: the host would refuse it at create time.
+  const commit = useCallback(() => {
+    const valid = isStartDirectory(latest.current);
+    setRefused(!valid);
+    if (!valid) return;
+    const current = hostsStore.getState().hosts.find((saved) => saved.id === host.id);
+    if (!current || (current.defaultDirectory ?? "") === latest.current.trim()) return;
+    hostsStore.getState().updateHost(current.id, { host: current.host, port: current.port, user: current.user, label: current.label, defaultDirectory: latest.current });
+  }, [host.id]);
+  useEffect(() => commit, [commit]);
+  return (
+    <View style={[styles.section, styles.sectionFollows]}>
+      <Text {...fixedChromeText} style={styles.label}>Default directory</Text>
+      <TextInput
+        accessibilityLabel={`Default directory on ${host.label}`}
+        autoCapitalize="none"
+        autoCorrect={false}
+        maxLength={4 * 1024}
+        onChangeText={(text) => {
+          setDraft(text);
+          setRefused(false);
+        }}
+        onEndEditing={commit}
+        onSubmitEditing={commit}
+        placeholder="~"
+        placeholderTextColor={colors.chromeFaint}
+        returnKeyType="done"
+        style={styles.input}
+        testID="settings-default-directory"
+        value={draft}
+      />
+      {refused ? <Text accessibilityLiveRegion="polite" style={styles.error}>Not saved: use an absolute path, ~ or a path under ~/.</Text> : null}
+      <Text style={styles.help}>New agent and New terminal open in the random workspace, starting here on {host.label}. An absolute path or one under ~.</Text>
     </View>
   );
 }
@@ -118,6 +167,8 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   root: { backgroundColor: colors.chromeBg, flex: 1 },
   section: { gap: 8, padding: 16 },
+  sectionFollows: { paddingTop: 0 },
+  sectionHeading: { color: colors.chromeDim, fontSize: typeScale.meta, fontWeight: "600", letterSpacing: 0.5, paddingHorizontal: 16, paddingTop: 16, textTransform: "uppercase" },
   settingRow: { alignItems: "center", borderTopColor: colors.chromeBorder, borderTopWidth: StyleSheet.hairlineWidth, flexDirection: "row", gap: 16, marginHorizontal: 16, paddingVertical: 16 },
   settingCopy: { flex: 1, gap: 4 },
   label: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle, fontWeight: "600" },
@@ -131,6 +182,7 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: 12,
   },
+  error: { color: colors.dangerInk, fontSize: typeScale.rowSecondary, lineHeight: 18 },
   help: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, lineHeight: 18 },
   sizeOptions: { flexDirection: "row", gap: 4 },
   sizeOption: { alignItems: "center", borderColor: colors.chromeBorder, borderRadius: radii.pill, borderWidth: StyleSheet.hairlineWidth, justifyContent: "center", minHeight: 44, minWidth: 40 },

@@ -50,7 +50,7 @@ use crate::{
             CombinedTab, TabKind, app_key, bulk_close_disabled, tabs_to_close_non_agent,
             tabs_to_close_others, tabs_to_close_right, takes_terminals,
         },
-        moved_cursor, run_command,
+        run_command,
     },
 };
 
@@ -138,10 +138,6 @@ impl RenderOnce for TabStrip {
         let state = self.workspaces.read(cx);
         let view = state.view(cx);
         let strip_focus = state.strip_focus.clone();
-        let keyboard = strip_focus
-            .is_focused(window)
-            .then(|| state.strip_position(cx))
-            .flatten();
         let tabs = view.tabs.clone();
         let active = view.active_key.clone();
         let docked = view.docked.as_ref().map(|(tab, _)| app_key(&tab.id));
@@ -197,8 +193,8 @@ impl RenderOnce for TabStrip {
             .collect();
 
         let mut tab_elements: Vec<AnyElement> = Vec::new();
-        // Each tab's menu, for the keyboard to open on the cursor's tab.
-        let mut menus: Vec<Option<context_menu::Builder>> = Vec::new();
+        // Which tabs Kit's list moves the keyboard through: not placeholders.
+        let settled: Rc<[bool]> = tabs.iter().map(|tab| !tab.is_pending()).collect();
         for (index, tab) in tabs.iter().enumerate() {
             let is_active = active.as_deref() == Some(tab.key.as_str());
             let is_docked = docked.as_deref() == Some(tab.key.as_str());
@@ -232,7 +228,6 @@ impl RenderOnce for TabStrip {
                         )
                         .into_any_element(),
                 );
-                menus.push(None);
                 continue;
             }
             let target = target(&view, tab);
@@ -419,10 +414,7 @@ impl RenderOnce for TabStrip {
                         }
                         return;
                     }
-                    this.update(cx, |this, cx| {
-                        this.strip_cursor = Some(index);
-                        this.select_tab(&tab.key, cx);
-                    });
+                    this.update(cx, |this, cx| this.select_tab(&tab.key, cx));
                     if terminal {
                         focus_terminal(&this, window, cx);
                     }
@@ -441,7 +433,6 @@ impl RenderOnce for TabStrip {
                 &tabs,
                 split && is_active,
             ));
-            menus.push(Some(menu.clone()));
             let cell = Rc::new(Cell::new(Bounds::<Pixels>::default()));
             let gap = drop_gap
                 .as_ref()
@@ -480,9 +471,15 @@ impl RenderOnce for TabStrip {
                         }
                     })
                     .child(
-                        canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
-                            .absolute()
-                            .size_full(),
+                        canvas(
+                            {
+                                let cell = cell.clone();
+                                move |bounds, _, _| cell.set(bounds)
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
                     )
                     // The gap a drop would land in, drawn over the cell's edge.
                     .when_some(gap, |this, side| {
@@ -500,29 +497,37 @@ impl RenderOnce for TabStrip {
                                 }),
                         )
                     })
-                    // Drawn over the cell, so the cursor walking the strip
-                    // changes no tab's width.
-                    .when(keyboard == Some(index), |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top(ui(1.))
-                                .left(ui(1.))
-                                .right(ui(1.))
-                                // Clear of the active tab's underline.
-                                .bottom(ui(3.))
-                                .border_2()
-                                .border_color(palette.accent)
-                                .rounded(ui(4.)),
-                        )
-                        .child(context_menu::anchor(&strip_focus))
-                    })
                     .child(
                         Tab::new(id)
                             .selected(is_active)
                             .accessibility_label(label.join(" "))
                             .set_position(index, count)
-                            .when(keyboard == Some(index), |tab| tab.aria_active_descendant())
+                            // Kit's list moves the keyboard between tabs;
+                            // the strip scrolls to follow it, and opens the
+                            // focused tab's menu.
+                            .on_key_down({
+                                let (menu, cell, follow, settled) =
+                                    (menu.clone(), cell.clone(), scroll.clone(), settled.clone());
+                                move |event: &KeyDownEvent, window, cx| {
+                                    if context_menu::is_menu_key(&event.keystroke) {
+                                        let menu = menu.clone();
+                                        context_menu::open_under(
+                                            Some(cell.get()),
+                                            move |popup, window, cx| menu(popup, window, cx),
+                                            window,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    } else if let Some(next) = crate::ui::kit_tab_step(
+                                        index,
+                                        settled.len(),
+                                        event,
+                                        |index| settled[index],
+                                    ) {
+                                        follow.scroll_to_item(next);
+                                    }
+                                }
+                            })
                             .on_click(click)
                             // Captured: the tab keeps its press from the bar behind
                             // it, which would move the window.
@@ -542,9 +547,15 @@ impl RenderOnce for TabStrip {
                             .min_w_0()
                             .items_center()
                             .gap(ui(6.))
-                            .pl(ui(14.))
+                            // A ring for the keyboard only, as Tauri's
+                            // `:focus-visible`, inside the padding it takes.
+                            .border_2()
+                            .border_color(gpui_kit::transparent_black())
+                            .rounded(ui(4.))
+                            .focus_visible(|style| style.border_color(palette.accent))
+                            .pl(ui(12.))
                             // The pin toggle beside it brings its own space.
-                            .pr(ui(if terminal { 2. } else { 14. }))
+                            .pr(ui(if terminal { 0. } else { 12. }))
                             .text_size(ui(TYPE_MENU))
                             .text_color(if is_active {
                                 palette.chrome_ink_strong
@@ -736,7 +747,6 @@ impl RenderOnce for TabStrip {
             )
         };
 
-        let (keys, follow) = (self.workspaces.downgrade(), scroll.clone());
         h_flex()
             .id("tab-strip")
             .on_mouse_move({
@@ -771,52 +781,6 @@ impl RenderOnce for TabStrip {
                     // The bridges read a set's size from its container.
                     .aria_size_of_set(count)
                     .track_focus(&strip_focus)
-                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                        let Some(this) = keys.upgrade() else {
-                            return;
-                        };
-                        if context_menu::is_menu_key(&event.keystroke) {
-                            let cursor = this.read(cx).strip_position(cx);
-                            let menu = cursor.and_then(|index| menus.get(index).cloned().flatten());
-                            if let Some(menu) = menu {
-                                context_menu::open(
-                                    move |popup, window, cx| menu(popup, window, cx),
-                                    window,
-                                    cx,
-                                );
-                            }
-                            cx.stop_propagation();
-                            return;
-                        }
-                        if event.keystroke.modifiers.modified() {
-                            return;
-                        }
-                        let key = event.keystroke.key.as_str();
-                        let cursor = this.read(cx).strip_position(cx);
-                        if let Some(next) = moved_cursor(cursor, count, key) {
-                            this.update(cx, |this, cx| {
-                                this.strip_cursor = Some(next);
-                                cx.notify();
-                            });
-                            follow.scroll_to_item(next);
-                            cx.stop_propagation();
-                        } else if matches!(key, "enter" | "space") {
-                            let key = cursor.and_then(|index| {
-                                this.read(cx)
-                                    .view(cx)
-                                    .tabs
-                                    .get(index)
-                                    .map(|tab| tab.key.clone())
-                            });
-                            if let Some(key) = key {
-                                this.update(cx, |this, cx| this.select_tab(&key, cx));
-                                if key.starts_with("terminal:") {
-                                    focus_terminal(&this, window, cx);
-                                }
-                            }
-                            cx.stop_propagation();
-                        }
-                    })
                     .flex()
                     .min_w_0()
                     .overflow_x_scroll()

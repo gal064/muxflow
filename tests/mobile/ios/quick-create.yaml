@@ -1,0 +1,45 @@
+appId: dev.muxflow.mobile
+---
+# New terminal on the bar above the tab bar opens a terminal in the `random`
+# workspace, creating it first (docs/design/quick-session-and-shortcuts-plan.md
+# §4). Starts where key-auth.yaml ends: a terminal in primary, two screens
+# above the tabs.
+- extendedWaitUntil:
+    visible:
+      text: Esc
+      enabled: true
+    timeout: 30000
+- tapOn:
+    id: BackButton
+- tapOn:
+    id: BackButton
+- extendedWaitUntil:
+    visible:
+      id: quick-new-terminal
+      enabled: true
+    timeout: 30000
+- takeScreenshot: quick-create-bar
+# A tap can report success without its effect; the terminal is the proof.
+# Retrying is safe: a second tap opens another window in the same workspace.
+- retry:
+    maxRetries: 1
+    commands:
+      - tapOn:
+          id: quick-new-terminal
+      - extendedWaitUntil:
+          visible:
+            text: Esc
+            enabled: true
+          timeout: 30000
+- takeScreenshot: quick-create-terminal
+- tapOn:
+    id: BackButton
+- retry:
+    maxRetries: 1
+    commands:
+      - waitForAnimationToEnd
+      - tapOn: '^Workspaces.*'
+      - extendedWaitUntil:
+          visible: '^random,.*'
+          timeout: 30000
+- takeScreenshot: quick-create-random

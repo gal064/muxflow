@@ -495,6 +495,32 @@ pub fn rows(
     (all, listed)
 }
 
+/// The sort and filter the sidebar's agent list is drawn with, published by
+/// the chrome whenever they change, so a command can follow the list's order
+/// without the view.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AgentListOrder {
+    pub sort: AgentSortMode,
+    pub pinned_only: bool,
+}
+
+impl Global for AgentListOrder {}
+
+/// The agents ⌘1–9 reach in Agents mode, first to last: the rows the list
+/// draws, in its order, that lead to a live pane. The woken sessions drawn
+/// above the list are not agents and take no number.
+pub fn numbered_rows(cx: &App) -> Vec<AgentListRow> {
+    let order = cx
+        .try_global::<AgentListOrder>()
+        .copied()
+        .unwrap_or_default();
+    let (_, listed) = rows(cx, order.sort, order.pinned_only);
+    view::numbered(&listed, order.sort)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
 /// Every row, unfiltered: what the bell counts and the jump searches. They
 /// rank by `compare_agents`, a total order, so the sort mode does not matter.
 fn all_rows(cx: &App) -> Vec<AgentListRow> {

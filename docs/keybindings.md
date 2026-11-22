@@ -6,9 +6,12 @@ The Linux keymap is the macOS keymap with ⌘ read as Ctrl. Where that would tak
 a key the terminal depends on (Ctrl+D is end-of-file, Ctrl+E is end-of-line) or
 collide with another binding, Linux uses Ghostty's default instead.
 
-Any command in the tables can be rebound or unbound: open the command palette
-and run **Configure keyboard shortcuts**. Commands without a default key are
-still in the palette and can be given one there.
+Any command in the tables can be rebound or unbound in **Settings › Keyboard**
+(the command palette's **Configure keyboard shortcuts** opens it). Click a
+command's keys and press the new shortcut: Backspace removes it and Escape
+stops recording. A shortcut another command already has offers to swap the two
+or to replace the other's. Each change is saved at once. Commands without a
+default key are listed there too and can be given one.
 
 ## Application
 
@@ -25,6 +28,13 @@ still in the palette and can be given one there.
 | Back | ⌘[ | Ctrl+[ |
 | Forward | ⌘] | Ctrl+] |
 | Jump to the agent that needs you | ⌘⇧U | Ctrl+Shift+U |
+| New agent session in random | ⌘⇧N | Ctrl+Shift+N |
+
+**New agent session in random** opens a new tab in the workspace named
+`random` on the host on screen, creating the workspace if there is none, and
+runs that host's **Agent command** in it (Settings › Workspace). The tab starts
+in the host's **Start in directory**. With no agent command set, it opens
+Settings to set one.
 
 ## Workspaces and tabs
 
@@ -41,12 +51,17 @@ query. Workspaces and tabs remain available if file search fails.
 | Command | macOS | Linux |
 |---|---|---|
 | New workspace | ⌘N | Ctrl+N |
-| Go to workspace 1–9 | ⌘1–9 | Ctrl+1–9 |
+| Go to workspace or agent 1–9 | ⌘1–9 | Ctrl+1–9 |
 | New terminal tab | ⌘T | Ctrl+T |
 | Close current tab | ⌘W | Ctrl+W |
 | Previous tab | ⌘⇧[ | Ctrl+Shift+[ |
 | Next tab | ⌘⇧] | Ctrl+Shift+] |
 | Go to tab 1–9 | ⌃1–9 | Alt+1–9 |
+
+**⌘1–9 jumps to** in Settings › Keyboard chooses what ⌘1–9 (Ctrl+1–9 on Linux)
+reach: the workspaces, numbered beside each one in the sidebar (the default), or
+the agents, in the order the agent list shows them. With Agents chosen, hold ⌘
+(Ctrl on Linux) for a moment to see each agent's number.
 
 ## Panes
 
@@ -77,7 +92,7 @@ paste.
 On Linux Muxflow takes several Ctrl keys that shells also use, including Ctrl+W
 (delete word), Ctrl+V (insert next key literally), Ctrl+B, Ctrl+K, Ctrl+L,
 Ctrl+P, Ctrl+N, Ctrl+T, Ctrl+F and Ctrl+[ (Escape). If you need one of them in
-the terminal, unbind or rebind the command in **Configure keyboard shortcuts**.
+the terminal, unbind or rebind the command in **Settings › Keyboard**.
 
 On Omarchy, the system-wide Super+C and Super+V also copy and paste in Muxflow.
 

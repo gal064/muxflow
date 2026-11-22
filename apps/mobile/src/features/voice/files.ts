@@ -24,7 +24,7 @@ export function createExpoFiles(): VoiceFiles {
     writeReply(agentId, bytes) {
       const file = new File(voiceDirectory(), `${replyFileName(agentId)}.mp3`);
       if (file.exists) file.delete();
-      file.write(bytes);
+      file.writeSync(bytes);
       return file.uri;
     },
     delete(uri) {

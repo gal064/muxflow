@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 # Exact pins, as the app's, but for `regex`: the view renders through gpui-base's `editor_host`.
-gpui-kit = { version = "=0.9.0", default-features = true }
+gpui-kit = { version = "=0.10.0", default-features = true }
 # Both already resolved through gpui-base; `markdown` gives source offsets.
 markdown = "=1.0.0"
 unicode-segmentation = "=1.13.3"
@@ -18,4 +18,4 @@ regex = "1"
 
 [dev-dependencies]
 # `HeadlessAppContext` for the typing benchmark in `examples/`.
-gpui-kit = { version = "=0.9.0", default-features = true, features = ["test-support"] }
+gpui-kit = { version = "=0.10.0", default-features = true, features = ["test-support"] }

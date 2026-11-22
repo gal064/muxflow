@@ -1,35 +1,22 @@
 // Drives the real expo-router code that `router.push` runs, from href to the
 // params `useLocalSearchParams` hands a screen, to prove the encoding
-// survives it. The chain in expo-router 57.0.16 is
-// `build/global-state/router.js` line 69 (`push` -> `resolveHref`) ->
-// `build/global-state/getNavigationAction.js` line 26
-// (`store.linking.getStateFromPath`, the fork re-exported by
-// `build/link/linking.js` line 46) -> `LocalRouteParamsContext` ->
+// survives it. The chain in expo-router 58.0.32 is
+// `build/global-state/router.js` line 173 (`pushImpl` -> `resolveHref`) ->
+// `build/global-state/getNavigationAction.js` line 22
+// (`config.linking.getStateFromPath`, the fork re-exported by
+// `build/link/linking.js` line 29) -> `LocalRouteParamsContext` ->
 // `build/hooks/useLocalSearchParams.js`.
-
-import { createRequire, Module } from "node:module";
+//
+// The fork validates its config with its own `fork/validatePathConfig.js`,
+// so nothing here reaches react-native's flow-typed entry point.
 
 import { getReactNavigationConfig } from "expo-router/build/getReactNavigationConfig";
 import { findFocusedRoute } from "expo-router/build/fork/findFocusedRoute";
+import { getStateFromPath } from "expo-router/build/fork/getStateFromPath";
 import { resolveHref } from "expo-router/build/link/href";
 import { describe, expect, it } from "vitest";
 
 import { fromRouteParam, toRouteParam } from "./routeParams";
-
-// `getStateFromPath` requires `../react-navigation/native` only for
-// `validatePathConfig` (`build/fork/getStateFromPath.js` line 170), and that
-// module pulls in react-native, whose flow-typed entry point cannot be parsed
-// under node. vitest loads `node_modules` through Node's own `require`, out of
-// reach of `vi.mock`, so the stand-in goes into `require.cache` instead. It
-// has to be installed before `getStateFromPath` loads, hence the dynamic
-// import below; the static imports above do not reach that module.
-const nodeRequire = createRequire(import.meta.url);
-const nativeId = nodeRequire.resolve("expo-router/build/react-navigation/native");
-const nativeStandIn = new Module(nativeId);
-nativeStandIn.exports = { validatePathConfig: () => undefined };
-nativeStandIn.loaded = true;
-nodeRequire.cache[nativeId] = nativeStandIn;
-const { getStateFromPath } = await import("expo-router/build/fork/getStateFromPath");
 
 // The app's route tree, in the shape `getReactNavigationConfig` reads, so the
 // `[paneId]` -> `:paneId` conversion is the real one too.
@@ -46,7 +33,7 @@ const routeTree = {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const linkingConfig = getReactNavigationConfig(routeTree as any, true);
 
-/** What `useLocalSearchParams` does to each value (`build/hooks/useLocalSearchParams.js` lines 34-40). */
+/** What `useLocalSearchParams` does to each string value (`build/hooks/useLocalSearchParams.js` lines 67-74). */
 function decodeLikeUseLocalSearchParams(params: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(params).map(([key, value]) => {
