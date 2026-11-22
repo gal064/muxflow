@@ -478,8 +478,9 @@ fn workspace_defaults_are_per_host_and_an_empty_field_clears_them(cx: &mut TestA
     assert_eq!(defaults.directory.as_deref(), Some("/work"));
     assert_eq!(defaults.startup_command.as_deref(), Some("htop"));
     assert_eq!(defaults.agent_command.as_deref(), Some("codex"));
+    // Wait for the last field typed: an earlier write can hold the first two.
     let value = saved(cx, &state, |value| {
-        value["workspaceDefaults"]["local"]["startupCommand"] == json!("htop")
+        value["workspaceDefaults"]["local"]["agentCommand"] == json!("codex")
     });
     assert_eq!(
         value["workspaceDefaults"]["local"]["directory"],
@@ -487,8 +488,8 @@ fn workspace_defaults_are_per_host_and_an_empty_field_clears_them(cx: &mut TestA
     );
 
     assert_eq!(
-        value["workspaceDefaults"]["local"]["agentCommand"],
-        json!("codex")
+        value["workspaceDefaults"]["local"]["startupCommand"],
+        json!("htop")
     );
 
     type_into(handle, "settings-start-directory", "", cx);
