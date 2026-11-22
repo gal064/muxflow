@@ -16,7 +16,7 @@
 // must not do.
 
 import { useFocusEffect, useIsFocused } from "expo-router";
-import { useKeepAwake } from "expo-keep-awake";
+import { activateKeepAwakeAsync, deactivateKeepAwake, useKeepAwake } from "expo-keep-awake";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { AppState, Platform } from "react-native";
 import { useStore } from "zustand";
@@ -72,6 +72,9 @@ export interface VoiceRouting {
   /** Rechecked after transcription and before Enter. */
   canSubmit: (paneId: string) => boolean;
 }
+
+/** Its own tag, so a take ending does not release voice mode's lock. */
+const TAKE_WAKE_TAG = "muxflow-voice-take";
 
 /**
  * Where a dictated transcript goes, per pane: the screen's send, with the
@@ -157,6 +160,16 @@ export function useVoiceMode({ paneId, sessionId, serverIdentity, voiceMode, con
   // The screen stays on only while this screen is the one in front.
   const focused = useIsFocused();
 
+  // A take on keeps the screen on whatever the preference says: the screen
+  // going off takes the app out of the foreground, which cancels the take.
+  // The preference is for voice mode's wait between takes.
+  const taking = focused && phase !== "idle";
+  useEffect(() => {
+    if (!taking) return undefined;
+    void activateKeepAwakeAsync(TAKE_WAKE_TAG).catch(() => undefined);
+    return () => void deactivateKeepAwake(TAKE_WAKE_TAG).catch(() => undefined);
+  }, [taking]);
+
   useEffect(() => controller?.setPlaybackRate(playbackRate), [controller, playbackRate]);
   // Before the focus below, which plays a reply that waits when autoplay is on.
   useEffect(() => controller?.setAutoPlay(voiceMode && autoPlay), [autoPlay, controller, voiceMode]);
@@ -211,6 +224,7 @@ export function useVoiceMode({ paneId, sessionId, serverIdentity, voiceMode, con
       dictation: {
         phase,
         refusal: hint,
+        taught: tipDone,
         onPressIn: () => setPressing(true),
         onRelease: () => setPressing(false),
         onBegin: () => {
