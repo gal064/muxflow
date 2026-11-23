@@ -10,6 +10,11 @@ The phone app has a New agent | New terminal bar at the bottom of the Agents and
 Workspaces tabs. Both open in "random", in the host's Default directory, which
 you set in Settings.
 
+A Claude Code agent no longer stays on Working after it publishes an artifact.
+On the phone, the screen stays on while you dictate, the recording bar is
+opaque, the empty reply field says "Reply · hold the mic to dictate", and a
+Claude Code terminal no longer offers a $ list.
+
 The iOS app is now built with the iOS 27 SDK on Expo 58 and React Native 0.88.
 Phones need the 0.1.33 app or newer, as before; this release does not change the
 protocol. Update the Android app from the APK below; the iOS build is on
