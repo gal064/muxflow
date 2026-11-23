@@ -26,7 +26,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     relative,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     connection_ui::backend::TerminalBackend,
@@ -257,15 +257,48 @@ impl UploadTarget for ChatPane {
     }
 
     fn stopped(&mut self, failure: Option<String>, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(attachment) = self.uploading_attachment() {
-            attachment.upload =
-                Upload::Failed(failure.unwrap_or_else(|| "The upload was stopped.".to_owned()));
-            cx.notify();
-        }
+        let why = failure.unwrap_or_else(|| "The upload was stopped.".to_owned());
+        let Some(attachment) = self.uploading_attachment() else {
+            return;
+        };
+        let transfer = match &attachment.upload {
+            Upload::Uploading(transfer) => transfer.clone(),
+            _ => None,
+        };
+        attachment.upload = Upload::Failed(why.clone());
+        let id = attachment.id;
+        self.note_upload_failure(id, transfer, &why, cx);
+        cx.notify();
     }
 }
 
 impl ChatPane {
+    /// Keeps why an upload failed in the incident journal: the chip says only
+    /// that it did.
+    fn note_upload_failure(&self, id: u64, transfer: Option<String>, why: &str, cx: &App) {
+        let Some(attachment) = self.attachments.iter().find(|a| a.id == id) else {
+            return;
+        };
+        let scope = (self.upload_scope)(self, cx);
+        self.connection_backend(cx).record_incident(
+            "chat.uploadFailed",
+            json!({
+                "hostProfileId": self.profile_id,
+                "paneId": self.pane_id.to_string(),
+                "transferId": transfer,
+                // Capped: the journal drops a line over 8 KB whole.
+                "error": why.chars().take(1000).collect::<String>(),
+                "name": attachment.name.chars().take(200).collect::<String>(),
+                "size": attachment.size,
+                "mediaType": attachment.media_type,
+                "clipboard": attachment.clipboard,
+                "connected": scope.is_some(),
+                "local": scope.as_ref().map(|scope| scope.local),
+                "terminalEpoch": scope.as_ref().map(|scope| scope.terminal_epoch),
+            }),
+        );
+    }
+
     fn uploading_attachment(&mut self) -> Option<&mut Attachment> {
         let id = self.uploading?;
         self.attachments
@@ -393,7 +426,10 @@ impl ChatPane {
         let scope = (self.upload_scope)(self, cx);
         let next = &mut self.attachments[index];
         if scope.is_none() {
-            next.upload = Upload::Failed("The host is not connected.".into());
+            let why = "The host is not connected.";
+            next.upload = Upload::Failed(why.into());
+            let id = next.id;
+            self.note_upload_failure(id, None, why, cx);
             cx.notify();
             // The rest wait for a retry too: nothing can go now.
             return self.pump_uploads(window, cx);
