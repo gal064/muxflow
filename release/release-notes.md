@@ -1,23 +1,12 @@
-## Stage all, discard all and Commit & Push
+## Android connection and update fix
 
-The desktop's Source Control panel works more like VS Code's. Unstaged and new
-files share one Changes list, new files marked U, above Staged changes. Hover a
-group's heading to stage, unstage or discard the whole group; the command
-palette has the same three. Discard all asks once, reverts the listed files,
-deletes the new ones and keeps what is staged. None of them touches a merge
-conflict.
+Restores Android SSH connections and update checks by preserving the crypto
+classes the release build loads at runtime. The release build now checks
+for those classes in the signed APK.
 
-Commit commits what is staged, or, when nothing is staged, every change, new
-files included; its label says which. Commit & Push and Push sit under it. An
-empty message commits as "no commit message". Committing waits until merge
-conflicts are resolved.
-
-On the phone, the terminal uses the colors the desktop gives programs, so
-Codex's prompts stay readable when the desktop uses a light theme.
-
-Phones need the 0.1.33 app or newer, as before; this release adds to the
-protocol without changing its version. Update the Android app from the APK
-below; the iOS build is on TestFlight.
+If you installed Android 0.1.37, download the 0.1.38 APK below, open it on
+your phone, and tap **Update**. Install it over 0.1.37 to keep your settings
+and SSH identity. The 0.1.37 in-app updater is affected by the same bug.
 
 ## Install
 
