@@ -889,6 +889,15 @@ enum GitMutationKind {
   GIT_MUTATION_KIND_STAGE_HUNK = 4;
   GIT_MUTATION_KIND_UNSTAGE_HUNK = 5;
   GIT_MUTATION_KIND_DISCARD_HUNK = 6;
+  // The bulk kinds carry no path: they act on every entry of the status at
+  // `expected_status_generation` that is not a conflict, a submodule or
+  // ignored. STAGE_ALL stages the unstaged and untracked ones; UNSTAGE_ALL
+  // unstages the staged ones; DISCARD_ALL reverts the unstaged ones to the
+  // index and deletes the untracked ones, leaving staged changes, and needs a
+  // confirmation token like any discard.
+  GIT_MUTATION_KIND_STAGE_ALL = 7;
+  GIT_MUTATION_KIND_UNSTAGE_ALL = 8;
+  GIT_MUTATION_KIND_DISCARD_ALL = 9;
 }
 
 message GitRepository {
@@ -1065,6 +1074,10 @@ message GitRequest {
   string branch = 18;
   // OPERATION_GIT_BRANCH_SUMMARY.
   GitSummaryBase summary_base = 19;
+  // OPERATION_GIT_COMMIT: stage what STAGE_ALL would, then commit, under one
+  // repository lock. Refused while a conflict is open. A commit Git refuses
+  // leaves the index as it was.
+  bool commit_all = 20;
 }
 
 // One file of a branch summary. Renames are not detected: a renamed file is

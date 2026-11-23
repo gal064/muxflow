@@ -357,6 +357,7 @@ fn sends_a_commit_and_a_push_exactly_once() {
         "repo".into(),
         3,
         "msg".into(),
+        false,
     ));
     assert_eq!(committed.unwrap_err(), "connection lost");
     let pushed = block_on(client::push(
@@ -375,6 +376,7 @@ fn sends_a_commit_and_a_push_exactly_once() {
         "repo".into(),
         3,
         " ".into(),
+        false,
     ));
     assert_eq!(empty.unwrap_err(), "Enter a commit message.");
     assert_eq!(fake.requests.borrow().len(), 2);
@@ -397,6 +399,7 @@ fn cancels_the_exact_live_read_when_its_reader_stops_waiting() {
         "repo".into(),
         1,
         "m".into(),
+        false,
     ));
     assert!((&mut commit).now_or_never().is_none());
     drop(commit);
@@ -440,13 +443,13 @@ fn requires_every_native_transport_identity() {
 // The panel's model (`GitSidebar.test.tsx`).
 
 #[test]
-fn groups_conflicts_staged_unstaged_and_untracked_and_shows_nothing_ignored() {
+fn groups_conflicts_staged_and_one_changes_list_and_shows_nothing_ignored() {
     let parsed = parse(status_in(
         "repo",
         1,
         vec![
-            entry(A, "a.txt", "modified", "modified"),
             entry(B, "dir/b.txt", "none", "untracked"),
+            entry(A, "a.txt", "modified", "modified"),
             json!({
                 "path": "Yy50eHQ=", "displayPath": "c.txt", "conflicted": true,
                 "conflictCode": "UU", "indexKind": "unmerged", "worktreeKind": "unmerged",
@@ -462,8 +465,9 @@ fn groups_conflicts_staged_unstaged_and_untracked_and_shows_nothing_ignored() {
     };
     assert_eq!(names(&groups.conflicts), ["c.txt"]);
     assert_eq!(names(&groups.staged), ["a.txt"]);
-    assert_eq!(names(&groups.unstaged), ["a.txt"]);
-    assert_eq!(names(&groups.untracked), ["dir/b.txt"]);
+    // Untracked files join the unstaged ones, by path.
+    assert_eq!(names(&groups.changes), ["a.txt", "dir/b.txt"]);
+    assert_eq!(status_code(groups.changes[1], Target::Unstaged), "U");
     assert_eq!(status_code(groups.conflicts[0], Target::Unstaged), "U");
     assert_eq!(status_code(groups.staged[0], Target::Staged), "M");
     assert_eq!(
@@ -874,13 +878,111 @@ fn offers_no_mutation_while_the_status_is_resynchronizing(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn rejects_an_empty_commit_message_before_invoking_git(cx: &mut TestAppContext) {
+fn commits_everything_under_a_default_message_when_nothing_is_staged(cx: &mut TestAppContext) {
     let panel = Panel::new(cx, answering);
     panel.point_at("t", 1, cx);
     panel.run(Work::Commit, cx);
-    assert_eq!(panel.fake.operations(), ["watch"]);
+    let sent = panel.fake.requests.borrow().last().unwrap().clone();
+    assert_eq!(sent.operation, "commit");
+    assert_eq!(sent.commit_message, "no commit message");
+    assert!(sent.commit_all);
     let (error, _, _) = panel.panel.read_with(cx, |panel, _| panel.form_state());
-    assert_eq!(error.as_deref(), Some("Enter a commit message."));
+    assert_eq!(error, None);
+}
+
+#[gpui_kit::test]
+fn commits_only_the_staged_changes_when_some_are_staged(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        Some(Ok(match command.operation.as_str() {
+            "watch" => json!({ "status": status_in("repo", 1, vec![
+                entry(A, "a.txt", "modified", "none"),
+                entry(B, "dir/b.txt", "none", "untracked"),
+            ]) }),
+            _ => applied(2),
+        }))
+    });
+    panel.point_at("t", 1, cx);
+    panel.type_message("only a", cx);
+    panel.run(Work::Commit, cx);
+    let sent = panel.fake.requests.borrow().last().unwrap().clone();
+    assert_eq!(sent.commit_message, "only a");
+    assert!(!sent.commit_all);
+}
+
+#[gpui_kit::test]
+fn acts_on_a_whole_group_in_one_request(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, answering);
+    panel.point_at("t", 1, cx);
+    panel.panel.update(cx, |panel, cx| {
+        panel.mutate_all(MutationKind::StageAll, None, cx)
+    });
+    cx.run_until_parked();
+    let sent = panel.fake.requests.borrow().last().unwrap().clone();
+    assert_eq!(sent.mutation, "stageAll");
+    assert!(sent.path.is_empty());
+    assert_eq!(sent.expected_status_generation, "1");
+
+    // Discarding everything is asked for once and confirmed by the host.
+    let status = panel
+        .panel
+        .read_with(cx, |panel, cx| panel.status(cx).unwrap());
+    let key = panel
+        .panel
+        .read_with(cx, |panel, _| panel.observed_key().unwrap());
+    panel
+        .panel
+        .update(cx, |panel, cx| panel.confirm_discard_all(&key, status, cx));
+    cx.run_until_parked();
+    let requests = panel.fake.requests.borrow();
+    let tail: Vec<_> = requests[requests.len() - 2..]
+        .iter()
+        .map(|request| (request.operation.as_str(), request.mutation.as_str()))
+        .collect();
+    assert_eq!(
+        tail,
+        [("prepareDiscard", "discardAll"), ("mutate", "discardAll")]
+    );
+    assert_eq!(requests.last().unwrap().confirmation_token, "once");
+}
+
+#[test]
+fn the_commit_button_names_what_it_commits() {
+    let parsed = |entries| parse(status_in("repo", 1, entries));
+    let plan = |status: &StatusSnapshot| model::CommitPlan::new(&group_entries(&status.entries));
+    let staged = parsed(vec![
+        entry(A, "a.txt", "modified", "modified"),
+        entry(B, "dir/b.txt", "none", "untracked"),
+    ]);
+    assert_eq!(plan(&staged).label(), "Commit 1 staged");
+    let unstaged = parsed(vec![
+        entry(A, "a.txt", "none", "modified"),
+        entry(B, "dir/b.txt", "none", "untracked"),
+    ]);
+    assert_eq!(plan(&unstaged).label(), "Commit all 2");
+    assert!(plan(&unstaged).can_commit());
+    let clean = parsed(vec![]);
+    assert_eq!(plan(&clean).label(), "Commit");
+    assert!(!plan(&clean).can_commit());
+    // Committing everything would stage a conflict, which resolves it.
+    let conflicted = parsed(vec![
+        entry(A, "a.txt", "none", "modified"),
+        json!({
+            "path": "Yy50eHQ=", "displayPath": "c.txt", "conflicted": true,
+            "conflictCode": "UU", "indexKind": "unmerged", "worktreeKind": "unmerged",
+        }),
+    ]);
+    assert!(plan(&conflicted).blocked);
+    assert!(!plan(&conflicted).can_commit());
+    // Git refuses a staged-only commit while the conflict is open too.
+    let staged_beside_a_conflict = parsed(vec![
+        entry(A, "a.txt", "modified", "none"),
+        json!({
+            "path": "Yy50eHQ=", "displayPath": "c.txt", "conflicted": true,
+            "conflictCode": "UU", "indexKind": "unmerged", "worktreeKind": "unmerged",
+        }),
+    ]);
+    assert_eq!(plan(&staged_beside_a_conflict).label(), "Commit 1 staged");
+    assert!(!plan(&staged_beside_a_conflict).can_commit());
 }
 
 #[gpui_kit::test]

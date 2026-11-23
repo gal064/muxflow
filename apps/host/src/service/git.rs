@@ -46,7 +46,7 @@ use coordinator::{Freshness, RepositoryCapabilities, RepositoryCoordinator, Repo
 mod diff;
 use diff::{DiffAudience, read_diff};
 mod mutation;
-use mutation::{discard_file, mutate_hunk, unstage_file};
+use mutation::{discard_file, is_bulk, mutate_all, mutate_hunk, stage_all, unstage_file};
 mod measurements;
 use measurements::GitObservation;
 #[cfg(test)]
@@ -59,8 +59,9 @@ mod runner;
 #[cfg(test)]
 use runner::command_result;
 use runner::{
-    GIT_COMMIT_DEADLINE, GIT_PUSH_DEADLINE, GitMetadataCapability, GitOutput, ensure_success,
-    git_index_generation, git_output_cancellable, git_output_with_deadline, git_path_cancellable,
+    GIT_COMMIT_DEADLINE, GIT_MUTATION_DEADLINE, GIT_PUSH_DEADLINE, GitMetadataCapability,
+    GitOutput, ensure_success, git_index_generation, git_output_cancellable,
+    git_output_with_deadline, git_path_cancellable,
 };
 mod status;
 use status::{
@@ -438,7 +439,9 @@ impl GitService {
         let mutation = v1::GitMutationKind::try_from(request.mutation).unwrap_or_default();
         if !matches!(
             mutation,
-            v1::GitMutationKind::DiscardFile | v1::GitMutationKind::DiscardHunk
+            v1::GitMutationKind::DiscardFile
+                | v1::GitMutationKind::DiscardHunk
+                | v1::GitMutationKind::DiscardAll
         ) {
             bail!("confirmation tokens are issued only for discard operations");
         }
@@ -520,33 +523,25 @@ impl GitService {
             .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
         let mutation = v1::GitMutationKind::try_from(request.mutation).unwrap_or_default();
         validate_mutation_target(&request, mutation)?;
-        let stable_root = capabilities.stable_root();
-        let target_entry = validate_current_target(&stable_root, &request, &current)?;
-        if target_entry.submodule {
-            bail!("submodule Git mutations are unsupported");
-        }
-        if matches!(
-            mutation,
-            v1::GitMutationKind::StageHunk
-                | v1::GitMutationKind::UnstageHunk
-                | v1::GitMutationKind::DiscardHunk
-        ) && (!target_entry.original_path.is_empty()
-            || matches!(
-                v1::GitChangeKind::try_from(target_entry.index_kind).unwrap_or_default(),
-                v1::GitChangeKind::Renamed | v1::GitChangeKind::Copied
-            ))
-        {
-            bail!("complete-hunk operations for renamed or copied paths are unsupported");
-        }
-        // Copy provenance is not a second mutation target. Only a rename
-        // transfers ownership from original_path to path.
+        let bulk = is_bulk(mutation);
         let mut mutation_request = request.clone();
-        if target_entry.index_kind != v1::GitChangeKind::Renamed as i32 {
-            mutation_request.original_path.clear();
+        if bulk {
+            if !request.path.is_empty() || !request.original_path.is_empty() {
+                bail!("bulk Git mutations take no path");
+            }
+        } else {
+            let entry = validate_file_mutation(&capabilities, &request, &current, mutation)?;
+            // Copy provenance is not a second mutation target. Only a rename
+            // transfers ownership from original_path to path.
+            if entry.index_kind != v1::GitChangeKind::Renamed as i32 {
+                mutation_request.original_path.clear();
+            }
         }
         if matches!(
             mutation,
-            v1::GitMutationKind::DiscardFile | v1::GitMutationKind::DiscardHunk
+            v1::GitMutationKind::DiscardFile
+                | v1::GitMutationKind::DiscardHunk
+                | v1::GitMutationKind::DiscardAll
         ) {
             self.consume_confirmation(&request, connection_epoch)?;
         }
@@ -584,6 +579,15 @@ impl GitService {
                     &root,
                     &execution_repository,
                     &mutation_request,
+                    mutation,
+                    &execution_cancellation,
+                ),
+                v1::GitMutationKind::StageAll
+                | v1::GitMutationKind::UnstageAll
+                | v1::GitMutationKind::DiscardAll => mutate_all(
+                    &root,
+                    execution_repository.initial,
+                    &current,
                     mutation,
                     &execution_cancellation,
                 ),
@@ -633,17 +637,24 @@ impl GitService {
             let _metadata_guard = execution_capabilities.metadata.install();
             let root = execution_capabilities.stable_root();
             let pre_state = command_state(&root, &current);
-            let outcome = git_output_with_deadline(
-                &root,
-                &[
-                    OsStr::new("commit"),
-                    OsStr::new("-m"),
-                    OsStr::new(&request.commit_message),
-                ],
-                None,
-                Some(&cancellation),
-                GIT_COMMIT_DEADLINE,
-            );
+            let commit = || {
+                git_output_with_deadline(
+                    &root,
+                    &[
+                        OsStr::new("commit"),
+                        OsStr::new("-m"),
+                        OsStr::new(&request.commit_message),
+                    ],
+                    None,
+                    Some(&cancellation),
+                    GIT_COMMIT_DEADLINE,
+                )
+            };
+            let outcome = if request.commit_all {
+                commit_all(&root, &current, &cancellation, commit)
+            } else {
+                commit()
+            };
             (outcome, pre_state)
         })
         .await
@@ -937,6 +948,109 @@ fn validate_mutation_target(
         }
         _ => Ok(()),
     }
+}
+
+/// One file's target, as the status this mutation read itself has it.
+fn validate_file_mutation(
+    capabilities: &RepositoryCapabilities,
+    request: &v1::GitRequest,
+    current: &v1::GitStatusSnapshot,
+    mutation: v1::GitMutationKind,
+) -> anyhow::Result<v1::GitStatusEntry> {
+    let stable_root = capabilities.stable_root();
+    let target_entry = validate_current_target(&stable_root, request, current)?;
+    if target_entry.submodule {
+        bail!("submodule Git mutations are unsupported");
+    }
+    if matches!(
+        mutation,
+        v1::GitMutationKind::StageHunk
+            | v1::GitMutationKind::UnstageHunk
+            | v1::GitMutationKind::DiscardHunk
+    ) && (!target_entry.original_path.is_empty()
+        || matches!(
+            v1::GitChangeKind::try_from(target_entry.index_kind).unwrap_or_default(),
+            v1::GitChangeKind::Renamed | v1::GitChangeKind::Copied
+        ))
+    {
+        bail!("complete-hunk operations for renamed or copied paths are unsupported");
+    }
+    Ok(target_entry)
+}
+
+/// Stages every unstaged and untracked change of `status`, then commits. A
+/// commit Git refuses (a failing hook, say) puts the index back as it was, so
+/// the refusal leaves nothing half done.
+fn commit_all(
+    root: &str,
+    status: &v1::GitStatusSnapshot,
+    cancellation: &AtomicBool,
+    commit: impl FnOnce() -> anyhow::Result<GitOutput>,
+) -> anyhow::Result<GitOutput> {
+    if status.entries.iter().any(|entry| entry.conflicted) {
+        bail!("resolve the merge conflicts before committing");
+    }
+    let saved = git_output_with_deadline(
+        root,
+        &[OsStr::new("write-tree")],
+        None,
+        Some(cancellation),
+        GIT_MUTATION_DEADLINE,
+    )?;
+    ensure_success(&saved, "save the Git index")?;
+    let tree = String::from_utf8_lossy(&saved.output.stdout)
+        .trim()
+        .to_owned();
+    // Nothing unstaged is still a commit of what is staged.
+    if !mutation::unstaged_entries(root, status)?.is_empty() {
+        let staged = stage_all(root, status, cancellation)?;
+        if !staged.status.success() || staged.interrupted.is_some() {
+            return Ok(staged);
+        }
+    }
+    let output = commit()?;
+    // A commit cut off after it moved HEAD (in a post-commit hook, say) did
+    // land: its index is the commit's, and must stay so.
+    let head = status
+        .repository
+        .as_ref()
+        .map_or("", |repository| repository.head_oid.as_str());
+    if (!output.status.success() || output.interrupted.is_some())
+        && current_head(root)?.as_deref().unwrap_or("") == head
+    {
+        // Independent of the cancellation, as a hunk rollback is. `-m` keeps
+        // the stat cache and sparse checkout's skip-worktree bits.
+        let restored = git_output_with_deadline(
+            root,
+            &[OsStr::new("read-tree"), OsStr::new("-m"), OsStr::new(&tree)],
+            None,
+            None,
+            GIT_MUTATION_DEADLINE,
+        )?;
+        ensure_success(&restored, "restore the Git index after a refused commit")?;
+    }
+    Ok(output)
+}
+
+/// HEAD's object id, or `None` before the first commit.
+fn current_head(root: &str) -> anyhow::Result<Option<String>> {
+    let output = git_output_with_deadline(
+        root,
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--verify"),
+            OsStr::new("--quiet"),
+            OsStr::new("HEAD"),
+        ],
+        None,
+        None,
+        GIT_MUTATION_DEADLINE,
+    )?;
+    Ok(output.status.success().then(|| {
+        String::from_utf8_lossy(&output.output.stdout)
+            .trim()
+            .to_owned()
+    }))
 }
 
 fn validate_git_path(path: &[u8]) -> anyhow::Result<()> {

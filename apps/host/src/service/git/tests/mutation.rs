@@ -872,3 +872,247 @@ async fn deleted_files_stage_with_and_without_their_parent_directory() {
             .any(|entry| entry.path == b"plain" && entry.index_status == "D")
     );
 }
+
+fn names(fixture: &Fixture, args: &[&str]) -> Vec<String> {
+    String::from_utf8(fixture.git(args).stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn bulk_mutations_act_on_the_shown_status_and_never_touch_a_conflict() {
+    let fixture = Fixture::new("bulk");
+    for file in ["tracked", "staged", "conflict"] {
+        fixture.write(file, b"base\n");
+    }
+    fixture.git(&["add", "."]);
+    fixture.git(&["commit", "-qm", "base"]);
+    fixture.git(&["checkout", "-qb", "other"]);
+    fixture.write("conflict", b"other\n");
+    fixture.git(&["commit", "-qam", "other"]);
+    fixture.git(&["checkout", "-q", "master"]);
+    fixture.write("conflict", b"master\n");
+    fixture.git(&["commit", "-qam", "master"]);
+    let merge = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.root)
+        .args(["merge", "-q", "other"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success());
+    fixture.write("tracked", b"edited\n");
+    fixture.write("staged", b"staged\n");
+    fixture.git(&["add", "staged"]);
+    fixture.write("new dir/untracked", b"new\n");
+    let unmerged = || names(&fixture, &["diff", "--name-only", "--diff-filter=U"]);
+    assert_eq!(unmerged(), ["conflict"]);
+
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
+    let mut request = fixture.request();
+    request.repository_id = status.repository.unwrap().repository_id;
+    request.expected_status_generation = status.generation;
+    request.connection_epoch = 9;
+    let run = |request: v1::GitRequest| {
+        let service = Arc::clone(&service);
+        async move {
+            service
+                .mutate(request, 9, Arc::new(AtomicBool::new(false)))
+                .await
+        }
+    };
+
+    request.mutation = v1::GitMutationKind::StageAll.into();
+    request.path = b"tracked".to_vec();
+    assert!(
+        run(request.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no path")
+    );
+    request.path.clear();
+    let staged = run(request.clone()).await.unwrap();
+    assert_eq!(staged.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert_eq!(
+        names(
+            &fixture,
+            &["diff", "--cached", "--name-only", "--diff-filter=AM"]
+        ),
+        ["new dir/untracked", "staged", "tracked"]
+    );
+    assert_eq!(unmerged(), ["conflict"]);
+
+    request.expected_status_generation = staged.status.unwrap().generation;
+    request.mutation = v1::GitMutationKind::UnstageAll.into();
+    let unstaged = run(request.clone()).await.unwrap();
+    assert_eq!(unstaged.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert!(
+        names(
+            &fixture,
+            &["diff", "--cached", "--name-only", "--diff-filter=AM"]
+        )
+        .is_empty()
+    );
+    assert_eq!(unmerged(), ["conflict"]);
+    assert_eq!(fs::read(fixture.root.join("tracked")).unwrap(), b"edited\n");
+
+    fixture.git(&["add", "staged"]);
+    request.expected_status_generation = service
+        .status(&fixture.request(), None)
+        .await
+        .unwrap()
+        .generation;
+    request.mutation = v1::GitMutationKind::DiscardAll.into();
+    assert!(
+        run(request.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("confirmation")
+    );
+    request.confirmation_token = service.prepare_discard(&request, 9).await.unwrap().token;
+    let discarded = run(request.clone()).await.unwrap();
+    assert_eq!(discarded.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert_eq!(fs::read(fixture.root.join("tracked")).unwrap(), b"base\n");
+    assert!(!fixture.root.join("new dir/untracked").exists());
+    // Staged work and the conflict are left alone.
+    assert_eq!(fs::read(fixture.root.join("staged")).unwrap(), b"staged\n");
+    assert_eq!(
+        names(
+            &fixture,
+            &["diff", "--cached", "--name-only", "--diff-filter=M"]
+        ),
+        ["staged"]
+    );
+    assert_eq!(unmerged(), ["conflict"]);
+
+    request.expected_status_generation = discarded.status.unwrap().generation;
+    request.commit_message = "all".into();
+    request.commit_all = true;
+    let refused = service
+        .commit(request, 9, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(refused.outcome, v1::GitCommandOutcome::NotApplied as i32);
+    assert!(refused.error.contains("conflicts"));
+}
+
+#[tokio::test]
+async fn commit_all_takes_untracked_files_and_a_refused_commit_restores_the_index() {
+    let _hook_test_guard = COMMIT_HOOK_TEST_LOCK.lock().await;
+    let fixture = Fixture::new("commit-all");
+    fixture.write("tracked", b"base\n");
+    fixture.git(&["add", "tracked"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    fixture.write("tracked", b"edited\n");
+    fixture.write("untracked", b"new\n");
+    let head = || names(&fixture, &["rev-parse", "HEAD"]);
+    let base = head();
+
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
+    let mut request = fixture.request();
+    request.repository_id = status.repository.unwrap().repository_id;
+    request.expected_status_generation = status.generation;
+    request.connection_epoch = 5;
+    request.commit_message = "everything".into();
+    request.commit_all = true;
+
+    let hook = fixture.root.join(".git/hooks/pre-commit");
+    fs::write(&hook, b"#!/bin/sh\necho refused >&2\nexit 1\n").unwrap();
+    let mut mode = fs::metadata(&hook).unwrap().permissions();
+    mode.set_mode(0o755);
+    fs::set_permissions(&hook, mode).unwrap();
+    let refused = service
+        .commit(request.clone(), 5, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(refused.outcome, v1::GitCommandOutcome::NotApplied as i32);
+    assert!(refused.error.contains("refused"));
+    assert_eq!(head(), base);
+    assert!(names(&fixture, &["diff", "--cached", "--name-only"]).is_empty());
+
+    fs::remove_file(&hook).unwrap();
+    request.expected_status_generation = refused.status.unwrap().generation;
+    let committed = service
+        .commit(request, 5, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(committed.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert_eq!(
+        names(&fixture, &["show", "--name-only", "--format=", "HEAD"]),
+        ["tracked", "untracked"]
+    );
+    assert!(names(&fixture, &["status", "--porcelain"]).is_empty());
+}
+
+#[tokio::test]
+async fn bulk_mutations_work_before_the_first_commit_and_leave_a_nested_repository_alone() {
+    let fixture = Fixture::new("bulk-initial");
+    fixture.write("both", b"staged\n");
+    fixture.git(&["add", "both"]);
+    fixture.write("both", b"staged then edited\n");
+    fixture.write("loose", b"untracked\n");
+    let nested = fixture.root.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let init = Command::new("git")
+        .arg("-C")
+        .arg(&nested)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    assert!(init.status.success());
+    fs::write(nested.join("inner"), b"inner\n").unwrap();
+
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
+    let mut request = fixture.request();
+    request.repository_id = status.repository.unwrap().repository_id;
+    request.expected_status_generation = status.generation;
+    request.connection_epoch = 3;
+
+    // A file staged and then edited again unstages with the rest.
+    request.mutation = v1::GitMutationKind::UnstageAll.into();
+    let unstaged = service
+        .mutate(request.clone(), 3, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(unstaged.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert!(names(&fixture, &["ls-files", "--cached"]).is_empty());
+    assert_eq!(
+        fs::read(fixture.root.join("both")).unwrap(),
+        b"staged then edited\n"
+    );
+
+    request.expected_status_generation = unstaged.status.unwrap().generation;
+    request.mutation = v1::GitMutationKind::StageAll.into();
+    let staged = service
+        .mutate(request.clone(), 3, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(staged.outcome, v1::GitCommandOutcome::Applied as i32);
+    // No gitlink for the nested repository.
+    assert_eq!(
+        names(&fixture, &["ls-files", "--cached"]),
+        ["both", "loose"]
+    );
+
+    fixture.git(&["rm", "--cached", "-q", "loose"]);
+    request.expected_status_generation = service
+        .status(&fixture.request(), None)
+        .await
+        .unwrap()
+        .generation;
+    request.mutation = v1::GitMutationKind::DiscardAll.into();
+    request.confirmation_token = service.prepare_discard(&request, 3).await.unwrap().token;
+    let discarded = service
+        .mutate(request, 3, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(discarded.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert!(!fixture.root.join("loose").exists());
+    assert!(nested.join("inner").exists());
+}
