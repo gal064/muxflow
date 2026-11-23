@@ -91,6 +91,7 @@ fn command(scope: &GitScope, operation: &str) -> GitCommand {
         watch_id: String::new(),
         branch: String::new(),
         summary_base: String::new(),
+        commit_all: false,
     }
 }
 
@@ -366,13 +367,15 @@ pub async fn mutate(
     model::response_command(model::response(answer)?)
 }
 
-/// Sent exactly once, like a mutation.
+/// Sent exactly once, like a mutation. With `all`, the host stages every
+/// unstaged and untracked change first.
 pub async fn commit(
     transport: Transport,
     scope: GitScope,
     repository_id: String,
     expected_status_generation: u64,
     message: String,
+    all: bool,
 ) -> Result<CommandResult, String> {
     if message.trim().is_empty() {
         return Err("Enter a commit message.".into());
@@ -381,6 +384,7 @@ pub async fn commit(
         repository_id,
         expected_status_generation: expected_status_generation.to_string(),
         commit_message: message,
+        commit_all: all,
         ..command(&scope, "commit")
     };
     let answer = transport.request(scope.client_id.clone(), wire).await?;
