@@ -95,4 +95,12 @@ describe("Rust-produced framed protobuf", () => {
     expect(chat.change.value.itemId).toBe("a1");
     expect(chat.change.value.textAppend).toBe("héllo");
   });
+
+  it("preserves the terminal colors a host reports", () => {
+    const payload = decode("terminalColors");
+    expect(payload.case).toBe("event");
+    if (payload.case !== "event") throw new Error("wrong event payload");
+    expect(payload.value.kind).toBe(EventKind.TERMINAL_COLORS);
+    expect(payload.value.terminalColors).toEqual(expect.objectContaining({ foreground: "#1c2129", background: "#fcfcfc" }));
+  });
 });

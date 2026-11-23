@@ -91,6 +91,11 @@ fn mobile_contract_matches_rust() {
                     })),
                 }), ..Default::default()
             })),
+            "terminalColors": frame(v1::envelope::Payload::Event(v1::HostEvent {
+                kind: v1::EventKind::TerminalColors.into(), terminal_colors: Some(v1::TerminalColors {
+                    foreground: "#1c2129".into(), background: "#fcfcfc".into(),
+                }), ..Default::default()
+            })),
         },
     });
     for (file, value) in [

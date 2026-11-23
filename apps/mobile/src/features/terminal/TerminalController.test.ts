@@ -322,7 +322,19 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
   it("inits the page with the chosen font size", () => {
     const h = harness({ fontSize: 17 });
     h.controller.start();
-    expect(h.page).toEqual([{ t: "init", fontSize: 17 }]);
+    expect(h.page).toEqual([{ t: "init", fontSize: 17, scheme: "dark" }]);
+  });
+
+  it("inits the page in the host's scheme and follows it until stopped", async () => {
+    const h = harness();
+    h.store.getState().setTerminalScheme("light");
+    h.controller.start();
+    h.store.getState().setTerminalScheme("dark");
+    // Store changes that leave the scheme alone send nothing.
+    h.store.getState().setFocusedPane("%2");
+    await h.controller.stop();
+    h.store.getState().setTerminalScheme("light");
+    expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "light" }, { t: "theme", scheme: "dark" }]);
   });
 
   it("takes focus, inits the page, and after the first size sends claim window size → attach in that order", async () => {
@@ -330,7 +342,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     const t = await h.connect();
     h.controller.start();
     expect(h.store.getState().focusedPaneId).toBe("%1");
-    expect(h.page).toEqual([{ t: "init", fontSize: 13 }]);
+    expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "dark" }]);
     expect(t.drain()).toHaveLength(0); // nothing before the page measured
 
     h.controller.onPageMessage({ t: "ready" });

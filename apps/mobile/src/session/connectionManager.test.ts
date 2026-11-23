@@ -1,5 +1,5 @@
 import { create } from "@bufbuild/protobuf";
-import { VoiceSpeechSchema } from "../protocol/gen/envelope_pb";
+import { EventKind, HostEventSchema, VoiceSpeechSchema } from "../protocol/gen/envelope_pb";
 import { voiceRegistry } from "../features/voice/voiceRegistry";
 import { voiceStore } from "../features/voice/voiceStore";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder } from "../features/voice/testing";
@@ -248,6 +248,29 @@ describe("connectionManager", () => {
     expect(dials).toHaveLength(2);
     // The control store is untouched by the bulk lane.
     expect(sessionStore.getState().connection.state).toBe("connected");
+  });
+
+  it("keeps a host's terminal scheme across a reconnect and forgets it when leaving the host", async () => {
+    const { control } = await connectControl();
+    const lightColors = create(HostEventSchema, {
+      kind: EventKind.TERMINAL_COLORS,
+      terminalColors: { foreground: "#1c2129", background: "#fcfcfc" },
+    });
+    control.feed(hostEnvelope({ case: "event", value: lightColors }, { sequence: 1n }));
+    expect(sessionStore.getState().terminalScheme).toBe("light");
+
+    control.closeFromRemote({ reason: "networkLost" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const control2 = dials[1]!.transport;
+    const epoch2 = getConnection()!.connectionEpoch;
+    control2.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch2 }) }, { requestId: 1n }));
+    control2.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    // Still light before the host sends its colors again: no dark flash.
+    expect(sessionStore.getState().connection.state).toBe("connected");
+    expect(sessionStore.getState().terminalScheme).toBe("light");
+
+    await disconnectHost();
+    expect(sessionStore.getState().terminalScheme).toBe("dark");
   });
 
   it("re-dials the bulk lane after the control connection reconnects", async () => {

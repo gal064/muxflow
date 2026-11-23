@@ -377,6 +377,11 @@ enum EventKind {
   EVENT_KIND_CHAT = 24;
   // The session history changed, in `history`: list again.
   EVENT_KIND_SESSION_HISTORY = 25;
+  // The terminal colors this host reports to programs that ask (OSC 10/11),
+  // in `terminal_colors`. Sent right after a Subscribe response and whenever a
+  // desktop changes them, so a phone can draw panes in the palette their
+  // programs were told about.
+  EVENT_KIND_TERMINAL_COLORS = 26;
 }
 
 message HostEvent {
@@ -405,6 +410,14 @@ message HostEvent {
   ChatEvent chat = 15;
   // EVENT_KIND_SESSION_HISTORY only.
   HistoryEvent history = 16;
+  // EVENT_KIND_TERMINAL_COLORS only.
+  TerminalColors terminal_colors = 17;
+}
+
+// The foreground and background tmux reports for every pane, as `#rrggbb`.
+message TerminalColors {
+  string foreground = 1;
+  string background = 2;
 }
 
 message Cancel {

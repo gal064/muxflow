@@ -2,13 +2,16 @@
 // Imported by both sides so the two cannot drift.
 
 import type { Grid } from "./sizing";
+import type { TerminalScheme } from "./terminalScheme";
 
 /** A confirmed grid change at a byte boundary in a retained output stream. */
 export interface GridFence extends Grid { offset: number }
 
 /** RN → page. */
 export type ToPageMessage =
-  | { t: "init"; fontSize: number }
+  | { t: "init"; fontSize: number; scheme: TerminalScheme }
+  /** The host reported colors of the other polarity: redraw in that palette. */
+  | { t: "theme"; scheme: TerminalScheme }
   | { t: "seed"; b64: string; grid?: Grid }
   | { t: "grid"; cols: number; rows: number }
   | { t: "out"; b64: string }

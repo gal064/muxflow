@@ -26,6 +26,7 @@ import type { ChatEvent } from "./gen/chat_pb";
 import type { HistoryEvent } from "./gen/history_pb";
 import { logAgentTransitions } from "../features/agents/diagnostics";
 import { deriveAgentIdentityPromotion, type AgentIdentityPromotion } from "../features/agents/agentIdentityPromotion";
+import { schemeForBackground } from "../features/terminal/terminalScheme";
 import { requestTerminalSeed, subscribeFull } from "./requests";
 import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "./backgroundTimer";
 import { TransportDialError, type Transport, type TransportClose, type TransportCloseReason } from "./Transport";
@@ -709,6 +710,9 @@ export class HostConnection {
         if (event.history) this.options.onHistoryEvent?.(event.history);
         break;
       case EventKind.TERMINAL_CLIPBOARD_WRITE:
+        break;
+      case EventKind.TERMINAL_COLORS:
+        if (event.terminalColors) store.getState().setTerminalScheme(schemeForBackground(event.terminalColors.background));
         break;
       default:
         this.log(`event.ignored kind=${event.kind}`);
