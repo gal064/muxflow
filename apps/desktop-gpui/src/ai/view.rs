@@ -201,7 +201,7 @@ impl Render for AiPanel {
         } else if turns.is_empty() {
             empty_note(
                 if key.is_some() {
-                    "Nothing asked yet. The assistant is shown what the Session, Files, Git, Ports and Automations tabs hold, and this tab keeps its own thread."
+                    "Nothing asked yet. The assistant sees the sources checked above, and this tab keeps its own thread. The session is on by default."
                 } else {
                     "Open a tab — each tab of the strip keeps its own conversation."
                 },

@@ -72,7 +72,10 @@ impl AiPanel {
         Self {
             controller,
             conversations: Conversations::default(),
-            sources: super::context::AI_SOURCES.to_vec(),
+            // Session only: the other four are what the assistant is shown on
+            // request, and a question about the tab in front of you is the
+            // common case. The row above the transcript turns them on.
+            sources: vec![AiSource::Session],
             expanded: HashSet::new(),
             gathering: false,
             fields: None,

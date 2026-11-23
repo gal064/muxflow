@@ -513,9 +513,9 @@ fn dragging_the_panel_edge_resizes_it_within_its_bounds(cx: &mut TestAppContext)
     let value = saved(window_cx, &state, |value| width(value) == 560.);
     assert_eq!(width(&value), 560.);
 
-    // And it never gets narrower than 240.
+    // And it never gets narrower than 300, where all five segment labels fit.
     let from = grab(window_cx);
     window_cx.update(|window, cx| window.drag(from, point(px(1270.), from.y), cx));
-    let value = saved(window_cx, &state, |value| width(value) == 240.);
-    assert_eq!(width(&value), 240.);
+    let value = saved(window_cx, &state, |value| width(value) == 300.);
+    assert_eq!(width(&value), 300.);
 }
