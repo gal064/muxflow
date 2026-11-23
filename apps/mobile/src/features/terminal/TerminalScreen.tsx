@@ -7,6 +7,7 @@ import { runOnJS } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import type { ChatCommand } from "../../protocol/gen/chat_pb";
+import { isCodexAdapter } from "../agents/agentIconPaths";
 import { agentForPane, agentStateWord, agentTitle } from "../agents/agentViews";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 import { markState } from "../agents/agentListModel";
@@ -136,7 +137,9 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
   const files = useAttachments(paneId, attachDeps);
   const [attaching, setAttaching] = useState(false);
   const catalog = useTerminalCommands(paneId, state.serverIdentity, agentPresent ? `${agent.adapterId}:${agent.id}` : undefined, connected);
-  const commands = useMemo(() => slashMatches(catalog, draft), [catalog, draft]);
+  // Typed into the agent as is: only Codex reads `$name` as a skill. A chat's host turns it into what its agent takes.
+  const dollarSkills = agent !== undefined && isCodexAdapter(agent.adapterId);
+  const commands = useMemo(() => slashMatches(catalog, draft, dollarSkills), [catalog, draft, dollarSkills]);
   const pickCommand = useCallback((command: ChatCommand) => setDraft((current) => withPickedCommand(current, command)), []);
 
   useFocusEffect(useCallback(() => {

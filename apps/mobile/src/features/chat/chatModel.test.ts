@@ -179,6 +179,12 @@ describe("the slash list", () => {
     expect(slashMatches(unmarked, "$c").flatMap((group) => group.commands.map((command) => command.name))).toEqual(["clear", "compact"]);
   });
 
+  it("lists nothing for a dollar when the agent takes no `$`, and the slash list still has the skills", () => {
+    expect(slashMatches(catalog(), "look at this with $c", false)).toEqual([]);
+    expect(slashMatches(catalog(), "$", false)).toEqual([]);
+    expect(slashMatches(catalog(), "/code", false).find((group) => group.title === "Skills")?.commands.map((command) => command.name)).toEqual(["code-review"]);
+  });
+
   it("offers Muxflow's side questions only to a provider that can fork", () => {
     expect(slashMatches(catalog(), "/b")[0]?.title).toBe("Muxflow");
     const noFork = catalog({ capabilities: { fork: false } });
