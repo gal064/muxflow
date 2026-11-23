@@ -11,7 +11,6 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-#[cfg(test)]
 use tmux_agent_protocol::v1;
 #[cfg(test)]
 use tmux_control::{CommandTag, ScreenSeeder};
@@ -91,6 +90,61 @@ impl TerminalColors {
             foreground: osc_rgb(foreground)?,
             background: osc_rgb(background)?,
         })
+    }
+
+    /// The `TERMINAL_COLORS` event that tells a client what panes report, so a
+    /// phone can draw them in the palette their programs were told about.
+    pub(super) fn event(&self) -> v1::HostEvent {
+        // Each channel is the renderer's two digits written twice (`osc_rgb`).
+        let hex = |osc: &str| {
+            let digits: String = osc.split('/').map(|channel| &channel[..2]).collect();
+            format!("#{digits}")
+        };
+        v1::HostEvent {
+            kind: v1::EventKind::TerminalColors.into(),
+            terminal_colors: Some(v1::TerminalColors {
+                foreground: hex(&self.foreground),
+                background: hex(&self.background),
+            }),
+            ..Default::default()
+        }
+    }
+}
+
+/// Tells a connection that just subscribed which colors panes report.
+///
+/// Queued behind the subscribe response, never before it: a client discards
+/// every event its snapshot barrier covers, and a palette is not in the
+/// snapshot. That also covers a change announced while the connection was
+/// still subscribing.
+///
+/// The queue is shared with terminal output and broadcasts, so this waits for
+/// room rather than lose the palette for the whole connection. The slot is
+/// taken first and the colors read under the lock [`TerminalClients::set_colors`]
+/// announces under, so a change racing this send still arrives last.
+pub(super) async fn send_host_terminal_colors(sender: &mpsc::Sender<SequencerControl>) {
+    // A closed connection has no one to tell.
+    let Ok(permit) = sender.reserve().await else {
+        return;
+    };
+    let colors = host_terminal_colors();
+    let colors = colors.lock().unwrap();
+    permit.send(SequencerControl::OrderedEvent(colors.event()));
+}
+
+/// Stores `colors` and, only when they differ from the ones held, hands their
+/// event to `announce` before the lock is released: two desktops racing a
+/// theme change then reach every phone in the order they were stored, and the
+/// colors a desktop re-sends on each connect cost the phones nothing.
+fn replace_colors(
+    shared: &Mutex<TerminalColors>,
+    colors: TerminalColors,
+    announce: impl FnOnce(v1::HostEvent),
+) {
+    let mut current = shared.lock().unwrap();
+    if *current != colors {
+        *current = colors;
+        announce(current.event());
     }
 }
 
@@ -687,8 +741,17 @@ impl TerminalClients {
     /// Always re-reports, even when the daemon already holds these colors:
     /// another desktop may have set them, and this connection's own panes may
     /// still answer with the ones before.
+    ///
+    /// A change to the daemon's colors is announced to every connection. A
+    /// connection holding colors of its own (a test's) has nothing to tell
+    /// the others.
     pub(super) fn set_colors(&mut self, colors: TerminalColors) -> anyhow::Result<()> {
-        *self.colors.lock().unwrap() = colors;
+        let daemon_wide = Arc::ptr_eq(&self.colors, &host_terminal_colors());
+        replace_colors(&self.colors, colors, |event| {
+            if daemon_wide {
+                super::broadcast_control_event(event);
+            }
+        });
         // Every client gets its reports even if one cannot take them.
         let mut first_error = None;
         for client in self.clients.values() {

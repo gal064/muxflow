@@ -40,6 +40,7 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
     assert_eq!(v1::EventKind::VoiceReplyText as i32, 23);
     assert_eq!(v1::EventKind::Chat as i32, 24);
     assert_eq!(v1::EventKind::SessionHistory as i32, 25);
+    assert_eq!(v1::EventKind::TerminalColors as i32, 26);
     assert_eq!(v1::ChatAction::SetMode as i32, 10);
     assert_eq!(v1::HistoryAction::Wake as i32, 4);
     assert_eq!(v1::VoiceProvider::EdgeTts as i32, 1);

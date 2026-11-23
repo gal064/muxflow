@@ -396,6 +396,17 @@ describe("ordered events (§7.4)", () => {
     expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);
   });
 
+  it("draws terminals in the palette of the colors the host reports", async () => {
+    const h = harness();
+    const transport = await connectHappily(h);
+    expect(h.store.getState().terminalScheme).toBe("dark");
+    transport.feed(event(EventKind.TERMINAL_COLORS, 1n, { terminalColors: { foreground: "#1c2129", background: "#fcfcfc" } }));
+    expect(h.store.getState().terminalScheme).toBe("light");
+    transport.feed(event(EventKind.TERMINAL_COLORS, 2n, { terminalColors: { foreground: "#ffffff", background: "#282c34" } }));
+    expect(h.store.getState().terminalScheme).toBe("dark");
+    expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);
+  });
+
   it("answers a chat request with Response.chat, and a refusal with the host's error code", async () => {
     const h = harness();
     const transport = await connectHappily(h);

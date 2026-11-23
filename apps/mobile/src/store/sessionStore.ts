@@ -12,6 +12,7 @@ import {
   type Snapshot,
 } from "../protocol/gen/envelope_pb";
 import { ChatAgentMode } from "../protocol/gen/chat_pb";
+import { DEFAULT_TERMINAL_SCHEME, type TerminalScheme } from "../features/terminal/terminalScheme";
 
 export type ConnectionState =
   | "idle"
@@ -130,6 +131,8 @@ export interface SessionState {
   notificationWatermark: bigint;
   /** Pane currently displayed on the Terminal screen. */
   focusedPaneId?: string | undefined;
+  /** The palette of the colors this host reports to its programs. */
+  terminalScheme: TerminalScheme;
 }
 
 export interface AgentTransition {
@@ -153,7 +156,10 @@ export interface SessionActions {
   /** §8.2: upsert `event.agent` unless stale; remove `retiredAgentIds`. Returns the transition when an upsert happened. */
   applyAgentEvent(event: AgentEvent): AgentTransition | undefined;
   setFocusedPane(paneId: string | undefined): void;
-  /** Forget everything that belongs to a connection (kept: `connection`, `focusedPaneId`). */
+  setTerminalScheme(scheme: TerminalScheme): void;
+  /** Back to dark when leaving a host: the next one may be an older helper that reports nothing. */
+  resetTerminalScheme(): void;
+  /** Forget everything that belongs to a connection (kept: `connection`, `focusedPaneId`, `terminalScheme`). */
   clearHostState(): void;
 }
 
@@ -171,6 +177,7 @@ export function initialSessionState(): SessionState {
     adapters: [],
     agentMode: "unknown",
     notificationWatermark: 0n,
+    terminalScheme: DEFAULT_TERMINAL_SCHEME,
   };
 }
 
@@ -279,9 +286,21 @@ export function createSessionStore(): SessionStore {
       set({ focusedPaneId: paneId });
     },
 
+    setTerminalScheme(scheme) {
+      // A desktop re-sends its colors on every connect; an unchanged scheme redraws nothing.
+      if (get().terminalScheme !== scheme) set({ terminalScheme: scheme });
+    },
+
     clearHostState() {
-      const { connection, focusedPaneId } = get();
-      set({ ...initialSessionState(), connection, focusedPaneId });
+      // The scheme survives too: every subscribe clears host state, and resetting
+      // it there would flash a light terminal dark until the colors arrive again.
+      // Leaving a host resets it (`resetTerminalScheme`).
+      const { connection, focusedPaneId, terminalScheme } = get();
+      set({ ...initialSessionState(), connection, focusedPaneId, terminalScheme });
+    },
+
+    resetTerminalScheme() {
+      get().setTerminalScheme(DEFAULT_TERMINAL_SCHEME);
     },
   }));
 }

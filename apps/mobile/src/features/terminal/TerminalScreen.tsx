@@ -30,6 +30,7 @@ import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { FolderIcon } from "../../ui/components/MediaIcons";
 import { externalLinkTarget } from "../../ui/externalLinks";
 import { useSession } from "../../ui/hooks";
+import { lightColors } from "@muxflow/client-core";
 import { colors, radii, typeScale } from "../../ui/tokens";
 import { displayMessageFor } from "../files/errors";
 import { filesStore } from "../files/filesStore";
@@ -385,7 +386,7 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
           </View>
         ) : (
           <>
-            <TerminalWebView onLoadEnd={() => setPageLoaded(true)} onMessage={onPageMessage} ref={webview} />
+            <TerminalWebView onLoadEnd={() => setPageLoaded(true)} onMessage={onPageMessage} ref={webview} scheme={state.terminalScheme} />
             {snapshot.phase === "exited" ? (
               <View style={styles.banner}>
                 <Text style={styles.bannerText}>This pane has closed.</Text>
@@ -393,7 +394,8 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
             ) : null}
             {snapshot.phase === "noOutput" ? (
               <View pointerEvents="none" style={styles.overlay}>
-                <Text style={styles.overlayText}>No output yet. The pane may be idle.</Text>
+                {/* Drawn over the terminal itself, so it takes the terminal's light or dark ink. */}
+                <Text style={[styles.overlayText, state.terminalScheme === "light" ? { color: lightColors.chromeDim } : null]}>No output yet. The pane may be idle.</Text>
               </View>
             ) : null}
           </>
