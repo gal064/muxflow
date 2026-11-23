@@ -28,6 +28,7 @@ use futures::future::BoxFuture;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     Global, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
+    base::{RenderedText, TextViewState},
     component::{
         input::{InputEvent, InputState, TextareaState},
         message_scroller::MessageScrollerState,
@@ -179,6 +180,16 @@ pub(super) enum Row {
 enum Thought {
     Since(Instant),
     Took(Duration),
+}
+
+/// A message's Markdown outlives the virtual row that first measured it.
+/// Otherwise leading overdraw can cache an empty height, drop the view and
+/// cancel its background parse before the real height is ever available.
+struct Text {
+    state: Entity<TextViewState>,
+    given: SharedString,
+    seen: RenderedText,
+    _changes: Subscription,
 }
 
 /// Choices sent to the host and not yet in its state, one per pill, drawn
@@ -368,6 +379,8 @@ pub struct ChatPane {
     probing: bool,
     /// Each agent message as shown, by item id, with the length it was made from.
     shown: HashMap<String, (usize, SharedString)>,
+    /// Kept separately from link rewrites, which may clear `shown`.
+    texts: HashMap<String, Text>,
     pub(super) loading_older: bool,
     /// Counts `LOAD_OLDER`s, so only the newest one's answer is read.
     older_attempt: u64,
@@ -539,6 +552,7 @@ impl ChatPane {
             probe_queue: VecDeque::new(),
             probing: false,
             shown: HashMap::new(),
+            texts: HashMap::new(),
             loading_older: false,
             older_attempt: 0,
             older_failed: false,
@@ -1108,6 +1122,7 @@ impl ChatPane {
                 self.open_error = None;
                 self.updating = false;
                 self.shown.clear();
+                self.texts.retain(|id, _| self.chat.item(id).is_some());
                 self.loading_older = false;
                 self.older_failed = false;
                 // Not watched from their start.
@@ -1130,6 +1145,7 @@ impl ChatPane {
             Outcome::Truncated(_) => {
                 let chat = &self.chat;
                 self.shown.retain(|id, _| chat.item(id).is_some());
+                self.texts.retain(|id, _| chat.item(id).is_some());
                 self.thoughts.retain(|id, _| chat.item(id).is_some());
                 self.open_groups.retain(|id| chat.item(id).is_some());
                 self.relayout(0, cx);
@@ -2007,6 +2023,55 @@ impl ChatPane {
         // A link shows a file's name where the text had its path.
         self.list.update(cx, |list, cx| list.remeasure(cx));
         cx.notify();
+    }
+
+    /// Retains the parsed Markdown when its row leaves the viewport. A parse
+    /// completing after the row was measured invalidates only that row's
+    /// height, keeping the list's item anchor in place.
+    pub(super) fn text_state(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextViewState> {
+        let given = self.shown_text(index, cx);
+        let id = self.chat.items[index].id.clone();
+        if let Some(text) = self.texts.get_mut(&id) {
+            // The rewrite cache returns the same allocation on every frame.
+            if text.given.as_ptr() != given.as_ptr() || text.given.len() != given.len() {
+                text.state
+                    .update(cx, |state, cx| state.set_text(&given, cx));
+                text.given = given;
+            }
+            return text.state.clone();
+        }
+
+        let state = cx.new(|cx| TextViewState::markdown(&given, cx));
+        let seen = state.read(cx).rendered_text();
+        let key = id.clone();
+        let changes = cx.observe(&state, move |this, state, cx| {
+            let Some(text) = this.texts.get_mut(&key) else {
+                return;
+            };
+            let seen = state.read(cx).rendered_text();
+            if text.state != state || text.seen == seen {
+                return;
+            }
+            text.seen = seen;
+            // Older pages can move indices while a parse is still pending.
+            if let Some(index) = this.chat.items.iter().position(|item| item.id == key) {
+                this.remeasure_item(index, cx);
+            }
+        });
+        self.texts.insert(
+            id,
+            Text {
+                state: state.clone(),
+                given,
+                seen,
+                _changes: changes,
+            },
+        );
+        state
     }
 
     /// An agent message as drawn: its Markdown with file links. Inline code
