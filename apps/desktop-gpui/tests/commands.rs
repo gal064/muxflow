@@ -72,10 +72,13 @@ fn the_positional_selectors_go_to_one_through_nine() {
         );
     }
     // Plus the two commands the Tauri app does not have: History and New
-    // agent session in random.
+    // agent session in random, and the three whole-group Git actions.
     assert!(command_by_id("agents.history").is_some());
     assert!(command_by_id("agents.newInRandom").is_some());
-    assert_eq!(COMMANDS.len(), 65 + 2 + 18);
+    for id in ["git.stageAll", "git.unstageAll", "git.discardAll"] {
+        assert!(command_by_id(id).is_some());
+    }
+    assert_eq!(COMMANDS.len(), 65 + 2 + 18 + 3);
 }
 
 /// id, macOS key, Linux key, `-` for none.
@@ -252,7 +255,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
     press(handle, "secondary-shift-p", cx);
     assert!(dialog_open(handle, cx));
     with_window(handle, cx, |window, _| {
-        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 67);
+        assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 70);
         for command in palette_commands() {
             // The title bar may name a control the same as a command.
             let rows = window.find_all_by_label(command.title);
