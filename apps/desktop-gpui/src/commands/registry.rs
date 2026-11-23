@@ -332,9 +332,9 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_lists_67_and_hides_only_the_positional_selectors() {
-        assert_eq!(COMMANDS.len(), 85);
-        assert_eq!(palette_commands().count(), 67);
+    fn the_palette_lists_70_and_hides_only_the_positional_selectors() {
+        assert_eq!(COMMANDS.len(), 88);
+        assert_eq!(palette_commands().count(), 70);
         for command in COMMANDS.iter().filter(|command| command.palette_hidden) {
             assert!(
                 command.id.starts_with("workspace.select") || command.id.starts_with("tab.select"),
