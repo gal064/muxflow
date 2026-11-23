@@ -76,6 +76,23 @@ that key and would otherwise send nothing at all. Ctrl+_ is left to xterm.js,
 which already encodes it correctly. Ctrl+Shift+/ (Ctrl+?) is a different key and
 is unaffected.
 
+## Light or dark terminal on the phone
+
+The phone draws a host's terminals in the desktop's terminal palette: light
+when the desktop is light, even if the phone is in dark mode. This is on
+purpose. A program can ask the terminal for its background color, and tmux
+gives one answer per pane, which Muxflow sets from the desktop. Codex asks once
+at startup and then paints its composer and prompts in colors chosen for that
+background, so they are only readable on a terminal with the same background.
+
+Codex never asks again. After switching the desktop between light and dark,
+restart Codex, or its panes keep the old theme's colors on every device. The
+same applies to other programs that pick colors at startup, such as Neovim.
+
+The palette is per host, taken from the desktop that last set it. Two desktops
+in different themes on one host each set it again when they connect. An older
+host helper reports no colors, and the phone stays dark.
+
 # A Mac as an SSH host
 
 - **Connection refused on port 22.** Turn on System Settings → General →

@@ -21,7 +21,7 @@ import {
   TERMINAL_LONG_PRESS_MS,
 } from "../../src/features/terminal/touchIntent";
 import { TouchScrollController } from "../../src/features/terminal/touchScroll";
-import { terminalTheme } from "../../src/ui/tokens";
+import { DEFAULT_TERMINAL_SCHEME, terminalThemeFor, type TerminalScheme } from "../../src/features/terminal/terminalScheme";
 
 declare global {
   interface Window {
@@ -44,6 +44,7 @@ function decodeBase64(b64: string): Uint8Array {
 }
 
 let term: Terminal | undefined;
+let scheme: TerminalScheme = DEFAULT_TERMINAL_SCHEME;
 let fit: FitAddon | undefined;
 let stream: TerminalStream | undefined;
 let lastGrid: Grid | undefined;
@@ -95,7 +96,21 @@ function scheduleMeasure(): void {
   }, RESIZE_DEBOUNCE_MS);
 }
 
-async function init(fontSize: number): Promise<void> {
+/**
+ * Draws the page and the buffer in `scheme`. xterm repaints every cell; colors
+ * a program wrote explicitly stay as written, which is why the scheme follows
+ * what the host reported to it.
+ */
+function applyScheme(next: TerminalScheme): void {
+  // Kept for the terminal `init` creates after its font wait, so a `theme`
+  // that arrives during that wait is not lost.
+  scheme = next;
+  document.documentElement.dataset.scheme = next;
+  if (term) term.options.theme = terminalThemeFor(next);
+}
+
+async function init(fontSize: number, initialScheme: TerminalScheme): Promise<void> {
+  applyScheme(initialScheme);
   if (term) {
     term.options.fontSize = fontSize;
     measure(true);
@@ -138,7 +153,7 @@ async function init(fontSize: number): Promise<void> {
         if (sameRange(hoveredLink.range, range)) hoveredLink.range = undefined;
       },
     },
-    theme: terminalTheme,
+    theme: terminalThemeFor(scheme),
   });
   stream = new TerminalStream(term, (bytes) => post({ t: "written", bytes }),
     (error) => post({ t: "log", line: `stream error: ${String(error)}` }));
@@ -603,7 +618,10 @@ async function init(fontSize: number): Promise<void> {
 function receive(message: ToPageMessage): void {
   switch (message.t) {
     case "init":
-      void init(message.fontSize);
+      void init(message.fontSize, message.scheme);
+      return;
+    case "theme":
+      applyScheme(message.scheme);
       return;
     case "measure":
       measure(true);

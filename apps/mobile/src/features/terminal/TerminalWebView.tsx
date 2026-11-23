@@ -1,10 +1,10 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from "react";
 import { StyleSheet } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
 import { PAGE_RECEIVE_FUNCTION, parseFromPageMessage, type FromPageMessage, type ToPageMessage } from "./bridgeMessages";
-import { TERMINAL_HTML } from "./terminalHtml";
-import { colors } from "../../ui/tokens";
+import { terminalDocument } from "./terminalDocument";
+import { terminalThemeFor, type TerminalScheme } from "./terminalScheme";
 
 const TERMINAL_DOCUMENT_ORIGIN = "https://terminal.muxflow.invalid";
 const TERMINAL_DOCUMENT_URL = `${TERMINAL_DOCUMENT_ORIGIN}/`;
@@ -19,9 +19,12 @@ export interface TerminalWebViewHandle {
  * come back through `onMessage`. `textZoom={100}` pins the cell size against
  * the system font scale, which would otherwise break the sizing rule.
  */
-export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (message: FromPageMessage) => void; onLoadEnd?: () => void }>(
-  function TerminalWebView({ onMessage, onLoadEnd }, ref) {
+export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (message: FromPageMessage) => void; onLoadEnd?: () => void; scheme: TerminalScheme }>(
+  function TerminalWebView({ onMessage, onLoadEnd, scheme }, ref) {
     const webview = useRef<WebView<object>>(null);
+    // Only the first scheme goes into the source: a new source would reload the
+    // page and lose its buffer. Later changes arrive as `theme` messages.
+    const [html] = useState(() => terminalDocument(scheme));
     useImperativeHandle(ref, () => ({
       send(message) {
         webview.current?.injectJavaScript(`window.${PAGE_RECEIVE_FUNCTION} && window.${PAGE_RECEIVE_FUNCTION}(${JSON.stringify(message)}); true;`);
@@ -55,8 +58,8 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (m
         overScrollMode="never"
         ref={webview}
         setSupportMultipleWindows={false}
-        source={{ html: TERMINAL_HTML, baseUrl: TERMINAL_DOCUMENT_URL }}
-        style={styles.webview}
+        source={{ html, baseUrl: TERMINAL_DOCUMENT_URL }}
+        style={[styles.webview, { backgroundColor: terminalThemeFor(scheme).background }]}
         textZoom={100}
       />
     );
@@ -64,5 +67,5 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (m
 );
 
 const styles = StyleSheet.create({
-  webview: { backgroundColor: colors.chromeBg, flex: 1 },
+  webview: { flex: 1 },
 });

@@ -354,6 +354,7 @@ function closeHostConnection({ keepVoiceSessions = false, keepHostState = false 
   if (!keepVoiceSessions) voiceRegistry.disposeAll();
   if (!keepHostState) {
     sessionStore.getState().clearHostState();
+    sessionStore.getState().resetTerminalScheme();
     chatClient.reset();
     historyClient.reset();
   }
