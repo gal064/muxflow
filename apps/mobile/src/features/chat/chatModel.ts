@@ -325,12 +325,13 @@ const SKILL_WORD = /(?:^|\s)\$(\S*)$/;
  * The composer's list for `draft`. A slash followed by a name and nothing
  * after it lists the commands and skills; a `$` in the last word, anywhere in
  * the message, lists the skills. Prefix matches rank before matches inside
- * the name. Muxflow's entries need a provider that can fork.
+ * the name. Muxflow's entries need a provider that can fork. Without
+ * `dollarSkills` (a terminal's agent that has no `$` of its own) a `$` lists nothing.
  */
-export function slashMatches(catalog: ChatCatalog | undefined, draft: string): CommandGroup[] {
+export function slashMatches(catalog: ChatCatalog | undefined, draft: string, dollarSkills = true): CommandGroup[] {
   if (!catalog) return [];
   const slash = /^\/(\S*)$/.exec(draft);
-  const skill = slash ? null : SKILL_WORD.exec(draft);
+  const skill = slash || !dollarSkills ? null : SKILL_WORD.exec(draft);
   const match = slash ?? skill;
   if (!match) return [];
   const sigil = skill ? "$" : "/";

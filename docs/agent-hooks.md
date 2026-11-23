@@ -270,10 +270,13 @@ A parent `Stop` remains Working until that map is empty,
 including across daemon restarts, while a real Blocked state remains Blocked
 until its own question or permission resolves. A Claude `Stop` retains only two
 booleans: whether a subagent is still running, and whether a background shell or
-monitor is. Task descriptions, commands, IDs, and the rest of Claude's
-background-task payload are discarded. The daemon retains the subagent boolean
-until the final `Stop`, including across restarts, so Claude's routine idle
-notification cannot misreport a long-running subagent as blocked.
+monitor is. A monitor counts only when it has a command (the Monitor tool) or an
+MCP server: Claude's own watches, such as the live-updates watch armed on every
+artifact publish, run until the session ends and never count. Task descriptions,
+commands, IDs, and the rest of Claude's background-task payload are discarded.
+The daemon retains the subagent boolean until the final `Stop`, including across
+restarts, so Claude's routine idle notification cannot misreport a long-running
+subagent as blocked.
 
 An experiment, being evaluated, holds notifications on Claude turns started by
 a background task: such a turn stays Working while a shell or monitor is still

@@ -178,6 +178,13 @@ describe("the reply field's mic", () => {
     expect(byLabel(view, "Talk").props.disabled).toBe(true);
   });
 
+  it("the empty field says the mic can be held until a first dictation", () => {
+    const placeholder = (view: ReactTestRenderer) => byLabel(view, "Message").props.placeholder as string;
+    expect(placeholder(composer({ taught: false }, []))).toBe("Reply · hold the mic to dictate");
+    expect(placeholder(composer({ taught: true }, []))).toBe("Reply");
+    // A field already saying something else keeps it.
+    expect(placeholder(composer({ taught: false }, [], { working: true }))).toBe("Send a follow-up while it works");
+  });
 });
 
 function composerElement(fields: Partial<ComposerDictation>, calls: string[], props: Partial<ComposerProps> = {}) {

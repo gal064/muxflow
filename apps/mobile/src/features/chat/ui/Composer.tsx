@@ -77,7 +77,9 @@ export function Composer(props: ComposerProps) {
   const sendDisabled = disabled || sending || (blocked && !sideQuestion) || !hasMessage || filesHeld !== undefined;
   // Nothing to send yet, or not all of it on the host yet.
   const sendPlain = !hasMessage || files === "uploading";
-  const placeholder = props.placeholder ?? (blocked ? "Answer the card above" : working && canSendMidTurn ? "Send a follow-up while it works" : "Reply");
+  // Until a first dictation, the empty field says the mic can be held.
+  const replyPlaceholder = mic?.dictation && !mic.dictation.taught ? "Reply · hold the mic to dictate" : "Reply";
+  const placeholder = props.placeholder ?? (blocked ? "Answer the card above" : working && canSendMidTurn ? "Send a follow-up while it works" : replyPlaceholder);
   // A dictation is sent as Send would send it, so it waits for what Send waits for.
   const dictationRefusal = blocked && !sideQuestion ? "Answer the card above first" : working && !canSendMidTurn && !sideQuestion && !editing ? "The agent takes a message once it stops" : "";
   const dictation = mic?.dictation;

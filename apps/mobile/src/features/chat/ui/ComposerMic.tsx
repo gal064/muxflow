@@ -22,6 +22,8 @@ export interface ComposerDictation {
   phase: VoicePhase;
   /** Why a hold records nothing now; empty when it can. */
   refusal: string;
+  /** A hold has dictated once, or the tip was dismissed: the empty field stops saying how. */
+  taught: boolean;
   /** The finger went down on the mic: the microphone gets ready. */
   onPressIn: () => void;
   /** The finger came up, whatever the press did. */
@@ -197,18 +199,21 @@ function DictationStrip({ dictation, direction }: { dictation: ComposerDictation
     );
   }
   // The finger is on the mic, which stays above the strip; the strip only shows where to swipe.
+  // The red wash is see-through, so an opaque strip under it hides the field and its buttons.
   return (
-    <View pointerEvents="none" style={[styles.strip, styles.stripRecording]}>
-      <View style={[styles.target, styles.lock, direction === "lock" && styles.lockActive]}>
-        <LockIcon color={direction === "lock" ? colors.accentInk : colors.accent} size={15} />
-      </View>
-      <View style={styles.stripMiddle}>
-        <View style={styles.dot} />
-        <Text {...fixedChromeText} style={styles.elapsed}>{elapsed}</Text>
-        <Text accessibilityLiveRegion="polite" numberOfLines={1} style={styles.stripLabel}>‹ Lock · Discard ›</Text>
-      </View>
-      <View style={[styles.target, styles.discard, styles.discardEnd, direction === "cancel" && styles.discardActive]}>
-        <TrashIcon color={direction === "cancel" ? colors.chromeInkStrong : colors.dangerInk} size={15} />
+    <View pointerEvents="none" style={styles.stripBase}>
+      <View style={[styles.strip, styles.stripRecording]}>
+        <View style={[styles.target, styles.lock, direction === "lock" && styles.lockActive]}>
+          <LockIcon color={direction === "lock" ? colors.accentInk : colors.accent} size={15} />
+        </View>
+        <View style={styles.stripMiddle}>
+          <View style={styles.dot} />
+          <Text {...fixedChromeText} style={styles.elapsed}>{elapsed}</Text>
+          <Text accessibilityLiveRegion="polite" numberOfLines={1} style={styles.stripLabel}>‹ Lock · Discard ›</Text>
+        </View>
+        <View style={[styles.target, styles.discard, styles.discardEnd, direction === "cancel" && styles.discardActive]}>
+          <TrashIcon color={direction === "cancel" ? colors.chromeInkStrong : colors.dangerInk} size={15} />
+        </View>
       </View>
     </View>
   );
@@ -223,6 +228,8 @@ const styles = StyleSheet.create({
   discRecording: { backgroundColor: colors.danger, borderColor: colors.danger },
   pressed: { opacity: 0.75 },
   strip: { alignItems: "center", bottom: 0, flexDirection: "row", gap: 8, left: 0, paddingHorizontal: 8, position: "absolute", right: 0, top: 0, zIndex: 1 },
+  /** Opaque, under the recording strip's see-through wash. */
+  stripBase: { backgroundColor: colors.chromeBg, bottom: 0, left: 0, position: "absolute", right: 0, top: 0, zIndex: 1 },
   stripRecording: { backgroundColor: colors.dangerWash },
   stripPlain: { backgroundColor: colors.chromeBg },
   stripMiddle: { alignItems: "center", flex: 1, flexDirection: "row", gap: 6, minWidth: 0 },

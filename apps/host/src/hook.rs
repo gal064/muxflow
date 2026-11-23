@@ -443,6 +443,12 @@ impl<'de> Deserialize<'de> for TaskWakeupPrompt {
 
 /// `shell_or_monitor` is an allowlist on purpose. Claude also lists internal
 /// work, such as memory saves, that never wakes the agent again.
+///
+/// A `monitor` counts only with a `command` (the Monitor tool) or a `server`
+/// (an MCP monitor). Claude also reports its own websocket watches as
+/// `monitor`, such as the live-updates watch it arms on every artifact
+/// publish. Those carry neither field and run until the session ends, so
+/// counting them would hold every later wakeup turn.
 #[derive(Clone, Copy, Default)]
 struct BackgroundWork {
     subagent: bool,
@@ -524,6 +530,8 @@ impl<'de> Visitor<'de> for BackgroundWorkVisitor {
 enum TaskField {
     Type,
     Status,
+    Command,
+    Server,
     Unknown,
 }
 
@@ -549,6 +557,8 @@ impl Visitor<'_> for TaskFieldVisitor {
         Ok(match value {
             "type" => TaskField::Type,
             "status" => TaskField::Status,
+            "command" => TaskField::Command,
+            "server" => TaskField::Server,
             _ => TaskField::Unknown,
         })
     }
@@ -580,10 +590,15 @@ impl<'de> Visitor<'de> for BackgroundTaskMatchVisitor {
     {
         let mut task_type = TaskToken::Other;
         let mut status = TaskToken::Other;
+        let mut has_command_or_server = false;
         while let Some(field) = map.next_key::<TaskField>()? {
             match field {
                 TaskField::Type => task_type = map.next_value()?,
                 TaskField::Status => status = map.next_value()?,
+                TaskField::Command | TaskField::Server => {
+                    map.next_value::<IgnoredAny>()?;
+                    has_command_or_server = true;
+                }
                 TaskField::Unknown => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -591,7 +606,8 @@ impl<'de> Visitor<'de> for BackgroundTaskMatchVisitor {
         }
         Ok(BackgroundTaskMatch(BackgroundWork {
             subagent: task_type == TaskToken::Subagent && status == TaskToken::Running,
-            shell_or_monitor: matches!(task_type, TaskToken::Shell | TaskToken::Monitor)
+            shell_or_monitor: (task_type == TaskToken::Shell
+                || task_type == TaskToken::Monitor && has_command_or_server)
                 && matches!(status, TaskToken::Running | TaskToken::Pending),
         }))
     }
@@ -2182,17 +2198,52 @@ mod tests {
 
     #[test]
     fn claude_stop_counts_only_live_shells_and_monitors_as_background_work() {
-        for (task_type, status, expected) in [
-            ("shell", "running", true),
-            ("shell", "pending", true),
-            ("monitor", "running", true),
-            ("shell", "completed", false),
-            ("memory save", "running", false),
-            ("teammate", "running", false),
+        // Claude Code 2.1.330 arms this on every artifact publish and keeps it
+        // running for the rest of the session.
+        let artifact_watch = serde_json::json!({
+            "id": "sozw7hxc2",
+            "type": "monitor",
+            "status": "running",
+            "description": "live updates for artifact https://claude.ai/artifact/x (auto-armed on publish)",
+        });
+        for (tasks, expected) in [
+            (
+                serde_json::json!([{"type": "shell", "status": "running"}]),
+                true,
+            ),
+            (
+                serde_json::json!([{"type": "shell", "status": "pending"}]),
+                true,
+            ),
+            (
+                serde_json::json!([{"type": "monitor", "status": "running", "command": "tail -f log"}]),
+                true,
+            ),
+            (
+                serde_json::json!([{"type": "monitor", "status": "running", "server": "s", "tool": "t"}]),
+                true,
+            ),
+            (
+                serde_json::json!([{"type": "shell", "status": "completed"}]),
+                false,
+            ),
+            (
+                serde_json::json!([{"type": "memory save", "status": "running"}]),
+                false,
+            ),
+            (
+                serde_json::json!([{"type": "teammate", "status": "running"}]),
+                false,
+            ),
+            (serde_json::json!([artifact_watch.clone()]), false),
+            (
+                serde_json::json!([artifact_watch, {"type": "shell", "status": "running"}]),
+                true,
+            ),
         ] {
             let raw = serde_json::to_vec(&serde_json::json!({
                 "hook_event_name": "Stop",
-                "background_tasks": [{"type": task_type, "status": status}],
+                "background_tasks": tasks,
             }))
             .unwrap();
             assert_eq!(
@@ -2200,7 +2251,7 @@ mod tests {
                     .get(crate::service::agents::adapters::CLAUDE_HAS_BACKGROUND_WORK_FIELD)
                     .is_some(),
                 expected,
-                "{task_type} {status}"
+                "{tasks}"
             );
         }
     }
