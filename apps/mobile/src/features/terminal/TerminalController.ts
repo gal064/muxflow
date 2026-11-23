@@ -138,6 +138,7 @@ export class TerminalController {
   private attachOnForeground = false;
   private unsubscribeForeground: (() => void) | undefined;
   private unsubscribeBackground: (() => void) | undefined;
+  private unsubscribeScheme: (() => void) | undefined;
   /** The connection epoch on which this controller issued its latest select. */
   private sizingClaimEpoch: bigint | undefined;
   /** Invalidates a select or resize that crossed an app visibility change. */
@@ -210,7 +211,11 @@ export class TerminalController {
         void this.reclaimSizing();
       }
     });
-    this.options.page.send({ t: "init", fontSize: this.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE });
+    const store = this.options.store;
+    this.options.page.send({ t: "init", fontSize: this.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE, scheme: store.getState().terminalScheme });
+    this.unsubscribeScheme = store.subscribe((state, previous) => {
+      if (state.terminalScheme !== previous.terminalScheme) this.options.page.send({ t: "theme", scheme: state.terminalScheme });
+    });
   }
 
   /** The WebView page reported something (§10.2). */
@@ -347,6 +352,8 @@ export class TerminalController {
     this.unsubscribeForeground = undefined;
     this.unsubscribeBackground?.();
     this.unsubscribeBackground = undefined;
+    this.unsubscribeScheme?.();
+    this.unsubscribeScheme = undefined;
     const store = this.options.store.getState();
     if (store.focusedPaneId === this.paneId) store.setFocusedPane(undefined);
     const connection = this.liveConnection();

@@ -1178,6 +1178,58 @@ fn terminal_colors_accept_only_six_hex_digits() {
 }
 
 #[test]
+fn the_colors_event_carries_the_renderers_hex() {
+    let event = TerminalColors::from_hex("#383A42", "#fafafa")
+        .unwrap()
+        .event();
+    assert_eq!(event.kind, v1::EventKind::TerminalColors as i32);
+    assert_eq!(
+        event.terminal_colors,
+        Some(v1::TerminalColors {
+            foreground: "#383a42".into(),
+            background: "#fafafa".into(),
+        })
+    );
+}
+
+#[test]
+fn only_a_change_of_colors_is_announced() {
+    let shared = Mutex::new(TerminalColors::default());
+    let light = TerminalColors::from_hex("#383a42", "#fafafa").unwrap();
+    let mut announced = Vec::new();
+    replace_colors(&shared, light.clone(), |event| announced.push(event));
+    // A desktop re-sends its colors on every connect.
+    replace_colors(&shared, light.clone(), |event| announced.push(event));
+    assert_eq!(announced, [light.event()]);
+    assert_eq!(*shared.lock().unwrap(), light);
+}
+
+#[tokio::test]
+async fn a_subscriber_is_told_the_daemon_colors_even_behind_a_full_queue() {
+    let (sender, mut receiver) = mpsc::channel(1);
+    let earlier = v1::HostEvent {
+        kind: v1::EventKind::TerminalOutput.into(),
+        ..Default::default()
+    };
+    sender
+        .try_send(SequencerControl::OrderedEvent(earlier.clone()))
+        .unwrap();
+    let send = tokio::spawn(async move { send_host_terminal_colors(&sender).await });
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        let Some(SequencerControl::OrderedEvent(event)) = receiver.recv().await else {
+            panic!("expected ordered events");
+        };
+        received.push(event);
+    }
+    send.await.unwrap();
+    assert_eq!(
+        received,
+        [earlier, host_terminal_colors().lock().unwrap().event()]
+    );
+}
+
+#[test]
 fn color_reports_are_capability_gated_for_tmux_33() {
     assert!(tmux_supports_control_color_reports(
         b"refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-r pane:report] [-t target-client] [adjustment]\n"

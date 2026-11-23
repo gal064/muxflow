@@ -157,6 +157,9 @@ fn spawn_snapshot_request(request: SnapshotRequest) {
                         )),
                     )
                     .await;
+                    if subscribe_after {
+                        super::terminal::send_host_terminal_colors(&sender).await;
+                    }
                     reconcile_terminal_clients(&terminal, &value, &event_sender, &overflowed);
                     if subscribe_after {
                         subscribed.store(true, Ordering::Release);
