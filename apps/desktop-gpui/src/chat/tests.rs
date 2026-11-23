@@ -400,6 +400,8 @@ struct HostState {
     /// Every upload and preflight started, in order.
     uploads: Vec<Uploaded>,
     cancelled_uploads: Vec<String>,
+    /// Every incident recorded, as its kind and detail.
+    incidents: Vec<(String, Value)>,
     /// Every tmux action asked for, in order.
     actions: Vec<Value>,
 }
@@ -554,7 +556,9 @@ impl TerminalBackend for FakeHost {
         Ok(())
     }
 
-    fn record_incident(&self, _: &str, _: Value) {}
+    fn record_incident(&self, kind: &str, detail: Value) {
+        self.state().incidents.push((kind.to_owned(), detail));
+    }
 
     fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
         Ok(())
@@ -3975,6 +3979,19 @@ mod attachments {
             "muxflow-gpui.log, upload failed: disk full"
         );
         assert!(shell.shows("chat-attachment-retry-1"));
+        // Why it failed is kept where a bug report can find it.
+        let failures: Vec<Value> = shell
+            .host
+            .state()
+            .incidents
+            .iter()
+            .filter(|(kind, _)| kind == "chat.uploadFailed")
+            .map(|(_, detail)| detail.clone())
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["error"], "disk full");
+        assert_eq!(failures[0]["name"], "muxflow-gpui.log");
+        assert!(failures[0]["transferId"].is_string());
         shell.input("The log from the crash is attached.");
         shell.press("enter");
         assert_eq!(shell.host.count(ChatAction::Send), 0);
