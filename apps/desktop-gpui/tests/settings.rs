@@ -396,6 +396,31 @@ fn the_font_size_commits_when_typed_and_stays_within_its_bounds(cx: &mut TestApp
     });
 }
 
+#[gpui_kit::test]
+fn terminal_colors_load_apply_live_and_reset(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let state = write_state(
+        directory.path(),
+        json!({ "theme": "dark", "terminalForeground": 0xdce4ef }),
+    );
+    let handle = open_app(&state, cx);
+    let palette = |cx: &mut TestAppContext| cx.read(muxflow_gpui::theme::palette);
+    assert_eq!(palette(cx).term_fg, gpui_kit::rgb(0xdce4ef));
+    open_settings(handle, Some("Terminal"), cx);
+
+    type_into(handle, "settings-terminal-background", "#171b22", cx);
+    assert_eq!(palette(cx).term_bg, gpui_kit::rgb(0x171b22));
+    saved(cx, &state, |value| {
+        value["shell"]["terminalBackground"] == json!(0x171b22)
+    });
+
+    type_into(handle, "settings-terminal-foreground", "", cx);
+    assert_eq!(palette(cx).term_fg, muxflow_gpui::theme::dark().term_fg);
+    saved(cx, &state, |value| {
+        value["shell"]["terminalForeground"].is_null()
+    });
+}
+
 /// A click on a checkbox or a button does not move focus out of a field, so
 /// what was typed must count when the dialog closes or the tab changes.
 #[gpui_kit::test]

@@ -101,7 +101,10 @@ pub fn update(change: impl FnOnce(&mut Prefs), window: &mut Window, cx: &mut App
     let settings = cx.global_mut::<Settings>();
     settings.prefs = after.clone();
     *settings.latest.lock().unwrap() = after.clone();
-    if (after.theme, after.ui_scale) != (before.theme, before.ui_scale) {
+    if (after.theme, after.ui_scale) != (before.theme, before.ui_scale)
+        || after.terminal_foreground != before.terminal_foreground
+        || after.terminal_background != before.terminal_background
+    {
         let system = cx.window_appearance();
         theme::apply(after.theme, after.ui_scale, system, cx);
         cx.refresh_windows();
@@ -280,9 +283,15 @@ pub fn reload(state: &PersistedAppState, cx: &mut App) {
 pub fn init(cx: &mut App) {
     let state = load_app_state(&cx.global::<Core>().app_state).unwrap_or_default();
     let prefs = Prefs::from_state(&state);
+    let (preference, scale) = (prefs.theme, prefs.ui_scale);
+    let has_terminal_colors =
+        prefs.terminal_foreground.is_some() || prefs.terminal_background.is_some();
     cx.set_global(Settings {
         latest: Arc::new(Mutex::new(prefs.clone())),
         prefs,
     });
+    if has_terminal_colors {
+        theme::apply(preference, scale, cx.window_appearance(), cx);
+    }
     dialog::init(cx);
 }

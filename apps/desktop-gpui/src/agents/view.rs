@@ -925,6 +925,15 @@ fn agent_row(
                     )
                 }),
         )
+        .when(row.state == DisplayState::Working, |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .text_size(ui(11.))
+                    .text_color(if selected { ink } else { palette.state_working })
+                    .child("Running"),
+            )
+        })
         .child(
             div()
                 .flex_none()

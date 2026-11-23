@@ -216,6 +216,22 @@ pub fn font_size_from_text(typed: &str, current: u8) -> (u8, bool) {
     }
 }
 
+fn terminal_color_from_text(typed: &str, current: Option<u32>) -> Option<u32> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    typed
+        .strip_prefix('#')
+        .filter(|hex| hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .or(current)
+}
+
+fn terminal_color_text(color: Option<u32>) -> String {
+    color.map_or_else(String::new, |color| format!("#{color:06x}"))
+}
+
 /// `<input type="range" min="0" max="1" step="0.05">`.
 const VOLUME_STEP: f32 = 0.05;
 
@@ -251,6 +267,8 @@ pub struct SettingsDialog {
     controller: Option<Entity<ConnectionController>>,
     form: Option<Entity<ConnectionForm>>,
     font_size: Entity<InputState>,
+    terminal_foreground: Entity<InputState>,
+    terminal_background: Entity<InputState>,
     start_directory: Entity<InputState>,
     startup_command: Entity<InputState>,
     /// The Snooze menu's wake times, comma separated.
@@ -284,6 +302,14 @@ impl SettingsDialog {
             input.set_value(prefs.terminal_font_size.to_string(), window, cx);
             input
         });
+        let [terminal_foreground, terminal_background] =
+            [prefs.terminal_foreground, prefs.terminal_background].map(|color| {
+                cx.new(|cx| {
+                    let mut input = InputState::new(window, cx).placeholder("Use theme");
+                    input.set_value(terminal_color_text(color), window, cx);
+                    input
+                })
+            });
         let start_directory = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder("Home directory");
             input.set_value(defaults.directory.clone().unwrap_or_default(), window, cx);
@@ -342,6 +368,15 @@ impl SettingsDialog {
                 }
             }),
         ];
+        for input in [&terminal_foreground, &terminal_background] {
+            subscriptions.push(
+                cx.subscribe_in(input, window, |this, _, event, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.commit_terminal_colors(window, cx);
+                    }
+                }),
+            );
+        }
         let form = controller.as_ref().map(|controller| {
             let controller = controller.clone();
             cx.new(|cx| ConnectionForm::new(controller, window, cx))
@@ -361,6 +396,8 @@ impl SettingsDialog {
             controller,
             form,
             font_size,
+            terminal_foreground,
+            terminal_background,
             start_directory,
             startup_command,
             snooze_times,
@@ -425,6 +462,38 @@ impl SettingsDialog {
         set_text(&self.font_size, size.to_string(), window, cx);
     }
 
+    fn commit_terminal_colors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefs = get(cx);
+        let foreground = terminal_color_from_text(
+            &self.terminal_foreground.read(cx).value(),
+            prefs.terminal_foreground,
+        );
+        let background = terminal_color_from_text(
+            &self.terminal_background.read(cx).value(),
+            prefs.terminal_background,
+        );
+        update(
+            |prefs| {
+                prefs.terminal_foreground = foreground;
+                prefs.terminal_background = background;
+            },
+            window,
+            cx,
+        );
+        set_text(
+            &self.terminal_foreground,
+            terminal_color_text(foreground),
+            window,
+            cx,
+        );
+        set_text(
+            &self.terminal_background,
+            terminal_color_text(background),
+            window,
+            cx,
+        );
+    }
+
     fn commit_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let directory = self.start_directory.read(cx).value().to_string();
         let command = self.startup_command.read(cx).value().to_string();
@@ -452,6 +521,7 @@ impl SettingsDialog {
     /// of a field, so blur alone would drop what was typed.
     fn commit_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_font_size(window, cx);
+        self.commit_terminal_colors(window, cx);
         self.commit_defaults(window, cx);
         self.commit_snooze_times(window, cx);
     }
@@ -886,6 +956,37 @@ impl SettingsDialog {
                         ),
                     )
                     .child(hint("Applies to all open terminals.", cx)),
+            )
+            .child(
+                v_flex()
+                    .gap(ui(5.))
+                    .child(
+                        div().flex().gap(ui(12.)).children(
+                            [
+                                (
+                                    "Foreground",
+                                    "settings-terminal-foreground",
+                                    &self.terminal_foreground,
+                                ),
+                                (
+                                    "Background",
+                                    "settings-terminal-background",
+                                    &self.terminal_background,
+                                ),
+                            ]
+                            .map(|(label, id, input)| {
+                                v_flex()
+                                    .w(ui(120.))
+                                    .gap(ui(5.))
+                                    .child(caption(label, cx))
+                                    .child(Input::new(input).id(id).aria_label(label))
+                            }),
+                        ),
+                    )
+                    .child(hint(
+                        "Enter a #RRGGBB color or clear the field to use the theme.",
+                        cx,
+                    )),
             )
             .child(setting_check(
                 "settings-copy-on-select",

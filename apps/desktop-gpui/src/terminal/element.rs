@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Point as ViewportPoint;
 use gpui_kit::{
     App, Bounds, ContentMask, Element, ElementId, Entity, FontStyle, FontWeight, GlobalElementId,
     Hsla, InspectorElementId, IntoElement, LayoutId, LineLayout, Pixels, Rgba, ShapedLine,
@@ -186,10 +187,17 @@ struct GridFrame {
     metrics: std::rc::Rc<CellMetrics>,
     cursor: Option<(CursorSpec, Option<ShapedLine>)>,
     cursor_color: Hsla,
-    preedit: Option<ShapedLine>,
+    preedit: Option<PreeditFrame>,
     rows: usize,
     rendered_rows: usize,
     stats: CacheStats,
+}
+
+struct PreeditFrame {
+    position: ViewportPoint<usize>,
+    line: ShapedLine,
+    background: Hsla,
+    placeholder_columns: usize,
 }
 
 impl Element for TerminalElement {
@@ -241,12 +249,14 @@ impl Element for TerminalElement {
         let repaint_all = pane.repaint_all.clone();
         let cursor_on = pane.cursor_on();
         let revealed = pane.revealed();
-        let preedit = pane.input.preedit.clone();
+        let preedit = (revealed && self.focused)
+            .then(|| pane.input.preedit.clone())
+            .flatten();
 
         // Before reading the grid: anything written after this raises the flag
         // again and wakes the pane, so no update can fall between.
         terminal.take_dirty();
-        let (rows_to_shape, cursor, rows) = {
+        let (rows_to_shape, cursor, preedit, rows) = {
             let mut term = terminal.lock();
             let rows = term.screen_lines();
             let columns = term.columns();
@@ -266,10 +276,14 @@ impl Element for TerminalElement {
                 .map(|row| (row, grid::build_row(&term, row, &grid_palette, &highlights)))
                 .collect();
             // Until the pane has its content there is only an empty grid.
-            let cursor = revealed
+            let preedit = preedit.and_then(|text| {
+                let position = grid::input_position(&term)?;
+                Some((position, text, grid::input_overlay(&term, &grid_palette)))
+            });
+            let cursor = (revealed && preedit.is_none())
                 .then(|| grid::cursor_spec(&term, self.focused, &grid_palette))
                 .flatten();
-            (specs, cursor, rows)
+            (specs, cursor, preedit, rows)
         };
 
         let rendered_rows = rows_to_shape.len();
@@ -301,7 +315,7 @@ impl Element for TerminalElement {
                 });
                 (cursor, glyph)
             });
-        let preedit = preedit.filter(|_| self.focused).map(|text| {
+        let preedit = preedit.map(|(position, text, (background, placeholder_columns))| {
             let run = TextRun {
                 len: text.len(),
                 font: metrics.font.clone(),
@@ -314,9 +328,15 @@ impl Element for TerminalElement {
                 }),
                 strikethrough: None,
             };
-            window
+            let line = window
                 .text_system()
-                .shape_line(text, metrics.font_size, &[run], None)
+                .shape_line(text, metrics.font_size, &[run], None);
+            PreeditFrame {
+                position,
+                line,
+                background: hsla(background),
+                placeholder_columns,
+            }
         });
         let scale = window.scale_factor();
         let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
@@ -411,6 +431,26 @@ impl Element for TerminalElement {
                 }
             }
             paint_cursor(grid, cell_w, cell_h, origin, window, cx);
+            if let Some(preedit) = grid.preedit.as_ref() {
+                let at = point(
+                    origin.x + cell_w * preedit.position.column.0 as f32,
+                    origin.y + cell_h * preedit.position.line as f32,
+                );
+                let line = &preedit.line;
+                let stroke = ui(2.).to_pixels(window.rem_size());
+                let width =
+                    (line.width() + stroke).max(cell_w * preedit.placeholder_columns as f32);
+                let color = grid.cursor_color;
+                window.paint_quad(fill(
+                    Bounds::new(at, size(width, cell_h)),
+                    preedit.background,
+                ));
+                let _ = line.paint(at, cell_h, TextAlign::Left, None, window, cx);
+                window.paint_quad(fill(
+                    Bounds::new(point(at.x + line.width(), at.y), size(stroke, cell_h)),
+                    color,
+                ));
+            }
         });
 
         let now = Instant::now();
@@ -493,20 +533,6 @@ fn paint_cursor(
     let width = cell_w * cursor.cell_span as f32;
     let cell = Bounds::new(at, size(width, cell_h));
     let color = grid.cursor_color;
-    if let Some(preedit) = grid.preedit.as_ref() {
-        // While composing, the preedit replaces the cursor: a block cursor
-        // under it would hide its first glyph.
-        window.paint_quad(fill(
-            Bounds::new(at, size(preedit.width(), cell_h)),
-            color.opacity(0.25),
-        ));
-        let _ = preedit.paint(at, cell_h, TextAlign::Left, None, window, cx);
-        window.paint_quad(fill(
-            Bounds::new(point(at.x + preedit.width(), at.y), size(stroke, cell_h)),
-            color,
-        ));
-        return;
-    }
     match cursor.shape {
         CursorShape::Block => {
             window.paint_quad(fill(cell, color));

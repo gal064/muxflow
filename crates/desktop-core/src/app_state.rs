@@ -204,6 +204,10 @@ pub struct ShellPreferences {
     pub terminal_application_clipboard: Option<bool>,
     #[serde(default)]
     pub terminal_font_size: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_foreground: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_background: Option<u32>,
     /// `None` is a save written before the setting existed: the frontend
     /// default, which follows the OS.
     #[serde(default)]
@@ -764,6 +768,8 @@ mod tests {
                 clean_wrapped_commands: Some(false),
                 terminal_application_clipboard: Some(false),
                 terminal_font_size: Some(13),
+                terminal_foreground: Some(0xcfd8e3),
+                terminal_background: None,
                 theme: Some(ThemePreference::Light),
                 ui_scale: Some(1.2),
                 markdown_appearance: Some(MarkdownAppearance::Dark),

@@ -37,7 +37,14 @@ pub fn palette(cx: &App) -> Palette {
 /// The theme and UI scale to show, from the saved preferences.
 pub fn apply(preference: ThemePreference, scale: f64, system: WindowAppearance, cx: &mut App) {
     let is_dark = resolve_dark(preference, system);
-    let palette = if is_dark { dark() } else { light() };
+    let mut palette = if is_dark { dark() } else { light() };
+    let prefs = crate::settings::get(cx);
+    if let Some(foreground) = prefs.terminal_foreground {
+        palette.term_fg = gpui_kit::rgb(foreground);
+    }
+    if let Some(background) = prefs.terminal_background {
+        palette.term_bg = gpui_kit::rgb(background);
+    }
     let scale = scale as f32;
     cx.set_global(Appearance {
         preference,

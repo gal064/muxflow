@@ -9,7 +9,7 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{RenderableCursor, TermDamage, point_to_viewport};
@@ -336,6 +336,35 @@ pub struct CursorSpec {
     /// The glyph under a block cursor, redrawn in the cursor's text color.
     pub glyph: Option<(String, TextStyle)>,
     pub blinking: bool,
+}
+
+pub(super) fn input_position<L: EventListener>(term: &Term<L>) -> Option<Point<usize>> {
+    point_to_viewport(term.grid().display_offset(), term.grid().cursor.point)
+        .filter(|position| position.line < term.screen_lines())
+}
+
+pub(super) fn input_overlay<L: EventListener>(term: &Term<L>, palette: &Palette) -> (Rgb24, usize) {
+    const CODEX_PLACEHOLDER: &str = "Ask Codex to do anything";
+    let cursor = term.grid().cursor.point;
+    let row = &term.grid()[cursor.line];
+    let start = cursor.column.0;
+    let placeholder_end = start + CODEX_PLACEHOLDER.len();
+    let background = resolve(row[cursor.column].bg, term.colors(), palette);
+    let placeholder = placeholder_end <= term.columns()
+        && CODEX_PLACEHOLDER
+            .chars()
+            .enumerate()
+            .all(|(index, glyph)| row[Column(start + index)].c == glyph)
+        && (placeholder_end..term.columns()).all(|column| row[Column(column)].c == ' ')
+        && resolve(row[Column(start + 1)].fg, term.colors(), palette) != palette.fg;
+    (
+        background,
+        if placeholder {
+            CODEX_PLACEHOLDER.len()
+        } else {
+            0
+        },
+    )
 }
 
 /// Where the cursor is on screen, or `None` while it is hidden or scrolled off.
@@ -689,6 +718,31 @@ mod tests {
         );
         feed(&mut term, b"\x1b[?25l");
         assert!(cursor_spec(&term, true, &PALETTE).is_none());
+    }
+
+    #[test]
+    fn input_position_survives_a_hidden_cursor_but_leaves_with_the_viewport() {
+        use alacritty_terminal::grid::Scroll;
+
+        let mut term = term(20, 2);
+        feed(&mut term, b"one\r\ntwo\r\nthree\x1b[?25l");
+        assert!(cursor_spec(&term, true, &PALETTE).is_none());
+        assert_eq!(input_position(&term), Some(Point::new(1, Column(5))));
+
+        term.scroll_display(Scroll::Delta(1));
+        assert!(input_position(&term).is_none());
+    }
+
+    #[test]
+    fn input_overlay_covers_the_dimmed_codex_placeholder_but_keeps_prompt_text() {
+        let mut term = term(40, 2);
+        feed(
+            &mut term,
+            b"> \x1b[48;2;16;17;18m\x1b[90mAsk Codex to do anything\x1b[1;3H",
+        );
+        assert_eq!(input_overlay(&term, &PALETTE), (0x101112, 24));
+        feed(&mut term, b"\x1b[1;1Hx");
+        assert_eq!(input_overlay(&term, &PALETTE).1, 0);
     }
 
     #[test]

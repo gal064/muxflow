@@ -12,7 +12,7 @@ use gpui_kit::{
     UTF16Selection, Window, point, size,
 };
 
-use super::super::pane::TerminalPane;
+use super::super::{grid, pane::TerminalPane};
 
 /// The pane whose composition is open, so app shortcuts leave its keys to the IME.
 #[derive(Default)]
@@ -121,17 +121,15 @@ impl EntityInputHandler for TerminalPane {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let painted = self.painted_at()?;
-        let (row, column) = {
+        let position = {
             let term = self.terminal()?.lock();
-            let cursor = term.grid().cursor.point;
-            let row = cursor.line.0 + term.grid().display_offset() as i32;
-            (row.max(0) as usize, cursor.column.0)
+            grid::input_position(&term)?
         };
         let cell = painted.cell;
         Some(Bounds::new(
             point(
-                painted.origin.x + cell.width * (column + range_utf16.start) as f32,
-                painted.origin.y + cell.height * row as f32,
+                painted.origin.x + cell.width * (position.column.0 + range_utf16.start) as f32,
+                painted.origin.y + cell.height * position.line as f32,
             ),
             size(cell.width, cell.height),
         ))

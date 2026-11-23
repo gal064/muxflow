@@ -37,6 +37,8 @@ pub struct Prefs {
     pub theme: ThemePreference,
     pub ui_scale: f64,
     pub terminal_font_size: u8,
+    pub terminal_foreground: Option<u32>,
+    pub terminal_background: Option<u32>,
     pub copy_on_select: bool,
     pub clean_wrapped_commands: bool,
     pub terminal_application_clipboard: bool,
@@ -94,6 +96,8 @@ impl Prefs {
                 .map_or(TERMINAL_FONT_SIZE_DEFAULT, |size| {
                     clamped_terminal_font_size(f64::from(size))
                 }),
+            terminal_foreground: shell.terminal_foreground.filter(|color| *color <= 0xffffff),
+            terminal_background: shell.terminal_background.filter(|color| *color <= 0xffffff),
             copy_on_select: shell.copy_on_select.unwrap_or(true),
             clean_wrapped_commands: shell.clean_wrapped_commands.unwrap_or(true),
             terminal_application_clipboard: shell.terminal_application_clipboard.unwrap_or(true),
@@ -147,6 +151,8 @@ impl Prefs {
         shell.theme = Some(self.theme);
         shell.ui_scale = Some(self.ui_scale);
         shell.terminal_font_size = Some(self.terminal_font_size);
+        shell.terminal_foreground = self.terminal_foreground;
+        shell.terminal_background = self.terminal_background;
         shell.copy_on_select = Some(self.copy_on_select);
         shell.clean_wrapped_commands = Some(self.clean_wrapped_commands);
         shell.terminal_application_clipboard = Some(self.terminal_application_clipboard);
@@ -231,6 +237,8 @@ mod tests {
                 theme: ThemePreference::System,
                 ui_scale: 1.0,
                 terminal_font_size: 13,
+                terminal_foreground: None,
+                terminal_background: None,
                 copy_on_select: true,
                 clean_wrapped_commands: true,
                 terminal_application_clipboard: true,
