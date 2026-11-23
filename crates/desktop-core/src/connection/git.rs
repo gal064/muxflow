@@ -48,6 +48,8 @@ pub struct GitCommand {
     pub branch: String,
     #[serde(default)]
     pub summary_base: String,
+    #[serde(default)]
+    pub commit_all: bool,
 }
 
 /// Async so the host round trip never runs on the WebView's main thread. Git
@@ -96,6 +98,7 @@ pub async fn git_request(
         hunk_index: command.hunk_index,
         confirmation_token: command.confirmation_token,
         commit_message: command.commit_message,
+        commit_all: command.commit_all,
         watch_id: command.watch_id,
         branch: command.branch,
         summary_base: summary_base_from_name(&command.summary_base)?.into(),
@@ -185,6 +188,9 @@ fn mutation_from_name(value: &str) -> Result<v1::GitMutationKind, String> {
         "stageHunk" => Ok(v1::GitMutationKind::StageHunk),
         "unstageHunk" => Ok(v1::GitMutationKind::UnstageHunk),
         "discardHunk" => Ok(v1::GitMutationKind::DiscardHunk),
+        "stageAll" => Ok(v1::GitMutationKind::StageAll),
+        "unstageAll" => Ok(v1::GitMutationKind::UnstageAll),
+        "discardAll" => Ok(v1::GitMutationKind::DiscardAll),
         _ => Err(format!("unsupported Git mutation {value}")),
     }
 }

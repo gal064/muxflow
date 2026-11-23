@@ -127,7 +127,7 @@ const SOURCE_CONTROL: &str = "Source control";
 /// take Ctrl+D (EOF) or Ctrl+E (end-of-line), or collide with another binding,
 /// the Linux default is Ghostty's instead.
 #[rustfmt::skip]
-pub static COMMANDS: [CommandDefinition; 85] = [
+pub static COMMANDS: [CommandDefinition; 88] = [
     command("commands.show", "Show command palette", APPLICATION).keys("Meta+Shift+P", "Ctrl+Shift+P"),
     command("workspaces.switch", "Quick Open…", APPLICATION).keys("Meta+P", "Ctrl+P"),
     command("shortcuts.configure", "Configure keyboard shortcuts", APPLICATION),
@@ -199,6 +199,9 @@ pub static COMMANDS: [CommandDefinition; 85] = [
     command("git.stage", "Stage the selected change", SOURCE_CONTROL).requires(Requires::Row),
     command("git.unstage", "Unstage the selected change", SOURCE_CONTROL).requires(Requires::Row),
     command("git.discard", "Discard the selected change…", SOURCE_CONTROL).requires(Requires::Row),
+    command("git.stageAll", "Stage all changes", SOURCE_CONTROL).requires(Requires::Row),
+    command("git.unstageAll", "Unstage all changes", SOURCE_CONTROL).requires(Requires::Row),
+    command("git.discardAll", "Discard all changes…", SOURCE_CONTROL).requires(Requires::Row),
     // ⌘1–9 selects workspaces, or agents (Settings › Keyboard), and ⌃1–9
     // selects tabs on macOS. Linux follows the ⌘→Ctrl rule for workspaces,
     // which leaves tabs Alt+N, Ghostty's selector.
@@ -329,9 +332,9 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_lists_67_and_hides_only_the_positional_selectors() {
-        assert_eq!(COMMANDS.len(), 85);
-        assert_eq!(palette_commands().count(), 67);
+    fn the_palette_lists_70_and_hides_only_the_positional_selectors() {
+        assert_eq!(COMMANDS.len(), 88);
+        assert_eq!(palette_commands().count(), 70);
         for command in COMMANDS.iter().filter(|command| command.palette_hidden) {
             assert!(
                 command.id.starts_with("workspace.select") || command.id.starts_with("tab.select"),

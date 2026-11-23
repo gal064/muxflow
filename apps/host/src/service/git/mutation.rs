@@ -290,3 +290,159 @@ pub(super) fn discard_file(
 fn remove_untracked(root: &str, path: &[u8]) -> anyhow::Result<()> {
     WorktreeRoot::capture(root)?.entry(path)?.unlink_file()
 }
+
+/// Whether a mutation acts on the whole status rather than one path.
+pub(super) fn is_bulk(mutation: v1::GitMutationKind) -> bool {
+    matches!(
+        mutation,
+        v1::GitMutationKind::StageAll
+            | v1::GitMutationKind::UnstageAll
+            | v1::GitMutationKind::DiscardAll
+    )
+}
+
+/// An entry a bulk mutation may touch: never a conflict, whose staging would
+/// mark it resolved, nor a submodule pointer, nor an ignored file.
+fn bulk_eligible(entry: &v1::GitStatusEntry) -> bool {
+    !entry.ignored && !entry.conflicted && !entry.submodule
+}
+
+fn has_worktree_change(entry: &v1::GitStatusEntry) -> bool {
+    entry.untracked || entry.worktree_kind != v1::GitChangeKind::Unspecified as i32
+}
+
+fn has_index_change(entry: &v1::GitStatusEntry) -> bool {
+    entry.index_kind != v1::GitChangeKind::Unspecified as i32
+}
+
+/// The unstaged and untracked entries of `status` that staging, discarding
+/// or committing everything acts on: what the Changes list shows. Git names
+/// an untracked repository inside the worktree as one directory entry;
+/// staging it would add a gitlink and deleting it is not one file's discard,
+/// so it is left alone.
+pub(super) fn unstaged_entries<'a>(
+    root: &str,
+    status: &'a v1::GitStatusSnapshot,
+) -> anyhow::Result<Vec<&'a v1::GitStatusEntry>> {
+    let worktree = WorktreeRoot::capture(root)?;
+    let mut entries = Vec::new();
+    for entry in &status.entries {
+        if !bulk_eligible(entry) || !has_worktree_change(entry) {
+            continue;
+        }
+        if entry.untracked
+            && let Some(found) = worktree.entry_if_parent_exists(&entry.path)?
+            && found.is_directory()?
+        {
+            continue;
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// Paths for Git's `--pathspec-from-file=- --pathspec-file-nul`, which the
+/// runner's `GIT_LITERAL_PATHSPECS` keeps literal.
+fn pathspec_input(paths: &[&[u8]]) -> anyhow::Result<Vec<u8>> {
+    let mut input = Vec::new();
+    for path in paths {
+        validate_git_path(path)?;
+        input.extend_from_slice(path);
+        input.push(0);
+    }
+    Ok(input)
+}
+
+fn git_with_paths(
+    root: &str,
+    args: &[&str],
+    paths: &[&[u8]],
+    cancellation: &AtomicBool,
+) -> anyhow::Result<GitOutput> {
+    let input = pathspec_input(paths)?;
+    let mut refs: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+    refs.extend([
+        OsStr::new("--pathspec-from-file=-"),
+        OsStr::new("--pathspec-file-nul"),
+    ]);
+    git_output_with_deadline(
+        root,
+        &refs,
+        Some(&input),
+        Some(cancellation),
+        GIT_MUTATION_DEADLINE,
+    )
+}
+
+/// Stages every unstaged and untracked path of `status`.
+pub(super) fn stage_all(
+    root: &str,
+    status: &v1::GitStatusSnapshot,
+    cancellation: &AtomicBool,
+) -> anyhow::Result<GitOutput> {
+    let paths: Vec<&[u8]> = unstaged_entries(root, status)?
+        .iter()
+        .map(|entry| entry.path.as_slice())
+        .collect();
+    if paths.is_empty() {
+        bail!("there are no unstaged changes to stage");
+    }
+    git_with_paths(root, &["add", "-A"], &paths, cancellation)
+}
+
+/// Stage, unstage or discard every eligible entry of `status`, the snapshot
+/// this mutation validated its generation against.
+pub(super) fn mutate_all(
+    root: &str,
+    initial: bool,
+    status: &v1::GitStatusSnapshot,
+    mutation: v1::GitMutationKind,
+    cancellation: &AtomicBool,
+) -> anyhow::Result<GitOutput> {
+    match mutation {
+        v1::GitMutationKind::StageAll => stage_all(root, status, cancellation),
+        v1::GitMutationKind::UnstageAll => {
+            // A rename's original path is restored too, as for one file.
+            let paths: Vec<&[u8]> = status
+                .entries
+                .iter()
+                .filter(|entry| bulk_eligible(entry) && has_index_change(entry))
+                .flat_map(|entry| {
+                    std::iter::once(entry.path.as_slice()).chain(
+                        (!entry.original_path.is_empty()).then_some(&entry.original_path[..]),
+                    )
+                })
+                .collect();
+            if paths.is_empty() {
+                bail!("there are no staged changes to unstage");
+            }
+            // Without a HEAD, `rm --cached` would refuse any file whose
+            // worktree also changed; `-f` with `--cached` never touches it.
+            let args: &[&str] = if initial {
+                &["rm", "--cached", "--quiet", "-f"]
+            } else {
+                &["restore", "--staged"]
+            };
+            git_with_paths(root, args, &paths, cancellation)
+        }
+        v1::GitMutationKind::DiscardAll => {
+            let (untracked, tracked): (Vec<_>, Vec<_>) = unstaged_entries(root, status)?
+                .into_iter()
+                .partition(|entry| entry.untracked);
+            if untracked.is_empty() && tracked.is_empty() {
+                bail!("there are no unstaged changes to discard");
+            }
+            let mut output = success_output();
+            if !tracked.is_empty() {
+                let paths: Vec<&[u8]> = tracked.iter().map(|entry| entry.path.as_slice()).collect();
+                output = git_with_paths(root, &["restore", "--worktree"], &paths, cancellation)?;
+                ensure_success(&output, "git restore --worktree")?;
+            }
+            for entry in untracked {
+                remove_untracked(root, &entry.path)?;
+            }
+            Ok(output)
+        }
+        _ => bail!("not a bulk Git mutation"),
+    }
+}

@@ -207,6 +207,14 @@ pub enum MutationKind {
     StageHunk,
     UnstageHunk,
     DiscardHunk,
+    /// The Changes group's unstaged and untracked entries, conflicts and
+    /// submodules aside. No path.
+    StageAll,
+    /// The Staged group's entries. No path.
+    UnstageAll,
+    /// The Changes group's entries: unstaged edits reverted, untracked files
+    /// deleted. Staged changes stay. No path.
+    DiscardAll,
 }
 
 impl MutationKind {
@@ -218,18 +226,24 @@ impl MutationKind {
             Self::StageHunk => "stageHunk",
             Self::UnstageHunk => "unstageHunk",
             Self::DiscardHunk => "discardHunk",
+            Self::StageAll => "stageAll",
+            Self::UnstageAll => "unstageAll",
+            Self::DiscardAll => "discardAll",
         }
     }
 
     pub fn is_discard(self) -> bool {
-        matches!(self, Self::DiscardFile | Self::DiscardHunk)
+        matches!(
+            self,
+            Self::DiscardFile | Self::DiscardHunk | Self::DiscardAll
+        )
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::StageFile | Self::StageHunk => "Staged",
-            Self::UnstageFile | Self::UnstageHunk => "Unstaged",
-            Self::DiscardFile | Self::DiscardHunk => "Discarded",
+            Self::StageFile | Self::StageHunk | Self::StageAll => "Staged",
+            Self::UnstageFile | Self::UnstageHunk | Self::UnstageAll => "Unstaged",
+            Self::DiscardFile | Self::DiscardHunk | Self::DiscardAll => "Discarded",
         }
     }
 
@@ -237,9 +251,9 @@ impl MutationKind {
     /// it happened.
     pub fn pending_label(self) -> &'static str {
         match self {
-            Self::StageFile => "staging…",
-            Self::UnstageFile => "unstaging…",
-            Self::DiscardFile => "discarding…",
+            Self::StageFile | Self::StageAll => "staging…",
+            Self::UnstageFile | Self::UnstageAll => "unstaging…",
+            Self::DiscardFile | Self::DiscardAll => "discarding…",
             Self::StageHunk => "staging hunk…",
             Self::UnstageHunk => "unstaging hunk…",
             Self::DiscardHunk => "discarding hunk…",
@@ -728,33 +742,84 @@ pub fn git_scope(link: &Live, root: &RootInfo) -> Option<GitScope> {
 pub struct Groups<'a> {
     pub conflicts: Vec<&'a StatusEntry>,
     pub staged: Vec<&'a StatusEntry>,
-    pub unstaged: Vec<&'a StatusEntry>,
-    pub untracked: Vec<&'a StatusEntry>,
+    /// Unstaged and untracked together, by path, as VS Code lists them: an
+    /// untracked file is told apart by its `U`.
+    pub changes: Vec<&'a StatusEntry>,
 }
 
 pub fn group_entries(entries: &[StatusEntry]) -> Groups<'_> {
     let visible = || entries.iter().filter(|entry| !entry.ignored);
+    let mut changes: Vec<_> = visible()
+        .filter(|entry| {
+            !entry.conflicted && (entry.untracked || entry.worktree_kind != ChangeKind::None)
+        })
+        .collect();
+    changes.sort_by(|a, b| a.display_path.cmp(&b.display_path));
     Groups {
         conflicts: visible().filter(|entry| entry.conflicted).collect(),
         staged: visible()
             .filter(|entry| !entry.conflicted && entry.index_kind != ChangeKind::None)
             .collect(),
-        unstaged: visible()
-            .filter(|entry| {
-                !entry.conflicted && !entry.untracked && entry.worktree_kind != ChangeKind::None
-            })
-            .collect(),
-        untracked: visible().filter(|entry| entry.untracked).collect(),
+        changes,
     }
+}
+
+/// The entries a bulk mutation acts on, as the host chooses them: a
+/// submodule pointer is listed but never touched.
+pub fn bulk_targets<'a>(entries: &[&'a StatusEntry]) -> Vec<&'a StatusEntry> {
+    entries
+        .iter()
+        .copied()
+        .filter(|entry| !entry.submodule)
+        .collect()
 }
 
 impl Groups<'_> {
     /// Nothing to show: a tree whose only entries are ignored files is clean.
     pub fn is_empty(&self) -> bool {
-        self.conflicts.is_empty()
-            && self.staged.is_empty()
-            && self.unstaged.is_empty()
-            && self.untracked.is_empty()
+        self.conflicts.is_empty() && self.staged.is_empty() && self.changes.is_empty()
+    }
+}
+
+/// What an empty message commits as.
+pub const EMPTY_COMMIT_MESSAGE: &str = "no commit message";
+
+/// What the Commit button commits: the staged changes, or with none staged,
+/// every change, untracked included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitPlan {
+    pub all: bool,
+    pub count: usize,
+    /// Git refuses any commit while a conflict is open, and committing
+    /// everything would stage the conflict, marking it resolved.
+    pub blocked: bool,
+}
+
+impl CommitPlan {
+    pub fn new(groups: &Groups) -> Self {
+        let all = groups.staged.is_empty();
+        let count = if all {
+            bulk_targets(&groups.changes).len()
+        } else {
+            groups.staged.len()
+        };
+        Self {
+            all,
+            count,
+            blocked: !groups.conflicts.is_empty(),
+        }
+    }
+
+    pub fn can_commit(&self) -> bool {
+        self.count > 0 && !self.blocked
+    }
+
+    pub fn label(&self) -> String {
+        match (self.all, self.count) {
+            (true, 0) => "Commit".into(),
+            (true, count) => format!("Commit all {count}"),
+            (false, count) => format!("Commit {count} staged"),
+        }
     }
 }
 
