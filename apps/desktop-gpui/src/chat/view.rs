@@ -510,7 +510,7 @@ impl ChatPane {
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text = self.shown_text(index, cx);
+        let text = self.text_state(index, cx);
         let id = self.chat.items[index].id.clone();
         let dark = cx.global::<theme::Appearance>().is_dark;
         let pane_id = self.pane_id.clone();
@@ -548,7 +548,7 @@ impl ChatPane {
             .min_w_0()
             .gap(ui(3.))
             .child(
-                TextView::markdown(SharedString::from(format!("chat-text-{id}")), text)
+                TextView::new(&text)
                     .style(markdown_style(palette, dark))
                     .selectable(true)
                     // An agent's text never fetches anything: an image is
