@@ -44,6 +44,7 @@ if [[ "$APK_VARIANT" == release ]]; then
     exit 1
   fi
   echo "Signed by the pinned release certificate: $actual"
+  bash ./scripts/verify-apk-crypto.sh "${apksigner%/*}/dexdump" "$APK_PATH"
 fi
 
 echo "APK: $APK_PATH"
