@@ -257,15 +257,15 @@ describe("chat Markdown links", () => {
   });
 
   it("turns every other link into its label", () => {
-    const block = only("[js](javascript:alert(1)) [file](file:///etc/passwd) [top](#top) [cdn](//cdn.example/x.js) [intent](intent://x#Intent;end) [data](data:text/html,x) [tel](tel:+1-555-0100) [app](muxflow://open) [*styled*](vbscript:x)");
+    const block = only("[js](javascript:alert(1)) [file](file:///etc/passwd) [top](#top) [cdn](//cdn.example/x.js) [intent](intent://x#Intent;end) [data](data:text/html,x) [tel](tel:5551234) [dev](localhost:3000) [readme](README) [app](muxflow://open) [*styled*](vbscript:x)");
     expect(block).toEqual({
       kind: "paragraph",
-      content: [{ text: "js file top cdn intent data tel app " }, { text: "styled", emphasis: true }],
+      content: [{ text: "js file top cdn intent data tel dev readme app " }, { text: "styled", emphasis: true }],
     });
   });
 
   it("reads a link to a path as a file link, its label the file's name when it is the path", () => {
-    expect(only("In [the join](src/links.rs:171), [crates/term/links.rs:12](crates/term/links.rs:12), [](/etc/hosts) and [*it*](<docs/a b.md>)")).toEqual({
+    expect(only("In [the join](src/links.rs:171), [crates/term/links.rs:12](crates/term/links.rs:12), [](/etc/hosts), [*it*](<docs/a b.md>), [client/server split](docs/arch.md), [app.ts](src/app.ts#L42) and [Cargo.toml:3](Cargo.toml:3)")).toEqual({
       kind: "paragraph",
       content: [
         { text: "In " },
@@ -274,8 +274,14 @@ describe("chat Markdown links", () => {
         { text: "links.rs:12", file: "crates/term/links.rs" },
         { text: ", " },
         { text: "hosts", file: "/etc/hosts" },
-        { text: " and " },
+        { text: ", " },
         { text: "it", emphasis: true, file: "docs/a b.md" },
+        { text: ", " },
+        { text: "client/server split", file: "docs/arch.md" },
+        { text: ", " },
+        { text: "app.ts", file: "src/app.ts" },
+        { text: " and " },
+        { text: "Cargo.toml:3", file: "Cargo.toml" },
       ],
     });
   });

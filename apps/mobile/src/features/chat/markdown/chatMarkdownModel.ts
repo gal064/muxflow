@@ -122,11 +122,12 @@ function inlines(tokens: Token[] | undefined, marks: Marks = NO_MARKS, out: Chat
         break;
       case "link":
       case "image": {
-        if (token.type === "link" && isFileTarget(token.href)) {
-          const file = splitPosition(token.href)[0];
-          const label = token.tokens.map((inner) => inner.raw).join("");
+        const target = fileTarget(token);
+        if (target !== undefined) {
+          const file = splitPosition(target)[0];
+          const label = token.tokens.map((inner) => inner.raw).join("").trim();
           // A label that is the path itself is shown as the file's name.
-          if (label.includes("/") || !label.trim()) push(out, fileName(token.href), { ...marks, file });
+          if (!label || label === token.href || label === target || label === file) push(out, fileName(target), { ...marks, file });
           else inlines(token.tokens, { ...marks, file }, out);
           break;
         }
@@ -193,14 +194,22 @@ export function pathLike(code: string): boolean {
     && /^[\p{L}\p{N}/._\-~+@,]+$/u.test(path);
 }
 
-/** A Markdown link's target that is a path: no scheme, and not an anchor. */
-function isFileTarget(target: string): boolean {
-  const colon = target.indexOf(":");
+/**
+ * A Markdown link's target that is a path, without the `#L42` or `?query` a
+ * web view would read: no scheme, not an anchor, and a separator or a dot in
+ * it, so `src/a.rs`, `Cargo.toml:12`, but not `localhost:3000`.
+ */
+function fileTarget(token: Token): string | undefined {
+  if (token.type !== "link") return undefined;
+  const href: string = token.href;
+  const colon = href.indexOf(":");
   const scheme = colon > 1
-    && /^[A-Za-z0-9+.-]+$/u.test(target.slice(0, colon))
-    && !/^[\d:]*$/u.test(target.slice(colon + 1));
-  return target !== "" && !scheme && !target.startsWith("#") && !target.startsWith("//")
-    && !/[\u0000-\u001f\u007f]/u.test(target);
+    && /^[A-Za-z0-9+.-]+$/u.test(href.slice(0, colon))
+    && !/^[\d:]*(?:[#?].*)?$/su.test(href.slice(colon + 1));
+  if (scheme || href.startsWith("#") || href.startsWith("//") || /[\u0000-\u001f\u007f]/u.test(href)) return undefined;
+  const target = href.replace(/[#?].*$/su, "");
+  const [path] = splitPosition(target);
+  return path && (path.includes("/") || path.includes(".")) ? target : undefined;
 }
 
 /** The length of a cell's longest line, for sizing its column; a wide character (CJK, emoji) counts as two. */

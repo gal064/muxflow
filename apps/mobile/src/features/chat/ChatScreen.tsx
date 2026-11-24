@@ -64,12 +64,14 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const serverIdentity = useSession((s) => s.serverIdentity);
   const hostLabel = useSession((s) => s.connection.host?.label || s.connection.host?.host || "");
   const folder = useSession((s) => s.panes[paneId]?.currentPath ?? "");
-  // What the host said about the reply's paths holds for this directory
-  // only: another one is asked about afresh.
-  const fileLinks = useMemo(() => chatFileLinks(paneId, (resolved) => router.push({
+  const fileLinks = useMemo(() => chatFileLinks(serverIdentity, paneId, folder, (resolved) => router.push({
     pathname: "/file/[paneId]",
     params: { paneId: toRouteParam(paneId), path: toRouteParam(resolved.path), name: toRouteParam(resolved.name) },
-  })), [folder, paneId, router]);
+  })), [folder, paneId, router, serverIdentity]);
+  useEffect(() => {
+    fileLinks.show();
+    return () => fileLinks.hide();
+  }, [fileLinks]);
   useEffect(() => {
     if (connected) fileLinks.resume();
   }, [connected, fileLinks]);
