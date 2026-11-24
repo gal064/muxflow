@@ -939,23 +939,18 @@ fn agent_row(
         .when(!row.location.host_letter.is_empty(), |this| {
             this.child(host_letter(&row.location.host_letter, selected, &palette))
         })
-        .child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .items_center()
-                .gap(ui(4.))
-                .child(div().min_w_0().truncate().child(session_label))
-                .when(row.location.tab_pinned, |this| {
-                    this.child(
-                        svg()
-                            .data(Glyph::Pin.svg())
-                            .flex_none()
-                            .size(ui(11.))
-                            .text_color(dim),
-                    )
-                }),
-        )
+        .child(div().flex_1().min_w_0().truncate().child(session_label))
+        // At the right, by the workspace's name, so the pins of a workspace's
+        // rows line up whatever their titles' lengths.
+        .when(row.location.tab_pinned, |this| {
+            this.child(
+                svg()
+                    .data(Glyph::Pin.svg())
+                    .flex_none()
+                    .size(ui(11.))
+                    .text_color(dim),
+            )
+        })
         .child(
             div()
                 .flex_none()
