@@ -183,6 +183,8 @@ fn the_pane_runs_the_agents_server_on_the_panes_socket() {
             "--strict-config",
             "-c",
             "features.default_mode_request_user_input=true",
+            "-c",
+            "suppress_unstable_features_warning=true",
             "--listen",
             "unix:///run/chat/a.sock",
         ]
@@ -346,6 +348,37 @@ fn each_item_of_a_thread_is_drawn_as_the_row_of_its_kind() {
         .is_none()
     );
     assert!(thread_item(&json!({"type": "somethingNew", "id": "n"}), true).is_none());
+    // Newer items: a review's start and end, an image looked at, a pause.
+    let text = |source: Value| {
+        let item = thread_item(&source, true).unwrap();
+        (Kind::try_from(item.kind).unwrap(), item.text)
+    };
+    assert_eq!(
+        text(json!({"type": "enteredReviewMode", "id": "e", "review": "current changes"})),
+        (Kind::Notice, "Reviewing current changes".to_owned())
+    );
+    // An agent's message carries the review's text.
+    assert!(
+        thread_item(
+            &json!({"type": "exitedReviewMode", "id": "x", "review": "Looks right."}),
+            true
+        )
+        .is_none()
+    );
+    assert_eq!(
+        row(
+            json!({"type": "imageView", "id": "v", "path": "/w/shot.png"}),
+            true
+        ),
+        expect(ToolKind::Read, "view", "/w/shot.png", Status::Ok, "done")
+    );
+    assert_eq!(
+        row(
+            json!({"type": "sleep", "id": "s", "durationMs": 2500}),
+            true
+        ),
+        expect(ToolKind::Other, "wait", "3s", Status::Ok, "done")
+    );
 }
 
 // --- the recorded session ---------------------------------------------------
@@ -1202,6 +1235,408 @@ async fn a_subagent_is_its_spawns_row_and_the_calls_after_it_say_how_it_is() {
     assert_eq!(refused.code, "chat_task_not_found");
 }
 
+/// What a subagent's own thread says reaches its row: seen live on 0.171.0,
+/// the server sends a spawned agent's items, token use and turns on the same
+/// link, under the subagent's thread. Its row outlives the parent's turn and
+/// is listed on the composer's edge while it runs.
+#[tokio::test]
+async fn a_subagents_own_thread_says_what_it_does_and_when_it_ends() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let spawn = json!({"type": "collabAgentToolCall", "id": "spawn", "tool": "spawnAgent",
+        "status": "completed", "senderThreadId": THREAD, "receiverThreadIds": ["sub-1"],
+        "prompt": "List the files", "agentsStates": {"sub-1": {"status": "pendingInit"}}});
+    replay.agent(&item_event("item/completed", spawn));
+    let tasks = |replay: &Replay<Codex>| {
+        replay
+            .client
+            .state
+            .background
+            .iter()
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    task.kind,
+                    task.description.clone(),
+                    task.stoppable,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let listed = vec![(
+        "spawn".to_owned(),
+        i32::from(v1::ChatTaskKind::Subagent),
+        "List the files".to_owned(),
+        false,
+    )];
+    assert_eq!(tasks(&replay), listed);
+
+    let theirs = |method: &str, params: Value| {
+        let mut params = params;
+        params["threadId"] = json!("sub-1");
+        json!({"method": method, "params": params}).to_string()
+    };
+    let command = json!({"type": "commandExecution", "id": "c1", "status": "inProgress",
+        "command": "/usr/bin/bash -lc ls", "commandActions": [{"command": "ls"}]});
+    replay.agent(&theirs("turn/started", json!({"turn": {"id": "s1"}})));
+    replay.agent(&theirs("item/started", json!({"item": command})));
+    // Its steps are its own, not rows of this chat.
+    assert!(replay.client.item("c1").is_none());
+    let row = |replay: &Replay<Codex>| replay.client.item("spawn").unwrap().tool.clone().unwrap();
+    assert_eq!(row(&replay).activity, "Running ls");
+    let mut ran = command.clone();
+    ran["status"] = json!("completed");
+    ran["exitCode"] = json!(0);
+    replay.agent(&theirs("item/completed", json!({"item": ran})));
+    replay.agent(&theirs(
+        "thread/tokenUsage/updated",
+        json!({"tokenUsage": {"total": {"totalTokens": 4200}, "last": {"totalTokens": 900}}}),
+    ));
+    let working = row(&replay);
+    // Its size as of its last request, as Claude's subagents count.
+    assert_eq!((working.tool_uses, working.tokens), (1, 900));
+    assert_eq!(working.status, i32::from(Status::Running));
+
+    // The parent's turn ends first: the subagent works on, and stays listed.
+    let completed = json!({"method": "turn/completed", "params": {
+        "threadId": THREAD, "turn": {"id": "t1", "status": "completed"}}});
+    replay.agent(&completed.to_string());
+    assert_eq!(row(&replay).status, i32::from(Status::Running));
+    assert_eq!(tasks(&replay), listed);
+
+    replay.agent(&theirs(
+        "turn/completed",
+        json!({"turn": {"id": "s1", "status": "completed"}}),
+    ));
+    let done = row(&replay);
+    assert_eq!(
+        (done.status, done.activity.as_str(), done.tool_uses),
+        (i32::from(Status::Ok), "", 1)
+    );
+    assert!(tasks(&replay).is_empty());
+    replay.client.assert_settled();
+}
+
+// --- the agent's own commands -----------------------------------------------
+//
+// Seen live on 0.171.0: a compaction runs as a turn of its own, and a review
+// as a turn inside the one `review/start` names, which is the one that
+// completes.
+
+#[tokio::test]
+async fn the_agents_commands_are_listed_and_run_as_requests_not_messages() {
+    let (mut replay, _lines) = opened(Launch::default());
+    let names: Vec<&str> = replay
+        .client
+        .catalog
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    for name in ["compact", "review", "init"] {
+        assert!(names.contains(&name), "{name} is listed");
+    }
+
+    replay.send("c1", "/compact");
+    assert_eq!(
+        replay.last_asked("thread/compact/start")["params"],
+        json!({"threadId": THREAD})
+    );
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["method"] != "turn/start")
+    );
+    let shown = replay.client.item("c1").unwrap();
+    assert_eq!(
+        (shown.kind, shown.text.as_str()),
+        (i32::from(Kind::User), "/compact")
+    );
+    assert!(!shown.rewindable, "it opens no turn of the user's");
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Working));
+    replay.agent(&json!({"id": "@thread/compact/start", "result": {}}).to_string());
+    let started = json!({"method": "turn/started", "params": {"threadId": THREAD,
+        "turn": {"id": "k1", "rootTurnId": "k1"}}});
+    replay.agent(&started.to_string());
+    let completed = |id: &str| {
+        json!({"method": "turn/completed", "params": {"threadId": THREAD,
+            "turn": {"id": id, "status": "completed"}}})
+        .to_string()
+    };
+    replay.agent(&completed("k1"));
+    assert_eq!(replay.client.state.turn, i32::from(Turn::Idle));
+
+    // What `/review` reviews.
+    for (typed, target) in [
+        ("/review", json!({"type": "uncommittedChanges"})),
+        (
+            "/review main",
+            json!({"type": "baseBranch", "branch": "main"}),
+        ),
+        (
+            "/review 5e194037",
+            json!({"type": "commit", "sha": "5e194037"}),
+        ),
+        (
+            "/review the error handling",
+            json!({"type": "custom", "instructions": "the error handling"}),
+        ),
+    ] {
+        replay.send(&format!("r-{typed}"), typed);
+        assert_eq!(
+            replay.last_asked("review/start")["params"]["target"],
+            target
+        );
+        // Its outer turn is named in the answer; the inner one starts, and
+        // the outer one completes.
+        replay.agent(
+            &json!({"id": "@review/start", "result": {"turn": {"id": "outer"}}}).to_string(),
+        );
+        let inner = json!({"method": "turn/started", "params": {"threadId": THREAD,
+            "turn": {"id": "inner", "rootTurnId": "outer"}}});
+        replay.agent(&inner.to_string());
+        replay.agent(&completed("outer"));
+        assert_eq!(replay.client.state.turn, i32::from(Turn::Idle), "{typed}");
+    }
+
+    // `/init` is a turn of its own prompt; the chat shows what was typed.
+    replay.send("i1", "/init");
+    let asked = replay.last_asked("turn/start")["params"]["input"][0]["text"].clone();
+    assert!(asked.as_str().unwrap().contains("AGENTS.md"));
+    assert_eq!(replay.client.item("i1").unwrap().text, "/init");
+}
+
+#[tokio::test]
+async fn a_command_typed_during_a_turn_waits_for_it_to_end() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    replay.send("c1", "/compact");
+    replay.send("m2", "then this");
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["method"] != "thread/compact/start"
+                && written["method"] != "turn/steer"),
+        "nothing joins the turn ahead of the command"
+    );
+    let completed = |id: &str| {
+        json!({"method": "turn/completed", "params": {"threadId": THREAD,
+            "turn": {"id": id, "status": "completed"}}})
+        .to_string()
+    };
+    replay.agent(&completed("t1"));
+    assert_eq!(
+        replay.last_asked("thread/compact/start")["params"],
+        json!({"threadId": THREAD})
+    );
+    replay.agent(&json!({"id": "@thread/compact/start", "result": {}}).to_string());
+    let started = json!({"method": "turn/started", "params": {"threadId": THREAD,
+        "turn": {"id": "k1", "rootTurnId": "k1"}}});
+    replay.agent(&started.to_string());
+    // The compaction's turn takes no message: they wait for its end.
+    replay.send("m3", "and this");
+    let asked = |replay: &Replay<Codex>, method: &str| {
+        replay
+            .written
+            .iter()
+            .filter(|written| written["method"] == method)
+            .count()
+    };
+    assert_eq!(asked(&replay, "turn/steer"), 0);
+    let starts = asked(&replay, "turn/start");
+    replay.agent(&completed("k1"));
+    assert_eq!(asked(&replay, "turn/start"), starts + 1);
+    assert_eq!(
+        replay.last_asked("turn/start")["params"]["clientUserMessageId"],
+        "m2"
+    );
+}
+
+#[tokio::test]
+async fn init_is_shown_as_typed_after_the_server_echoes_its_prompt() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("i1", "/init");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let echoed = json!({"type": "userMessage", "id": "server", "clientId": "i1",
+        "content": [{"type": "text", "text": INIT_PROMPT}]});
+    replay.agent(&item_event("item/completed", echoed));
+    assert_eq!(replay.client.item("i1").unwrap().text, "/init");
+}
+
+/// A skill named as a built-in is reached with `$`; `/` is the built-in's.
+#[tokio::test]
+async fn a_skill_named_as_a_built_in_is_listed_once() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.agent(&json!({"method": "skills/changed", "params": {}}).to_string());
+    let skills = json!({"id": "@skills/list", "result": {"data": [{"skills": [
+        {"name": "review", "description": "mine", "path": "/s/review", "enabled": true},
+        {"name": "deploy", "description": "d", "path": "/s/deploy", "enabled": true}]}]}});
+    replay.agent(&skills.to_string());
+    let named = |name: &str| {
+        replay
+            .client
+            .catalog
+            .commands
+            .iter()
+            .filter(|command| command.name == name)
+            .count()
+    };
+    assert_eq!((named("review"), named("deploy")), (1, 1));
+}
+
+/// Going back to before a subagent's turn takes the subagent with it: its
+/// pill goes, and what its thread says later brings no row back.
+#[tokio::test]
+async fn a_rewind_past_a_subagents_turn_forgets_it() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let echoed = json!({"type": "userMessage", "id": "server", "clientId": "m1",
+        "content": [{"type": "text", "text": "go"}]});
+    replay.agent(&item_event("item/completed", echoed));
+    let spawn = json!({"type": "collabAgentToolCall", "id": "spawn", "tool": "spawnAgent",
+        "status": "completed", "senderThreadId": THREAD, "receiverThreadIds": ["sub-1"],
+        "prompt": "Look around", "agentsStates": {"sub-1": {"status": "running"}}});
+    replay.agent(&item_event("item/completed", spawn));
+    let completed = json!({"method": "turn/completed", "params": {"threadId": THREAD,
+        "turn": {"id": "t1", "status": "completed"}}});
+    replay.agent(&completed.to_string());
+    assert_eq!(
+        replay.client.state.background.len(),
+        1,
+        "it outlives its turn"
+    );
+
+    replay
+        .command(SessionCommand::Rewind {
+            item_id: "m1".into(),
+            after_item_id: String::new(),
+        })
+        .unwrap();
+    replay.agent(&json!({"id": "@thread/revert", "result": {}}).to_string());
+    assert!(replay.client.state.background.is_empty());
+    let late = json!({"method": "turn/completed", "params": {"threadId": "sub-1",
+        "turn": {"id": "s1", "status": "completed"}}});
+    replay.agent(&late.to_string());
+    assert!(replay.client.item("spawn").is_none());
+}
+
+/// Stopping the turn stops its subagents: their rows and pills end with it.
+#[tokio::test]
+async fn an_interrupted_turn_ends_its_subagents_rows() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let spawn = json!({"type": "collabAgentToolCall", "id": "spawn", "tool": "spawnAgent",
+        "status": "completed", "senderThreadId": THREAD, "receiverThreadIds": ["sub-1"],
+        "prompt": "Look around\nthen report", "agentsStates": {"sub-1": {"status": "running"}}});
+    replay.agent(&item_event("item/completed", spawn));
+    assert_eq!(replay.client.state.background[0].description, "Look around");
+    let interrupted = json!({"method": "turn/completed", "params": {"threadId": THREAD,
+        "turn": {"id": "t1", "status": "interrupted"}}});
+    replay.agent(&interrupted.to_string());
+    assert!(replay.client.state.background.is_empty());
+    let status = |replay: &Replay<Codex>| {
+        replay
+            .client
+            .item("spawn")
+            .unwrap()
+            .tool
+            .clone()
+            .unwrap()
+            .status
+    };
+    assert_ne!(status(&replay), i32::from(Status::Running));
+    // What its thread says after that changes nothing here.
+    let late = json!({"method": "turn/completed", "params": {"threadId": "sub-1",
+        "turn": {"id": "s1", "status": "completed"}}});
+    replay.agent(&late.to_string());
+    assert_ne!(status(&replay), i32::from(Status::Ok));
+}
+
+/// Warnings are shown once each; a model switched mid-turn and a retry are
+/// said.
+#[tokio::test]
+async fn warnings_reroutes_and_retries_are_said() {
+    let (mut replay, _lines) = opened(Launch::default());
+    let notices = |replay: &Replay<Codex>| {
+        replay
+            .client
+            .items
+            .iter()
+            .filter(|item| item.kind == i32::from(Kind::Notice))
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>()
+    };
+    let warning = json!({"method": "warning", "params": {"threadId": THREAD,
+        "message": "Disk is nearly full"}});
+    replay.agent(&warning.to_string());
+    replay.agent(&warning.to_string());
+    let config = json!({"method": "configWarning", "params": {"summary": "Unknown key",
+        "details": "`foo` in config.toml"}});
+    replay.agent(&config.to_string());
+    // A subagent's warnings are its own.
+    let theirs = json!({"method": "warning", "params": {"threadId": "sub-9",
+        "message": "not this chat's"}});
+    replay.agent(&theirs.to_string());
+    assert_eq!(
+        notices(&replay),
+        ["Disk is nearly full", "Unknown key\n`foo` in config.toml"]
+    );
+
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    let rerouted = json!({"method": "model/rerouted", "params": {"threadId": THREAD,
+        "turnId": "t1", "fromModel": "a", "toModel": "b", "reason": "highRiskCyberActivity"}});
+    replay.agent(&rerouted.to_string());
+    assert_eq!(
+        notices(&replay).last().unwrap(),
+        "Codex switched this turn from a to b"
+    );
+    // For that turn only: the chat's choice is not changed.
+    assert_ne!(replay.client.state.options.clone().unwrap().model, "b");
+    let retry = |message: &str| {
+        json!({"method": "error", "params": {"threadId": THREAD, "turnId": "t1",
+            "willRetry": true, "error": {"message": message}}})
+        .to_string()
+    };
+    replay.agent(&retry("stream disconnected"));
+    replay.agent(&retry("stream disconnected again"));
+    let retries: Vec<String> = notices(&replay)
+        .into_iter()
+        .filter(|text| text.starts_with("Retrying"))
+        .collect();
+    assert_eq!(retries, ["Retrying: stream disconnected again"]);
+}
+
+#[tokio::test]
+async fn the_agents_plan_is_one_row_it_updates() {
+    let (mut replay, _lines) = opened(Launch::default());
+    let plan = |statuses: [&str; 2]| {
+        json!({"method": "turn/plan/updated", "params": {"threadId": THREAD, "turnId": "t1",
+            "explanation": null, "plan": [
+                {"step": "Read the code", "status": statuses[0]},
+                {"step": "Fix the bug", "status": statuses[1]}]}})
+        .to_string()
+    };
+    replay.agent(&plan(["inProgress", "pending"]));
+    replay.agent(&plan(["completed", "inProgress"]));
+    let rows: Vec<_> = replay
+        .client
+        .items
+        .iter()
+        .filter(|item| item.id == "t1-plan")
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let tool = rows[0].tool.clone().unwrap();
+    assert_eq!(tool.detail, "1 of 2 done");
+    assert_eq!(tool.output_preview, "[x] Read the code\n[>] Fix the bug");
+}
+
 // --- commands put in the background ------------------------------------------
 //
 // Seen live on 0.169.0: such a command is still in progress when its turn
@@ -1546,4 +1981,69 @@ fn an_ask_for_a_title_keeps_the_chats_settings_but_not_its_risky_ones() {
             "--strict-config",
         ])
     );
+}
+
+// --- a review, live and as read ---------------------------------------------
+//
+// Seen live on 0.171.0: the review's text comes as the review's end and again
+// as an agent's message, and its prompt as a user's message without a client
+// id. As read, the review's own turn names the review's as its root, comes
+// before it, and is interrupted although it ended.
+
+#[tokio::test]
+async fn a_review_is_said_once_and_its_prompt_not_at_all() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("r1", "/review");
+    replay.agent(&json!({"id": "@review/start", "result": {"turn": {"id": "outer"}}}).to_string());
+    let inner = json!({"method": "turn/started", "params": {"threadId": THREAD,
+        "turn": {"id": "inner", "rootTurnId": "outer"}}});
+    replay.agent(&inner.to_string());
+    for item in [
+        json!({"type": "enteredReviewMode", "id": "e", "review": "current changes"}),
+        json!({"type": "userMessage", "id": "p",
+            "content": [{"type": "text", "text": "Review the current code changes."}]}),
+        json!({"type": "exitedReviewMode", "id": "x", "review": "Looks right."}),
+        json!({"type": "agentMessage", "id": "m", "text": "Looks right."}),
+    ] {
+        let done = json!({"method": "item/completed", "params": {"threadId": THREAD,
+            "turnId": "outer", "item": item}});
+        replay.agent(&done.to_string());
+    }
+    let outline = replay.client.outline();
+    assert!(replay.client.item("p").is_none(), "{outline:#?}");
+    assert!(replay.client.item("x").is_none(), "{outline:#?}");
+    assert_eq!(replay.client.item("m").unwrap().text, "Looks right.");
+    assert_eq!(replay.client.item("r1").unwrap().text, "/review");
+}
+
+#[tokio::test]
+async fn a_review_read_back_is_in_order_and_not_interrupted() {
+    let mut replay = replay();
+    replay.connect(&tag(THREAD, Launch::default()));
+    initialized(&mut replay);
+    let turns = json!([
+        {"id": "inner", "rootTurnId": "outer", "status": "interrupted", "items": [
+            {"type": "userMessage", "id": "p",
+                "content": [{"type": "text", "text": "Review the current code changes."}]},
+            {"type": "commandExecution", "id": "c", "command": "git diff",
+                "status": "completed", "aggregatedOutput": ""},
+        ]},
+        {"id": "outer", "rootTurnId": "outer", "status": "completed", "items": [
+            {"type": "enteredReviewMode", "id": "e", "review": "current changes"},
+            {"type": "exitedReviewMode", "id": "x", "review": "Looks right."},
+            {"type": "agentMessage", "id": "m", "text": "Looks right."},
+        ]},
+    ]);
+    replay.agent(
+        &json!({"id": "@thread/resume", "result": {
+            "thread": {"id": THREAD, "name": "n", "turns": turns}, "model": "m"}})
+        .to_string(),
+    );
+    let ids: Vec<&str> = replay
+        .client
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(ids, ["e", "c", "m"], "{:#?}", replay.client.outline());
 }

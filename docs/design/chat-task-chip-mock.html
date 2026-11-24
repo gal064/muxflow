@@ -1,0 +1,125 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muxflow Chat — background chip, left-aligned</title>
+<style>
+:root{
+  --page:#1f2329;--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;
+  --ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;
+  --accent:#7aa6da;--working:#f0c674;--danger:#cc6566;
+  --ui:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;
+  color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--page);color:var(--ink);font:14px/1.6 var(--ui);margin:0}
+.wrap{max-width:1180px;margin:0 auto;padding:36px 16px 64px;display:flex;flex-direction:column;gap:28px}
+h1{font-size:24px;font-weight:600;color:var(--ink-strong);margin:0}
+h3{font-size:13px;font-weight:600;color:var(--ink-strong);margin:0 0 10px;display:flex;gap:8px;align-items:center}
+p{margin:0;max-width:74ch;color:var(--dim)}
+code{font-family:var(--mono);font-size:12px;background:var(--raised);border:1px solid var(--hair);border-radius:4px;padding:0 4px}
+.tag{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;border-radius:4px;padding:1px 6px}
+.tag.now{background:#cc656633;color:var(--danger)}.tag.fix{background:#7aa6da33;color:var(--accent)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+.pane{background:var(--bg);border:1px solid var(--hair);border-radius:10px;padding:18px 18px 16px;display:flex;flex-direction:column;gap:14px;min-height:300px}
+.msg{font-size:13px;color:var(--ink);max-width:640px;margin:0 auto;width:100%}
+.msg.user{background:var(--raised);border:1px solid var(--hair);border-radius:9px;padding:7px 11px;width:auto;margin-right:0;margin-left:auto;max-width:70%}
+.step{font-size:12.5px;color:var(--dim);display:flex;gap:6px;align-items:center;max-width:640px;margin:0 auto;width:100%}
+.step .m{font-family:var(--mono);color:var(--faint)}
+.sp{flex:1}
+.comp{width:min(640px,100%);margin:18px auto 0;border:1px solid var(--border);border-radius:11px;background:var(--bg);position:relative}
+.ta{padding:16px 12px 6px;color:var(--faint);font-size:13px}
+.bar{display:flex;align-items:center;gap:6px;padding:6px 8px 8px}
+.pill{font-size:11.5px;border:1px solid var(--border);border-radius:999px;padding:2px 9px;color:var(--ink);white-space:nowrap;background:var(--bg);display:inline-flex;align-items:center;gap:5px}
+.send{margin-left:auto;width:26px;height:26px;border-radius:7px;background:var(--accent);opacity:.5}
+.edge{position:absolute;top:-11px;left:10px;right:10px;display:flex;gap:6px;min-width:0}
+.edge.centered{justify-content:center}
+.edge .pill{font-size:11px;padding:1px 8px;cursor:pointer;min-width:0}
+.edge .pill.agt{border-color:var(--accent);color:var(--ink-strong);max-width:62%}
+.edge .pill .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.edge .pill .t{color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
+.wk{display:inline-flex;gap:1.5px;align-items:end;height:9px;flex:none}
+.wk i{width:2px;background:var(--working);border-radius:1px}
+.wk i:nth-child(1){height:5px}.wk i:nth-child(2){height:9px}.wk i:nth-child(3){height:7px}
+.ic{width:12px;height:12px;flex:none;color:var(--dim)}
+.guide{position:absolute;top:-30px;bottom:-6px;left:10px;border-left:1px dashed #7aa6da88}
+.guide.mid{left:50%;border-left-color:#cc656688}
+.note{font-size:12px;color:var(--faint)}
+</style>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="term" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+</svg>
+<div class="wrap">
+  <div>
+    <h1>Background chip on the composer's edge</h1>
+    <p>This applies to Claude Code and Codex chats alike. The chip should start at the composer's left edge, where <code>chat-polish-mock</code> and <code>subagents-visible-mock</code> put it. Today it is centred over the composer. The blue pill is a running subagent: its working mark, its description, and how long it has run. The grey pill counts background commands. Either one opens the list.</p>
+  </div>
+
+  <h3>One background command</h3>
+  <div class="grid">
+    <div>
+      <h3><span class="tag now">Now</span> centred</h3>
+      <div class="pane">
+        <div class="msg user">start the dev server and watch the logs</div>
+        <div class="step"><span class="m">run</span> pnpm dev <span class="sp"></span> running</div>
+        <div class="msg">The dev server is up on :5173. I'll keep it running in the background.</div>
+        <div class="comp">
+          <span class="guide mid"></span>
+          <div class="edge centered"><span class="pill"><svg class="ic"><use href="#term"/></svg>1 background command</span></div>
+          <div class="ta">Reply, or type / for commands and $ for skills</div>
+          <div class="bar"><span class="pill">gpt-5.5 · high</span><span class="send"></span></div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3><span class="tag fix">Proposed</span> left, 10px in</h3>
+      <div class="pane">
+        <div class="msg user">start the dev server and watch the logs</div>
+        <div class="step"><span class="m">run</span> pnpm dev <span class="sp"></span> running</div>
+        <div class="msg">The dev server is up on :5173. I'll keep it running in the background.</div>
+        <div class="comp">
+          <span class="guide"></span>
+          <div class="edge"><span class="pill"><svg class="ic"><use href="#term"/></svg>1 background command</span></div>
+          <div class="ta">Reply, or type / for commands and $ for skills</div>
+          <div class="bar"><span class="pill">gpt-5.5 · high</span><span class="send"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3>A subagent and two commands</h3>
+  <div class="grid">
+    <div>
+      <h3><span class="tag now">Now</span> centred</h3>
+      <div class="pane">
+        <div class="msg user">review PRs 73 and 74, run the tests meanwhile</div>
+        <div class="msg">I started a subagent on the two PRs and kicked off the test suite.</div>
+        <div class="comp">
+          <span class="guide mid"></span>
+          <div class="edge centered">
+            <span class="pill agt"><span class="wk"><i></i><i></i><i></i></span><span class="nm">Review PRs 73 and 74</span><span class="t">3m 29s</span></span>
+            <span class="pill"><svg class="ic"><use href="#term"/></svg>2 background commands</span>
+          </div>
+          <div class="ta">Reply, or type / for commands and $ for skills</div>
+          <div class="bar"><span class="pill">Opus 5.5 (default)</span><span class="send"></span></div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3><span class="tag fix">Proposed</span> left</h3>
+      <div class="pane">
+        <div class="msg user">review PRs 73 and 74, run the tests meanwhile</div>
+        <div class="msg">I started a subagent on the two PRs and kicked off the test suite.</div>
+        <div class="comp">
+          <span class="guide"></span>
+          <div class="edge">
+            <span class="pill agt"><span class="wk"><i></i><i></i><i></i></span><span class="nm">Review PRs 73 and 74</span><span class="t">3m 29s</span></span>
+            <span class="pill"><svg class="ic"><use href="#term"/></svg>2 background commands</span>
+          </div>
+          <div class="ta">Reply, or type / for commands and $ for skills</div>
+          <div class="bar"><span class="pill">Opus 5.5 (default)</span><span class="send"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="note">The list still opens from the chip's bottom-left corner (<code>Anchor::BottomLeft</code>), so with the chip on the left it opens directly above the chip, not off to one side.</p>
+</div>

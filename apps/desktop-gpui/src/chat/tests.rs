@@ -3483,6 +3483,15 @@ fn the_chip_comes_and_goes_with_the_list_and_stays_while_the_chat_is_idle(cx: &m
     );
     let edge = composer.bounds().top();
     assert!(chip.bounds().top() < edge && edge < chip.bounds().bottom());
+    // At the composer's left, as wide as its pill: not stretched across it
+    // with the pill in the middle.
+    let (chip, composer) = (chip.bounds(), composer.bounds());
+    let inset = chip.left() - composer.left();
+    assert!(
+        inset > px(0.) && inset < px(20.),
+        "{chip:?} in {composer:?}"
+    );
+    assert!(chip.size.width < composer.size.width / 2., "{chip:?}");
     // The turn ends; the command still runs.
     shell.chat(event(
         12,

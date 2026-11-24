@@ -73,11 +73,13 @@ fn section_label(id: &'static str, text: &'static str, cx: &App) -> impl IntoEle
         .child(text.to_uppercase())
 }
 
+/// A section header's setting, as its value in quiet ink: pressing it moves
+/// to the next value.
 fn sort_toggle(
     id: &'static str,
     label: impl Into<SharedString>,
     text: impl Into<SharedString>,
-    accent: Rgba,
+    ink: Rgba,
 ) -> Button {
     Button::new(id)
         .ghost()
@@ -88,37 +90,8 @@ fn sort_toggle(
         .child(
             div()
                 .text_size(ui(TYPE_LABEL))
-                .text_color(accent)
+                .text_color(ink)
                 .child(text.into()),
-        )
-}
-
-/// A [`sort_toggle`] with a chevron after its value, for a setting that has
-/// more than two values to step through.
-fn sort_toggle_with_chevron(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    text: impl Into<SharedString>,
-    accent: Rgba,
-) -> Button {
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .compact()
-        .h(ui(14.))
-        .accessibility_label(label)
-        .child(
-            h_flex()
-                .items_center()
-                .gap(ui(2.))
-                .text_size(ui(TYPE_LABEL))
-                .text_color(accent)
-                .child(text.into())
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(ui(10.))
-                        .text_color(accent),
-                ),
         )
 }
 
@@ -773,7 +746,7 @@ impl RenderOnce for Sidebar {
                 "Showing all workspaces. Show pinned workspaces only."
             },
             if pinned_only { "pinned only" } else { "all" },
-            palette.accent,
+            palette.chrome_dim,
         )
         .on_click(move |_, _, cx| {
             toggle_chrome
@@ -800,7 +773,7 @@ impl RenderOnce for Sidebar {
 
         let sort = self.agent_sort;
         let sort_chrome = self.chrome.clone();
-        let ordering = sort_toggle_with_chevron(
+        let ordering = sort_toggle(
             "agents-sort",
             format!(
                 "Agent ordering: {}. Next: {}.",
@@ -808,7 +781,7 @@ impl RenderOnce for Sidebar {
                 layout::sort_mode_label(layout::next_sort_mode(sort))
             ),
             layout::sort_mode_label(sort),
-            palette.accent,
+            palette.chrome_dim,
         )
         .on_click(move |_, _, cx| {
             sort_chrome

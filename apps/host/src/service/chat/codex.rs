@@ -40,6 +40,9 @@ const FAST_TIER: &str = "priority";
 /// server warns that the feature is unfinished; without it there are no
 /// questions to show at all.
 const QUESTIONS_FEATURE: &str = "features.default_mode_request_user_input=true";
+/// Keeps that warning, which every thread of the server would repeat, out of
+/// the chat: the chat turned the feature on, not the user.
+const QUIET_FEATURES: &str = "suppress_unstable_features_warning=true";
 /// What has the agent answer one prompt, given on its stdin, with a title:
 /// with nothing it may change, leaving no session behind, thinking little,
 /// and running none of the user's hooks or `notify` program (both taken by
@@ -204,7 +207,7 @@ impl ChatProvider for CodexProvider {
         let mut argv = launch.program.clone();
         argv.push("app-server".to_owned());
         argv.extend(launch.passthrough.iter().cloned());
-        argv.extend(["-c", QUESTIONS_FEATURE, "--listen"].map(str::to_owned));
+        argv.extend(["-c", QUESTIONS_FEATURE, "-c", QUIET_FEATURES, "--listen"].map(str::to_owned));
         argv.push(format!("unix://{}", socket.display()));
         Some(PaneCommand {
             argv,
@@ -240,6 +243,8 @@ enum Asked {
     Turn,
     /// `turn/steer`, with the message it carried.
     Steer(Held),
+    /// `thread/compact/start` or `review/start`, for a built-in.
+    Command,
     Revert,
     Other,
 }
@@ -272,7 +277,7 @@ impl Held {
         let mut item = items::text(self.item_id.clone(), Kind::User, self.text.clone());
         item.attachments = self.attachments.iter().map(Attached::wire).collect();
         item.at_unix_millis = super::now_unix_millis();
-        item.rewindable = opens;
+        item.rewindable = opens && !is_request(&self.text);
         item
     }
 }
@@ -308,6 +313,14 @@ pub(super) struct Codex {
     skills: Vec<(String, String, String)>,
     /// The turn that is running.
     turn: Option<String>,
+    /// The turn the running one belongs to. A review runs as a turn inside
+    /// the one `review/start` named, and that outer one is what completes.
+    root: Option<String>,
+    /// The warnings already shown, which the server may repeat.
+    warned: BTreeSet<String>,
+    /// The running or asked-for turn is a compaction's or a review's, which
+    /// no message can join.
+    command_turn: bool,
     /// A turn was asked for and has not started yet.
     starting: bool,
     pending: VecDeque<Pending>,
@@ -334,6 +347,8 @@ pub(super) struct Codex {
     /// The row of each subagent spawned in the thread, by its thread, for
     /// the collab calls that say how it is.
     agents: BTreeMap<String, v1::ChatItem>,
+    /// The turn each subagent was spawned in, by its thread.
+    spawned_in: BTreeMap<String, String>,
     naming: Naming,
     /// The thread being opened is a new one: started, or a copy.
     new_thread: bool,
@@ -365,6 +380,132 @@ pub(super) fn skill_command(name: &str, description: &str) -> v1::ChatCommand {
         argument_hint: String::new(),
         kind: v1::ChatCommandKind::Skill.into(),
     }
+}
+
+/// A command of the agent's own that the chat runs for it. Codex's server
+/// reads a typed `/compact` as words for the model: each is a request of its
+/// own, or for `/init` a prompt of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Builtin {
+    Compact,
+    Review,
+    Init,
+}
+
+/// Each built-in as the composer lists it: its name, description and what
+/// it takes.
+const BUILTINS: &[(Builtin, &str, &str, &str)] = &[
+    (
+        Builtin::Compact,
+        "compact",
+        "Summarize the conversation to free up context",
+        "",
+    ),
+    (
+        Builtin::Review,
+        "review",
+        "Review uncommitted changes, or those against a branch or of a commit",
+        "[branch | commit | instructions]",
+    ),
+    (
+        Builtin::Init,
+        "init",
+        "Create an AGENTS.md with instructions for this folder",
+        "",
+    ),
+];
+
+/// What `/init` asks of the agent.
+const INIT_PROMPT: &str = "Create a file named AGENTS.md in this folder: a short guide for \
+    an agent working in this repository. Read the repository first. Cover its layout, \
+    how to build, test and run it, its coding style and testing conventions, and how \
+    commits and pull requests are written here. Write only what the repository shows. \
+    If an AGENTS.md is already here, improve it instead of starting over.";
+
+/// A built-in the server runs as a request: it opens no turn of a message,
+/// and its turn takes no message.
+fn is_request(text: &str) -> bool {
+    matches!(builtin(text), Some((Builtin::Compact | Builtin::Review, _)))
+}
+
+/// The built-in a message is, and what follows its name.
+fn builtin(text: &str) -> Option<(Builtin, &str)> {
+    let rest = text.trim().strip_prefix('/')?;
+    let (name, rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    BUILTINS
+        .iter()
+        .find(|(_, known, _, _)| *known == name)
+        .map(|(builtin, ..)| (*builtin, rest.trim()))
+}
+
+fn builtin_command((_, name, description, hint): &(Builtin, &str, &str, &str)) -> v1::ChatCommand {
+    v1::ChatCommand {
+        name: (*name).to_owned(),
+        description: (*description).to_owned(),
+        argument_hint: (*hint).to_owned(),
+        kind: v1::ChatCommandKind::Command.into(),
+    }
+}
+
+/// What `/review` reviews: the uncommitted changes, a commit named by its
+/// hash, the changes against a branch, or what the words ask for.
+fn review_target(what: &str) -> Value {
+    let hash = (7..=40).contains(&what.len()) && what.chars().all(|c| c.is_ascii_hexdigit());
+    if what.is_empty() {
+        json!({"type": "uncommittedChanges"})
+    } else if hash {
+        json!({"type": "commit", "sha": what})
+    } else if !what.contains(char::is_whitespace) {
+        json!({"type": "baseBranch", "branch": what})
+    } else {
+        json!({"type": "custom", "instructions": what})
+    }
+}
+
+/// What a subagent is doing, from the step it has started.
+fn activity(step: &v1::ChatTool) -> String {
+    let what = &step.detail;
+    match ToolKind::try_from(step.kind).unwrap_or_default() {
+        ToolKind::Command => format!("Running {what}"),
+        ToolKind::Edit => format!("Editing {what}"),
+        ToolKind::Web => format!("Searching {what}"),
+        _ if what.is_empty() => step.title.clone(),
+        _ => format!("{} {what}", step.title),
+    }
+}
+
+/// A plan the agent keeps for its turn, as one row it updates: what it
+/// explained, how far it has got, and each step with how it stands.
+fn plan_item(params: &Value) -> v1::ChatItem {
+    let steps = params["plan"].as_array().map_or(&[][..], Vec::as_slice);
+    let done = steps
+        .iter()
+        .filter(|step| string(step, "status") == "completed")
+        .count();
+    let detail = match string(params, "explanation") {
+        "" => format!("{done} of {} done", steps.len()),
+        explanation => explanation.to_owned(),
+    };
+    let id = format!("{}-plan", string(params, "turnId"));
+    let mut row = items::tool(id, ToolKind::Other, "plan", detail);
+    row.at_unix_millis = super::now_unix_millis();
+    if let Some(tool) = row.tool.as_mut() {
+        tool.status = Status::Ok.into();
+        tool.result_summary = format!("{done}/{}", steps.len());
+        tool.output_preview = steps
+            .iter()
+            .map(|step| {
+                let mark = match string(step, "status") {
+                    "completed" => "[x]",
+                    "inProgress" => "[>]",
+                    _ => "[ ]",
+                };
+                format!("{mark} {}", string(step, "step"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    row
 }
 
 /// One item of a thread as a timeline item. `None` for one that is not
@@ -435,6 +576,12 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
                     _ => {}
                 }
             }
+            // `/init` is sent as its prompt, and shown as it was typed.
+            let text = if text == INIT_PROMPT {
+                "/init".to_owned()
+            } else {
+                text
+            };
             let mut item = items::text(id, Kind::User, text);
             item.attachments = attachments;
             item
@@ -531,6 +678,34 @@ fn thread_item(source: &Value, finished: bool) -> Option<v1::ChatItem> {
         // Read when it has ended: while it runs the working line says so. The
         // item names no size.
         "contextCompaction" => items::text(id, Kind::Notice, "Context compacted"),
+        "enteredReviewMode" => {
+            items::text(id, Kind::Notice, format!("Reviewing {}", field("review")))
+        }
+        // An agent's message that follows it carries the review's text, live
+        // and as read.
+        "exitedReviewMode" => return None,
+        "imageView" => {
+            let mut row = items::tool(id, ToolKind::Read, "view", field("path"));
+            let tool = row.tool.as_mut()?;
+            field("path").clone_into(&mut tool.path);
+            status(tool, false);
+            row
+        }
+        "sleep" => {
+            let seconds = source["durationMs"].as_u64().unwrap_or(0).div_ceil(1000);
+            let mut row = items::tool(id, ToolKind::Other, "wait", format!("{seconds}s"));
+            status(row.tool.as_mut()?, false);
+            row
+        }
+        "imageGeneration" => {
+            let detail = match field("savedPath") {
+                "" => field("revisedPrompt"),
+                path => path,
+            };
+            let mut row = items::tool(id, ToolKind::Other, "image", detail);
+            status(row.tool.as_mut()?, !source["failure"].is_null());
+            row
+        }
         _ => return None,
     };
     if produced.at_unix_millis == 0 {
@@ -675,9 +850,12 @@ impl Codex {
         // its end.
         let mut commands = Vec::from(super::muxflow_commands());
         commands.extend(naming::with_command(
-            self.skills
-                .iter()
-                .map(|(name, description, _)| skill_command(name, description)),
+            BUILTINS.iter().map(builtin_command).chain(
+                self.skills
+                    .iter()
+                    .filter(|(name, _, _)| builtin(&format!("/{name}")).is_none())
+                    .map(|(name, description, _)| skill_command(name, description)),
+            ),
         ));
         out.publish(Change::Catalog(v1::ChatCatalog {
             capabilities: None,
@@ -848,20 +1026,40 @@ impl Codex {
         let mut streamed = std::mem::take(&mut self.open);
         streamed.retain(|_, item| item.streaming);
         self.turn = None;
+        self.root = None;
+        self.command_turn = false;
         self.agents.clear();
+        self.spawned_in.clear();
+        // The timeline is read anew: warnings may be said again.
+        self.warned.clear();
         self.state.compacting = false;
         // The thread as read has every step of an ended turn ended.
         self.execs.clear();
         self.state.background.clear();
         let turns = thread["turns"].as_array().map_or(&[][..], Vec::as_slice);
+        // The steps of a review's own turn, by the turn of the review.
+        let mut reviews: BTreeMap<&str, Vec<v1::ChatItem>> = BTreeMap::new();
         for turn in turns {
             let running = string(turn, "status") == "inProgress";
             let turn_id = string(turn, "id");
             if running {
                 self.turn = Some(turn_id.to_owned());
+                self.root = match string(turn, "rootTurnId") {
+                    "" => None,
+                    root => Some(root.to_owned()),
+                };
             }
             let mut opened = false;
+            // A review runs in a turn of its own that names the review's
+            // turn as its root. It is read before that turn, and as
+            // interrupted although it ended: its steps go under the review's
+            // notice, and its prompt, which Codex wrote, is not shown.
+            let root = string(turn, "rootTurnId");
+            let inner = !root.is_empty() && root != turn_id;
             for source in turn["items"].as_array().map_or(&[][..], Vec::as_slice) {
+                if inner && string(source, "type") == "userMessage" {
+                    continue;
+                }
                 if string(source, "type") == "collabAgentToolCall"
                     && string(source, "tool") != SPAWN
                 {
@@ -881,6 +1079,7 @@ impl Codex {
                 }
                 if string(source, "type") == "collabAgentToolCall" {
                     remember_agent(&mut self.agents, source, &item);
+                    self.note_spawn(source, turn_id);
                 }
                 // Going back to a message goes back to before its turn, so
                 // only the message that opened a turn can be gone back to.
@@ -894,13 +1093,23 @@ impl Codex {
                         self.execs.insert(item.id.clone());
                     }
                 }
-                timeline.push(item);
+                let entered = string(source, "type") == "enteredReviewMode";
+                if inner {
+                    reviews.entry(root).or_default().push(item);
+                } else {
+                    timeline.push(item);
+                }
+                if entered {
+                    timeline.extend(reviews.remove(turn_id).unwrap_or_default());
+                }
             }
-            if string(turn, "status") == "interrupted" {
+            if string(turn, "status") == "interrupted" && !inner {
                 let id = format!("{turn_id}-interrupted");
                 timeline.push(items::text(id, Kind::Notice, "Interrupted"));
             }
         }
+        // A review whose own turn was read without it.
+        timeline.extend(reviews.into_values().flatten());
         if self.turn.is_some() {
             // What was shown of it stays, and goes on from where it is.
             for (id, item) in streamed {
@@ -928,6 +1137,7 @@ impl Codex {
         self.starting = false;
         self.state.connection = Connection::Ready.into();
         self.publish_state(out);
+        self.sync_agent_tasks(out);
         // No hook of the server's names the thread until a turn runs on it:
         // one that was resumed would not be known to be running until then.
         if !self.turns.is_empty() && self.turn.is_none() {
@@ -967,6 +1177,12 @@ impl Codex {
         while !self.starting
             && let Some(held) = self.held.pop_front()
         {
+            // A built-in cannot join a turn: it waits for the turn's end, and
+            // what was sent after it waits behind it.
+            if self.turn.is_some() && (self.command_turn || builtin(&held.text).is_some()) {
+                self.held.push_front(held);
+                break;
+            }
             self.send(held, out);
         }
     }
@@ -1034,7 +1250,26 @@ impl Codex {
     }
 
     fn send(&mut self, held: Held, out: &mut Output) {
-        let input = self.input_with(&held.text, &held.attachments);
+        let thread = self.thread.clone();
+        let text = match builtin(&held.text) {
+            Some((Builtin::Compact, _)) => {
+                self.starting = true;
+                self.command_turn = true;
+                let params = json!({"threadId": thread});
+                self.request("thread/compact/start", params, Asked::Command, out);
+                return self.publish_state(out);
+            }
+            Some((Builtin::Review, what)) => {
+                self.starting = true;
+                self.command_turn = true;
+                let params = json!({"threadId": thread, "target": review_target(what)});
+                self.request("review/start", params, Asked::Command, out);
+                return self.publish_state(out);
+            }
+            Some((Builtin::Init, _)) => INIT_PROMPT,
+            None => held.text.as_str(),
+        };
+        let input = self.input_with(text, &held.attachments);
         if let Some(turn) = self.turn.clone() {
             let params = json!({
                 "threadId": self.thread, "expectedTurnId": turn, "input": input,
@@ -1090,20 +1325,27 @@ impl Codex {
                     return self.publish_state(out);
                 }
             }
+            // The prompt Codex writes for a command it runs: the command
+            // as typed is shown.
+            ("userMessage", _) if self.command_turn && string(source, "clientId").is_empty() => {
+                return;
+            }
             ("collabAgentToolCall", tool) if tool != SPAWN => {
                 for item in note_agents(&mut self.agents, source) {
                     self.track(&item);
                     out.publish(Change::Item(item));
                 }
-                return;
+                return self.sync_agent_tasks(out);
             }
             _ => {}
         }
         let Some(mut item) = thread_item(source, finished) else {
             return;
         };
-        if string(source, "type") == "collabAgentToolCall" {
+        let spawn = string(source, "type") == "collabAgentToolCall";
+        if spawn {
             remember_agent(&mut self.agents, source, &item);
+            self.note_spawn(source, string(params, "turnId"));
         }
         if item.kind == i32::from(Kind::User) {
             // The first message of a turn is the one a rewind can name.
@@ -1122,6 +1364,9 @@ impl Codex {
         out.publish(Change::Item(item));
         if string(source, "type") == "contextCompaction" {
             self.publish_state(out);
+        }
+        if spawn {
+            self.sync_agent_tasks(out);
         }
         if is_exec(source) {
             if running {
@@ -1174,10 +1419,25 @@ impl Codex {
     fn turn_completed(&mut self, params: &Value, out: &mut Output) {
         let turn = &params["turn"];
         let id = string(turn, "id");
-        if self.turn.as_deref().is_some_and(|running| running != id) {
+        if self
+            .turn
+            .as_deref()
+            .is_some_and(|running| running != id && self.root.as_deref() != Some(id))
+        {
             return;
         }
+        // Stopping a turn stops the subagents it spawned; their threads may
+        // not say so.
+        if string(turn, "status") == "interrupted" {
+            let stopped: Vec<String> = [Some(id.to_owned()), self.turn.take(), self.root.take()]
+                .into_iter()
+                .flatten()
+                .collect();
+            self.forget_agents(&stopped);
+        }
         self.turn = None;
+        self.root = None;
+        self.command_turn = false;
         self.starting = false;
         self.pending.clear();
         self.state.compacting = false;
@@ -1185,6 +1445,16 @@ impl Codex {
         for (id, mut item) in std::mem::take(&mut self.open) {
             // A command still running was put in the background: listed
             // until its own end. Codex has no stop for one.
+            // A subagent works on past the turn that spawned it, until its
+            // own thread says it has ended.
+            if self
+                .agents
+                .values()
+                .any(|row| row.id == id && items::is_running(row))
+            {
+                self.open.insert(id, item);
+                continue;
+            }
             if self.execs.contains(&id) {
                 if !self.state.background.iter().any(|task| task.id == id) {
                     self.state.background.push(v1::ChatBackgroundTask {
@@ -1208,9 +1478,7 @@ impl Codex {
             out.publish(Change::Item(item));
         }
         self.execs.retain(|id| self.open.contains_key(id));
-        // Whether a subagent outlives the turn that spawned it is not known
-        // (not seen live): its row ends with the turn, as every step does.
-        self.agents.values_mut().for_each(items::stop);
+        self.sync_agent_tasks(out);
         match string(turn, "status") {
             "interrupted" => self.notice(format!("{id}-interrupted"), "Interrupted", out),
             "failed" => {
@@ -1227,6 +1495,123 @@ impl Codex {
             self.revert(out);
         } else {
             self.send_held(out);
+        }
+    }
+
+    /// Notes the turn a spawn's subagent was started in.
+    fn note_spawn(&mut self, source: &Value, turn: &str) {
+        if let Some(thread) = source["receiverThreadIds"][0].as_str()
+            && self.agents.contains_key(thread)
+        {
+            self.spawned_in.insert(thread.to_owned(), turn.to_owned());
+        }
+    }
+
+    /// Stops following the subagents spawned in `turns`, and gives their
+    /// rows' ids.
+    fn forget_agents(&mut self, turns: &[String]) -> Vec<String> {
+        let spawned_in = &self.spawned_in;
+        let mut rows = Vec::new();
+        self.agents.retain(|thread, row| {
+            let gone = spawned_in
+                .get(thread)
+                .is_some_and(|turn| turns.contains(turn));
+            if gone {
+                rows.push(row.id.clone());
+            }
+            !gone
+        });
+        let agents = &self.agents;
+        self.spawned_in
+            .retain(|thread, _| agents.contains_key(thread));
+        rows
+    }
+
+    /// What a subagent's own thread says of it, on its row: what it is
+    /// doing, the steps it has taken, the tokens it has used, and its end.
+    fn subagent_event(&mut self, thread: String, method: &str, params: &Value, out: &mut Output) {
+        let Some(row) = self.agents.get_mut(&thread) else {
+            return;
+        };
+        let before = row.clone();
+        match method {
+            "turn/started" => agent_state(row, "running"),
+            "turn/completed" => {
+                let state = match string(&params["turn"], "status") {
+                    "interrupted" => "interrupted",
+                    "failed" => "errored",
+                    _ => "completed",
+                };
+                agent_state(row, state);
+            }
+            "item/started" | "item/completed" => {
+                let finished = method == "item/completed";
+                let step = thread_item(&params["item"], finished).and_then(|item| item.tool);
+                if let (Some(step), Some(tool)) = (step, row.tool.as_mut())
+                    && items::is_running(&before)
+                {
+                    if finished {
+                        tool.tool_uses += 1;
+                    } else {
+                        tool.activity = activity(&step);
+                    }
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                if let (Some(tokens), Some(tool)) = (
+                    params["tokenUsage"]["last"]["totalTokens"].as_u64(),
+                    row.tool.as_mut(),
+                ) {
+                    tool.tokens = tokens;
+                }
+            }
+            _ => {}
+        }
+        if *row != before {
+            let row = row.clone();
+            self.track(&row);
+            out.publish(Change::Item(row));
+            self.sync_agent_tasks(out);
+        }
+    }
+
+    /// Lists each subagent that runs among the work outside the turn, as
+    /// the composer's pill shows it, and no other.
+    fn sync_agent_tasks(&mut self, out: &mut Output) {
+        let subagent = i32::from(v1::ChatTaskKind::Subagent);
+        let mut tasks: Vec<v1::ChatBackgroundTask> = self
+            .state
+            .background
+            .iter()
+            .filter(|task| task.kind != subagent)
+            .cloned()
+            .collect();
+        for row in self.agents.values().filter(|row| items::is_running(row)) {
+            // Its start as first listed, when the row names none.
+            let listed = self.state.background.iter().find(|task| task.id == row.id);
+            let started = match (row.at_unix_millis, listed) {
+                (0, Some(task)) => task.started_at_unix_millis,
+                (0, None) => super::now_unix_millis(),
+                (at, _) => at,
+            };
+            tasks.push(v1::ChatBackgroundTask {
+                id: row.id.clone(),
+                kind: subagent,
+                // The prompt's first line, as its row reads.
+                description: row
+                    .tool
+                    .as_ref()
+                    .and_then(|tool| tool.detail.lines().find(|line| !line.trim().is_empty()))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
+                started_at_unix_millis: started,
+                stoppable: false,
+            });
+        }
+        if tasks != self.state.background {
+            self.state.background = tasks;
+            self.publish_state(out);
         }
     }
 
@@ -1414,9 +1799,18 @@ impl Codex {
                     out.publish(Change::Truncate(v1::ChatTruncate {
                         after_item_id: rewind.after_item_id,
                     }));
-                    // The turns from that one on are gone with their messages.
+                    // The turns from that one on are gone with their messages,
+                    // and the rows of the subagents they spawned.
                     let gone = self.turns.iter().position(|(_, turn)| *turn == rewind.turn);
-                    self.turns.truncate(gone.unwrap_or(self.turns.len()));
+                    let gone: Vec<(String, String)> = self
+                        .turns
+                        .drain(gone.unwrap_or(self.turns.len())..)
+                        .collect();
+                    let turns: Vec<String> = gone.into_iter().map(|(_, turn)| turn).collect();
+                    for row in self.forget_agents(&turns) {
+                        self.open.remove(&row);
+                    }
+                    self.sync_agent_tasks(out);
                     // A message sent meanwhile is the next one of the
                     // conversation as it now is.
                     for (index, held) in self.held.iter().enumerate() {
@@ -1430,6 +1824,28 @@ impl Codex {
             Asked::Steer(_) if failed => {
                 let text = "The message could not join the turn that is running.";
                 self.notice(format!("request-{id}-failed"), text, out);
+            }
+            Asked::Command if failed => {
+                self.starting = false;
+                self.command_turn = false;
+                self.stop_wanted = false;
+                let reason = match string(&message["error"], "message") {
+                    "" => "The command could not run.",
+                    reason => reason,
+                };
+                self.notice(format!("request-{id}-failed"), reason, out);
+                self.publish_state(out);
+                self.send_held(out);
+            }
+            // A review names its turn; a compaction's says it has started.
+            Asked::Command => {
+                let turn = string(&result["turn"], "id");
+                if self.turn.is_none() && !turn.is_empty() {
+                    self.turn = Some(turn.to_owned());
+                    self.starting = false;
+                    self.stop_if_wanted(out);
+                    self.publish_state(out);
+                }
             }
             Asked::Models | Asked::Skills | Asked::Steer(_) | Asked::Other => {}
         }
@@ -1446,14 +1862,23 @@ impl Codex {
     }
 
     fn notification(&mut self, method: &str, params: &Value, out: &mut Output) {
-        // One server could hold other threads; this chat is one of them.
+        // One server could hold other threads; this chat is one of them, and
+        // the subagents it spawned say on theirs how they get on.
         let thread = string(params, "threadId");
         if !thread.is_empty() && thread != self.thread {
+            if self.agents.contains_key(thread) {
+                self.subagent_event(thread.to_owned(), method, params, out);
+            }
             return;
         }
         match method {
             "turn/started" => {
-                self.turn = Some(string(&params["turn"], "id").to_owned());
+                let turn = &params["turn"];
+                self.turn = Some(string(turn, "id").to_owned());
+                self.root = match string(turn, "rootTurnId") {
+                    "" => None,
+                    root => Some(root.to_owned()),
+                };
                 self.starting = false;
                 self.stop_if_wanted(out);
                 self.note_thread(out);
@@ -1483,13 +1908,41 @@ impl Codex {
                     .retain(|pending| request_key(&pending.id) != resolved);
                 self.publish_state(out);
             }
-            "error" if params["willRetry"].as_bool() != Some(true) => {
+            "error" => {
                 let reason = string(&params["error"], "message");
+                let retries = params["willRetry"].as_bool() == Some(true);
                 if !reason.is_empty() {
-                    let id = format!("{}-error", string(params, "turnId"));
-                    self.notice(id, reason, out);
+                    // One line for a turn's retries, said again as they go.
+                    let (id, text) = if retries {
+                        ("retry", format!("Retrying: {reason}"))
+                    } else {
+                        ("error", reason.to_owned())
+                    };
+                    let id = format!("{}-{id}", string(params, "turnId"));
+                    self.notice(id, &text, out);
                 }
             }
+            "warning" | "configWarning" | "deprecationNotice" => {
+                let said = match method {
+                    "warning" => string(params, "message"),
+                    _ => string(params, "summary"),
+                };
+                let text = match string(params, "details") {
+                    "" => said.to_owned(),
+                    details => format!("{said}\n{details}"),
+                };
+                if !text.trim().is_empty() && self.warned.insert(text.clone()) {
+                    self.notice(format!("warning-{}", self.warned.len()), &text, out);
+                }
+            }
+            "model/rerouted" => {
+                let (from, to) = (string(params, "fromModel"), string(params, "toModel"));
+                // For this turn only: the chat's own choice goes with the next.
+                let id = format!("{}-rerouted", string(params, "turnId"));
+                let text = format!("Codex switched this turn from {from} to {to}");
+                self.notice(id, &text, out);
+            }
+            "turn/plan/updated" => out.publish(Change::Item(plan_item(params))),
             "thread/name/updated" => {
                 let name = string(params, "threadName");
                 if self.naming.heard(name) {
@@ -1759,8 +2212,16 @@ impl Dialect for Codex {
                 item_id,
                 attachments,
             } => {
-                // A turn that was asked for and has no id yet cannot be joined.
-                let waits = !self.ready || self.rewind.is_some() || self.starting;
+                let command = builtin(&text).map(|(builtin, _)| builtin);
+                // A turn that was asked for and has no id yet cannot be
+                // joined, a built-in joins none, and nothing goes ahead of
+                // what already waits.
+                let waits = !self.ready
+                    || self.rewind.is_some()
+                    || self.starting
+                    || self.command_turn
+                    || !self.held.is_empty()
+                    || (command.is_some() && self.turn.is_some());
                 if waits && self.held.len() >= MAX_HELD {
                     return Err(not_ready());
                 }
@@ -1927,12 +2388,15 @@ impl Dialect for Codex {
         self.naming.stop();
         self.ready = false;
         self.turn = None;
+        self.root = None;
+        self.command_turn = false;
         self.starting = false;
         self.stop_wanted = false;
         self.pending.clear();
         self.held.clear();
         self.rewind = None;
         self.agents.clear();
+        self.spawned_in.clear();
         self.state.compacting = false;
         // What it ran in the background went with it.
         self.execs.clear();

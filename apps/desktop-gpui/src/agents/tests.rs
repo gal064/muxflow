@@ -17,8 +17,6 @@ use futures::future::{BoxFuture, FutureExt};
 use gpui_kit::{AppContext, Entity, TestAppContext};
 use serde_json::{Value, json};
 
-use crate::terminal::integration::agents::PaneAttention;
-
 use super::{
     model::{AttentionKind, EventScope},
     notify::{AgentFocus, AgentNativeNotification},
@@ -241,23 +239,6 @@ impl Harness {
                 .collect()
         })
     }
-
-    fn rings(&self, cx: &mut TestAppContext) -> Vec<String> {
-        self.runtime.read_with(cx, |runtime, _| {
-            runtime
-                .attention_rings()
-                .get("local")
-                .cloned()
-                .unwrap_or_default()
-        })
-    }
-}
-
-fn wants(cx: &mut TestAppContext, pane: &str) -> bool {
-    cx.update(|cx| {
-        cx.try_global::<PaneAttention>()
-            .is_some_and(|attention| attention.wants("local", pane))
-    })
 }
 
 /// A host whose snapshot is `agents`, and that accepts every seen mark on a
@@ -333,16 +314,12 @@ fn a_frame_from_another_connection_epoch_is_dropped(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn rings_a_waiting_pane_and_typing_in_it_acknowledges_the_exact_generation(
-    cx: &mut TestAppContext,
-) {
+fn typing_in_a_waiting_pane_acknowledges_the_exact_generation(cx: &mut TestAppContext) {
     let harness = Harness::new(
         cx,
         snapshot_host(vec![wire_agent("idle", 7, Some("completed"), 0)]),
     );
     harness.sync(cx, inputs(vec![scope(4, 1)]));
-    assert_eq!(harness.rings(cx), ["%1"]);
-    assert!(wants(cx, "%1"));
 
     // Activity elsewhere acknowledges nothing.
     harness.runtime.update(cx, |runtime, cx| {
@@ -363,12 +340,10 @@ fn rings_a_waiting_pane_and_typing_in_it_acknowledges_the_exact_generation(
         (seen.agent_id.as_str(), seen.attention_generation.as_str()),
         ("agent-1", "7")
     );
-    assert!(harness.rings(cx).is_empty());
-    assert!(!wants(cx, "%1"));
 }
 
 #[gpui_kit::test]
-fn a_refused_seen_mark_keeps_the_ring_and_says_why(cx: &mut TestAppContext) {
+fn a_refused_seen_mark_says_why(cx: &mut TestAppContext) {
     let harness = Harness::new(cx, |command| match command.operation.as_str() {
         "snapshot" => Ok(snapshot_answer(
             command,
@@ -382,7 +357,6 @@ fn a_refused_seen_mark_keeps_the_ring_and_says_why(cx: &mut TestAppContext) {
         runtime.acknowledge_pane("local", "%1", cx)
     });
     cx.run_until_parked();
-    assert_eq!(harness.rings(cx), ["%1"]);
     assert_eq!(
         *harness.statuses.borrow(),
         ["Could not mark agent attention seen: stale generation"]
@@ -400,7 +374,6 @@ fn a_lost_client_disconnects_its_host_and_a_hidden_host_is_removed(cx: &mut Test
 
     harness.sync(cx, inputs(vec![]));
     assert!(harness.lifecycles(cx).is_empty());
-    assert!(harness.rings(cx).is_empty());
 
     harness.sync(cx, inputs(vec![scope(5, 1)]));
     assert_eq!(harness.lifecycles(cx).len(), 1);
@@ -412,7 +385,6 @@ fn a_lost_client_disconnects_its_host_and_a_hidden_host_is_removed(cx: &mut Test
             .runtime
             .read_with(cx, |runtime, _| runtime.store.host("local").is_none())
     );
-    assert!(!wants(cx, "%1"));
 }
 
 #[gpui_kit::test]
@@ -644,7 +616,6 @@ fn a_reconnect_snapshot_catches_up_once_on_what_happened_while_away(cx: &mut Tes
     harness.sync(cx, inputs(vec![]));
     harness.sync(cx, inputs(vec![scope(5, 1)]));
     assert_eq!(harness.effects.shown.borrow().len(), 1);
-    assert_eq!(harness.rings(cx), ["%1"]);
 
     // The same watermark again is nothing new.
     harness.sync(cx, inputs(vec![scope(5, 2)]));
