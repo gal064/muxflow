@@ -61,8 +61,6 @@ pub struct TerminalPane {
     /// Mounted on the screen the engine kept while it was hidden, so it shows
     /// that before the host's reveal.
     restored: bool,
-    /// tmux's active pane, when there are several to tell apart.
-    pub(super) active: bool,
     cursor_on: bool,
     last_output: Option<Instant>,
     _blink: Option<Task<()>>,
@@ -115,7 +113,6 @@ impl TerminalPane {
             last_stats: Rc::default(),
             revealed: false,
             restored: false,
-            active: false,
             cursor_on: true,
             last_output: None,
             _blink: None,
@@ -245,13 +242,6 @@ impl TerminalPane {
     /// a paint gate armed for it.
     pub(super) fn revealed(&self) -> bool {
         self.revealed
-    }
-
-    pub(super) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        if self.active != active {
-            self.active = active;
-            cx.notify();
-        }
     }
 
     pub(super) fn on_grid_applied(&mut self, _size: GridSize, cx: &mut Context<Self>) {

@@ -31,10 +31,6 @@ pub const PALETTE_ROW_HEIGHT: f32 = 28.;
 pub const RADIUS_ROW: f32 = 7.;
 pub const RADIUS_CONTROL: f32 = 5.;
 pub const RADIUS_PANEL: f32 = 10.;
-pub const FOCUS_RING: f32 = 2.;
-pub const ATTENTION_RING: f32 = 2.5;
-pub const ATTENTION_RADIUS: f32 = 6.;
-pub const ATTENTION_INSET: f32 = 2.;
 
 /// `styles.css`'s narrow-window breakpoints, in CSS pixels. Tauri zoomed the
 /// webview for UI scale, so they move with it: compare with [`narrower_than`].

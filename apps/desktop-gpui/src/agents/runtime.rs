@@ -22,15 +22,13 @@ use futures::future::{BoxFuture, FutureExt};
 use gpui_kit::{Context, EventEmitter, Task};
 use serde_json::Value;
 
-use crate::{
-    connection_ui::backend::TerminalBackend, terminal::integration::agents::PaneAttention,
-};
+use crate::connection_ui::backend::TerminalBackend;
 
 use super::{
-    list::{needs_attention, next_recent_expiration},
+    list::next_recent_expiration,
     model::{
         AdapterDescriptor, AgentRecord, AgentStore, AttentionKind, Generation, RuntimeMemory,
-        WireEvent, agents_matching_pane, derive_rollups, record_key, scope_key,
+        WireEvent, agents_matching_pane, record_key, scope_key,
     },
     notify::{
         AgentFocus, AgentNativeNotification, NotificationDecision, TransitionContext,
@@ -162,8 +160,6 @@ pub struct AgentRuntime {
     /// Bumped to ask a host again with an unchanged scope (after a hook change).
     resnapshot: HashMap<String, u64>,
     pub(super) inputs: RuntimeInputs,
-    /// The panes each host's attention ring was last set to.
-    attention: HashMap<String, Vec<String>>,
     recent_clock: Option<(u64, Task<()>)>,
     pub(super) setup: super::setup::SetupState,
     /// Per host, the topology its last accepted requested snapshot covered.
@@ -184,7 +180,6 @@ impl AgentRuntime {
             requests: HashMap::new(),
             resnapshot: HashMap::new(),
             inputs: RuntimeInputs::default(),
-            attention: HashMap::new(),
             recent_clock: None,
             setup: super::setup::SetupState::default(),
             authorities: HashMap::new(),
@@ -761,33 +756,9 @@ impl AgentRuntime {
         cx.spawn(async move |_, _| Ok(wire::map_host_naming(&request.await?)))
     }
 
-    /// The store moved: redraw, re-mark the attention rings, and rearm the
-    /// one clock that changes a row with no event at all.
+    /// The store moved: redraw, and rearm the one clock that changes a row
+    /// with no event at all.
     pub(super) fn changed(&mut self, cx: &mut Context<Self>) {
-        let mut rings: HashMap<String, Vec<String>> = HashMap::new();
-        for host in &self.inputs.shown {
-            let rollups = derive_rollups(self.agents(host));
-            let mut panes: Vec<String> = rollups
-                .by_pane
-                .into_iter()
-                .filter(|(_, rollup)| rollup.state.is_some_and(needs_attention))
-                .map(|(pane, _)| pane)
-                .collect();
-            panes.sort();
-            rings.insert(host.clone(), panes);
-        }
-        let hosts: HashSet<String> = rings.keys().chain(self.attention.keys()).cloned().collect();
-        for host in hosts {
-            let next = rings.remove(&host).unwrap_or_default();
-            if self.attention.get(&host) != Some(&next) {
-                PaneAttention::set_host(&host, next.clone(), cx);
-                if next.is_empty() {
-                    self.attention.remove(&host);
-                } else {
-                    self.attention.insert(host, next);
-                }
-            }
-        }
         self.arm_recent_clock(cx);
         self.setup_tick(cx);
         cx.notify();
@@ -817,11 +788,5 @@ impl AgentRuntime {
             .ok();
         });
         self.recent_clock = Some((deadline, task));
-    }
-
-    /// For tests: what each host's attention ring holds.
-    #[cfg(test)]
-    pub fn attention_rings(&self) -> &HashMap<String, Vec<String>> {
-        &self.attention
     }
 }
