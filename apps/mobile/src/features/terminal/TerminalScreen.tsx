@@ -43,6 +43,7 @@ import { KeyChips } from "./KeyChips";
 import { terminalKeyboardInset } from "./keyboardInset";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { terminalRegistry } from "./terminalRegistry";
+import { paneTerminalScheme } from "./terminalScheme";
 import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
 import { withFilePaths } from "./terminalText";
 import { useTerminalCommands } from "./useTerminalCommands";
@@ -130,6 +131,7 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
     ? agentTitle(state, agent)
     : `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
   const agentPresent = agent?.present === true;
+  const scheme = paneTerminalScheme(state, paneId);
   const working = agent !== undefined && markState(agent) === "working";
   const agentId = agent?.id;
   useFocusEffect(useCallback(() => (agentId ? notificationAttention.focusAgent(agentId) : undefined), [agentId]));
@@ -386,7 +388,7 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
           </View>
         ) : (
           <>
-            <TerminalWebView onLoadEnd={() => setPageLoaded(true)} onMessage={onPageMessage} ref={webview} scheme={state.terminalScheme} />
+            <TerminalWebView onLoadEnd={() => setPageLoaded(true)} onMessage={onPageMessage} ref={webview} scheme={scheme} />
             {snapshot.phase === "exited" ? (
               <View style={styles.banner}>
                 <Text style={styles.bannerText}>This pane has closed.</Text>
@@ -395,7 +397,7 @@ export function TerminalScreen({ paneId, sessionId, startInVoice }: TerminalScre
             {snapshot.phase === "noOutput" ? (
               <View pointerEvents="none" style={styles.overlay}>
                 {/* Drawn over the terminal itself, so it takes the terminal's light or dark ink. */}
-                <Text style={[styles.overlayText, state.terminalScheme === "light" ? { color: lightColors.chromeDim } : null]}>No output yet. The pane may be idle.</Text>
+                <Text style={[styles.overlayText, scheme === "light" ? { color: lightColors.chromeDim } : null]}>No output yet. The pane may be idle.</Text>
               </View>
             ) : null}
           </>

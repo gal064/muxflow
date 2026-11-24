@@ -19,6 +19,7 @@ import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { CR } from "./chips";
 import { DEFAULT_TERMINAL_FONT_SIZE, sameGrid, windowGrid, type Grid } from "./sizing";
 import type { RegisteredTerminal, TerminalRegistry } from "./terminalRegistry";
+import { paneTerminalScheme } from "./terminalScheme";
 
 /** §9.5 states, as the screen renders them. */
 export type TerminalPhase =
@@ -212,9 +213,14 @@ export class TerminalController {
       }
     });
     const store = this.options.store;
-    this.options.page.send({ t: "init", fontSize: this.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE, scheme: store.getState().terminalScheme });
-    this.unsubscribeScheme = store.subscribe((state, previous) => {
-      if (state.terminalScheme !== previous.terminalScheme) this.options.page.send({ t: "theme", scheme: state.terminalScheme });
+    let scheme = paneTerminalScheme(store.getState(), this.paneId);
+    this.options.page.send({ t: "init", fontSize: this.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE, scheme });
+    // Codex starting or leaving the pane changes its scheme as much as the host's colors do.
+    this.unsubscribeScheme = store.subscribe((state) => {
+      const next = paneTerminalScheme(state, this.paneId);
+      if (next === scheme) return;
+      scheme = next;
+      this.options.page.send({ t: "theme", scheme });
     });
   }
 
