@@ -33,6 +33,7 @@ pub(crate) enum Handler {
     Automation,
     Chat,
     History,
+    WorkspaceRestore,
     Daemon,
     Test,
 }
@@ -187,6 +188,13 @@ impl OperationPolicy {
             // for a pane also loads its history and connects its session.
             v1::Operation::Chat => (Lane::Control, Scheduling::Inline, Handler::Chat),
             v1::Operation::SessionHistory => (Lane::Control, Scheduling::Inline, Handler::History),
+            // Detached: GET and SET_ENABLED read and write the plugin's
+            // state file, which must not make the lane wait.
+            v1::Operation::WorkspaceRestore => (
+                Lane::Control,
+                Scheduling::Detached,
+                Handler::WorkspaceRestore,
+            ),
             v1::Operation::TestDelay
             | v1::Operation::TestInjectGap
             | v1::Operation::TestOverflow => (Lane::Control, Scheduling::Inline, Handler::Test),
@@ -254,7 +262,7 @@ mod tests {
         use Handler::{
             ActiveRoot as AR, Agent as AH, Automation as AU, Chat as CH, Daemon as DH,
             Filesystem as FH, Git as GH, History as HH, Snapshot as SH, Terminal as TH, Test as XH,
-            TmuxAction as MH, Unsupported as UH, Voice as VH,
+            TmuxAction as MH, Unsupported as UH, Voice as VH, WorkspaceRestore as WH,
         };
         use Lane::{Bulk as B, Control as C};
         use Scheduling::{Detached as Dd, Inline as I};
@@ -325,6 +333,7 @@ mod tests {
             (Automation, C, Dd, AU),
             (Chat, C, I, CH),
             (SessionHistory, C, I, HH),
+            (WorkspaceRestore, C, Dd, WH),
             (TestDelay, C, I, XH),
             (TestInjectGap, C, I, XH),
             (TestOverflow, C, I, XH),

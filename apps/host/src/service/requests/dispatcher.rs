@@ -166,6 +166,23 @@ pub(crate) async fn handle_request(
             return;
         }
 
+        (Handler::WorkspaceRestore, Some(_)) => {
+            let response = match request.workspace_restore {
+                None => response_error(
+                    "invalid_workspace_restore",
+                    "a workspace restore operation needs a workspace_restore payload",
+                ),
+                Some(workspace_restore) => tokio::task::spawn_blocking(move || {
+                    crate::service::plugins::workspace_restore_request(workspace_restore)
+                })
+                .await
+                .unwrap_or_else(|_| response_error("internal", "workspace restore request failed")),
+            };
+            send_response(control_tx, request_id, response).await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
         (Handler::Chat, Some(_)) => {
             // A terminal agent's commands are read by starting the agent, which
             // takes a second or more: answered off the ordered lane, which

@@ -5,11 +5,12 @@
 //! plugin.
 
 mod automations;
+mod workspace_restore;
 
 /// Daemon-lifetime tasks, started once beside the hook timer and aborted with
 /// it. They run whether or not any client is connected.
 pub(crate) fn start() -> Vec<tokio::task::JoinHandle<()>> {
-    vec![automations::start()]
+    vec![automations::start(), workspace_restore::start()]
 }
 
 /// A `Stop` hook's final message, after ingest has accepted it.
@@ -27,4 +28,11 @@ pub(crate) fn automation_request(
     connection_id: u64,
 ) -> tmux_agent_protocol::v1::Response {
     automations::handle_request(request, connection_id)
+}
+
+/// `OPERATION_WORKSPACE_RESTORE`. Blocking on the record file.
+pub(crate) fn workspace_restore_request(
+    request: tmux_agent_protocol::v1::WorkspaceRestoreRequest,
+) -> tmux_agent_protocol::v1::Response {
+    workspace_restore::handle(request)
 }
