@@ -5,8 +5,8 @@ description: Use when starting, reading, or messaging Claude Code, Codex, pi, Op
 
 # Muxflow
 
-Muxflow runs agents as tmux panes. Its helper tracks Claude Code, Codex and pi in
-`agents.json` in the state directory:
+Muxflow runs agents as tmux panes. Its helper tracks the agents it has adapters
+for (Claude Code, Codex, pi) in `agents.json` in the state directory:
 
 - Linux: `~/.local/state/muxflow/`
 - macOS: `~/Library/Application Support/dev.muxflow.desktop/`
@@ -25,9 +25,10 @@ Then check the pane's mode. `tmux show-options -pqv -t <pane> @muxflow-chat` is
 empty for a terminal pane and names the adapter for a chat pane. pi always runs
 in a terminal pane.
 
-Other CLI agents, such as OpenCode, are not tracked. They are ordinary terminal
-panes: find them with `tmux list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}'`,
-and read and message them as terminal panes.
+An agent missing from `agents.json` (OpenCode until its adapter lands, or any
+other CLI) is an ordinary terminal pane: find it with
+`tmux list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}'`, and
+read and message it as a terminal pane.
 
 ## Read an agent
 
