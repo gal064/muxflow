@@ -21,6 +21,7 @@ mod sidebar;
 pub(crate) use sidebar::{host_letter, list_divider, phase_color};
 mod tab_strip;
 mod title_content;
+pub(super) use title_content::TitleContent;
 mod workspace;
 
 use std::sync::{Arc, Mutex};
@@ -46,7 +47,6 @@ use crate::{
         layout::{Prefs, Rails},
         right_panel::RightPanel,
         sidebar::Sidebar,
-        title_content::TitleContent,
         workspace::WorkspaceArea,
     },
     workspaces::Workspaces,
@@ -165,8 +165,8 @@ impl Chrome {
     /// The title bar's content. A press that reaches the bar starts a window
     /// drag, so an interactive child calls `cx.stop_propagation()` on left
     /// mouse-down, as `WindowControls` does.
-    pub fn title_bar_content(&self) -> impl IntoElement + use<> {
-        TitleContent(self.this.clone())
+    pub(super) fn title_bar_content(&self) -> TitleContent {
+        TitleContent::new(self.this.clone())
     }
 
     pub fn tabs_in_title_bar(&self) -> bool {

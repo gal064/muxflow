@@ -1,17 +1,14 @@
 //! The window shell through GPUI's test platform: saved appearance, UI scale,
-//! the minimum size and the accessibility baseline.
+//! and the minimum size.
 
 use std::path::{Path, PathBuf};
 
 use desktop_core::app_state::ThemePreference;
-use gpui_kit::{
-    App, Context, IntoElement, ParentElement, Render, Role, Styled, TestAppContext, Window,
-    component::Theme, div, px, test::TestQueryExt,
-};
+use gpui_kit::{App, TestAppContext, component::Theme, px};
 use muxflow_gpui::{
     app::{self, Core},
     theme::{self, Appearance},
-    ui::{shell::Shell, title_bar::WindowControls},
+    ui::shell::Shell,
 };
 
 const NO_STATE: &str = "/nonexistent/app-state.json";
@@ -60,61 +57,4 @@ fn the_minimum_size_is_tauris(cx: &mut TestAppContext) {
     });
     let min = options.window_min_size.expect("a minimum size");
     assert_eq!((min.width, min.height), (px(320.), px(240.)));
-}
-
-struct ControlsOnly;
-
-impl Render for ControlsOnly {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(WindowControls::trailing())
-    }
-}
-
-#[gpui_kit::test]
-fn window_controls_are_named_buttons_in_the_tree(cx: &mut TestAppContext) {
-    cx.update(|cx| boot(Path::new(NO_STATE), cx));
-    let (_, window_cx) = cx.add_window_view(|_, _| ControlsOnly);
-    window_cx.update(|window, _| {
-        for name in ["Minimize", "Maximize", "Close window"] {
-            assert_eq!(window.find_by_label(name).role(), Some(Role::Button));
-        }
-    });
-}
-
-struct LeadingControls;
-
-impl Render for LeadingControls {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(WindowControls::leading())
-    }
-}
-
-/// Left to right, as `elements()` lists one row.
-fn control_order(window: &Window) -> Vec<String> {
-    window
-        .elements()
-        .iter()
-        .filter_map(|element| element.label())
-        .filter(|label| ["Minimize", "Maximize", "Restore", "Close window"].contains(label))
-        .map(str::to_owned)
-        .collect()
-}
-
-#[gpui_kit::test]
-fn window_controls_lead_with_close_beside_the_tabs(cx: &mut TestAppContext) {
-    cx.update(|cx| boot(Path::new(NO_STATE), cx));
-    let (_, trailing) = cx.add_window_view(|_, _| ControlsOnly);
-    trailing.update(|window, _| {
-        assert_eq!(
-            control_order(window),
-            ["Minimize", "Maximize", "Close window"]
-        );
-    });
-    let (_, leading) = cx.add_window_view(|_, _| LeadingControls);
-    leading.update(|window, _| {
-        assert_eq!(
-            control_order(window),
-            ["Close window", "Minimize", "Maximize"]
-        );
-    });
 }

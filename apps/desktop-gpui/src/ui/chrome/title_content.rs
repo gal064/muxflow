@@ -27,7 +27,7 @@ use crate::{
     tooltips::with_shortcut,
     ui::{
         chrome::{Chrome, tab_strip::TabStrip},
-        title_bar::{WindowControls, bar_button, disabled_ink, should_show_window_controls},
+        title_bar::{WindowControls, bar_button, disabled_ink},
     },
     workspaces::focus_history::Direction,
 };
@@ -36,12 +36,26 @@ use crate::{
 const TRAFFIC_LIGHT_INSET: f32 = 78.;
 
 #[derive(IntoElement)]
-pub struct TitleContent(pub WeakEntity<Chrome>);
+pub(in crate::ui) struct TitleContent {
+    chrome: WeakEntity<Chrome>,
+    pub(in crate::ui) leading_controls: Option<WindowControls>,
+    pub(in crate::ui) has_trailing_window_controls: bool,
+}
+
+impl TitleContent {
+    pub(super) fn new(chrome: WeakEntity<Chrome>) -> Self {
+        Self {
+            chrome,
+            leading_controls: None,
+            has_trailing_window_controls: false,
+        }
+    }
+}
 
 impl RenderOnce for TitleContent {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
-        let Some(entity) = self.0.upgrade() else {
+        let Some(entity) = self.chrome.upgrade() else {
             return div().into_any_element();
         };
         let chrome = entity.read(cx);
@@ -231,7 +245,7 @@ impl RenderOnce for TitleContent {
         };
 
         let sidebar_toggle = {
-            let weak = self.0.clone();
+            let weak = self.chrome.clone();
             move || {
                 let weak = weak.clone();
                 bar_button(
@@ -253,7 +267,7 @@ impl RenderOnce for TitleContent {
             }
         };
         let panel_toggle = {
-            let weak = self.0.clone();
+            let weak = self.chrome.clone();
             move || {
                 let weak = weak.clone();
                 bar_button(
@@ -297,9 +311,7 @@ impl RenderOnce for TitleContent {
                 .when(rails.sidebar_open, |this| {
                     this.min_w(ui(rails.sidebar_width))
                 })
-                .when(should_show_window_controls(window), |this| {
-                    this.child(WindowControls::leading())
-                })
+                .children(self.leading_controls)
                 .child(
                     group()
                         .child(settings())
@@ -315,6 +327,15 @@ impl RenderOnce for TitleContent {
                 workspaces,
                 in_title_bar: true,
             };
+            // Reserve room to drag the bar even when the tabs fill the strip.
+            // At minimum width, trailing window controls can use part of it.
+            let drag_space = div().w(ui(32.)).h_full().map(|space| {
+                if self.has_trailing_window_controls {
+                    space.flex_shrink_1().min_w(ui(8.))
+                } else {
+                    space.flex_none()
+                }
+            });
 
             h_flex()
                 .w_full()
@@ -330,8 +351,7 @@ impl RenderOnce for TitleContent {
                         .overflow_hidden()
                         .child(strip),
                 )
-                // Fixed, so a window full of tabs still leaves room to drag it.
-                .child(div().flex_none().w(ui(32.)).h_full())
+                .child(drag_space)
                 .child(group().children(update))
                 .child(
                     group()

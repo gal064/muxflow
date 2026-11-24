@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use desktop_core::app_state::NumberKeys;
 use gpui_kit::{
-    AnyElement, App, AppContext, Context, Entity, Global, InteractiveElement, IntoElement,
-    Modifiers, ParentElement, Render, Styled, Subscription, Task, Window,
+    App, AppContext, Context, Entity, Global, InteractiveElement, IntoElement, Modifiers,
+    ParentElement, Render, Styled, Subscription, Task, Window,
     component::{ActiveTheme, v_flex},
     div,
 };
@@ -23,6 +23,8 @@ pub struct Shell {
     _appearance: Subscription,
     _visibility: Subscription,
     _activation: Subscription,
+    #[cfg(target_os = "linux")]
+    _button_layout: Subscription,
 }
 
 /// How long the platform key must be held alone before the agents' numbers
@@ -104,6 +106,8 @@ impl Shell {
             _appearance: appearance,
             _visibility: crate::ui::visibility::track(window, cx),
             _activation: activation,
+            #[cfg(target_os = "linux")]
+            _button_layout: cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()),
         }
     }
 
@@ -116,10 +120,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::notices::fit_to(window, cx);
         let chrome = self.chrome.read(cx);
-        let (title, tabs_in_bar): (AnyElement, bool) = (
-            chrome.title_bar_content().into_any_element(),
-            chrome.tabs_in_title_bar(),
-        );
+        let title_bar = TitleBar::new(chrome.title_bar_content(), chrome.tabs_in_title_bar());
         v_flex()
             .size_full()
             .on_modifiers_changed(|event, window, cx| {
@@ -128,7 +129,7 @@ impl Render for Shell {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(ui(TYPE_ROW))
-            .child(TitleBar::new(title, tabs_in_bar))
+            .child(title_bar)
             .child(div().flex_1().min_h_0().child(self.chrome.clone()))
             .children(crate::context_menu::keyboard_menu(window, cx))
     }
