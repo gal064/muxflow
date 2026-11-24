@@ -98,9 +98,10 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
-    /// OpenCode's full TUI cannot fork; `opencode mini --fork` continues a copy
-    /// of the conversation under a new session id in its minimal interface. It
-    /// has no option to name the copy.
+    /// The full TUI's command line has no fork option; `opencode mini --fork`
+    /// continues a copy of the conversation under a new session id in the
+    /// minimal interface. It has no option to name the copy, and `mini` loads
+    /// no TUI plugins, so the copy's state is not reported.
     fn branch(&self, native_session_id: &str, _source_title: &str) -> LaunchSpec {
         LaunchSpec {
             program: self.executable(),

@@ -12,8 +12,9 @@
 // runs inside the TUI process instead, which lives in a pane and inherits its
 // TMUX_PANE, exactly like the pi extension. The shared server still streams
 // every session's events to every TUI, so this file forwards only the sessions
-// the terminal it runs in is actually showing (its focused session and its open
-// tabs), and it folds subagent sessions onto their root.
+// the terminal it runs in is actually showing (its focused session) or already
+// reported, and it folds subagent sessions onto their root. Open tabs do not
+// count: the server shares one tab list across every terminal.
 //
 // THE TUI EVENT BUS
 // ctx.data.listen delivers every event as {details}: `details.type` is the
@@ -117,17 +118,15 @@ export default Plugin.define({
       }
     };
 
-    // The roots this terminal is responsible for: its focused session and the
-    // roots of its open tabs.
+    // The root this terminal is showing: its focused session. The route is per
+    // terminal; the tab list is the server's, shared by every terminal, so it
+    // would claim other panes' sessions.
     const ownedRoots = (): Set<string> => {
       const roots = new Set<string>();
       try {
         const route = ctx.ui?.router?.current?.();
         if (route?.type === "session" && route.sessionID) {
           roots.add(rootOf(route.sessionID));
-        }
-        for (const tab of ctx.ui?.tabs?.list?.() ?? []) {
-          if (tab?.sessionID) roots.add(rootOf(tab.sessionID));
         }
       } catch {
         // A UI query that throws must not stop reporting; fall back to whatever

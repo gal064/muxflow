@@ -156,8 +156,9 @@ line belongs to the user and is never overwritten, and uninstall removes only
 the marked files, keeping the directory when the user put anything else in it.
 
 The shared server streams every session's events to every terminal, so the
-plugin reports only the sessions its terminal shows (the focused session and its
-open tabs) or already reported, and folds subagent sessions onto their root.
+plugin reports only the session its terminal shows (the focused one) or ones it
+already reported, and folds subagent sessions onto their root. Open tabs do not
+count: OpenCode shares one tab list across every terminal on the server.
 
 | OpenCode event | Sent as | State |
 | --- | --- | --- |
@@ -172,8 +173,10 @@ open tabs) or already reported, and folds subagent sessions onto their root.
 A subagent's run ending is not reported; its root ends with its own event. As
 with pi, an OpenCode started inside the pane stays silent: the first records its
 process ID in `MUXFLOW_OPENCODE_OWNER`. Resume uses `opencode --session <id>`.
-OpenCode's full TUI cannot fork, so branch uses `opencode mini --session <id>
---fork`, OpenCode's minimal interface.
+The full TUI's command line has no fork option (forking there is a palette
+action), so branch uses `opencode mini --session <id> --fork`, OpenCode's
+minimal interface. `mini` loads no TUI plugins, so a branched session's state is
+not reported.
 
 ## Events taken, and the gaps
 
