@@ -582,6 +582,7 @@ fn generic(title: &str) -> bool {
             | "claude"
             | "claude code"
             | "claude-code"
+            | "opencode"
             | "pi"
             // What tmux names a tab after the shell a launch starts in.
             | "sh"

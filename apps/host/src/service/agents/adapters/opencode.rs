@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::Value;
 use tmux_agent_protocol::v1;
 
-use super::{AgentAdapter, LaunchSpec, MANAGED_OWNER, MANAGED_VERSION, ParsedHook, fork_name};
+use super::{AgentAdapter, LaunchSpec, MANAGED_OWNER, MANAGED_VERSION, ParsedHook};
 
 /// The ownership marker, first line of every installed file. Ownership is decided
 /// by this line alone: a file at the same path without it belongs to the user.
@@ -24,8 +24,8 @@ pub(crate) struct OpenCodeAdapter;
 
 impl OpenCodeAdapter {
     fn render(&self, template: &str, helper_path: &Path) -> String {
-        let helper =
-            serde_json::to_string(&helper_path.to_string_lossy()).expect("a string always serializes");
+        let helper = serde_json::to_string(&helper_path.to_string_lossy())
+            .expect("a string always serializes");
         template
             .replace("__MUXFLOW_HELPER__", &helper)
             .replace("__MUXFLOW_MANAGED_OWNER__", MANAGED_OWNER)
@@ -64,8 +64,8 @@ impl AgentAdapter for OpenCodeAdapter {
     /// The lifecycle names the managed plugin sends. It reports under the names
     /// ingest already understands, so ingest has no OpenCode-specific path; see
     /// [`Self::parse_hook`]. The raw OpenCode events (session.execution.*,
-    /// session.created, session.deleted, permission.asked/updated,
-    /// permission.replied/deleted) are reduced to these inside the plugin.
+    /// session.created/deleted, permission.asked/replied, form.created/
+    /// replied/cancelled) are reduced to these inside the plugin.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -98,20 +98,17 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
-    /// `--fork` continues a copy of the conversation under a new session id, the
-    /// same flag `opencode run` exposes; `--title` names the copy so it is
-    /// distinguishable from the original in the session list.
-    fn branch(&self, native_session_id: &str, source_title: &str) -> LaunchSpec {
-        let source_name = crate::service::topology::agent_title_suffix(source_title)
-            .unwrap_or(source_title);
+    /// OpenCode's full TUI cannot fork; `opencode mini --fork` continues a copy
+    /// of the conversation under a new session id in its minimal interface. It
+    /// has no option to name the copy.
+    fn branch(&self, native_session_id: &str, _source_title: &str) -> LaunchSpec {
         LaunchSpec {
             program: self.executable(),
             arguments: vec![
+                "mini".to_owned(),
                 "--session".to_owned(),
                 native_session_id.to_owned(),
                 "--fork".to_owned(),
-                "--title".to_owned(),
-                fork_name(source_name),
             ],
         }
     }
@@ -137,7 +134,10 @@ impl AgentAdapter for OpenCodeAdapter {
     fn managed_files(&self, helper_path: &Path) -> Option<Vec<(&'static str, String)>> {
         Some(vec![
             (TUI_FILE, self.render(OPENCODE_TUI_TEMPLATE, helper_path)),
-            (SERVER_FILE, self.render(OPENCODE_SERVER_TEMPLATE, helper_path)),
+            (
+                SERVER_FILE,
+                self.render(OPENCODE_SERVER_TEMPLATE, helper_path),
+            ),
         ])
     }
 }
@@ -171,7 +171,11 @@ mod tests {
 
     #[test]
     fn opencode_process_detection_is_the_native_binary() {
-        for command in ["opencode", "/usr/bin/opencode serve --service", "/a/b/opencode --session ses_1"] {
+        for command in [
+            "opencode",
+            "/usr/bin/opencode serve --service",
+            "/a/b/opencode --session ses_1",
+        ] {
             assert!(OpenCodeAdapter.identifies_process(command), "{command}");
         }
         for command in ["opencoded", "/usr/bin/open", "oc"] {
@@ -182,10 +186,13 @@ mod tests {
     #[test]
     fn opencode_resumes_by_session_and_forks_a_copy() {
         assert!(OpenCodeAdapter.launch(None).arguments.is_empty());
-        assert_eq!(OpenCodeAdapter.launch(Some("ses_1")).arguments, ["--session", "ses_1"]);
+        assert_eq!(
+            OpenCodeAdapter.launch(Some("ses_1")).arguments,
+            ["--session", "ses_1"]
+        );
         assert_eq!(
             OpenCodeAdapter.branch("ses_1", "✳ Fix tests").arguments,
-            ["--session", "ses_1", "--fork", "--title", "Fix tests (fork)"]
+            ["mini", "--session", "ses_1", "--fork"]
         );
     }
 
@@ -195,11 +202,7 @@ mod tests {
             .managed_files(Path::new("/opt/muxflow's/muxflow-host"))
             .unwrap();
         assert_eq!(files.len(), 2);
-        let tui = &files
-            .iter()
-            .find(|(name, _)| *name == TUI_FILE)
-            .unwrap()
-            .1;
+        let tui = &files.iter().find(|(name, _)| *name == TUI_FILE).unwrap().1;
         let server = &files
             .iter()
             .find(|(name, _)| *name == SERVER_FILE)

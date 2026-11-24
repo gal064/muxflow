@@ -236,18 +236,18 @@ impl HookManager {
                 tree_is_owned(&path, &files).unwrap_or(false)
             } else {
                 match adapter.managed_file(&self.helper_path) {
-                // A managed file is never written through an unsafe path, so a
-                // path that cannot be read safely holds nothing of ours. Its
-                // state must not fail the answer for every other adapter.
-                Some(expected) => {
-                    read_config(&path).is_ok_and(|bytes| owns_file(&bytes, &expected))
-                }
-                None => {
-                    inspect_config_path(&path)?;
-                    let value = parse_config(&read_config(&path)?)?;
-                    validate_hook_shape(&value, adapter.hook_events())?;
-                    managed_entry_count(&value, adapter) > 0
-                }
+                    // A managed file is never written through an unsafe path, so a
+                    // path that cannot be read safely holds nothing of ours. Its
+                    // state must not fail the answer for every other adapter.
+                    Some(expected) => {
+                        read_config(&path).is_ok_and(|bytes| owns_file(&bytes, &expected))
+                    }
+                    None => {
+                        inspect_config_path(&path)?;
+                        let value = parse_config(&read_config(&path)?)?;
+                        validate_hook_shape(&value, adapter.hook_events())?;
+                        managed_entry_count(&value, adapter) > 0
+                    }
                 }
             };
             if owned {
@@ -502,7 +502,9 @@ impl HookManager {
             v1::AgentHookWiring::Wired
         } else if any_present {
             v1::AgentHookWiring::Partial
-        } else if !dir.exists() && !running.contains(adapter.id()) && !self.agent_is_present(adapter)
+        } else if !dir.exists()
+            && !running.contains(adapter.id())
+            && !self.agent_is_present(adapter)
         {
             v1::AgentHookWiring::Absent
         } else {
@@ -529,7 +531,10 @@ impl HookManager {
         for (index, (name, expected)) in files.iter().enumerate() {
             let bytes = &before[index].1;
             if !bytes.is_empty() && !owns_file(bytes, expected) {
-                bail!("{} exists and is not managed by muxflow", dir.join(name).display());
+                bail!(
+                    "{} exists and is not managed by muxflow",
+                    dir.join(name).display()
+                );
             }
         }
         let before_bytes = serialize_tree(&before);
@@ -596,7 +601,10 @@ impl HookManager {
 /// The files a managed plugin directory currently holds, in declaration order,
 /// each read as a bounded regular file (empty when the file or directory is
 /// absent).
-fn read_tree(dir: &Path, files: &[(&'static str, String)]) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+fn read_tree(
+    dir: &Path,
+    files: &[(&'static str, String)],
+) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     files
         .iter()
         .map(|(name, _)| Ok(((*name).to_string(), read_config(&dir.join(name))?)))
@@ -2229,7 +2237,11 @@ mod tests {
             .unwrap();
         // Every declared file is present under the marker, byte-for-byte.
         for (name, content) in &expected {
-            assert_eq!(fs::read(dir.join(name)).unwrap(), content.as_bytes(), "{name}");
+            assert_eq!(
+                fs::read(dir.join(name)).unwrap(),
+                content.as_bytes(),
+                "{name}"
+            );
         }
         assert_eq!(state(&manager).unwrap(), v1::AgentHookWiring::Wired);
         // Idempotent: a second install finds it current and writes nothing.
@@ -2292,7 +2304,10 @@ mod tests {
                 &uninstall.confirmation_token,
             )
             .unwrap();
-        assert!(!dir.exists(), "the managed directory is removed when it is left empty");
+        assert!(
+            !dir.exists(),
+            "the managed directory is removed when it is left empty"
+        );
         assert_eq!(state(&manager).unwrap(), v1::AgentHookWiring::NotWired);
         fs::remove_dir_all(home).unwrap();
     }

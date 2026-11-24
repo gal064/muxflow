@@ -775,8 +775,16 @@ mod tests {
         // OpenCode is owned as a whole plugin directory, not a single config file:
         // the singular managed_file is the trait default (None) and the plural,
         // directory-shaped managed_files is what the installer acts on.
-        assert!(opencode.managed_file(Path::new("/opt/muxflow-host")).is_none());
-        assert!(opencode.managed_files(Path::new("/opt/muxflow-host")).is_some());
+        assert!(
+            opencode
+                .managed_file(Path::new("/opt/muxflow-host"))
+                .is_none()
+        );
+        assert!(
+            opencode
+                .managed_files(Path::new("/opt/muxflow-host"))
+                .is_some()
+        );
     }
 
     /// Only a running subagent extends the user's turn. Ordinary background
