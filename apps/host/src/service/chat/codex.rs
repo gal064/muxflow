@@ -1862,17 +1862,10 @@ impl Codex {
                 self.publish_state(out);
                 self.send_held(out);
             }
-            // A review names its turn; a compaction's says it has started.
-            Asked::Command => {
-                let turn = string(&result["turn"], "id");
-                if self.turn.is_none() && !turn.is_empty() {
-                    self.turn = Some(turn.to_owned());
-                    self.starting = false;
-                    self.stop_if_wanted(out);
-                    self.publish_state(out);
-                }
-            }
-            Asked::Models | Asked::Skills | Asked::Steer(_) | Asked::Other => {}
+            // A review names its turn here, but runs in one of its own that
+            // says it has started, as a compaction's does: Codex stops only
+            // that one, so the chat waits for it.
+            Asked::Command | Asked::Models | Asked::Skills | Asked::Steer(_) | Asked::Other => {}
         }
     }
 

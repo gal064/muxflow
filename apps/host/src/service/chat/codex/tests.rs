@@ -2162,3 +2162,42 @@ async fn a_message_too_late_for_its_turn_waits_for_a_command_starting_meanwhile(
         "m2"
     );
 }
+
+/// Codex 0.171.0 stops a review only by its own turn: asked to stop the
+/// turn `review/start` names, it answers "expected active turn id <outer>
+/// but found <inner>" and the review runs on.
+#[tokio::test]
+async fn stop_pressed_as_a_review_starts_stops_the_reviews_own_turn() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("r1", "/review");
+    replay.command(SessionCommand::Interrupt).unwrap();
+    replay.agent(&json!({"id": "@review/start", "result": {"turn": {"id": "outer"}}}).to_string());
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["method"] != "turn/interrupt"),
+        "the turn the answer names is not the one Codex stops"
+    );
+    // Pressed again meanwhile, it still waits for the review's own turn.
+    replay.command(SessionCommand::Interrupt).unwrap();
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["method"] != "turn/interrupt")
+    );
+    let inner = json!({"method": "turn/started", "params": {"threadId": THREAD,
+        "turn": {"id": "inner", "rootTurnId": "outer"}}});
+    replay.agent(&inner.to_string());
+    assert_eq!(
+        replay.last_asked("turn/interrupt")["params"],
+        json!({"threadId": THREAD, "turnId": "inner"})
+    );
+    // Stop pressed once it runs goes to the same turn.
+    replay.command(SessionCommand::Interrupt).unwrap();
+    assert_eq!(
+        replay.last_asked("turn/interrupt")["params"]["turnId"],
+        "inner"
+    );
+}
