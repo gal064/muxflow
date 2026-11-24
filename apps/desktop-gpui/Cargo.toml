@@ -1,6 +1,6 @@
 [package]
 name = "muxflow-gpui"
-version = "0.1.39"
+version = "0.1.40"
 license = "MIT"
 description = "Muxflow's native desktop app, built on GPUI"
 edition.workspace = true
