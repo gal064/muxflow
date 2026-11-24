@@ -343,6 +343,10 @@ pub(super) struct Codex {
     speed_chosen: bool,
     /// Stop was asked for a turn that has no id yet.
     stop_wanted: bool,
+    /// The user messages shown as queued, by item id, as last shown. True once
+    /// Codex has put one in the turn: the model reads it when it next starts
+    /// an item.
+    queued: BTreeMap<String, (bool, v1::ChatItem)>,
     rewind: Option<Rewind>,
     /// The row of each subagent spawned in the thread, by its thread, for
     /// the collab calls that say how it is.
@@ -1342,6 +1346,11 @@ impl Codex {
 
     fn item(&mut self, params: &Value, finished: bool, out: &mut Output) {
         let source = &params["item"];
+        // Anything the model starts now, it started having read the messages
+        // put in the turn. A compaction is not the model's.
+        if !finished && !matches!(string(source, "type"), "userMessage" | "contextCompaction") {
+            self.release(false, out);
+        }
         match (string(source, "type"), string(source, "tool")) {
             // While it compacts, the working line says so; the notice is for
             // when it has.
@@ -1385,6 +1394,13 @@ impl Codex {
                 turn.clone_into(known);
             }
         }
+        // Codex puts a steered message in the turn at once, and the model
+        // reads it only when the step it is on ends.
+        if let Some((echoed, shown)) = self.queued.get_mut(&item.id) {
+            item.queued = true;
+            *echoed = true;
+            shown.clone_from(&item);
+        }
         self.track(&item);
         let (id, running) = (item.id.clone(), items::is_running(&item));
         out.publish(Change::Item(item));
@@ -1406,6 +1422,27 @@ impl Codex {
                     self.publish_state(out);
                 }
             }
+        }
+    }
+
+    /// Shows queued messages as read: the ones Codex has put in the turn, or
+    /// `all`.
+    fn release(&mut self, all: bool, out: &mut Output) {
+        let read: Vec<String> = self
+            .queued
+            .iter()
+            .filter(|(_, (echoed, _))| all || *echoed)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in read {
+            self.unqueue(&id, out);
+        }
+    }
+
+    fn unqueue(&mut self, id: &str, out: &mut Output) {
+        if let Some((_, mut item)) = self.queued.remove(id) {
+            item.queued = false;
+            out.publish(Change::Item(item));
         }
     }
 
@@ -1468,6 +1505,9 @@ impl Codex {
         self.pending.clear();
         self.state.compacting = false;
         self.state.turns_ended += 1;
+        // What the turn took in, it read or never will. What is still held
+        // waits on for the next turn.
+        self.release(false, out);
         for (id, mut item) in std::mem::take(&mut self.open) {
             // A command still running was put in the background: listed
             // until its own end. Codex has no stop for one.
@@ -1856,7 +1896,8 @@ impl Codex {
                     self.send(held, out);
                 }
             }
-            Asked::Steer(_) if failed => {
+            Asked::Steer(held) if failed => {
+                self.unqueue(&held.item_id, out);
                 let text = "The message could not join the turn that is running.";
                 self.notice(format!("request-{id}-failed"), text, out);
             }
@@ -2182,6 +2223,17 @@ impl Dialect for Codex {
         self.ready = false;
         self.asked.clear();
         self.pending.clear();
+        // What was sent over the link that is gone, the thread's record says
+        // again. What is still held has not been sent, and waits on.
+        let sent: Vec<String> = self
+            .queued
+            .keys()
+            .filter(|id| !self.held.iter().any(|held| held.item_id == **id))
+            .cloned()
+            .collect();
+        for id in sent {
+            self.unqueue(&id, out);
+        }
         // What a rewind waited for was asked over the link that is gone. The
         // thread says where it stands when it is opened again.
         self.rewind = None;
@@ -2261,7 +2313,14 @@ impl Dialect for Codex {
                 // A message that joins a running turn cannot be gone back to
                 // on its own.
                 let opens = self.turn.is_none() && !self.starting && self.held.is_empty();
-                out.publish(Change::Item(held.item(opens)));
+                let mut item = held.item(opens);
+                // One that does not open a turn waits for the step the agent
+                // is on.
+                item.queued = !opens;
+                if item.queued {
+                    self.queued.insert(item.id.clone(), (false, item.clone()));
+                }
+                out.publish(Change::Item(item));
                 if waits {
                     self.held.push_back(held);
                 } else {
@@ -2422,6 +2481,8 @@ impl Dialect for Codex {
         self.stop_wanted = false;
         self.pending.clear();
         self.held.clear();
+        // Nothing waits on an agent that has ended.
+        self.release(true, out);
         self.rewind = None;
         self.agents.clear();
         self.spawned_in.clear();

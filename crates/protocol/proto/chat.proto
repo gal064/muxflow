@@ -223,6 +223,9 @@ message ChatItem {
   bool rewindable = 7;
   // USER only: the files sent with the message.
   repeated ChatAttachment attachments = 8;
+  // USER only: sent while a turn ran, and the agent has not read it yet. It
+  // reads it when the step it is on ends.
+  bool queued = 9;
 }
 
 message ChatOption {

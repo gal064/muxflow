@@ -1552,6 +1552,19 @@ impl Claude {
         }
     }
 
+    /// The message the agent knows as `uuid` waits no longer: it has taken it,
+    /// or let it go.
+    fn unqueue(&mut self, uuid: &str, out: &mut Output) {
+        let waiting = self
+            .unconfirmed
+            .iter_mut()
+            .find(|item| item.queued && message_uuid(&item.id) == uuid);
+        if let Some(item) = waiting {
+            item.queued = false;
+            out.publish(Change::Item(item.clone()));
+        }
+    }
+
     fn system(&mut self, message: &Value, out: &mut Output) {
         // A subagent compacts a conversation of its own, not this one.
         let nested = !message["parent_tool_use_id"].is_null();
@@ -2336,9 +2349,11 @@ impl Dialect for Claude {
                         self.outstanding.insert(uuid, true);
                     }
                     "started" => {
+                        self.unqueue(&uuid, out);
                         self.outstanding.insert(uuid, false);
                     }
                     "completed" | "cancelled" => {
+                        self.unqueue(&uuid, out);
                         self.outstanding.remove(&uuid);
                     }
                     _ => return,
@@ -2406,6 +2421,9 @@ impl Dialect for Claude {
                 item.attachments = attachments.iter().map(Attached::wire).collect();
                 item.rewindable = true;
                 item.at_unix_millis = super::now_unix_millis();
+                // Sent into a turn that runs, it waits for the step the agent
+                // is on; its replay says the agent has read it.
+                item.queued = self.turn() != Turn::Idle;
                 if self.unconfirmed.len() >= MAX_SENT {
                     self.unconfirmed.remove(0);
                 }
@@ -2557,6 +2575,11 @@ impl Dialect for Claude {
         self.pending.clear();
         self.held.clear();
         self.rewind = None;
+        // Nothing waits on an agent that has ended.
+        for item in self.unconfirmed.iter_mut().filter(|item| item.queued) {
+            item.queued = false;
+            out.publish(Change::Item(item.clone()));
+        }
         for item in self.reader.stop_open() {
             out.publish(Change::Item(item));
         }

@@ -331,6 +331,27 @@ pub(super) fn chips(files: &[String]) -> (Vec<&str>, Option<usize>) {
     }
 }
 
+/// Where the newest steps start: after the newest message or text. A
+/// message queued while a step runs does not end them: the agent is still on
+/// the one before it.
+fn steps_start(items: &[ChatItem]) -> usize {
+    items
+        .iter()
+        .rposition(|item| !is_step(item) && !item.queued)
+        .map_or(0, |at| at + 1)
+}
+
+/// A command or a subagent runs, which Escape leaves alone: only Stop, or
+/// the task's own X, stops one.
+pub(super) fn escape_spares(items: &[ChatItem]) -> bool {
+    let command = |item: &ChatItem| {
+        item.tool.as_ref().is_some_and(|tool| {
+            tool_kind(tool) == ChatToolKind::Command && status(tool) == ChatToolStatus::Running
+        })
+    };
+    running_subagents(items).next().is_some() || items[steps_start(items)..].iter().any(command)
+}
+
 /// What the working line says the agent does now.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Doing {
@@ -343,11 +364,7 @@ pub(super) struct Doing {
 /// streams, else a tool that runs, else the subagents it waits on, else that
 /// the agent works.
 pub(super) fn doing(items: &[ChatItem]) -> Doing {
-    let run = items
-        .iter()
-        .rposition(|item| !is_step(item))
-        .map_or(0, |at| at + 1);
-    let active = items[run..]
+    let active = items[steps_start(items)..]
         .iter()
         .rev()
         .find(|item| match item.tool.as_ref() {
@@ -875,6 +892,15 @@ mod tests {
             doing(&[user("u"), test.clone(), read("r")]).label,
             "Running cargo test -p muxflow-gpui chat…"
         );
+        // A message sent while it runs waits for it: it still runs.
+        let mut queued = user("q");
+        queued.queued = true;
+        assert_eq!(
+            doing(&[user("u"), test.clone(), queued.clone(), queued]).label,
+            "Running cargo test -p muxflow-gpui chat…"
+        );
+        // Once the agent has read it, what ran before it is over.
+        assert_eq!(doing(&[test.clone(), user("q")]).label, "Working…");
         // Text after it: whatever ran before is not what happens now.
         assert_eq!(doing(&[test, says("a")]).label, "Working…");
         let agent = running(tool("g", ChatToolKind::Subagent, "Explore the git module"));
@@ -890,6 +916,26 @@ mod tests {
         assert_eq!(doing(&[reading]).label, "Reading src/view.rs…");
         let other = running(tool("o", ChatToolKind::Other, "Update the task list"));
         assert_eq!(doing(&[other]).label, "Update the task list…");
+    }
+
+    #[test]
+    fn escape_spares_a_command_or_subagent_that_runs() {
+        let command = running(tool("c", ChatToolKind::Command, "sleep 15"));
+        let reading = running(tool("r", ChatToolKind::Read, "src/view.rs"));
+        let agent = running(tool("g", ChatToolKind::Subagent, "Explore"));
+        let mut thinking = thought("t");
+        thinking.streaming = true;
+        assert!(!escape_spares(&[user("u"), thinking]));
+        assert!(!escape_spares(&[user("u"), reading.clone()]));
+        assert!(escape_spares(&[user("u"), command.clone()]));
+        // Beside a newer step, and with a message queued behind it.
+        assert!(escape_spares(&[user("u"), command.clone(), reading]));
+        let mut queued = user("q");
+        queued.queued = true;
+        assert!(escape_spares(&[user("u"), command.clone(), queued]));
+        assert!(escape_spares(&[user("u"), agent, says("a")]));
+        // One left running from an earlier reply is not this one's.
+        assert!(!escape_spares(&[command, says("a"), user("u")]));
     }
 
     fn subagent(id: &str, kind: &str) -> ChatItem {

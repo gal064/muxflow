@@ -2617,3 +2617,32 @@ async fn a_chat_started_with_its_own_settings_asks_for_no_title() {
     assert_eq!(replay.client.item("r1").unwrap().text, naming::NOT_NAMED);
     assert_eq!(replay.titles, ["Fix the agents bar"]);
 }
+
+/// Seen on 2.1.330: a message sent while a command runs is `queued` at once,
+/// and replayed with `started` only once the command has ended.
+#[tokio::test]
+async fn a_message_sent_while_a_step_runs_is_queued_until_the_agent_reads_it() {
+    let mut replay = ready();
+    replay.send(M5, "run sleep 15");
+    // Sent to an agent that waits on nothing: it is read at once.
+    assert!(!replay.client.item(M5).unwrap().queued);
+    replay.send("m6", "and banana");
+    replay.send("m7", "and cherry");
+    assert!(replay.client.item("m6").unwrap().queued);
+    for id in ["m6", "m7"] {
+        let queued = json!({"type": "command_lifecycle", "state": "queued",
+                            "command_uuid": message_uuid(id)});
+        replay.agent(&queued.to_string());
+    }
+    assert!(replay.client.item("m7").unwrap().queued);
+    let read = json!({"type": "user", "isReplay": true, "session_id": SESSION,
+        "uuid": message_uuid("m6"), "message": {"role": "user", "content": "and banana"}});
+    replay.agent(&read.to_string());
+    let m6 = replay.client.item("m6").unwrap();
+    assert_eq!((m6.text.as_str(), m6.queued), ("and banana", false));
+    // One the agent lets go waits no longer either.
+    let cancelled = json!({"type": "command_lifecycle", "state": "cancelled",
+                           "command_uuid": message_uuid("m7")});
+    replay.agent(&cancelled.to_string());
+    assert!(!replay.client.item("m7").unwrap().queued);
+}

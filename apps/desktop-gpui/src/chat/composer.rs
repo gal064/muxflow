@@ -225,14 +225,21 @@ impl ChatPane {
         false
     }
 
+    /// Escape stops the agent: while it works, and not while a command or a
+    /// subagent runs, which only Stop or the task's X stops.
+    pub(super) fn escape_stops(&self) -> bool {
+        self.stoppable() && !timeline::escape_spares(&self.chat.items)
+    }
+
     /// Escape anywhere in the chat that nothing inside it took: closes a
-    /// list, else cancels the edit, else stops the agent while it works, as
-    /// Stop does. Otherwise it goes on to the app.
+    /// list, else cancels the edit, else stops the agent while it works and
+    /// runs no command or subagent, as Stop does. Otherwise it goes on to
+    /// the app.
     pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.composing(window, cx) || self.dismiss(window, cx) {
             return;
         }
-        if self.stoppable() {
+        if self.escape_stops() {
             // Once while it stops: a second press sends nothing more.
             self.interrupt(cx);
             cx.notify();
