@@ -36,55 +36,44 @@ fn authorized_download(path: &str, transfers: &DownloadManager) -> Result<PathBu
     Ok(candidate)
 }
 
-#[cfg(target_os = "macos")]
-fn file_url(path: &Path) -> Result<objc2::rc::Retained<objc2_foundation::NSURL>, String> {
-    use objc2_foundation::{NSString, NSURL};
-
-    let path = path
-        .to_str()
-        .ok_or("a download path that is not valid UTF-8 cannot be opened")?;
-    Ok(NSURL::fileURLWithPath(&NSString::from_str(path)))
-}
+// Both platforms go through a child process. On macOS,
+// `activateFileViewerSelectingURLs` spins a nested run loop while it waits on
+// Finder; called from a click handler, that loop runs queued gpui tasks while
+// the app is still borrowed, and the second borrow aborts the process.
 
 #[cfg(target_os = "macos")]
 fn open_with_default_application(path: &Path) -> Result<(), String> {
-    use objc2_app_kit::NSWorkspace;
-
-    let url = file_url(path)?;
-    if NSWorkspace::sharedWorkspace().openURL(&url) {
-        return Ok(());
-    }
-    Err("macOS refused to open the download".into())
+    launch("/usr/bin/open", &[], path)
 }
 
 #[cfg(target_os = "macos")]
 fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::NSArray;
-
-    NSWorkspace::sharedWorkspace()
-        .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[file_url(path)?]));
-    Ok(())
+    launch("/usr/bin/open", &["-R"], path)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn open_with_default_application(path: &Path) -> Result<(), String> {
-    xdg_open(path)
+    launch("xdg-open", &[], path)
 }
 
 /// No `xdg` verb selects a file, so the parent directory is the closest honest
 /// answer on this platform.
 #[cfg(not(target_os = "macos"))]
 fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
-    xdg_open(path.parent().unwrap_or(path))
+    launch("xdg-open", &[], path.parent().unwrap_or(path))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn xdg_open(target: &Path) -> Result<(), String> {
+fn launch(program: &str, flags: &[&str], target: &Path) -> Result<(), String> {
     use std::process::{Command, Stdio};
 
-    let mut command = Command::new("xdg-open");
+    // The opener runs detached, so a file moved or deleted since the download
+    // would otherwise fail without a word.
+    if !target.exists() {
+        return Err("the download is no longer where it was saved".into());
+    }
+    let mut command = Command::new(program);
     command
+        .args(flags)
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -95,7 +84,6 @@ fn xdg_open(target: &Path) -> Result<(), String> {
 
 /// Starts a program without waiting for it, and waits on a thread of its own:
 /// a child nobody waits for stays a zombie until the app exits.
-#[cfg(not(target_os = "macos"))]
 fn spawn_reaped(mut command: std::process::Command) -> std::io::Result<u32> {
     let mut child = command.spawn()?;
     let pid = child.id();
