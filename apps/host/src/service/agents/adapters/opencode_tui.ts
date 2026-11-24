@@ -168,9 +168,13 @@ export default Plugin.define({
       queue = queue.then(() => send(body));
     };
 
-    // A root this terminal reports for: one it shows now, or one it already
-    // reported, so a run the user navigated away from still sends its Stop.
-    const reportsFor = (root: string): boolean => lastSent.has(root) || ownedRoots().has(root);
+    // A root this terminal reports for: the one it shows now, or one whose run
+    // it reported starting and has not seen end, so a run the user navigated
+    // away from still sends its Stop. Once that run ends, a session this
+    // terminal no longer shows is another pane's to report.
+    const IN_PROGRESS = new Set(["UserPromptSubmit", "PermissionRequest", "PostToolUse"]);
+    const reportsFor = (root: string): boolean =>
+      IN_PROGRESS.has(lastSent.get(root) ?? "") || ownedRoots().has(root);
 
     // Report a lifecycle edge for a root this terminal reports for, and only
     // when it differs from what we last sent for that root.
@@ -181,9 +185,6 @@ export default Plugin.define({
       if (lastSent.get(root) === hook_event_name) return;
       lastSent.set(root, hook_event_name);
       report(hook_event_name, root, withMessage);
-      // A finished run in a session this terminal no longer shows is handed
-      // back, so a later resume in another pane is that pane's alone.
-      if (hook_event_name.startsWith("Stop") && !ownedRoots().has(root)) lastSent.delete(root);
     };
 
     // A permission or question was answered: back to working unless the
