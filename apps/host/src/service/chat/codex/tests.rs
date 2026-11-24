@@ -2050,44 +2050,51 @@ async fn a_review_read_back_is_in_order_and_not_interrupted() {
 
 #[tokio::test]
 async fn a_review_running_when_read_back_takes_no_message() {
-    let mut replay = replay();
-    replay.connect(&tag(THREAD, Launch::default()));
-    initialized(&mut replay);
-    let turns = json!([
-        {"id": "inner", "rootTurnId": "outer", "status": "inProgress", "items": [
-            {"type": "userMessage", "id": "p",
-                "content": [{"type": "text", "text": "Review the current code changes."}]},
-        ]},
-        {"id": "outer", "rootTurnId": "outer", "status": "inProgress", "items": [
-            {"type": "enteredReviewMode", "id": "e", "review": "current changes"},
-        ]},
-    ]);
-    replay.agent(
-        &json!({"id": "@thread/resume", "result": {
-            "thread": {"id": THREAD, "name": "n", "turns": turns}, "model": "m"}})
-        .to_string(),
-    );
-    replay.send("m1", "after the review");
-    assert!(
-        replay
-            .written
-            .iter()
-            .all(|written| written["method"] != "turn/steer" && written["method"] != "turn/start"),
-        "the review's turn takes no message"
-    );
-    // Stop goes to the review's own turn, the one Codex stops.
-    replay.command(SessionCommand::Interrupt).unwrap();
-    assert_eq!(
-        replay.last_asked("turn/interrupt")["params"]["turnId"],
-        "inner"
-    );
-    let completed = json!({"method": "turn/completed", "params": {"threadId": THREAD,
-        "turn": {"id": "outer", "status": "completed"}}});
-    replay.agent(&completed.to_string());
-    assert_eq!(
-        replay.last_asked("turn/start")["params"]["clientUserMessageId"],
-        "m1"
-    );
+    let inner = json!({"id": "inner", "rootTurnId": "outer", "status": "inProgress", "items": [
+        {"type": "userMessage", "id": "p",
+            "content": [{"type": "text", "text": "Review the current code changes."}]},
+    ]});
+    let outer = json!({"id": "outer", "rootTurnId": "outer", "status": "inProgress", "items": [
+        {"type": "enteredReviewMode", "id": "e", "review": "current changes"},
+    ]});
+    // Codex 0.171.0 reads a running review as its own turn alone.
+    for turns in [
+        json!([inner.clone()]),
+        json!([inner.clone(), outer.clone()]),
+    ] {
+        let mut replay = replay();
+        replay.connect(&tag(THREAD, Launch::default()));
+        initialized(&mut replay);
+        replay.agent(
+            &json!({"id": "@thread/resume", "result": {
+                "thread": {"id": THREAD, "name": "n", "turns": turns}, "model": "m"}})
+            .to_string(),
+        );
+        replay.send("m1", "after the review");
+        assert!(
+            replay
+                .written
+                .iter()
+                .all(|written| written["method"] != "turn/steer"
+                    && written["method"] != "turn/start"),
+            "the review's turn takes no message: {turns}"
+        );
+        // Stop goes to the review's own turn, the one Codex stops.
+        replay.command(SessionCommand::Interrupt).unwrap();
+        assert_eq!(
+            replay.last_asked("turn/interrupt")["params"]["turnId"],
+            "inner",
+            "{turns}"
+        );
+        let completed = json!({"method": "turn/completed", "params": {"threadId": THREAD,
+            "turn": {"id": "outer", "status": "completed"}}});
+        replay.agent(&completed.to_string());
+        assert_eq!(
+            replay.last_asked("turn/start")["params"]["clientUserMessageId"],
+            "m1",
+            "{turns}"
+        );
+    }
 }
 
 #[tokio::test]
