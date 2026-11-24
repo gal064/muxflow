@@ -22,6 +22,9 @@ export const MAX_PROBES = 512;
 /** How many times a path is asked about when the host could not say. */
 export const PROBE_ATTEMPTS = 3;
 
+/** How long a path that could not be asked waits before it is asked again. */
+export const OFFLINE_RETRY_MS = 3_000;
+
 /**
  * The host's answer about a path: `offline` when there was no one to ask,
  * `retry` when the host could not say (it took too long, or the pane moved
@@ -48,6 +51,7 @@ export class ChatFileLinks {
   private probing = false;
   private shown = true;
   private tap = 0;
+  private later: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly probe: (path: string) => Promise<ProbeAnswer>,
@@ -92,6 +96,8 @@ export class ChatFileLinks {
   hide(): void {
     this.shown = false;
     this.tap += 1;
+    clearTimeout(this.later);
+    this.later = undefined;
   }
 
   /** The phone is connected again: what was waiting is asked now. */
@@ -111,7 +117,17 @@ export class ChatFileLinks {
       answer = "missing";
     }
     this.probing = false;
-    if (answer === "offline") return;
+    if (answer === "offline") {
+      // Asked again on reconnecting, or a little later: the pane may only
+      // not be known yet.
+      if (this.shown && this.later === undefined) {
+        this.later = setTimeout(() => {
+          this.later = undefined;
+          void this.pump();
+        }, OFFLINE_RETRY_MS);
+      }
+      return;
+    }
     this.queue.shift();
     const attempts = (this.attempts.get(path) ?? 0) + 1;
     if (answer === "retry" && attempts < PROBE_ATTEMPTS) {

@@ -2075,6 +2075,12 @@ async fn a_review_running_when_read_back_takes_no_message() {
             .all(|written| written["method"] != "turn/steer" && written["method"] != "turn/start"),
         "the review's turn takes no message"
     );
+    // Stop goes to the review's own turn, the one Codex stops.
+    replay.command(SessionCommand::Interrupt).unwrap();
+    assert_eq!(
+        replay.last_asked("turn/interrupt")["params"]["turnId"],
+        "inner"
+    );
     let completed = json!({"method": "turn/completed", "params": {"threadId": THREAD,
         "turn": {"id": "outer", "status": "completed"}}});
     replay.agent(&completed.to_string());
@@ -2112,7 +2118,7 @@ async fn a_review_never_entered_keeps_its_steps_where_it_ran() {
         .iter()
         .map(|item| item.id.as_str())
         .collect();
-    assert_eq!(ids, ["m", "c", "u"], "{:#?}", replay.client.outline());
+    assert_eq!(ids, ["c", "m", "u"], "{:#?}", replay.client.outline());
 }
 
 #[tokio::test]
@@ -2199,5 +2205,49 @@ async fn stop_pressed_as_a_review_starts_stops_the_reviews_own_turn() {
     assert_eq!(
         replay.last_asked("turn/interrupt")["params"]["turnId"],
         "inner"
+    );
+}
+
+#[tokio::test]
+async fn a_message_refused_by_its_turn_after_a_command_began_waits_for_the_command() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    replay.send("m2", "and also");
+    replay.send("c1", "/compact");
+    let completed = |id: &str| {
+        json!({"method": "turn/completed", "params": {"threadId": THREAD,
+            "turn": {"id": id, "status": "completed"}}})
+        .to_string()
+    };
+    replay.agent(&completed("t1"));
+    replay.agent(&json!({"id": "@thread/compact/start", "result": {}}).to_string());
+    let started = json!({"method": "turn/started", "params": {"threadId": THREAD,
+        "turn": {"id": "k1", "rootTurnId": "k1"}}});
+    replay.agent(&started.to_string());
+    let starts = |replay: &Replay<Codex>| {
+        replay
+            .written
+            .iter()
+            .filter(|written| written["method"] == "turn/start")
+            .count()
+    };
+    let before = starts(&replay);
+    let late = json!({"id": "@turn/steer", "error": {"code": -32600, "message": "no active turn"}});
+    replay.agent(&late.to_string());
+    assert_eq!(starts(&replay), before);
+    assert!(
+        replay
+            .client
+            .items
+            .iter()
+            .all(|item| !item.text.contains("could not join")),
+        "{:#?}",
+        replay.client.outline()
+    );
+    replay.agent(&completed("k1"));
+    assert_eq!(
+        replay.last_asked("turn/start")["params"]["clientUserMessageId"],
+        "m2"
     );
 }

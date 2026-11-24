@@ -4390,7 +4390,7 @@ fn a_link_opens_only_on_the_release_of_its_own_press(cx: &mut TestAppContext) {
         (
             one.origin + point(px(12.), px(10.)),
             two.origin + point(px(12.), px(10.)),
-            point(one.origin.x - px(20.), one.origin.y),
+            point(px(1.), px(1.)),
         )
     });
     let status = |shell: &mut Shell| {

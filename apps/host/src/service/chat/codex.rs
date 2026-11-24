@@ -1042,7 +1042,9 @@ impl Codex {
         for turn in turns {
             let running = string(turn, "status") == "inProgress";
             let turn_id = string(turn, "id");
-            if running {
+            // A review's own turn is the one Codex stops, not the review's,
+            // which is read after it.
+            if running && self.root.as_deref() != Some(turn_id) {
                 self.turn = Some(turn_id.to_owned());
                 self.root = match string(turn, "rootTurnId") {
                     "" => None,
@@ -1050,6 +1052,7 @@ impl Codex {
                 };
             }
             let mut opened = false;
+            let start = timeline.len();
             // A review runs in a turn of its own that names the review's
             // turn as its root. It is read before that turn, and as
             // interrupted although it ended: its steps go under the review's
@@ -1061,7 +1064,7 @@ impl Codex {
                 // turn, which nothing joins, as when it was started here.
                 let sources = turn["items"].as_array().map_or(&[][..], Vec::as_slice);
                 let has = |kind: &str| sources.iter().any(|source| string(source, "type") == kind);
-                self.command_turn = inner
+                self.command_turn |= inner
                     || has("enteredReviewMode")
                     || (has("contextCompaction") && !has("userMessage"));
             }
@@ -1117,9 +1120,14 @@ impl Codex {
                     timeline.extend(reviews.remove(turn_id).unwrap_or_default());
                 }
             }
-            if !inner {
-                // A review that was never entered, still where it ran.
-                timeline.extend(reviews.remove(turn_id).unwrap_or_default());
+            if !inner && let Some(steps) = reviews.remove(turn_id) {
+                // A review that was never entered: its steps where it ran,
+                // after what opened its turn and before what it said.
+                let opened_by = timeline
+                    .get(start)
+                    .is_some_and(|item| item.kind == i32::from(Kind::User));
+                let at = start + usize::from(opened_by);
+                timeline.splice(at..at, steps);
             }
             if string(turn, "status") == "interrupted" && !inner {
                 let id = format!("{turn_id}-interrupted");
@@ -1839,7 +1847,9 @@ impl Codex {
             }
             // The turn it was for ended first: it opens the next one, or
             // waits for the built-in that started meanwhile.
-            Asked::Steer(held) if failed && self.turn.is_none() => {
+            // Nothing is steered into a built-in's turn: a refusal that comes
+            // during one is about the turn before.
+            Asked::Steer(held) if failed && (self.turn.is_none() || self.command_turn) => {
                 if self.starting || self.command_turn {
                     self.held.push_front(held);
                 } else {

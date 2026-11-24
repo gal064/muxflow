@@ -114,7 +114,10 @@ function inlines(tokens: Token[] | undefined, marks: Marks = NO_MARKS, out: Chat
         break;
       case "codespan": {
         const { text } = token;
-        push(out, text, pathLike(text) ? { ...marks, code: true, path: text } : { ...marks, code: true });
+        // Code that is a link's label goes where the link does; and only
+        // code in single backticks is asked about, as on the desktop.
+        const path = marks.href === undefined && marks.file === undefined && !token.raw.startsWith("``") && pathLike(text);
+        push(out, text, path ? { ...marks, code: true, path: text } : { ...marks, code: true });
         break;
       }
       case "br":

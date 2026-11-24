@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { HostError, RequestTimeoutError } from "../../protocol/HostConnection";
-import { ChatFileLinks, couldNotTell, MAX_PROBES, PROBE_ATTEMPTS, type ProbeAnswer } from "./chatFileLinks";
+import { ChatFileLinks, couldNotTell, MAX_PROBES, OFFLINE_RETRY_MS, PROBE_ATTEMPTS, type ProbeAnswer } from "./chatFileLinks";
 
 function deferred() {
   let settle!: (answer: ProbeAnswer) => void;
@@ -31,6 +31,31 @@ describe("chat file links", () => {
     answers[1]!.settle("missing");
     await flush();
     expect(links.get("src/b.rs")).toBe("missing");
+  });
+
+  it("asks again a little later what it could not ask, and not once the conversation is left", async () => {
+    vi.useFakeTimers();
+    try {
+      let online = false;
+      const probe = vi.fn(async () => (online ? "exists" : "offline") as ProbeAnswer);
+      const links = new ChatFileLinks(probe, vi.fn());
+      links.ask("src/a.rs");
+      await vi.advanceTimersByTimeAsync(0);
+      online = true;
+      await vi.advanceTimersByTimeAsync(OFFLINE_RETRY_MS);
+      expect(links.get("src/a.rs")).toBe("exists");
+
+      online = false;
+      links.ask("src/b.rs");
+      await vi.advanceTimersByTimeAsync(0);
+      links.hide();
+      online = true;
+      const asked = probe.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(OFFLINE_RETRY_MS * 2);
+      expect(probe.mock.calls.length).toBe(asked);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("asks again on reconnecting what it could not ask offline", async () => {

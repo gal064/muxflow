@@ -311,6 +311,19 @@ describe("chat Markdown links", () => {
     });
   });
 
+  it("leaves code that is a link's label to the link, and code in double backticks as code", () => {
+    expect(only("[`src/a.ts`](https://example.com/blob/src/a.ts) [`src/b.ts`](/repo/src/b.ts) ``src/c.ts``")).toEqual({
+      kind: "paragraph",
+      content: [
+        { text: "src/a.ts", code: true, href: "https://example.com/blob/src/a.ts" },
+        { text: " " },
+        { text: "src/b.ts", code: true, file: "/repo/src/b.ts" },
+        { text: " " },
+        { text: "src/c.ts", code: true },
+      ],
+    });
+  });
+
   it("splits a line and column off a path, and names its file", () => {
     expect(splitPosition("src/a.rs:12:3")).toEqual(["src/a.rs", ":12:3"]);
     expect(splitPosition("src/a.rs:12")).toEqual(["src/a.rs", ":12"]);
