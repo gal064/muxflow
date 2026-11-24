@@ -43,7 +43,7 @@ import { KeyChips } from "./KeyChips";
 import { terminalKeyboardInset } from "./keyboardInset";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { terminalRegistry } from "./terminalRegistry";
-import { paneTerminalScheme } from "./terminalScheme";
+import { paneTerminalScheme } from "./paneTerminalScheme";
 import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
 import { withFilePaths } from "./terminalText";
 import { useTerminalCommands } from "./useTerminalCommands";

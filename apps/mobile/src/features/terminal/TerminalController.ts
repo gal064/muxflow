@@ -19,7 +19,7 @@ import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { CR } from "./chips";
 import { DEFAULT_TERMINAL_FONT_SIZE, sameGrid, windowGrid, type Grid } from "./sizing";
 import type { RegisteredTerminal, TerminalRegistry } from "./terminalRegistry";
-import { paneTerminalScheme } from "./terminalScheme";
+import { paneTerminalScheme } from "./paneTerminalScheme";
 
 /** §9.5 states, as the screen renders them. */
 export type TerminalPhase =

@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { lightTerminalTheme, terminalTheme } from "@muxflow/client-core";
 
 import type { Agent, Pane } from "../../store/sessionStore";
-import { paneTerminalScheme, schemeForBackground, terminalThemeFor } from "./terminalScheme";
+import { paneTerminalScheme } from "./paneTerminalScheme";
+import { schemeForBackground, terminalThemeFor } from "./terminalScheme";
 import { terminalDocument } from "./terminalDocument";
 
 function pane(chatAdapterId = ""): Pane {
