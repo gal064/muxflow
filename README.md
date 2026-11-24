@@ -118,6 +118,11 @@ curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh
 Make sure [tmux](https://github.com/tmux/tmux/wiki/Installing) is installed on
 your machine and on every machine you connect to.
 
+The installer also offers the [Muxflow skill](./skills/muxflow/SKILL.md), which
+teaches Claude Code, Codex and OpenCode to start, read and message your agents
+and to set up [automations](./docs/automations.md). Run it again to update the
+skill; the desktop's update leaves the skill alone.
+
 For Android, install the APK from the
 [releases page](https://github.com/gal064/muxflow/releases/latest).
 
