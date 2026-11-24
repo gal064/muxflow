@@ -18,6 +18,8 @@ images.
   Codex alike.
 - The sidebar's "all" and agent-ordering toggles are grey, without the
   chevron.
+- A link in a chat opens with Cmd-click (Ctrl-click on Linux) as well as a
+  plain click, as in a terminal. Cmd-dragging still moves the pane.
 - Panes no longer draw a ring around the active pane or the one that needs
   you.
 - The chat no longer jumps while long Markdown replies finish rendering.

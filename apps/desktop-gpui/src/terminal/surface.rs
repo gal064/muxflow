@@ -934,7 +934,7 @@ impl TerminalSurface {
     }
 
     /// A press with the link modifier grabs the pane, unless it is on a link,
-    /// which that modifier opens. Claimed before the pane sees it, so no
+    /// which that modifier opens: a terminal's at once, a chat's on release. Claimed before the pane sees it, so no
     /// selection starts and a program reading the mouse gets no click. The
     /// grab does not focus the pane. It is a drag like any other once the
     /// pointer travels: nothing moves until it is dropped.
@@ -953,11 +953,16 @@ impl TerminalSurface {
         let Some(mounted) = self.panes.iter().find(|mounted| mounted.id == *pane_id) else {
             return;
         };
-        // A chat's links open on a plain click, so the modifier is the grab's.
-        if let Mount::Terminal(pane) = &mounted.pane
-            && integration::link_at(pane.read(cx), event.position)
-        {
-            return;
+        match &mounted.pane {
+            Mount::Terminal(pane) if integration::link_at(pane.read(cx), event.position) => {
+                return;
+            }
+            // A chat's link opens on this press as on a plain one, as a
+            // terminal's does: the chat is told where it began, so a release
+            // that has not travelled opens the link under it. One that has is
+            // the grab's.
+            Mount::Chat(chat) => chat.read(cx).note_press(event.position),
+            Mount::Terminal(_) => {}
         }
         cx.stop_propagation();
         self.hover = None;
