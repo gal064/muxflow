@@ -53,33 +53,16 @@ first turn starts.
 it was submitted.
 
 **Chat pane:** the pane shows "Muxflow chat session". Anything typed into it is
-discarded.
+discarded. Send through the helper, which works for Claude Code and Codex:
 
-- Codex: `@muxflow-chat-socket` is a Codex app-server (JSON-RPC over WebSocket).
-  Start a turn on the pane's `@muxflow-chat-session` thread. Muxflow shows it like
-  any other turn. Your connection gets no events for it, so read the reply from
-  the transcript.
+```sh
+muxflow-host chat send <pane> 'MESSAGE'    # or pass - and pipe the message in
+```
 
-  ```sh
-  uv run -q --with websockets python - "$SOCKET" "$THREAD" 'MESSAGE' <<'EOF'
-  import asyncio, json, sys
-  from websockets.asyncio.client import unix_connect
-  sock, thread, text = sys.argv[1:]
-  async def main():
-      async with unix_connect(sock, uri="ws://localhost/") as ws:
-          for i, (m, p) in enumerate([("initialize", {"clientInfo": {"name": "agent", "version": "0"}}),
-                                      ("turn/start", {"threadId": thread, "input": [{"type": "text", "text": text}]})]):
-              await ws.send(json.dumps({"id": i, "method": m, "params": p}))
-              while (r := json.loads(await ws.recv())).get("id") != i: pass
-              if "error" in r: sys.exit(r["error"])
-              if i == 0: await ws.send(json.dumps({"method": "initialized"}))
-  asyncio.run(main())
-  EOF
-  ```
-
-- Claude Code: there is no safe way to send. **Never connect to its
-  `@muxflow-chat-socket`.** A new connection takes the agent over from Muxflow.
-  Ask the user to reply from Muxflow, or start a new agent with the full task.
+On a Mac the helper is `/Applications/Muxflow.app/Contents/MacOS/muxflow-host`.
+It returns once the message is accepted. Read the reply from the transcript.
+Never connect to the pane's `@muxflow-chat-socket` yourself: a new connection
+takes the agent over from Muxflow.
 
 ## Automations
 
