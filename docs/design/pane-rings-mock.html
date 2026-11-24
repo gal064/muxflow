@@ -1,0 +1,112 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muxflow — active pane shown by its divider</title>
+<style>
+.lt{--page:#eeeef1;--bg:#fafafa;--raised:#f4f4f5;--hair:#e4e4e7;--border:#d4d4d8;--strong:#a1a1aa;
+  --ink-strong:#18181b;--ink:#27272a;--dim:#71717b;--faint:#85858e;--accent:#2f6fe0;--term:#0e7490}
+.dk{--page:#1f2329;--bg:#282c34;--raised:#2c313a;--hair:#313640;--border:#3e4451;--strong:#5c6370;
+  --ink-strong:#ffffff;--ink:#c4c8c6;--dim:#a4abb6;--faint:#7f8794;--accent:#7aa6da;--term:#8abeb7}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 "Inter",system-ui,-apple-system,"Segoe UI",sans-serif;background:#e6e6ea;color:#27272a}
+.wrap{max-width:1240px;margin:0 auto;padding:36px 16px 64px;display:flex;flex-direction:column;gap:26px}
+h1{font-size:24px;font-weight:600;color:#18181b;margin:0}
+h2{font-size:16px;font-weight:600;color:#18181b;margin:0}
+p{margin:0;max-width:80ch;color:#52525b}
+b{color:#18181b}
+code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px;background:#f4f4f5;border:1px solid #e4e4e7;border-radius:4px;padding:0 4px}
+.theme{background:var(--page);border-radius:10px;padding:18px;display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+@media (max-width:1100px){.theme{grid-template-columns:1fr}}
+h3{font-size:13px;font-weight:600;color:var(--ink-strong);margin:0 0 10px;display:flex;gap:8px;align-items:center}
+.cap{font-size:12px;color:var(--faint);margin-top:8px}
+.tag{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;border-radius:4px;padding:1px 6px}
+.tag.now{background:#dc26261f;color:#dc2626}.tag.fix{background:#7aa6da33;color:var(--accent)}
+
+/* the surface: panes laid out on a grid; dividers are 1px lines in the 5px gap */
+.surf{position:relative;height:250px;background:var(--bg);border:1px solid var(--hair);border-radius:6px}
+.pn{position:absolute;padding:9px 11px;font-size:11px;display:flex;flex-direction:column;gap:6px;color:var(--ink);overflow:hidden}
+.pn.act{background:var(--bg)}
+.dv{position:absolute;background:var(--hair)}
+.dv.on{background:var(--strong)}
+.ring{position:absolute;border:2px solid var(--accent);pointer-events:none}
+.u{align-self:flex-end;background:var(--raised);border:1px solid var(--hair);border-radius:7px;padding:2px 8px;max-width:85%}
+.cmp{margin-top:auto;border:1px solid var(--border);border-radius:8px;padding:5px 8px;color:var(--faint)}
+.term{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:10px;line-height:1.5}
+.term .p{color:var(--term)}
+</style>
+
+<div class="wrap">
+  <div>
+    <h1>Active pane: its existing divider, drawn darker</h1>
+    <p>No new frame. The 1px dividers between panes are already there (<code>chrome_hairline</code>). The divider lines that touch the active pane are drawn one step stronger. Everything else stays as today, and the “agent wants you” frame is gone.</p>
+  </div>
+
+  <div class="theme dk">
+    <div>
+      <h3><span class="tag now">Now</span> two panes, left active</h3>
+      <div class="surf">
+        <div class="pn" style="left:5px;top:5px;right:calc(50% + 3px);bottom:5px"><div class="u">or separated X from blogs</div><div>The main X posts were self-contained…</div><div class="cmp">Reply…</div></div>
+        <div class="ring" style="left:3px;top:3px;right:calc(50% + 1px);bottom:3px"></div>
+        <div class="dv" style="left:50%;top:5px;bottom:5px;width:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:5px;right:5px;bottom:5px"><div class="term"><span class="p">~/dev/muxflow</span> $ cargo test<br>running 412 tests</div></div>
+      </div>
+    </div>
+    <div>
+      <h3><span class="tag fix">Proposed</span> two panes, left active</h3>
+      <div class="surf">
+        <div class="pn" style="left:5px;top:5px;right:calc(50% + 3px);bottom:5px"><div class="u">or separated X from blogs</div><div>The main X posts were self-contained…</div><div class="cmp">Reply…</div></div>
+        <div class="dv on" style="left:50%;top:5px;bottom:5px;width:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:5px;right:5px;bottom:5px"><div class="term"><span class="p">~/dev/muxflow</span> $ cargo test<br>running 412 tests</div></div>
+      </div>
+      <p class="cap">The catch: with two panes there is one divider, and both panes touch it. It looks the same whichever side is active.</p>
+    </div>
+    <div>
+      <h3><span class="tag fix">Proposed</span> three panes, top-right active</h3>
+      <div class="surf">
+        <div class="pn" style="left:5px;top:5px;right:calc(50% + 3px);bottom:5px"><div class="u">or separated X from blogs</div><div>The main X posts were self-contained…</div><div class="cmp">Reply…</div></div>
+        <div class="dv" style="left:50%;top:calc(50% + 1px);bottom:5px;width:1px"></div>
+        <div class="dv on" style="left:50%;top:5px;height:calc(50% - 4px);width:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:5px;right:5px;height:calc(50% - 8px)"><div class="term"><span class="p">~/dev/muxflow</span> $ cargo test<br>running 412 tests</div></div>
+        <div class="dv on" style="left:calc(50% + 3px);right:5px;top:50%;height:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:calc(50% + 3px);right:5px;bottom:5px"><div class="term"><span class="p">~/dev/muxflow</span> $ ▌</div></div>
+      </div>
+      <p class="cap">With more panes, the stronger segments outline the active one, so you can tell which it is.</p>
+    </div>
+  </div>
+
+  <div class="theme lt">
+    <div>
+      <h3><span class="tag now">Now</span> two panes, left active</h3>
+      <div class="surf">
+        <div class="pn" style="left:5px;top:5px;right:calc(50% + 3px);bottom:5px"><div class="u">or separated X from blogs</div><div>The main X posts were self-contained…</div><div class="cmp">Reply…</div></div>
+        <div class="ring" style="left:3px;top:3px;right:calc(50% + 1px);bottom:3px"></div>
+        <div class="dv" style="left:50%;top:5px;bottom:5px;width:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:5px;right:5px;bottom:5px"><div class="term"><span class="p">~/dev/muxflow</span> $ cargo test<br>running 412 tests</div></div>
+      </div>
+    </div>
+    <div>
+      <h3><span class="tag fix">Proposed</span> two panes, left active</h3>
+      <div class="surf">
+        <div class="pn" style="left:5px;top:5px;right:calc(50% + 3px);bottom:5px"><div class="u">or separated X from blogs</div><div>The main X posts were self-contained…</div><div class="cmp">Reply…</div></div>
+        <div class="dv on" style="left:50%;top:5px;bottom:5px;width:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:5px;right:5px;bottom:5px"><div class="term"><span class="p">~/dev/muxflow</span> $ cargo test<br>running 412 tests</div></div>
+      </div>
+    </div>
+    <div>
+      <h3><span class="tag fix">Proposed</span> three panes, top-right active</h3>
+      <div class="surf">
+        <div class="pn" style="left:5px;top:5px;right:calc(50% + 3px);bottom:5px"><div class="u">or separated X from blogs</div><div>The main X posts were self-contained…</div><div class="cmp">Reply…</div></div>
+        <div class="dv" style="left:50%;top:calc(50% + 1px);bottom:5px;width:1px"></div>
+        <div class="dv on" style="left:50%;top:5px;height:calc(50% - 4px);width:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:5px;right:5px;height:calc(50% - 8px)"><div class="term"><span class="p">~/dev/muxflow</span> $ cargo test<br>running 412 tests</div></div>
+        <div class="dv on" style="left:calc(50% + 3px);right:5px;top:50%;height:1px"></div>
+        <div class="pn" style="left:calc(50% + 3px);top:calc(50% + 3px);right:5px;bottom:5px"><div class="term"><span class="p">~/dev/muxflow</span> $ ▌</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <h2>Stronger grey</h2>
+    <p>Light <code>#a1a1aa</code>, dark <code>#5c6370</code>, against the <code>chrome_hairline</code> divider. In a two-pane split the darker line says only that a split exists, not which side is active; the blinking cursor and the composer's focus are the only remaining cues. If that's enough, the code gets simpler: the ring code goes, and only the divider's colour depends on the active pane.</p>
+  </div>
+</div>

@@ -614,6 +614,12 @@ impl ChatPane {
         }
     }
 
+    /// Where a left press began that the surface claimed before the chat saw
+    /// it: a link's click is told from a drag by it.
+    pub fn note_press(&self, position: Point<Pixels>) {
+        *self.pressed.lock().expect("the press is never poisoned") = Some(position);
+    }
+
     /// What typing goes to: the composer.
     pub fn input_focus(&self, cx: &App) -> FocusHandle {
         self.composer.read(cx).focus_handle(cx)

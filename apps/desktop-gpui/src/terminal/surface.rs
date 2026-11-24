@@ -34,7 +34,6 @@ use super::client_size::{
 };
 use super::integration::{
     self,
-    agents::PaneAttention,
     frames::{
         AFTER_GRAB_QUIET, Axis, DRAG_THRESHOLD_PX, HOVER_FOCUS_DELAY, KEY_RESIZE_CELLS, PaneEdge,
         divider_key, pane_edge_at, resize_action, resize_cells_from_pixels,
@@ -203,7 +202,6 @@ impl TerminalSurface {
                 })
             };
             let uploads = cx.observe_global::<integration::upload::Uploads>(|_, cx| cx.notify());
-            let attention = cx.observe_global::<PaneAttention>(|_, cx| cx.notify());
             // Focus left on nothing, or on something no longer drawn (a list
             // in a closed sidebar, a menu gone with its dialog), comes back to
             // the terminal rather than leaving the keyboard dead.
@@ -254,7 +252,7 @@ impl TerminalSurface {
                 origin: Point::default(),
                 divider: None,
                 hover: None,
-                _subscriptions: vec![observe, keys, uploads, attention, lost, settings],
+                _subscriptions: vec![observe, keys, uploads, lost, settings],
             };
             surface.sync(window, cx);
             surface
@@ -648,13 +646,6 @@ impl TerminalSurface {
                 _focused: focused,
             });
         }
-        let several = self.panes.len() > 1;
-        for mounted in &self.panes {
-            let active = several && mounted.geometry.active;
-            if let Mount::Terminal(pane) = &mounted.pane {
-                pane.update(cx, |pane, cx| pane.set_active(active, cx));
-            }
-        }
     }
 
     fn pane_measurements(
@@ -943,7 +934,7 @@ impl TerminalSurface {
     }
 
     /// A press with the link modifier grabs the pane, unless it is on a link,
-    /// which that modifier opens. Claimed before the pane sees it, so no
+    /// which that modifier opens: a terminal's at once, a chat's on release. Claimed before the pane sees it, so no
     /// selection starts and a program reading the mouse gets no click. The
     /// grab does not focus the pane. It is a drag like any other once the
     /// pointer travels: nothing moves until it is dropped.
@@ -962,11 +953,16 @@ impl TerminalSurface {
         let Some(mounted) = self.panes.iter().find(|mounted| mounted.id == *pane_id) else {
             return;
         };
-        // A chat's links open on a plain click, so the modifier is the grab's.
-        if let Mount::Terminal(pane) = &mounted.pane
-            && integration::link_at(pane.read(cx), event.position)
-        {
-            return;
+        match &mounted.pane {
+            Mount::Terminal(pane) if integration::link_at(pane.read(cx), event.position) => {
+                return;
+            }
+            // A chat's link opens on this press as on a plain one, as a
+            // terminal's does: the chat is told where it began, so a release
+            // that has not travelled opens the link under it. One that has is
+            // the grab's.
+            Mount::Chat(chat) => chat.read(cx).note_press(event.position),
+            Mount::Terminal(_) => {}
         }
         cx.stop_propagation();
         self.hover = None;
@@ -1197,13 +1193,6 @@ impl Render for TerminalSurface {
                 .filter(|(target, _)| target.as_str() == id.as_ref())
                 .map(|(_, edge)| *edge)
         };
-        // The active pane's ring sits just outside its frame, in the divider
-        // cell or the surface's inset: inside, it covered the first column.
-        let ring = ui(theme::metrics::FOCUS_RING)
-            .to_pixels(window.rem_size())
-            .as_f32();
-        let mut rings = Vec::new();
-        let several = self.panes.len() > 1;
         let frames: Vec<_> = surface.map_or(Vec::new(), |surface| {
             self.panes
                 .iter()
@@ -1216,27 +1205,7 @@ impl Render for TerminalSurface {
                     } = pane_rect(&mounted.geometry, grid, surface, zoomed);
                     let (right, bottom) =
                         separators(&mounted.geometry, grid, self.panes.len() > 1, zoomed);
-                    let ringed = match &mounted.pane {
-                        Mount::Terminal(pane) => pane.read(cx).active,
-                        Mount::Chat(_) => several && mounted.geometry.active,
-                    };
-                    if ringed {
-                        rings.push(
-                            div()
-                                .absolute()
-                                .left(px(left - ring))
-                                .top(px(top - ring))
-                                .w(px(width + 2. * ring))
-                                .h(px(height + 2. * ring))
-                                .border(px(ring))
-                                .border_color(palette.accent),
-                        );
-                    }
                     let id = mounted.id.clone();
-                    let wants_attention = self.target.as_ref().is_some_and(|target| {
-                        cx.try_global::<PaneAttention>()
-                            .is_some_and(|attention| attention.wants(&target.profile_id, &id))
-                    });
                     // Measured pixels of this surface, already scaled.
                     div()
                         .id(SharedString::from(format!("pane-frame-{id}")))
@@ -1281,18 +1250,6 @@ impl Render for TerminalSurface {
                         )
                         .when_some(drop_edge(&id), |frame, edge| {
                             frame.child(drop_hint(edge, cx))
-                        })
-                        // An agent in this pane wants a human.
-                        .when(wants_attention, |frame| {
-                            frame.child(
-                                div()
-                                    .absolute()
-                                    .inset(ui(2.))
-                                    .border(ui(2.5))
-                                    .border_color(palette.accent)
-                                    .rounded(ui(6.))
-                                    .opacity(0.9),
-                            )
                         })
                         .when(right, |frame| {
                             frame.child(self.divider_handle(mounted, Axis::Horizontal, cx))
@@ -1398,7 +1355,6 @@ impl Render for TerminalSurface {
                     .size_full()
                     .child(measure)
                     .children(frames)
-                    .children(rings)
                     .when(empty, |window| {
                         window.child(
                             div()
