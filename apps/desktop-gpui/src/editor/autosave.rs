@@ -87,12 +87,26 @@ pub struct SaveRequest {
     external_epoch: u64,
 }
 
+impl SaveRequest {
+    /// The text as the write leaves it in the file.
+    pub fn written(&self) -> String {
+        self.line_ending.apply(&self.content.to_string())
+    }
+}
+
 pub struct Autosave {
     view: AutosaveView,
     revision: u64,
     external_epoch: u64,
     self_operations: VecDeque<String>,
-    in_flight: bool,
+    /// The generations our writes produced, so a read that lands late and
+    /// finds one of them is not mistaken for someone else's write.
+    self_generations: VecDeque<String>,
+    /// The bytes of the write on the wire, as the file will hold them.
+    in_flight: Option<Rope>,
+    /// The generation a read found that write at, if one did before it
+    /// answered: the base to build on should its answer be lost.
+    echoed: Option<String>,
     /// A save asked for while another was on the wire. Only the newest is kept:
     /// an older one would find itself superseded when its turn came.
     queued: Option<SaveRequest>,
@@ -111,7 +125,9 @@ impl Autosave {
             revision: 0,
             external_epoch: 0,
             self_operations: VecDeque::new(),
-            in_flight: false,
+            self_generations: VecDeque::new(),
+            in_flight: None,
+            echoed: None,
             queued: None,
         }
     }
@@ -122,7 +138,12 @@ impl Autosave {
 
     /// A write is on the wire.
     pub fn saving(&self) -> bool {
-        self.in_flight
+        self.in_flight.is_some()
+    }
+
+    /// One of our recent writes, by the operation id its change event carries.
+    pub fn is_own(&self, operation_id: &str) -> bool {
+        self.self_operations.iter().any(|own| own == operation_id)
     }
 
     /// A local edit. Returns the revision to save once [`SAVE_DELAY`] passes
@@ -157,11 +178,11 @@ impl Autosave {
             revision,
             external_epoch: self.external_epoch,
         };
-        if self.in_flight {
+        if self.saving() {
             self.queued = Some(request);
             return None;
         }
-        self.in_flight = true;
+        self.in_flight = Some(Rope::from(request.written().as_str()));
         Some(request)
     }
 
@@ -180,10 +201,26 @@ impl Autosave {
         request: &SaveRequest,
         result: Result<String, String>,
     ) -> Option<SaveRequest> {
-        self.in_flight = false;
+        self.in_flight = None;
+        let echoed = self.echoed.take();
         // A newer external generation replaced the buffer while this was on
         // the wire: its answer describes content nobody is looking at.
         if request.external_epoch == self.external_epoch {
+            match &result {
+                Ok(generation) => {
+                    self.self_generations.push_back(generation.clone());
+                    if self.self_generations.len() > SELF_OPERATIONS {
+                        self.self_generations.pop_front();
+                    }
+                }
+                // The write landed but its answer did not: the next one
+                // builds on what it left, or every retry is refused as stale.
+                Err(_) => {
+                    if let Some(generation) = echoed {
+                        self.view.generation = generation;
+                    }
+                }
+            }
             match result {
                 Ok(generation) if request.revision == self.revision => {
                     self.view = AutosaveView {
@@ -212,20 +249,38 @@ impl Autosave {
             return None;
         }
         next.generation = self.view.generation.clone();
-        self.in_flight = true;
+        self.in_flight = Some(Rope::from(next.written().as_str()));
         Some(next)
     }
 
     /// Content that changed on disk, last writer wins. Returns false for the
     /// echo of one of our own writes, which changes nothing.
     pub fn external(&mut self, snapshot: Snapshot, operation_id: Option<&str>) -> bool {
-        if operation_id.is_some_and(|id| self.self_operations.iter().any(|own| own == id)) {
+        if operation_id.is_some_and(|id| self.is_own(id)) {
             return false;
+        }
+        // The host's watcher also sees our write land, and says so without an
+        // operation id, often before the write itself answers. Taking that as
+        // someone else's change would put the buffer back to what was written
+        // and drop everything typed since.
+        if operation_id.is_none() {
+            if self
+                .in_flight
+                .as_ref()
+                .is_some_and(|written| *written == snapshot.content)
+            {
+                self.echoed = Some(snapshot.generation);
+                return false;
+            }
+            if self.self_generations.contains(&snapshot.generation) {
+                return false;
+            }
         }
         // A genuinely external write invalidates the suppression of older
         // in-flight local writes: if one commits afterwards, its change event
         // is a real last-writer transition and must be reloaded.
         self.self_operations.clear();
+        self.self_generations.clear();
         self.revision += 1;
         self.external_epoch += 1;
         self.queued = None;
@@ -377,6 +432,42 @@ mod tests {
             Some(&request.operation_id)
         ));
         assert_eq!(text(autosave.current()), "b");
+    }
+
+    #[test]
+    fn the_watch_echo_of_the_write_on_the_wire_keeps_newer_typing() {
+        let mut autosave = Autosave::new(snapshot("a\r\n", "1", LineEnding::Crlf));
+        let revision = autosave.edit(Rope::from("a\r\nb\n"));
+        let first = autosave.due(revision).unwrap();
+        let revision = autosave.edit(Rope::from("a\r\nb\nc"));
+        assert_eq!(autosave.due(revision), None);
+        // The file as the write left it, typed line in the file's CRLF.
+        assert!(!autosave.external(snapshot("a\r\nb\r\n", "2", LineEnding::Crlf), None));
+        let second = autosave
+            .finished(&first, Ok("2".into()))
+            .expect("the typing queued behind the write still saves");
+        assert_eq!(second.content.to_string(), "a\r\nb\nc");
+        assert_eq!(second.generation, "2");
+        // A read that lands after the next write answered, finding what the
+        // first one left, is still ours.
+        assert_eq!(autosave.finished(&second, Ok("3".into())), None);
+        assert!(!autosave.external(snapshot("a\r\nb\r\n", "2", LineEnding::Crlf), None));
+        assert_eq!(text(autosave.current()), "a\r\nb\nc");
+        // Anything else on disk is still someone else's change.
+        assert!(autosave.external(snapshot("agent", "4", LineEnding::Lf), None));
+        assert_eq!(text(autosave.current()), "agent");
+    }
+
+    #[test]
+    fn a_write_that_landed_but_never_answered_is_retried_on_what_it_left() {
+        let mut autosave = Autosave::new(snapshot("a", "1", LineEnding::Lf));
+        let revision = autosave.edit(Rope::from("ab"));
+        let request = autosave.due(revision).unwrap();
+        assert!(!autosave.external(snapshot("ab", "2", LineEnding::Lf), None));
+        autosave.finished(&request, Err("connection lost".into()));
+        assert_eq!(autosave.current().state, SaveState::Error);
+        let retry = autosave.flush().expect("an errored buffer is still owed");
+        assert_eq!(retry.generation, "2");
     }
 
     #[test]

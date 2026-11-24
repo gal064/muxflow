@@ -693,3 +693,56 @@ fn a_read_nobody_waits_for_is_stopped_but_a_save_on_the_wire_never_is(cx: &mut T
     assert_eq!(*flushed.borrow(), Some(Ok(())));
     assert!(!fixture.host.writes.borrow()[0].cancelled.get());
 }
+
+#[gpui_kit::test]
+fn the_watch_echo_of_a_save_on_the_wire_never_drops_later_typing(cx: &mut TestAppContext) {
+    let fixture = open(cx, true);
+    fixture.read(0, text("a", "1"), cx);
+    fixture.edit("ab", cx);
+    saved_after_debounce(cx);
+    assert_eq!(fixture.writes(), 1);
+    // The host commits "ab" as generation 2; its watcher sees the rename and
+    // says so with no operation id, before the write's answer lands.
+    fixture.notice(
+        FileNotice::Changed {
+            generation: "2".into(),
+            operation_id: None,
+        },
+        cx,
+    );
+    fixture.edit("abc", cx);
+    saved_after_debounce(cx);
+    fixture.read(1, text("ab", "2"), cx);
+    assert_eq!(
+        fixture.text(cx),
+        "abc",
+        "typing after the save started was lost"
+    );
+    fixture.write(0, Ok("2".into()), cx);
+    let writes = fixture.host.writes.borrow();
+    assert_eq!(writes.len(), 2, "the later typing is saved");
+    assert_eq!(
+        (writes[1].content.as_str(), writes[1].base.as_str()),
+        ("abc", "2")
+    );
+}
+
+#[gpui_kit::test]
+fn our_own_commit_told_before_the_write_answers_is_not_read(cx: &mut TestAppContext) {
+    let fixture = open(cx, true);
+    fixture.read(0, text("a", "1"), cx);
+    fixture.edit("ab", cx);
+    saved_after_debounce(cx);
+    let operation = fixture.host.writes.borrow()[0].operation.clone();
+    fixture.notice(
+        FileNotice::Changed {
+            generation: "2".into(),
+            operation_id: Some(operation),
+        },
+        cx,
+    );
+    assert_eq!(fixture.reads(), 1, "our own commit is not read back");
+    fixture.write(0, Ok("2".into()), cx);
+    assert_eq!(fixture.text(cx), "ab");
+    assert_eq!(fixture.state(cx), Some(SaveState::Saved));
+}
