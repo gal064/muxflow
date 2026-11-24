@@ -4,6 +4,7 @@ use tmux_agent_protocol::v1;
 
 use crate::service::topology::agent_title_suffix;
 
+mod hermes;
 mod opencode;
 mod pi;
 
@@ -112,6 +113,13 @@ pub(crate) trait AgentAdapter: Send + Sync {
     /// carries, and nothing outside it is touched. Mutually exclusive with
     /// [`Self::managed_file`]; a directory is never merged with a config file.
     fn managed_files(&self, _helper_path: &Path) -> Option<Vec<(&'static str, String)>> {
+        None
+    }
+
+    /// The vendor command that turns a managed artifact on or off, when the
+    /// vendor has its own enable step outside the installed files. `None` means
+    /// the files themselves are the whole configuration.
+    fn managed_activation(&self, _install: bool) -> Option<(String, Vec<String>)> {
         None
     }
 
@@ -426,11 +434,13 @@ pub(crate) fn adapter(kind: v1::AgentAdapterKind) -> Option<&'static dyn AgentAd
     static CLAUDE: ClaudeCodeAdapter = ClaudeCodeAdapter;
     static PI: pi::PiAdapter = pi::PiAdapter;
     static OPENCODE: opencode::OpenCodeAdapter = opencode::OpenCodeAdapter;
+    static HERMES: hermes::HermesAdapter = hermes::HermesAdapter;
     [
         &CODEX as &dyn AgentAdapter,
         &CLAUDE as &dyn AgentAdapter,
         &PI as &dyn AgentAdapter,
         &OPENCODE as &dyn AgentAdapter,
+        &HERMES as &dyn AgentAdapter,
     ]
     .into_iter()
     .find(|adapter| adapter.legacy_kind() == kind)
@@ -442,6 +452,7 @@ pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
         v1::AgentAdapterKind::ClaudeCode,
         v1::AgentAdapterKind::Pi,
         v1::AgentAdapterKind::Opencode,
+        v1::AgentAdapterKind::Hermes,
     ]
     .into_iter()
     .filter_map(adapter)
@@ -468,6 +479,12 @@ pub(super) fn detect(command: &str) -> Option<&'static dyn AgentAdapter> {
 }
 
 pub(crate) fn detect_argv(argv: &[String]) -> Option<&'static dyn AgentAdapter> {
+    // A hand-started Hermes is `python3 -m hermes_cli.main …`, so the whole
+    // argv must be considered, not just the python executable.
+    let joined = argv.join(" ");
+    if let Some(adapter) = detect(&joined) {
+        return Some(adapter);
+    }
     let executable = argv.first()?;
     if let Some(adapter) = detect(executable) {
         return Some(adapter);
@@ -686,6 +703,7 @@ mod tests {
                 v1::AgentHookWiring::NotWired,
                 v1::AgentHookWiring::Absent,
                 v1::AgentHookWiring::Absent,
+                v1::AgentHookWiring::Absent,
             ])
             .map(|(adapter, state)| {
                 (
@@ -700,7 +718,7 @@ mod tests {
             })
             .collect();
         let descriptors = descriptors(home, &observed);
-        assert_eq!(descriptors.len(), 4);
+        assert_eq!(descriptors.len(), 5);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 10);
@@ -756,6 +774,7 @@ mod tests {
                 ("claude-code", v1::AgentHookWiring::NotWired as i32, true),
                 ("pi", v1::AgentHookWiring::Absent as i32, false),
                 ("opencode", v1::AgentHookWiring::Absent as i32, false),
+                ("hermes", v1::AgentHookWiring::Absent as i32, false),
             ]
         );
         let pi = adapter(v1::AgentAdapterKind::Pi).unwrap();
@@ -784,6 +803,34 @@ mod tests {
             opencode
                 .managed_files(Path::new("/opt/muxflow-host"))
                 .is_some()
+        );
+        let hermes = adapter(v1::AgentAdapterKind::Hermes).unwrap();
+        assert_eq!(
+            hermes.hook_path(home),
+            home.join(".hermes/plugins/muxflow-agent-status")
+        );
+        assert_eq!(hermes.hook_events().len(), 7);
+        assert_eq!(hermes.descriptor(home, &observed[4].1).id, "hermes");
+        assert!(
+            hermes
+                .managed_file(Path::new("/opt/muxflow-host"))
+                .is_none()
+        );
+        assert!(
+            hermes
+                .managed_files(Path::new("/opt/muxflow-host"))
+                .is_some()
+        );
+        assert_eq!(
+            hermes.managed_activation(true),
+            Some((
+                "hermes".to_owned(),
+                vec![
+                    "plugins".to_owned(),
+                    "enable".to_owned(),
+                    "muxflow-agent-status".to_owned()
+                ]
+            ))
         );
     }
 

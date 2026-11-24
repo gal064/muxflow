@@ -228,7 +228,7 @@ pub fn agent_mode_hint(mode: AgentMode) -> &'static str {
     match mode.chat {
         None => "Connect to this host to choose.",
         Some(true) => {
-            "An agent you start in a terminal opens as a chat in the same tab. Agents already running stay as they are, and pi and OpenCode stay terminals."
+            "An agent you start in a terminal opens as a chat in the same tab. Agents already running stay as they are, and pi, OpenCode and Hermes stay terminals."
         }
         Some(false) => {
             "An agent you start in a terminal runs there, as its own terminal interface. Agents already running stay as they are."

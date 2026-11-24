@@ -6,6 +6,7 @@ use std::{
         unix::fs::{OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, bail};
@@ -343,6 +344,35 @@ impl HookManager {
         })
     }
 
+    /// Runs the vendor's own enable/disable command for a managed artifact. A
+    /// Hermes plugin directory is discovered only when Hermes lists it in its
+    /// own `plugins.enabled` setting, so the installer asks Hermes to edit that
+    /// setting instead of rewriting `~/.hermes/config.yaml`.
+    fn run_managed_activation(
+        home: &Path,
+        adapter: &dyn adapters::AgentAdapter,
+        install: bool,
+    ) -> anyhow::Result<()> {
+        let Some((program, arguments)) = adapter.managed_activation(install) else {
+            return Ok(());
+        };
+        let mut command = Command::new(&program);
+        command
+            .args(&arguments)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if program == "hermes" {
+            command.env("HERMES_HOME", home.join(".hermes"));
+        }
+        let status = command
+            .status()
+            .with_context(|| format!("could not run {program} {}", arguments.join(" ")))?;
+        if !status.success() {
+            bail!("{program} {} failed with {status}", arguments.join(" "));
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply(
         &self,
         adapter: v1::AgentAdapterKind,
@@ -359,10 +389,11 @@ impl HookManager {
         if confirmation_token_value != review.confirmation_token {
             bail!("hook review is stale; review the current configuration again");
         }
+        let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
         if review.already_current {
+            Self::run_managed_activation(&self.home, adapter_impl, action == v1::HookManagementAction::Install)?;
             return Ok(review);
         }
-        let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
         let path = self.config_path(adapter_impl);
         let _lock = ConfigLock::acquire(&path)?;
         let review = self.review(adapter, action)?;
@@ -375,7 +406,9 @@ impl HookManager {
             // an interrupted install is repaired by the next idempotent run.
             if action == v1::HookManagementAction::Install {
                 write_tree(&path, &files)?;
+                Self::run_managed_activation(&self.home, adapter_impl, true)?;
             } else {
+                Self::run_managed_activation(&self.home, adapter_impl, false)?;
                 remove_tree(&path, &files)?;
             }
             return self.review_tree(adapter, action, &path, &files);
@@ -553,6 +586,15 @@ impl HookManager {
         let proposed_bytes = serialize_tree(&proposed);
         let before_preview = bounded(String::from_utf8_lossy(&before_bytes).into_owned());
         let after_preview = bounded(String::from_utf8_lossy(&proposed_bytes).into_owned());
+        let activation = adapter_impl
+            .managed_activation(action == v1::HookManagementAction::Install)
+            .map(|(program, arguments)| format!("`{program} {}`", arguments.join(" ")))
+            .unwrap_or_default();
+        let activation_note = if activation.is_empty() {
+            String::new()
+        } else {
+            format!("; then run {activation}")
+        };
         Ok(v1::HookManagementPlan {
             adapter_id: adapter_impl.id().into(),
             action: action.into(),
@@ -561,12 +603,16 @@ impl HookManager {
             managed_version: adapters::MANAGED_VERSION.to_string(),
             summary: match action {
                 v1::HookManagementAction::Install => {
-                    "Write muxflow's managed plugin directory; nothing else is changed"
+                    format!(
+                        "Write muxflow's managed plugin directory{activation_note}; muxflow does not rewrite the vendor's config"
+                    )
                 }
                 v1::HookManagementAction::Uninstall => {
-                    "Delete muxflow's managed plugin directory; nothing else is changed"
+                    format!(
+                        "Run the vendor's disable command{activation_note} and delete muxflow's managed plugin directory; files outside it are kept"
+                    )
                 }
-                _ => "Review managed plugin directory",
+                _ => "Review managed plugin directory".into(),
             }
             .into(),
             confirmation_token: confirmation_token(adapter, action, &before_bytes),

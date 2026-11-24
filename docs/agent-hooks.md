@@ -1,6 +1,6 @@
-# Codex, Claude Code, pi and OpenCode hooks
+# Codex, Claude Code, pi, OpenCode and Hermes hooks
 
-Codex, Claude Code, pi and OpenCode are the agent adapters. The app can launch them or
+Codex, Claude Code, pi, OpenCode and Hermes are the agent adapters. The app can launch them or
 detect manually started processes.
 
 **Hooks are the primary source of lifecycle state.** For Codex, the daemon also
@@ -27,7 +27,8 @@ Hook installation is always a separate, reviewable action from remote-helper
 installation. The review shows every touched file, before/after hashes, a
 redacted diff, the exact managed command, and adapter trust guidance. Confirming
 merges labeled entries while preserving unrelated configuration and creates a
-backup. Repeating install or upgrade is idempotent.
+backup for JSON/YAML hook files; a managed plugin directory writes only its
+marked files and needs no backup. Repeating install or upgrade is idempotent.
 
 ## Whether this host reports anything
 
@@ -68,7 +69,7 @@ The same installer is reachable without a UI, which is how it is exercised
 against a copy of a real configuration:
 
 ```
-muxflow-host hook status    [--adapter codex|claude-code|pi|opencode] [--home DIR] [--settings-path FILE]
+muxflow-host hook status    [--adapter codex|claude-code|pi|opencode|hermes] [--home DIR] [--settings-path FILE]
 muxflow-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
 muxflow-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
 ```
@@ -90,6 +91,57 @@ exactly the adapter named by `--adapter`, which it requires. Without
 uninstall on every adapter that has entries of this app's to remove. Either
 verb reports every adapter it did not act on and why, and exits non-zero if any
 adapter failed — after printing what the others did.
+
+## Hermes
+
+Hermes loads hooks from plugins, not from shell entries in its configuration
+file. The install is the Muxflow-owned plugin directory
+`~/.hermes/plugins/muxflow-agent-status/`, containing `plugin.yaml` and
+`__init__.py`. Both files start with
+`# muxflow-managed owner=muxflow adapter=hermes`; a file there without that
+line belongs to the user and is never overwritten, and uninstall removes only
+the marked files, keeping the directory when the user put anything else in it.
+
+Muxflow never rewrites `~/.hermes/config.yaml`. Hermes discovers the directory,
+and install runs `hermes plugins enable muxflow-agent-status`, which lets Hermes
+edit its own configuration and record the plugin in `plugins.enabled`. Uninstall
+runs `hermes plugins disable muxflow-agent-status` before deleting the marked
+files; disabling first keeps Hermes's entry valid while the files are removed.
+The plugin directory was installed and enabled through the Hermes CLI, so a host
+with Hermes available needs no per-event consent prompt.
+
+The plugin sends every event under the lifecycle names the daemon already uses
+for the other adapters:
+
+| Hermes event | Sent as | State |
+| --- | --- | --- |
+| `on_session_start`, `on_session_open` | `SessionStart` | Idle |
+| `pre_llm_call` | `UserPromptSubmit` | Working |
+| `pre_tool_call`, `post_tool_call` | `PostToolUse` | Working |
+| `pre_approval_request`, `on_human_input_request` | `PermissionRequest` | Blocked |
+| `post_approval_response`, `on_human_input_resolved` | `PostToolUse`, unless that turn already ended | Working |
+| `agent_loop_stopped` | `Stop` | Idle |
+| `on_session_end` succeeded | `Stop`, with the turn's final assistant message | Idle |
+| `on_session_end` failed or interrupted | `StopFailure` | Idle |
+| `on_session_finalize`, `on_session_reset`, `on_session_delete` | `SessionEnd` | Idle |
+
+A post-tool or approval event that arrives after its turn has ended is ignored,
+so a completed turn does not flip back to Working. The plugin does nothing
+outside a tmux pane, sends JSON through
+`muxflow-host hook ingest --adapter hermes`, and gives each send five seconds.
+Every failure is ignored. It caches the `post_llm_call` assistant response for
+the turn and forwards it on `Stop`; `StopFailure` forwards no message.
+
+Hermes started by hand runs as `python3`, so detection also matches commands
+such as `python3 -m hermes_cli.main chat`. Without that, it would be missed.
+Detection reads `hermes` or `hermes-agent`, and it skips `hermes gateway` and
+`hermes cron`, which are not terminal agents. Resume uses
+`hermes chat --resume <id>`.
+
+Branch uses `hermes chat --continue "<name> (fork)" --create-if-missing`.
+Hermes resolves an existing title first, so repeating that exact command reopens
+the same fork. Muxflow therefore appends a unique timestamp to the fork title,
+which makes `--create-if-missing` create a fresh titled session for every branch.
 
 ## pi
 

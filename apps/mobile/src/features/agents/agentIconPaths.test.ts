@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isOpencodeAdapter, isPiAdapter, OPENCODE_ICON, PI_ICON, PIN_ICON } from "./agentIconPaths";
+import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, HERMES_ICON, isClaudeAdapter, isCodexAdapter, isHermesAdapter, isOpencodeAdapter, isPiAdapter, OPENCODE_ICON, PI_ICON, PIN_ICON } from "./agentIconPaths";
 
 const desktopSrc = resolve(__dirname, "../../../../desktop-gpui/src");
 const view = readFileSync(resolve(desktopSrc, "agents/view.rs"), "utf8");
@@ -51,6 +51,13 @@ describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte
     expect(OPENCODE_ICON.blockOpacity).toBe(0.5);
   });
 
+  it("Hermes: the winged-helmet silhouette, its viewBox and inset", () => {
+    const svg = mark("HERMES");
+    expect(attrs(svg, "d")).toEqual([HERMES_ICON.path]);
+    expect(attrs(svg, "viewBox")).toEqual([HERMES_ICON.viewBox]);
+    expect(attrs(svg, "transform")).toEqual([HERMES_ICON.transform]);
+  });
+
   it("generic: the face", () => {
     const svg = mark("GENERIC");
     expect(attrs(svg, "d")).toEqual([GENERIC_ICON.mouth]);
@@ -72,6 +79,7 @@ describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte
     expect(view).toContain('"codex" => CODEX,');
     expect(view).toContain('"pi" => PI,');
     expect(view).toContain('"opencode" => OPENCODE,');
+    expect(view).toContain('"hermes" => HERMES,');
     expect(isClaudeAdapter("claude-code")).toBe(true);
     expect(isClaudeAdapter("claude")).toBe(false);
     expect(isClaudeAdapter("codex")).toBe(false);
@@ -82,5 +90,7 @@ describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte
     expect(isPiAdapter("pip")).toBe(false);
     expect(isOpencodeAdapter("opencode")).toBe(true);
     expect(isOpencodeAdapter("open-code")).toBe(false);
+    expect(isHermesAdapter("hermes")).toBe(true);
+    expect(isHermesAdapter("hermes-agent")).toBe(false);
   });
 });
