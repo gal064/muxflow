@@ -4314,3 +4314,53 @@ mod attachments {
         assert_eq!(shell.host.state().files, [path.clone(), path]);
     }
 }
+
+/// A link in an agent's text opens on a plain click, and on the click that
+/// opens a terminal's (Cmd on macOS, Ctrl elsewhere), which elsewhere in a
+/// pane grabs it.
+#[gpui_kit::test]
+fn a_link_opens_on_a_plain_click_and_on_a_terminals_link_click(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    // Links the app refuses, so following one says so and opens nothing.
+    shell.chat(snapshot(
+        10,
+        vec![
+            item(
+                "a1",
+                ChatItemKind::Assistant,
+                "[the first link](ftp://example.com/one)",
+            ),
+            item(
+                "a2",
+                ChatItemKind::Assistant,
+                "[the second link](ftp://example.com/two)",
+            ),
+        ],
+        "",
+    ));
+    let link_click = if cfg!(target_os = "macos") {
+        gpui_kit::Modifiers::command()
+    } else {
+        gpui_kit::Modifiers::control()
+    };
+    for (id, modifiers, url) in [
+        (
+            "chat-item-a1",
+            gpui_kit::Modifiers::default(),
+            "ftp://example.com/one",
+        ),
+        ("chat-item-a2", link_click, "ftp://example.com/two"),
+    ] {
+        let at = shell
+            .visual
+            .update(|window, _| window.find(id).bounds().origin + point(px(12.), px(10.)));
+        shell.visual.simulate_mouse_move(at, None, modifiers);
+        shell.visual.simulate_click(at, modifiers);
+        shell.settle();
+        let controller = shell.controller.clone();
+        let status = shell
+            .visual
+            .update(|_, cx| controller.read(cx).status().to_owned());
+        assert_eq!(status, format!("This link cannot be opened: {url}"), "{id}");
+    }
+}
