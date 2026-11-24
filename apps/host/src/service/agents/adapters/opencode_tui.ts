@@ -142,6 +142,9 @@ export default Plugin.define({
         const messages: readonly any[] = data?.session?.message?.list?.(root) ?? [];
         for (let index = messages.length - 1; index >= 0; index -= 1) {
           const message = messages[index];
+          // Nothing said since the user's last message: a run interrupted
+          // before any text has no answer, not the previous turn's.
+          if (message?.type === "user") break;
           if (message?.type !== "assistant") continue;
           const parts = Array.isArray(message.content) ? message.content : [];
           const text = parts
@@ -206,6 +209,22 @@ export default Plugin.define({
       }
     };
 
+    // A direct child still running, as OpenCode's own notifier asks: a
+    // background subagent's report wakes its parent again, so the parent's
+    // turn is not over yet.
+    const hasRunningChild = (sessionID: string): boolean => {
+      try {
+        return (data?.session?.family?.(sessionID) ?? []).some(
+          (child: string) =>
+            child !== sessionID &&
+            data.session.get?.(child)?.parentID === sessionID &&
+            data.session.status?.(child) === "running",
+        );
+      } catch {
+        return false;
+      }
+    };
+
     // The end of a run. A subagent's run ending is not its root's: the root
     // is still working and ends with its own event.
     const ended = (hook_event_name: string, sessionID: string | undefined, withMessage: boolean) => {
@@ -224,6 +243,7 @@ export default Plugin.define({
         transition("UserPromptSubmit", sessionID);
       } else if (name === "session.execution.succeeded") {
         // The clean end of a successful run; carries the final message.
+        if (sessionID && hasRunningChild(sessionID)) return;
         ended("Stop", sessionID, true);
       } else if (name === "session.execution.interrupted") {
         // Esc, shutdown or a superseding prompt: the run is over.
