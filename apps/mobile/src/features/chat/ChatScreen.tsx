@@ -19,6 +19,8 @@ import { waitForPane } from "../terminal/WorkspaceActionsSheet";
 import { attachDeps, chatImages } from "./attach/attachRuntime";
 import { filesRefusal, filesState } from "./attach/attachState";
 import { ChatImagesContext } from "./attach/chatImages";
+import { chatFileLinks } from "./chatFileLinks";
+import { ChatFilesContext } from "./markdown/ChatMarkdown";
 import { sendWithFiles, useAttachments } from "./attach/useAttachments";
 import { sideQuestion, slashMatches, turnOf, withDictation, withPickedCommand } from "./chatModel";
 import { chatClient, chatStore, setVoiceMode } from "./chatRuntime";
@@ -62,6 +64,15 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
   const serverIdentity = useSession((s) => s.serverIdentity);
   const hostLabel = useSession((s) => s.connection.host?.label || s.connection.host?.host || "");
   const folder = useSession((s) => s.panes[paneId]?.currentPath ?? "");
+  // What the host said about the reply's paths holds for this directory
+  // only: another one is asked about afresh.
+  const fileLinks = useMemo(() => chatFileLinks(paneId, (resolved) => router.push({
+    pathname: "/file/[paneId]",
+    params: { paneId: toRouteParam(paneId), path: toRouteParam(resolved.path), name: toRouteParam(resolved.name) },
+  })), [folder, paneId, router]);
+  useEffect(() => {
+    if (connected) fileLinks.resume();
+  }, [connected, fileLinks]);
   const agent = useSession((s) => agentForPane(s, paneId));
   const windows = useSession((s) => s.windows);
   const adapters = useSession((s) => s.adapters);
@@ -251,6 +262,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
     <Animated.View style={[styles.root, { paddingTop: insets.top }, keyboardPadding]}>
       <ConnectionStrip />
       <ChatImagesContext.Provider value={images}>
+        <ChatFilesContext.Provider value={fileLinks}>
         <ChatView
           attach={files}
           busy={busy}
@@ -289,6 +301,7 @@ export function ChatScreen({ paneId, sessionId, startInVoice }: ChatScreenProps)
           voiceMode={voiceMode}
           focused={focused}
         />
+        </ChatFilesContext.Provider>
       </ChatImagesContext.Provider>
     </Animated.View>
   );
