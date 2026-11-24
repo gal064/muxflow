@@ -860,8 +860,10 @@ impl ChatPane {
             .bg(p.chrome_raised)
             .shadow_lg()
             .content(move |_, _, _| task_list(&rows, &palette, &this));
+        // A row, so the chip is as wide as its pills and starts at the left:
+        // the button would stretch across a block and centre them.
         Some(
-            div()
+            h_flex()
                 .absolute()
                 .top(ui(-11.))
                 .left(ui(10.))
