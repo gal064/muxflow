@@ -5,6 +5,7 @@ package tmux_agent.protocol.v1;
 import "automation.proto";
 import "chat.proto";
 import "history.proto";
+import "workspace_restore.proto";
 
 message Envelope {
   uint32 protocol_major = 1;
@@ -206,6 +207,11 @@ enum Operation {
   // Switches to the local branch `GitRequest.branch`, as `git switch` does: a
   // switch Git refuses changes nothing. Answers with `GitResponse.command`.
   OPERATION_GIT_CHECKOUT = 64;
+  // Workspace restore (workspace_restore.proto): read the switch and the
+  // remembered session layout, and switch the remembering on or off, with
+  // `Request.workspace_restore` / `Response.workspace_restore`. The desktop
+  // Settings is the caller; the host owns the record.
+  OPERATION_WORKSPACE_RESTORE = 65;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -274,7 +280,9 @@ message Request {
   ChatRequest chat = 27;
   // OPERATION_SESSION_HISTORY only.
   HistoryRequest history = 28;
-  // NEXT FREE FIELD = 29.
+  // OPERATION_WORKSPACE_RESTORE only.
+  WorkspaceRestoreRequest workspace_restore = 29;
+  // NEXT FREE FIELD = 30.
 }
 
 message Response {
@@ -301,6 +309,9 @@ message Response {
   ChatResponse chat = 16;
   // OPERATION_SESSION_HISTORY only.
   HistoryResponse history = 17;
+  // OPERATION_WORKSPACE_RESTORE only.
+  WorkspaceRestoreResponse workspace_restore = 18;
+  // NEXT FREE FIELD = 19.
 }
 
 enum HookIngestDisposition {
