@@ -6,7 +6,7 @@ description: Use when starting, reading, or messaging Claude Code, Codex, pi, Op
 # Muxflow
 
 Muxflow runs agents as tmux panes. Its helper tracks the agents it has adapters
-for (Claude Code, Codex, pi) in `agents.json` in the state directory:
+for (Claude Code, Codex, pi, OpenCode) in `agents.json` in the state directory:
 
 - Linux: `~/.local/state/muxflow/`
 - macOS: `~/Library/Application Support/dev.muxflow.desktop/`
@@ -14,7 +14,7 @@ for (Claude Code, Codex, pi) in `agents.json` in the state directory:
 ## Find an agent
 
 Query `agents.json` for the record you need, not the whole file. Each entry in
-`.agents` has `adapter_id` (`claude-code`, `codex`, `pi`), `native_session_id`,
+`.agents` has `adapter_id` (`claude-code`, `codex`, `pi`, `opencode`), `native_session_id`,
 `lifecycle` (1 working, 2 blocked on the user, 3 idle, 4 unknown: no hooks) and `route.pane_id`.
 
 ```sh
@@ -22,13 +22,12 @@ jq '.agents[] | {adapter_id, native_session_id, lifecycle, pane: .route.pane_id,
 ```
 
 Then check the pane's mode. `tmux show-options -pqv -t <pane> @muxflow-chat` is
-empty for a terminal pane and names the adapter for a chat pane. pi always runs
-in a terminal pane.
+empty for a terminal pane and names the adapter for a chat pane. pi and OpenCode
+always run in a terminal pane.
 
-An agent missing from `agents.json` (OpenCode until its adapter lands, or any
-other CLI) is an ordinary terminal pane: find it with
-`tmux list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}'`, and
-read and message it as a terminal pane.
+Any other CLI agent is not in `agents.json`. It is an ordinary terminal pane:
+find it with `tmux list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_title}'`,
+and read and message it as a terminal pane.
 
 ## Read an agent
 
@@ -37,6 +36,8 @@ Its transcript is the reliable source in both modes.
 - Claude Code: `~/.claude/projects/*/<session-id>.jsonl`
 - Codex: `find ~/.codex/sessions -name "*<session-id>.jsonl"`
 - pi: `ls ~/.pi/agent/sessions/*/*_<session-id>.jsonl`
+- OpenCode: `opencode session export <session-id>` prints the session as JSON
+  (`.messages`); its store is a database, not files.
 
 Read only the latest user and assistant turns. In a terminal pane,
 `tmux capture-pane -p -t <pane> -S -60` shows live state. An idle prompt does not
@@ -98,7 +99,8 @@ changes within 15 seconds. Keep any entries already in the file.
 
 - `id` must match `[a-z0-9-]{1,64}` and be unique. `agent` is `claude`, `codex`,
   or `custom` (custom also needs `command`; the prompt is added as its last
-  argument). For pi, use `"agent": "custom", "command": "pi"`.
+  argument). For pi, use `"agent": "custom", "command": "pi"`; for OpenCode,
+  `"agent": "custom", "command": "opencode --auto --prompt"`.
 - Optional fields: `enabled` (default true), `keepTabs` (1–50, default 5),
   `maxRuntimeMinutes` (5–1440, default 120).
 - Cron has five fields in the host's local time. There are no `@hourly` macros.
