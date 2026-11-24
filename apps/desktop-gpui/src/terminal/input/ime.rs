@@ -12,7 +12,7 @@ use gpui_kit::{
     UTF16Selection, Window, point, size,
 };
 
-use super::super::pane::TerminalPane;
+use super::super::{cell_metrics::visible_grid, grid, pane::TerminalPane};
 
 /// The pane whose composition is open, so app shortcuts leave its keys to the IME.
 #[derive(Default)]
@@ -112,26 +112,27 @@ impl EntityInputHandler for TerminalPane {
         set_preedit(self, text, cx);
     }
 
-    /// Where the candidate window goes: under the composition, at the cursor.
+    /// The platform positions the candidate window at the bottom of this cell.
     fn bounds_for_range(
         &mut self,
-        range_utf16: Range<usize>,
-        _: Bounds<Pixels>,
-        _: &mut Window,
+        _: Range<usize>,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let painted = self.painted_at()?;
-        let (row, column) = {
-            let term = self.terminal()?.lock();
-            let cursor = term.grid().cursor.point;
-            let row = cursor.line.0 + term.grid().display_offset() as i32;
-            (row.max(0) as usize, cursor.column.0)
-        };
         let cell = painted.cell;
+        let visible = visible_grid(bounds, cell, window.scale_factor());
+        let position = {
+            let term = self.terminal()?.lock();
+            grid::input_position(&term).filter(|position| {
+                position.line < visible.rows && position.column.0 < visible.columns
+            })?
+        };
         Some(Bounds::new(
             point(
-                painted.origin.x + cell.width * (column + range_utf16.start) as f32,
-                painted.origin.y + cell.height * row as f32,
+                painted.origin.x + cell.width * position.column.0 as f32,
+                painted.origin.y + cell.height * position.line as f32,
             ),
             size(cell.width, cell.height),
         ))

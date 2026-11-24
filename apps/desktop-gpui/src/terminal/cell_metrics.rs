@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::theme::metrics::ui;
-use gpui_kit::{Font, FontFeatures, FontStyle, FontWeight, Pixels, Window, px};
+use gpui_kit::{Bounds, Font, FontFeatures, FontStyle, FontWeight, Pixels, Size, Window, px};
 use terminal_engine::GridSize;
 
 /// What a pane spends out of its box, in pixels.
@@ -89,6 +89,20 @@ pub fn cells_for_box(area: PixelBox, cell: PixelBox, chrome: BoxChrome) -> Optio
     })
 }
 
+/// Whole cells in the painted pane, which may be smaller than the tmux grid.
+pub(super) fn visible_grid(bounds: Bounds<Pixels>, cell: Size<Pixels>, scale: f32) -> GridSize {
+    // The painted origin and cell pitch are snapped to device pixels. Count
+    // cells in the same units so an exact fit survives fractional scaling.
+    let device = |value: Pixels| (f32::from(value) * scale).round();
+    let count = |start, end, pitch| {
+        ((device(end) - device(start)).max(0.) / device(pitch).max(1.)) as usize
+    };
+    GridSize {
+        columns: count(bounds.left(), bounds.right(), cell.width),
+        rows: count(bounds.top(), bounds.bottom(), cell.height),
+    }
+}
+
 /// The face and cell one pane's text is laid out on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CellMetrics {
@@ -153,6 +167,28 @@ pub fn measure(window: &Window, family: &str, font_size: Pixels) -> CellMetrics 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{point, size};
+
+    #[test]
+    fn the_painted_grid_keeps_the_last_cell_at_fractional_scale() {
+        let mut bounds = Bounds::new(point(px(161.6), px(0.)), size(px(352.), px(20.)));
+        let cell = size(px(8.8), px(20.));
+        assert_eq!(
+            visible_grid(bounds, cell, 1.25),
+            GridSize {
+                columns: 40,
+                rows: 1
+            }
+        );
+        bounds.size.width -= px(0.8);
+        assert_eq!(
+            visible_grid(bounds, cell, 1.25),
+            GridSize {
+                columns: 39,
+                rows: 1
+            }
+        );
+    }
 
     #[test]
     fn a_13px_face_is_an_8px_cell_at_every_ratio() {
