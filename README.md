@@ -207,6 +207,7 @@ Package builds: `pnpm release:linux -- x86_64`, `pnpm release:macos`, and
 - [Key bindings](./docs/keybindings.md)
 - [Agent hooks](./docs/agent-hooks.md)
 - [Automations](./docs/automations.md): scheduled agent runs
+- [Workspace restore](./docs/workspace-restore.md): sessions that come back after the tmux server dies
 - [Diagnostics, privacy, and security](./docs/diagnostics-privacy-security.md)
 - [Privacy policy](./site/privacy/README.md)
 - [Troubleshooting](./docs/troubleshooting.md)
