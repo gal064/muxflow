@@ -9,11 +9,13 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{RenderableCursor, TermDamage, point_to_viewport};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use terminal_engine::GridSize;
+use unicode_width::UnicodeWidthChar;
 
 /// `0xRRGGBB`, the one color type this module needs.
 pub type Rgb24 = u32;
@@ -336,6 +338,60 @@ pub struct CursorSpec {
     /// The glyph under a block cursor, redrawn in the cursor's text color.
     pub glyph: Option<(String, TextStyle)>,
     pub blinking: bool,
+}
+
+/// Unlike the display cursor, the IME anchor survives DECTCEM.
+pub(super) fn input_position<L: EventListener>(term: &Term<L>) -> Option<Point<usize>> {
+    point_to_viewport(term.grid().display_offset(), term.grid().cursor.point)
+        .filter(|position| position.line < term.screen_lines())
+}
+
+pub(super) struct PreeditSpec {
+    pub position: Point<usize>,
+    pub foreground: Rgb24,
+    pub backgrounds: Vec<Rgb24>,
+    /// Each glyph and its width in cells, in painting order.
+    pub glyphs: Vec<(char, usize)>,
+}
+
+pub(super) fn preedit_spec<L: EventListener>(
+    term: &Term<L>,
+    palette: &Palette,
+    text: &str,
+    visible: GridSize,
+) -> Option<PreeditSpec> {
+    let right = term.columns().min(visible.columns);
+    let position = input_position(term)
+        .filter(|position| position.line < visible.rows && position.column.0 < right)?;
+    let start = position.column.0;
+    let mut end = start;
+    let mut glyphs = Vec::new();
+    // Keep a contiguous suffix that fits, dropping whole glyphs.
+    for character in text.chars().rev() {
+        let Some(width @ (1 | 2)) = character.width() else {
+            continue;
+        };
+        if end + width > right {
+            break;
+        }
+        end += width;
+        glyphs.push((character, width));
+    }
+    glyphs.reverse();
+
+    let row = &term.grid()[term.grid().cursor.point.line];
+    let colors = term.colors();
+    let backgrounds = (start..end)
+        // Replace the cell's rendition, including reverse video. Keep the
+        // underlying tint even when the old foreground was painting its fill.
+        .map(|column| resolve(row[Column(column)].bg, colors, palette))
+        .collect();
+    Some(PreeditSpec {
+        position,
+        foreground: resolve(Color::Named(NamedColor::Foreground), colors, palette),
+        backgrounds,
+        glyphs,
+    })
 }
 
 /// Where the cursor is on screen, or `None` while it is hidden or scrolled off.
@@ -689,6 +745,45 @@ mod tests {
         );
         feed(&mut term, b"\x1b[?25l");
         assert!(cursor_spec(&term, true, &PALETTE).is_none());
+    }
+
+    #[test]
+    fn input_position_survives_a_hidden_cursor_but_leaves_with_the_viewport() {
+        use alacritty_terminal::grid::Scroll;
+
+        let mut term = term(20, 2);
+        feed(&mut term, b"one\r\ntwo\r\nthree\x1b[?25l");
+        assert!(cursor_spec(&term, true, &PALETTE).is_none());
+        assert_eq!(input_position(&term), Some(Point::new(1, Column(5))));
+
+        term.scroll_display(Scroll::Delta(1));
+        assert!(input_position(&term).is_none());
+    }
+
+    #[test]
+    fn preedit_keeps_whole_glyphs_in_the_suffix_and_uses_each_cells_background() {
+        let mut term = term(8, 2);
+        let visible = GridSize {
+            columns: 6,
+            rows: 2,
+        };
+        feed(
+            &mut term,
+            b"\x1b[2;4H\x1b[48;2;12;34;56;7mX\x1b[27;44mY\x1b[0mZ\x1b[2;4H",
+        );
+        let spec = preedit_spec(&term, &PALETTE, "drop文\u{301}a", visible).unwrap();
+        assert_eq!(spec.position, Point::new(1, Column(3)));
+        assert_eq!(spec.glyphs, [('文', 2), ('a', 1)]);
+        assert_eq!(spec.backgrounds, [0x0c2238, PALETTE.ansi[4], PALETTE.bg]);
+        assert_eq!(spec.foreground, PALETTE.fg);
+
+        feed(&mut term, b"\x1b[2;6H");
+        let spec = preedit_spec(&term, &PALETTE, "a文", visible).unwrap();
+        assert!(spec.glyphs.is_empty());
+        assert!(spec.backgrounds.is_empty());
+
+        feed(&mut term, b"\x1b[2;7H");
+        assert!(preedit_spec(&term, &PALETTE, "a", visible).is_none());
     }
 
     #[test]

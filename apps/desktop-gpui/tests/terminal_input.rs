@@ -4,129 +4,28 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc::Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::TermMode;
 use desktop_core::app_state::ThemePreference;
-use futures::FutureExt;
-use futures::future::BoxFuture;
 use gpui_kit::{
-    AppContext, Context, Entity, EntityInputHandler, Focusable, IntoElement, Modifiers,
+    AppContext, Bounds, Context, Entity, EntityInputHandler, Focusable, IntoElement, Modifiers,
     MouseButton, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollEvent, Styled,
-    TestAppContext, VisualTestContext, Window, base::Root, div, font, point, px,
+    TestAppContext, VisualTestContext, Window, base::Root, div, point, px, size,
 };
 use muxflow_gpui::{
-    connection_ui::backend::{EngineChannel, TerminalBackend},
-    terminal::{self, TerminalLink, TerminalPane, cell_metrics::CellMetrics, link::POLL_ACTIVE},
+    connection_ui::backend::TerminalBackend,
+    terminal::{self, TerminalLink, TerminalPane, link::POLL_ACTIVE},
     theme,
 };
-use serde_json::Value;
-use terminal_engine::{EngineOutput, GridSize, HubLimits};
+use terminal_engine::GridSize;
 
-/// One send, as `(pane, bytes, pasted)`.
-type Sent = (String, Vec<u8>, bool);
+#[path = "support/terminal_input.rs"]
+mod fixture;
 
-#[derive(Clone, Default)]
-struct Fake(Arc<Mutex<Vec<Sent>>>);
-
-impl Fake {
-    fn take(&self) -> Vec<Sent> {
-        std::mem::take(&mut self.0.lock().unwrap())
-    }
-}
-
-impl TerminalBackend for Fake {
-    fn spawn_engine(&self, outputs: Sender<EngineOutput>) -> Box<dyn EngineChannel> {
-        Box::new(terminal_engine::spawn(HubLimits::default(), outputs))
-    }
-
-    fn request_seed(&self, _: String, _: String) -> BoxFuture<'static, Result<(), String>> {
-        async { Ok(()) }.boxed()
-    }
-
-    fn request_history(
-        &self,
-        _: String,
-        _: String,
-        _: u32,
-        _: u32,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        async { Ok(()) }.boxed()
-    }
-
-    fn set_pane_visibility(
-        &self,
-        _: String,
-        _: String,
-        _: bool,
-        _: bool,
-        _: u64,
-        _: u64,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        async { Ok(()) }.boxed()
-    }
-
-    fn resize_client(
-        &self,
-        _: String,
-        _: u16,
-        _: u16,
-        _: String,
-        _: String,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        async { Ok(()) }.boxed()
-    }
-
-    fn send_input(&self, _: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().push((pane_id, bytes, false));
-        Ok(())
-    }
-
-    fn send_paste(&self, _: String, pane_id: String, text: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().push((pane_id, text, true));
-        Ok(())
-    }
-
-    fn record_incident(&self, _: &str, _: Value) {}
-
-    fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn tmux_action(&self, _: String, _: Value) -> BoxFuture<'static, Result<Value, String>> {
-        async { Ok(Value::Null) }.boxed()
-    }
-
-    fn start_upload(
-        &self,
-        _: muxflow_gpui::terminal::integration::transfers::UploadRequest,
-        _: Arc<dyn desktop_core::platform::EventSink>,
-    ) -> Result<String, String> {
-        Err("no uploads here".into())
-    }
-
-    fn cancel_upload(&self, _: String) -> Result<Value, String> {
-        Ok(Value::Null)
-    }
-}
-
-fn frame(kind: u8, label: &str, sequence: u64, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![kind];
-    bytes.extend_from_slice(&(label.len() as u16).to_be_bytes());
-    bytes.extend_from_slice(label.as_bytes());
-    bytes.extend_from_slice(&sequence.to_be_bytes());
-    bytes.extend_from_slice(payload);
-    bytes
-}
-
-/// A seed (kind 1) or an output (kind 2) for `pane`.
-fn screen_frame(kind: u8, pane: &str, generation: u64, text: &[u8]) -> Vec<u8> {
-    let mut payload = generation.to_be_bytes().to_vec();
-    payload.extend_from_slice(text);
-    frame(kind, pane, generation, &payload)
-}
-
+use fixture::{Fake, Sent, frame, metrics, screen_frame};
 fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -138,17 +37,6 @@ fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestCo
         assert!(Instant::now() < deadline, "timed out waiting");
         std::thread::sleep(Duration::from_millis(1));
     }
-}
-
-fn metrics() -> Rc<CellMetrics> {
-    Rc::new(CellMetrics {
-        font: font("JetBrains Mono"),
-        font_size: px(13.),
-        cell_width: px(8.),
-        cell_height: px(17.),
-        line_width: px(1.),
-        scrollbar_width: px(14.),
-    })
 }
 
 struct Split {
@@ -361,6 +249,53 @@ fn a_composition_holds_keys_until_it_commits_or_focus_leaves(cx: &mut TestAppCon
     focus(&panes[0], visual);
     visual.simulate_keystrokes("enter");
     assert_eq!(fake.take(), [sent("%1", b"\r")]);
+}
+
+#[gpui_kit::test]
+fn ime_candidates_stay_on_the_real_cursor_cell_until_it_scrolls_off(cx: &mut TestAppContext) {
+    let (_, link, panes, visual) = panes(1, cx);
+    let pane = &panes[0];
+    focus(pane, visual);
+    output(&link, visual, "%1", 2, b"\x1b[6;1H\r\n$ \x1b[?25l");
+    wait_until(visual, |cx| {
+        pane.read_with(cx, |pane, _| {
+            !pane
+                .terminal()
+                .unwrap()
+                .lock()
+                .mode()
+                .contains(TermMode::SHOW_CURSOR)
+        })
+    });
+    pane.update_in(visual, |pane, window, cx| {
+        let terminal = pane.terminal().unwrap().clone();
+        pane.replace_and_mark_text_in_range(None, "测𠀀", Some(1..3), window, cx);
+        let painted = pane.painted_at().unwrap();
+        let expected = Bounds::new(
+            point(
+                painted.origin.x + painted.cell.width * 2.,
+                painted.origin.y + painted.cell.height * 5.,
+            ),
+            painted.cell,
+        );
+        let bounds = Bounds::new(
+            painted.origin,
+            size(painted.cell.width * 40., painted.cell.height * 6.),
+        );
+        for range in [0..0, 1..3, 3..3] {
+            assert_eq!(
+                pane.bounds_for_range(range, bounds, window, cx),
+                Some(expected),
+            );
+        }
+        let narrow = Bounds::new(
+            painted.origin,
+            size(painted.cell.width * 2., bounds.size.height),
+        );
+        assert_eq!(pane.bounds_for_range(0..0, narrow, window, cx), None);
+        terminal.lock().scroll_display(Scroll::Delta(1));
+        assert_eq!(pane.bounds_for_range(3..3, bounds, window, cx), None);
+    });
 }
 
 #[gpui_kit::test]

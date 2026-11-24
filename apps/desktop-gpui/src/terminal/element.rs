@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Point as ViewportPoint;
 use gpui_kit::{
     App, Bounds, ContentMask, Element, ElementId, Entity, FontStyle, FontWeight, GlobalElementId,
     Hsla, InspectorElementId, IntoElement, LayoutId, LineLayout, Pixels, Rgba, ShapedLine,
@@ -16,7 +17,7 @@ use gpui_kit::{
 use crate::theme::{self, Palette as ThemePalette, metrics::ui};
 
 use super::box_glyphs;
-use super::cell_metrics::CellMetrics;
+use super::cell_metrics::{CellMetrics, visible_grid};
 use super::grid::{
     self, CacheStats, CursorShape, CursorSpec, Decoration, Palette, RowSpec, TextStyle,
 };
@@ -186,10 +187,83 @@ struct GridFrame {
     metrics: std::rc::Rc<CellMetrics>,
     cursor: Option<(CursorSpec, Option<ShapedLine>)>,
     cursor_color: Hsla,
-    preedit: Option<ShapedLine>,
+    preedit: Option<PreeditFrame>,
     rows: usize,
     rendered_rows: usize,
     stats: CacheStats,
+}
+
+struct PreeditFrame {
+    position: ViewportPoint<usize>,
+    foreground: Hsla,
+    backgrounds: Vec<grid::Rgb24>,
+    glyphs: Vec<(ShapedLine, usize)>,
+}
+
+impl PreeditFrame {
+    fn shape(spec: grid::PreeditSpec, metrics: &CellMetrics, window: &Window) -> Self {
+        let foreground = hsla(spec.foreground);
+        let system = window.text_system();
+        let glyphs = spec
+            .glyphs
+            .into_iter()
+            .map(|(character, width)| {
+                let text = SharedString::from(character.to_string());
+                let run = TextRun {
+                    len: text.len(),
+                    font: metrics.font.clone(),
+                    color: foreground,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let cell_span = metrics.cell_width * width as f32;
+                let mut line = system.shape_line(text, metrics.font_size, &[run], Some(cell_span));
+                pin_to_cells(&mut line, cell_span);
+                (line, width)
+            })
+            .collect();
+        Self {
+            position: spec.position,
+            foreground,
+            backgrounds: spec.backgrounds,
+            glyphs,
+        }
+    }
+
+    fn paint(
+        &self,
+        origin: gpui_kit::Point<Pixels>,
+        cell_w: Pixels,
+        cell_h: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let y = origin.y + cell_h * self.position.line as f32;
+        let mut column = self.position.column.0;
+        let x = |column: usize| origin.x + cell_w * column as f32;
+        for (offset, &background) in self.backgrounds.iter().enumerate() {
+            window.paint_quad(fill(
+                Bounds::new(point(x(column + offset), y), size(cell_w, cell_h)),
+                hsla(background),
+            ));
+        }
+        for (glyph, width) in &self.glyphs {
+            let bounds = Bounds::new(point(x(column), y), size(cell_w * *width as f32, cell_h));
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                let _ = glyph.paint(bounds.origin, cell_h, TextAlign::Left, None, window, cx);
+            });
+            column += width;
+        }
+        let underline = px(1.);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(x(self.position.column.0), y + cell_h - underline),
+                size(cell_w * self.backgrounds.len() as f32, underline),
+            ),
+            self.foreground,
+        ));
+    }
 }
 
 impl Element for TerminalElement {
@@ -241,12 +315,16 @@ impl Element for TerminalElement {
         let repaint_all = pane.repaint_all.clone();
         let cursor_on = pane.cursor_on();
         let revealed = pane.revealed();
-        let preedit = pane.input.preedit.clone();
+        let preedit = pane
+            .input
+            .preedit
+            .as_deref()
+            .filter(|text| revealed && self.focused && !text.is_empty());
 
         // Before reading the grid: anything written after this raises the flag
         // again and wakes the pane, so no update can fall between.
         terminal.take_dirty();
-        let (rows_to_shape, cursor, rows) = {
+        let (rows_to_shape, cursor, preedit, rows) = {
             let mut term = terminal.lock();
             let rows = term.screen_lines();
             let columns = term.columns();
@@ -266,10 +344,15 @@ impl Element for TerminalElement {
                 .map(|row| (row, grid::build_row(&term, row, &grid_palette, &highlights)))
                 .collect();
             // Until the pane has its content there is only an empty grid.
-            let cursor = revealed
+            let cursor = (revealed && preedit.is_none())
                 .then(|| grid::cursor_spec(&term, self.focused, &grid_palette))
                 .flatten();
-            (specs, cursor, rows)
+            let preedit = preedit.and_then(|text| {
+                let cell = size(metrics.cell_width, metrics.cell_height);
+                let visible = visible_grid(bounds, cell, window.scale_factor());
+                grid::preedit_spec(&term, &grid_palette, text, visible)
+            });
+            (specs, cursor, preedit, rows)
         };
 
         let rendered_rows = rows_to_shape.len();
@@ -301,23 +384,7 @@ impl Element for TerminalElement {
                 });
                 (cursor, glyph)
             });
-        let preedit = preedit.filter(|_| self.focused).map(|text| {
-            let run = TextRun {
-                len: text.len(),
-                font: metrics.font.clone(),
-                color: hsla(grid_palette.fg),
-                background_color: None,
-                underline: Some(UnderlineStyle {
-                    color: Some(hsla(grid_palette.fg)),
-                    thickness: metrics.line_width,
-                    wavy: false,
-                }),
-                strikethrough: None,
-            };
-            window
-                .text_system()
-                .shape_line(text, metrics.font_size, &[run], None)
-        });
+        let preedit = preedit.map(|spec| PreeditFrame::shape(spec, &metrics, window));
         let scale = window.scale_factor();
         let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
         let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
@@ -410,7 +477,11 @@ impl Element for TerminalElement {
                     );
                 }
             }
-            paint_cursor(grid, cell_w, cell_h, origin, window, cx);
+            if let Some(preedit) = &grid.preedit {
+                preedit.paint(origin, cell_w, cell_h, window, cx);
+            } else {
+                paint_cursor(grid, cell_w, cell_h, origin, window, cx);
+            }
         });
 
         let now = Instant::now();
@@ -493,20 +564,6 @@ fn paint_cursor(
     let width = cell_w * cursor.cell_span as f32;
     let cell = Bounds::new(at, size(width, cell_h));
     let color = grid.cursor_color;
-    if let Some(preedit) = grid.preedit.as_ref() {
-        // While composing, the preedit replaces the cursor: a block cursor
-        // under it would hide its first glyph.
-        window.paint_quad(fill(
-            Bounds::new(at, size(preedit.width(), cell_h)),
-            color.opacity(0.25),
-        ));
-        let _ = preedit.paint(at, cell_h, TextAlign::Left, None, window, cx);
-        window.paint_quad(fill(
-            Bounds::new(point(at.x + preedit.width(), at.y), size(stroke, cell_h)),
-            color,
-        ));
-        return;
-    }
     match cursor.shape {
         CursorShape::Block => {
             window.paint_quad(fill(cell, color));

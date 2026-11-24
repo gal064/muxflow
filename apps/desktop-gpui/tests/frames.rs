@@ -242,6 +242,8 @@ mod frames {
         };
     }
 
+    mod terminal;
+
     /// Menus, notices, tooltips and context menus, each against the same window
     /// without them, so a surface that never drew fails here.
     fn render_surfaces(theme: &str) {
@@ -347,6 +349,7 @@ mod frames {
             render_context_menu(theme);
             chat::run(theme);
         }
+        terminal::run();
     }
 }
 
