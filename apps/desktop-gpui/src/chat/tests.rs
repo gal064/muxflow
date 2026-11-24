@@ -4364,3 +4364,65 @@ fn a_link_opens_on_a_plain_click_and_on_a_terminals_link_click(cx: &mut TestAppC
         assert_eq!(status, format!("This link cannot be opened: {url}"), "{id}");
     }
 }
+
+#[gpui_kit::test]
+fn a_link_opens_only_on_the_release_of_its_own_press(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot(
+        10,
+        vec![
+            item(
+                "a1",
+                ChatItemKind::Assistant,
+                "[one](ftp://example.com/one)",
+            ),
+            item(
+                "a2",
+                ChatItemKind::Assistant,
+                "[two](ftp://example.com/two)",
+            ),
+        ],
+        "",
+    ));
+    let (one, two, outside) = shell.visual.update(|window, _| {
+        let one = window.find("chat-item-a1").bounds();
+        let two = window.find("chat-item-a2").bounds();
+        (
+            one.origin + point(px(12.), px(10.)),
+            two.origin + point(px(12.), px(10.)),
+            point(one.origin.x - px(20.), one.origin.y),
+        )
+    });
+    let status = |shell: &mut Shell| {
+        let controller = shell.controller.clone();
+        shell
+            .visual
+            .update(|_, cx| controller.read(cx).status().to_owned())
+    };
+    let none = gpui_kit::Modifiers::default();
+    let far = point(px(0.), px(300.));
+    let left = gpui_kit::MouseButton::Left;
+    shell.visual.simulate_mouse_move(two, None, none);
+    shell.visual.simulate_click(two, none);
+    shell.settle();
+    assert_eq!(
+        status(&mut shell),
+        "This link cannot be opened: ftp://example.com/two"
+    );
+    // A press on the other link let go away from it opens nothing.
+    shell.visual.simulate_mouse_down(one, left, none);
+    shell.visual.simulate_mouse_up(one + far, left, none);
+    shell.settle();
+    assert_eq!(
+        status(&mut shell),
+        "This link cannot be opened: ftp://example.com/two"
+    );
+    // Nor does a press outside the chat let go where the chat was pressed.
+    shell.visual.simulate_mouse_down(outside, left, none);
+    shell.visual.simulate_mouse_up(one, left, none);
+    shell.settle();
+    assert_eq!(
+        status(&mut shell),
+        "This link cannot be opened: ftp://example.com/two"
+    );
+}

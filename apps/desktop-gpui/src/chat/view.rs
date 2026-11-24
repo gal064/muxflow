@@ -560,7 +560,10 @@ impl ChatPane {
                     })
                     .on_link_click(
                         move |href: &SharedString, event: &ClickEvent, _window, cx| {
-                            let pressed = *pressed.lock().expect("the press is never poisoned");
+                            // A press is one click's at most: a release
+                            // after a press the chat never saw opens nothing.
+                            let pressed =
+                                pressed.lock().expect("the press is never poisoned").take();
                             if is_click(event, pressed) {
                                 open::link(&pane_id, href, cx);
                             }
@@ -1401,6 +1404,12 @@ impl Render for ChatPane {
                     *press.lock().expect("the press is never poisoned") = Some(event.position);
                 }
                 note_activity(&profile_id, &pane_id, cx);
+            })
+            // A press outside the chat, a drag from elsewhere, is none of its
+            // links' clicks wherever it is let go.
+            .on_mouse_down_out({
+                let press = self.pressed.clone();
+                move |_, _, _| *press.lock().expect("the press is never poisoned") = None
             })
             .child(
                 canvas(

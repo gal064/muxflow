@@ -2047,3 +2047,118 @@ async fn a_review_read_back_is_in_order_and_not_interrupted() {
         .collect();
     assert_eq!(ids, ["e", "c", "m"], "{:#?}", replay.client.outline());
 }
+
+#[tokio::test]
+async fn a_review_running_when_read_back_takes_no_message() {
+    let mut replay = replay();
+    replay.connect(&tag(THREAD, Launch::default()));
+    initialized(&mut replay);
+    let turns = json!([
+        {"id": "inner", "rootTurnId": "outer", "status": "inProgress", "items": [
+            {"type": "userMessage", "id": "p",
+                "content": [{"type": "text", "text": "Review the current code changes."}]},
+        ]},
+        {"id": "outer", "rootTurnId": "outer", "status": "inProgress", "items": [
+            {"type": "enteredReviewMode", "id": "e", "review": "current changes"},
+        ]},
+    ]);
+    replay.agent(
+        &json!({"id": "@thread/resume", "result": {
+            "thread": {"id": THREAD, "name": "n", "turns": turns}, "model": "m"}})
+        .to_string(),
+    );
+    replay.send("m1", "after the review");
+    assert!(
+        replay
+            .written
+            .iter()
+            .all(|written| written["method"] != "turn/steer" && written["method"] != "turn/start"),
+        "the review's turn takes no message"
+    );
+    let completed = json!({"method": "turn/completed", "params": {"threadId": THREAD,
+        "turn": {"id": "outer", "status": "completed"}}});
+    replay.agent(&completed.to_string());
+    assert_eq!(
+        replay.last_asked("turn/start")["params"]["clientUserMessageId"],
+        "m1"
+    );
+}
+
+#[tokio::test]
+async fn a_review_never_entered_keeps_its_steps_where_it_ran() {
+    let mut replay = replay();
+    replay.connect(&tag(THREAD, Launch::default()));
+    initialized(&mut replay);
+    let turns = json!([
+        {"id": "inner", "rootTurnId": "outer", "status": "interrupted", "items": [
+            {"type": "commandExecution", "id": "c", "command": "git diff",
+                "status": "completed", "aggregatedOutput": ""},
+        ]},
+        {"id": "outer", "rootTurnId": "outer", "status": "completed", "items": [
+            {"type": "agentMessage", "id": "m", "text": "Done."},
+        ]},
+        {"id": "next", "rootTurnId": "next", "status": "completed", "items": [
+            {"type": "userMessage", "id": "u", "content": [{"type": "text", "text": "next"}]},
+        ]},
+    ]);
+    replay.agent(
+        &json!({"id": "@thread/resume", "result": {
+            "thread": {"id": THREAD, "name": "n", "turns": turns}, "model": "m"}})
+        .to_string(),
+    );
+    let ids: Vec<&str> = replay
+        .client
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(ids, ["m", "c", "u"], "{:#?}", replay.client.outline());
+}
+
+#[tokio::test]
+async fn a_message_too_late_for_its_turn_waits_for_a_command_starting_meanwhile() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "go");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    replay.send("m2", "and also");
+    assert_eq!(
+        replay.last_asked("turn/steer")["params"]["clientUserMessageId"],
+        "m2"
+    );
+    replay.send("c1", "/compact");
+    let completed = |id: &str| {
+        json!({"method": "turn/completed", "params": {"threadId": THREAD,
+            "turn": {"id": id, "status": "completed"}}})
+        .to_string()
+    };
+    replay.agent(&completed("t1"));
+    assert_eq!(
+        replay.last_asked("thread/compact/start")["params"],
+        json!({"threadId": THREAD})
+    );
+    let starts = replay
+        .written
+        .iter()
+        .filter(|written| written["method"] == "turn/start")
+        .count();
+    let late = json!({"id": "@turn/steer", "error": {"code": -32600, "message": "no active turn"}});
+    replay.agent(&late.to_string());
+    assert_eq!(
+        replay
+            .written
+            .iter()
+            .filter(|written| written["method"] == "turn/start")
+            .count(),
+        starts,
+        "nothing starts while the compaction does"
+    );
+    replay.agent(&json!({"id": "@thread/compact/start", "result": {}}).to_string());
+    let started = json!({"method": "turn/started", "params": {"threadId": THREAD,
+        "turn": {"id": "k1", "rootTurnId": "k1"}}});
+    replay.agent(&started.to_string());
+    replay.agent(&completed("k1"));
+    assert_eq!(
+        replay.last_asked("turn/start")["params"]["clientUserMessageId"],
+        "m2"
+    );
+}

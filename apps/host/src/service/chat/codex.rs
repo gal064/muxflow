@@ -1056,6 +1056,15 @@ impl Codex {
             // notice, and its prompt, which Codex wrote, is not shown.
             let root = string(turn, "rootTurnId");
             let inner = !root.is_empty() && root != turn_id;
+            if running {
+                // A review or a compaction still running is a built-in's
+                // turn, which nothing joins, as when it was started here.
+                let sources = turn["items"].as_array().map_or(&[][..], Vec::as_slice);
+                let has = |kind: &str| sources.iter().any(|source| string(source, "type") == kind);
+                self.command_turn = inner
+                    || has("enteredReviewMode")
+                    || (has("contextCompaction") && !has("userMessage"));
+            }
             for source in turn["items"].as_array().map_or(&[][..], Vec::as_slice) {
                 if inner && string(source, "type") == "userMessage" {
                     continue;
@@ -1064,7 +1073,12 @@ impl Codex {
                     && string(source, "tool") != SPAWN
                 {
                     for row in note_agents(&mut self.agents, source) {
-                        if let Some(held) = timeline.iter_mut().find(|held| held.id == row.id) {
+                        // A subagent of a review may still wait under it.
+                        if let Some(held) = timeline
+                            .iter_mut()
+                            .chain(reviews.values_mut().flatten())
+                            .find(|held| held.id == row.id)
+                        {
                             *held = row;
                         }
                     }
@@ -1102,6 +1116,10 @@ impl Codex {
                 if entered {
                     timeline.extend(reviews.remove(turn_id).unwrap_or_default());
                 }
+            }
+            if !inner {
+                // A review that was never entered, still where it ran.
+                timeline.extend(reviews.remove(turn_id).unwrap_or_default());
             }
             if string(turn, "status") == "interrupted" && !inner {
                 let id = format!("{turn_id}-interrupted");
@@ -1819,8 +1837,15 @@ impl Codex {
                 }
                 self.send_held(out);
             }
-            // The turn it was for ended first: it opens the next one.
-            Asked::Steer(held) if failed && self.turn.is_none() => self.send(held, out),
+            // The turn it was for ended first: it opens the next one, or
+            // waits for the built-in that started meanwhile.
+            Asked::Steer(held) if failed && self.turn.is_none() => {
+                if self.starting || self.command_turn {
+                    self.held.push_front(held);
+                } else {
+                    self.send(held, out);
+                }
+            }
             Asked::Steer(_) if failed => {
                 let text = "The message could not join the turn that is running.";
                 self.notice(format!("request-{id}-failed"), text, out);
