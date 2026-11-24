@@ -90,6 +90,35 @@ cp "$repo_root/skills/muxflow/SKILL.md" "$assets/muxflow-SKILL.md"
 cp "$work/SHA256SUMS.good" "$assets/SHA256SUMS"
 echo "bad or missing skill only warns: ok"
 
+skill_home="$work/skill-home"
+skill_prefix="$work/skill-prefix"
+run_skill_only() {
+  curl -fsSL "http://127.0.0.1:$port/install.sh" \
+    | HOME="$skill_home" MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" ADE_INSTALL_PREFIX="$skill_prefix" bash -s -- --skill
+}
+mkdir -p "$skill_home/.claude"
+run_skill_only > "$work/skill-only.out"
+cmp -s "$skill_home/.agents/skills/muxflow/SKILL.md" "$repo_root/skills/muxflow/SKILL.md"
+cmp -s "$skill_home/.claude/skills/muxflow/SKILL.md" "$repo_root/skills/muxflow/SKILL.md"
+[[ ! -e "$skill_prefix" ]]
+if grep -q "Downloading Muxflow" "$work/skill-only.out"; then
+  echo "--skill downloaded the app" >&2
+  exit 1
+fi
+mv "$assets/muxflow-SKILL.md" "$work/skill.held"
+if run_skill_only > "$work/skill-only-missing.out" 2>&1; then
+  echo "--skill succeeded without a skill to install" >&2
+  exit 1
+fi
+grep -q "the Muxflow skill was not installed" "$work/skill-only-missing.out"
+mv "$work/skill.held" "$assets/muxflow-SKILL.md"
+if curl -fsSL "http://127.0.0.1:$port/install.sh" | MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" bash -s -- --bogus > "$work/usage.out" 2>&1; then
+  echo "installer accepted an unknown argument" >&2
+  exit 1
+fi
+grep -q "usage: install.sh \[--skill\]" "$work/usage.out"
+echo "--skill installs only the skill: ok"
+
 run_installer "v$version" > "$work/pinned.out"
 grep -q "Downloading Muxflow $version for" "$work/pinned.out"
 echo "pinned stable install: ok"

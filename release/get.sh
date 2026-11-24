@@ -17,6 +17,9 @@
 # Codex and OpenCode, on every run, so running it again also updates the skill.
 # MUXFLOW_INSTALL_SKILL=yes or no answers without asking; with neither that nor
 # a terminal to ask on, the skill is left alone.
+#
+# `--skill` installs or updates only the skill, on any host, without the app:
+#   curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash -s -- --skill
 set -euo pipefail
 
 releases=${MUXFLOW_RELEASES_URL:-https://github.com/gal064/muxflow/releases}
@@ -272,13 +275,10 @@ install_macos() {
   check_tmux 'brew install tmux, or brew upgrade tmux'
 }
 
-# Offers the release's agent skill and writes it where the agents look for
-# skills: ~/.agents/skills (Codex, OpenCode) and ~/.claude/skills (Claude Code,
-# which does not read ~/.agents). Never stops the install: the app is already
-# in place, so a failure here is only a warning. $1 is the release version,
-# whose SHA256SUMS the package download left in $work.
+# Offers the release's agent skill after an app install. Never stops the
+# install: the app is already in place, so a failure here is only a warning.
 offer_skill() {
-  local version=$1 answer=${MUXFLOW_INSTALL_SKILL:-}
+  local answer=${MUXFLOW_INSTALL_SKILL:-}
   if [[ -z "$answer" ]]; then
     # Under `curl | bash` stdin is the script, so ask on the terminal itself.
     # Only when output goes to it too: the desktop's Update pill captures the
@@ -290,22 +290,28 @@ offer_skill() {
     answer=${answer:-yes}
   fi
   case "$answer" in
-    y|Y|yes|Yes|YES) ;;
-    *) return 0 ;;
+    y|Y|yes|Yes|YES) install_skill "$1" || true ;;
   esac
+}
 
-  local name=muxflow-SKILL.md expected
-  if ! (fetch "$releases/download/v$version/$name" "$work/$name") 2>/dev/null; then
+# Writes release $1's agent skill, checked against its SHA256SUMS, where the
+# agents look for skills: ~/.agents/skills (Codex, OpenCode) and
+# ~/.claude/skills (Claude Code, which does not read ~/.agents). Fails, after
+# saying why, when the skill could not be written everywhere.
+install_skill() {
+  local version=$1 name=muxflow-SKILL.md expected
+  local base="$releases/download/v$version"
+  if ! (fetch "$base/$name" "$work/$name" && fetch "$base/SHA256SUMS" "$work/SHA256SUMS") 2>/dev/null; then
     printf 'warning: Muxflow %s has no agent skill to install; skipped\n' "$version" >&2
-    return 0
+    return 1
   fi
   expected=$(awk -v name="$name" '$2 == name { print $1 }' "$work/SHA256SUMS")
   if [[ -z "$expected" || "$(sha256 "$work/$name")" != "$expected" ]]; then
     printf 'warning: the agent skill does not match the release SHA256SUMS; skipped\n' >&2
-    return 0
+    return 1
   fi
 
-  local roots=("$HOME/.agents/skills") root installed=()
+  local roots=("$HOME/.agents/skills") root installed=() failed=false
   if [[ -d "$HOME/.claude" ]] || command -v claude >/dev/null; then
     roots+=("$HOME/.claude/skills")
   fi
@@ -316,15 +322,23 @@ offer_skill() {
       installed+=("$root/muxflow")
     else
       printf 'warning: could not write the agent skill to %s/muxflow\n' "$root" >&2
+      failed=true
     fi
   done
-  (( ${#installed[@]} )) || return 0
-  printf 'Installed the Muxflow skill in:\n'
-  printf '  %s\n' "${installed[@]}"
+  if (( ${#installed[@]} )); then
+    printf 'Installed the Muxflow skill in:\n'
+    printf '  %s\n' "${installed[@]}"
+  fi
+  ! $failed
 }
 
 main() {
-  local os
+  local os skill_only=false
+  case "${1:-}" in
+    '') ;;
+    --skill) skill_only=true ;;
+    *) fail "usage: install.sh [--skill]" ;;
+  esac
   case "$(uname -s)" in
     Linux) os=linux ;;
     Darwin) os=macos ;;
@@ -344,6 +358,10 @@ main() {
   version=${version#v}
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?(-ios(-internal)?)?$ ]] || fail "invalid version: '$version'"
 
+  if $skill_only; then
+    install_skill "$version" || fail "the Muxflow skill was not installed"
+    return
+  fi
   "install_$os" "$version"
   offer_skill "$version"
 }
