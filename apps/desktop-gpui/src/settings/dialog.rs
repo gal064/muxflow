@@ -53,7 +53,7 @@ use crate::{
 };
 
 /// Wide enough for the eight section tabs on one row.
-const DIALOG_WIDTH: f32 = 720.;
+const DIALOG_WIDTH: f32 = 800.;
 /// Between the rows of a tab: roomier than Tauri's 12px, which read as crowded.
 const SETTINGS_ROW_GAP: f32 = 16.;
 /// `.settings-dialog { max-height: min(640px, 78vh) }`.
