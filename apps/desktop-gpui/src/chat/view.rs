@@ -467,6 +467,7 @@ impl ChatPane {
         let editing = self.editing.as_deref() == Some(id.as_str());
         let group = SharedString::from(format!("chat-user-{id}"));
         let name = SharedString::from(format!("chat-item-{id}"));
+        let queued = item.queued;
         let mut buttons = vec![self.copy_button(index, editing, &group, palette, cx)];
         if self.editable(item) {
             let ink = if editing {
@@ -497,7 +498,24 @@ impl ChatPane {
                     .aria_label(text.clone()),
                 vec![("Copy message", text)],
             ))
-            .child(message_buttons(buttons))
+            .child(
+                h_flex()
+                    .gap(ui(6.))
+                    // Sent while a step runs: the agent reads it when the step
+                    // ends, and until then the message says so.
+                    .when(queued, |row| {
+                        row.child(
+                            div()
+                                .id(SharedString::from(format!("chat-queued-{}", item.id)))
+                                .test_support()
+                                .aria_label("Queued until the current step ends")
+                                .text_size(ui(12.))
+                                .text_color(palette.chrome_faint)
+                                .child("Queued · read after the current step"),
+                        )
+                    })
+                    .child(message_buttons(buttons)),
+            )
             .into_any_element()
     }
 
@@ -1009,7 +1027,7 @@ impl ChatPane {
             timeline::doing(&self.chat.items)
         };
         let label: SharedString = doing.label.into();
-        let escape = self.stoppable() && self.stopping.is_none();
+        let escape = self.escape_stops() && self.stopping.is_none();
         let time = timeline::elapsed(self.elapsed(cx));
         v_flex()
             .id("chat-working")

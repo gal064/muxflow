@@ -2258,3 +2258,36 @@ async fn a_message_refused_by_its_turn_after_a_command_began_waits_for_the_comma
         "m2"
     );
 }
+
+/// Seen on 0.171.0: a steered message is put in the turn at once, while the
+/// command runs on; the model reads it when it next starts an item.
+#[tokio::test]
+async fn a_steered_message_is_queued_until_the_model_starts_its_next_item() {
+    let (mut replay, _lines) = opened(Launch::default());
+    replay.send("m1", "run sleep 15");
+    replay.agent(&json!({"id": "@turn/start", "result": {"turn": {"id": "t1"}}}).to_string());
+    assert!(!replay.client.item("m1").unwrap().queued);
+    let item = |method: &str, item: Value| {
+        json!({"method": method, "params": {"threadId": THREAD, "turnId": "t1", "item": item}})
+            .to_string()
+    };
+    let exec = json!({"type": "commandExecution", "id": "exec", "status": "inProgress",
+                      "command": "sleep 15"});
+    replay.agent(&item("item/started", exec.clone()));
+    replay.send("m2", "and banana");
+    assert!(replay.client.item("m2").unwrap().queued);
+    replay.agent(&json!({"id": "@turn/steer", "result": {"turnId": "t1"}}).to_string());
+    let echoed = json!({"type": "userMessage", "id": "u2", "clientId": "m2",
+                        "content": [{"type": "text", "text": "and banana"}]});
+    replay.agent(&item("item/started", echoed.clone()));
+    replay.agent(&item("item/completed", echoed));
+    // In the turn, and not yet read.
+    assert!(replay.client.item("m2").unwrap().queued);
+    let mut done = exec;
+    done["status"] = json!("completed");
+    replay.agent(&item("item/completed", done));
+    assert!(replay.client.item("m2").unwrap().queued);
+    let says = json!({"type": "agentMessage", "id": "a1", "text": ""});
+    replay.agent(&item("item/started", says));
+    assert!(!replay.client.item("m2").unwrap().queued);
+}

@@ -1211,6 +1211,39 @@ fn escape_stops_the_agent_while_it_works(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn escape_leaves_a_running_command_to_stop_and_a_queued_message_says_it_waits(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx);
+    let mut queued = item("u2", ChatItemKind::User, "Also the fixture.");
+    queued.queued = true;
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![
+            item("u1", ChatItemKind::User, "Scrape the subreddits."),
+            with_status(
+                tool("c1", ChatToolKind::Command, "run", "bu root_reddit_r7"),
+                ChatToolStatus::Running,
+            ),
+            queued,
+        ],
+        "",
+    ));
+    // The message sent behind it leaves the working line saying what runs.
+    assert_eq!(shell.label("chat-working"), "Running bu root_reddit_r7…");
+    assert!(shell.shows("chat-queued-u2"));
+    assert!(!shell.shows("chat-queued-u1"));
+    // Escape does not stop the command, nor says it would.
+    assert!(!shell.shows("chat-working-escape"));
+    shell.press("escape");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 0);
+    // Stop still does.
+    shell.click("chat-send");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+}
+
+#[gpui_kit::test]
 fn escape_closes_the_command_list_before_it_stops_anything(cx: &mut TestAppContext) {
     let mut shell = open(cx);
     shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
