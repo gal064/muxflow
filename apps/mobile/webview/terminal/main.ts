@@ -402,6 +402,10 @@ async function init(fontSize: number, initialScheme: TerminalScheme): Promise<vo
     const input: string[] = [];
     capturedInput = input;
     term.options.disableStdin = false;
+    // xterm mirrors disableStdin onto the textarea's readOnly, and the press
+    // focuses that textarea: keep it read-only so the tap cannot raise the
+    // soft keyboard. Reports pass, since xterm gates them on the option.
+    if (term.textarea) term.textarea.readOnly = true;
     try {
       dispatchMouseGesture(point, 1, false);
     } finally {
