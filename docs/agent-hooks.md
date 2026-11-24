@@ -1,6 +1,6 @@
-# Codex, Claude Code and pi hooks
+# Codex, Claude Code, pi and OpenCode hooks
 
-Codex, Claude Code and pi are the agent adapters. The app can launch them or
+Codex, Claude Code, pi and OpenCode are the agent adapters. The app can launch them or
 detect manually started processes.
 
 **Hooks are the primary source of lifecycle state.** For Codex, the daemon also
@@ -68,7 +68,7 @@ The same installer is reachable without a UI, which is how it is exercised
 against a copy of a real configuration:
 
 ```
-muxflow-host hook status    [--adapter codex|claude-code|pi] [--home DIR] [--settings-path FILE]
+muxflow-host hook status    [--adapter codex|claude-code|pi|opencode] [--home DIR] [--settings-path FILE]
 muxflow-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
 muxflow-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
 ```
@@ -140,6 +140,43 @@ mailbox when the daemon does not answer. Every failure is ignored. Only the
 event name, the session ID and, on `Stop`, the final assistant message are
 sent. The message is left out when the run was aborted. Resume uses
 `pi --session <id>`, and branch uses `pi --fork <id> --name <source name> (fork)`.
+
+## OpenCode
+
+OpenCode needs version 2.x: the plugin uses the version 2 plugin API, and 1.x
+does not load it (1.x ignores the directory, with no error). OpenCode runs one
+shared server for every terminal, so a server plugin cannot tell which tmux pane
+a session belongs to. The install is a TUI plugin instead, which runs inside the
+pane and inherits `TMUX_PANE`, the same way the pi extension does. OpenCode loads
+a plugin directory's `tui.ts` only when the directory also has a server part, so
+the install is the directory `~/.config/opencode/plugins/muxflow-agent-status/`
+with an empty `index.ts` and the reporting `tui.ts`. Both files start with
+`// muxflow-managed owner=muxflow adapter=opencode`; a file there without that
+line belongs to the user and is never overwritten, and uninstall removes only
+the marked files, keeping the directory when the user put anything else in it.
+
+The shared server streams every session's events to every terminal, so the
+plugin reports only the session its terminal shows (the focused one) or ones it
+already reported, and folds subagent sessions onto their root. Open tabs do not
+count: OpenCode shares one tab list across every terminal on the server.
+
+| OpenCode event | Sent as | State |
+| --- | --- | --- |
+| `session.created` (a root session) | `SessionStart` | Idle |
+| `session.execution.started` | `UserPromptSubmit` | Working |
+| `permission.asked`, `form.created` | `PermissionRequest` | Blocked |
+| `permission.replied`, `form.replied`, `form.cancelled` | `PostToolUse`, or `Stop` when the session is idle | Working / Idle |
+| `session.execution.succeeded`, `.interrupted` | `Stop` | Idle |
+| `session.execution.failed` | `StopFailure` | Idle |
+| `session.deleted` (a session this terminal reported) | `SessionEnd` | Idle |
+
+A subagent's run ending is not reported; its root ends with its own event. As
+with pi, an OpenCode started inside the pane stays silent: the first records its
+process ID in `MUXFLOW_OPENCODE_OWNER`. Resume uses `opencode --session <id>`.
+The full TUI's command line has no fork option (forking there is a palette
+action), so branch uses `opencode mini --session <id> --fork`, OpenCode's
+minimal interface. `mini` loads no TUI plugins, so a branched session's state is
+not reported.
 
 ## Events taken, and the gaps
 

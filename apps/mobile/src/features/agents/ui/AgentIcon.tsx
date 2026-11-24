@@ -1,6 +1,6 @@
 import Svg, { Circle, G, Path } from "react-native-svg";
 
-import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isPiAdapter, PI_ICON, PIN_ICON } from "../agentIconPaths";
+import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isOpencodeAdapter, isPiAdapter, OPENCODE_ICON, PI_ICON, PIN_ICON } from "../agentIconPaths";
 
 /**
  * The adapter marks, drawn from the desktop's geometry (`agentIconPaths.ts`,
@@ -31,6 +31,16 @@ export function AgentIcon({ adapterId, size, color }: { adapterId: string; size:
       <Svg height={size} viewBox={PI_ICON.viewBox} width={size}>
         <G transform={PI_ICON.transform}>
           <Path d={PI_ICON.path} fill={color} />
+        </G>
+      </Svg>
+    );
+  }
+  if (isOpencodeAdapter(adapterId)) {
+    return (
+      <Svg height={size} viewBox={OPENCODE_ICON.viewBox} width={size}>
+        <G transform={OPENCODE_ICON.transform}>
+          <Path d={OPENCODE_ICON.frame} fill={color} />
+          <Path d={OPENCODE_ICON.block} fill={color} opacity={OPENCODE_ICON.blockOpacity} />
         </G>
       </Svg>
     );

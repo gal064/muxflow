@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isPiAdapter, PI_ICON, PIN_ICON } from "./agentIconPaths";
+import { CLAUDE_ICON, CODEX_ICON, GENERIC_ICON, isClaudeAdapter, isCodexAdapter, isOpencodeAdapter, isPiAdapter, OPENCODE_ICON, PI_ICON, PIN_ICON } from "./agentIconPaths";
 
 const desktopSrc = resolve(__dirname, "../../../../desktop-gpui/src");
 const view = readFileSync(resolve(desktopSrc, "agents/view.rs"), "utf8");
@@ -42,6 +42,15 @@ describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte
     expect(attrs(svg, "transform")).toEqual([PI_ICON.transform]);
   });
 
+  it("OpenCode: the brand frame and the block inside it", () => {
+    const svg = mark("OPENCODE");
+    expect(attrs(svg, "d")).toEqual([OPENCODE_ICON.frame, OPENCODE_ICON.block]);
+    expect(attrs(svg, "viewBox")).toEqual([OPENCODE_ICON.viewBox]);
+    expect(attrs(svg, "transform")).toEqual([OPENCODE_ICON.transform]);
+    expect(attrs(svg, "opacity")).toEqual([".5"]);
+    expect(OPENCODE_ICON.blockOpacity).toBe(0.5);
+  });
+
   it("generic: the face", () => {
     const svg = mark("GENERIC");
     expect(attrs(svg, "d")).toEqual([GENERIC_ICON.mouth]);
@@ -62,6 +71,7 @@ describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte
     expect(view).toContain('"claude-code" => CLAUDE,');
     expect(view).toContain('"codex" => CODEX,');
     expect(view).toContain('"pi" => PI,');
+    expect(view).toContain('"opencode" => OPENCODE,');
     expect(isClaudeAdapter("claude-code")).toBe(true);
     expect(isClaudeAdapter("claude")).toBe(false);
     expect(isClaudeAdapter("codex")).toBe(false);
@@ -70,5 +80,7 @@ describe("agent icon geometry matches the desktop's agents/view.rs byte-for-byte
     expect(isCodexAdapter("other")).toBe(false);
     expect(isPiAdapter("pi")).toBe(true);
     expect(isPiAdapter("pip")).toBe(false);
+    expect(isOpencodeAdapter("opencode")).toBe(true);
+    expect(isOpencodeAdapter("open-code")).toBe(false);
   });
 });
