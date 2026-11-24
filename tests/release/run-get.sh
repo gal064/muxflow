@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives the one-line installer (release/get.sh) through `curl | bash`
 # against a local mirror of a GitHub release: fresh install, upgrade, and a
-# checksum mismatch, and pinned RCs. Takes a Linux package built for this machine, e.g.
+# checksum mismatch, pinned RCs, and the agent skill offer. Takes a Linux package built for this machine, e.g.
 #   tests/release/run-get.sh tmp/release/muxflow-0.1.1-linux-x86_64.tar.gz
 set -euo pipefail
 
@@ -24,7 +24,8 @@ mirror="$work/mirror"
 assets="$mirror/download/v$version"
 mkdir -p "$assets" "$mirror/latest/download"
 cp "$tarball" "$assets/"
-(cd "$assets" && sha256sum -- "$name" > SHA256SUMS)
+cp "$repo_root/skills/muxflow/SKILL.md" "$assets/muxflow-SKILL.md"
+(cd "$assets" && sha256sum -- "$name" muxflow-SKILL.md > SHA256SUMS)
 printf '{"version": "%s", "url": "unused"}\n' "$version" > "$mirror/latest/download/latest.json"
 cp "$repo_root/release/get.sh" "$mirror/install.sh"
 
@@ -37,9 +38,14 @@ for _ in $(seq 50); do
 done
 
 prefix="$work/prefix"
+home="$work/home"
+mkdir -p "$home"
+# The skill offer is answered by MUXFLOW_INSTALL_SKILL (default no here), so a
+# run from a terminal never stops to ask.
 run_installer() {
   curl -fsSL "http://127.0.0.1:$port/install.sh" \
-    | MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" ADE_INSTALL_PREFIX="$prefix" MUXFLOW_VERSION="${1:-}" bash
+    | HOME="$home" MUXFLOW_INSTALL_SKILL="${skill:-no}" MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" \
+      ADE_INSTALL_PREFIX="$prefix" MUXFLOW_VERSION="${1:-}" bash
 }
 
 run_installer > "$work/install.out"
@@ -52,6 +58,66 @@ echo "fresh install: ok"
 run_installer > "$work/upgrade.out"
 grep -q "Installed Muxflow under $prefix" "$work/upgrade.out"
 echo "reinstall/upgrade: ok"
+
+[[ ! -e "$home/.agents" && ! -e "$home/.claude" ]]
+echo "skill declined: ok"
+
+mkdir -p "$home/.claude"
+skill=yes run_installer > "$work/skill.out"
+for root in "$home/.agents/skills" "$home/.claude/skills"; do
+  cmp -s "$root/muxflow/SKILL.md" "$repo_root/skills/muxflow/SKILL.md"
+  grep -qF "  $root/muxflow" "$work/skill.out"
+done
+echo "skill installed for every agent: ok"
+
+printf 'stale\n' > "$home/.agents/skills/muxflow/SKILL.md"
+skill=yes run_installer > "$work/skill-update.out"
+cmp -s "$home/.agents/skills/muxflow/SKILL.md" "$repo_root/skills/muxflow/SKILL.md"
+echo "skill updated on rerun: ok"
+
+cp "$assets/SHA256SUMS" "$work/SHA256SUMS.good"
+printf 'tampered\n' >> "$assets/muxflow-SKILL.md"
+printf 'stale\n' > "$home/.agents/skills/muxflow/SKILL.md"
+skill=yes run_installer > "$work/skill-bad.out" 2>&1
+grep -q "Installed Muxflow under $prefix" "$work/skill-bad.out"
+grep -q "does not match the release SHA256SUMS" "$work/skill-bad.out"
+grep -qx stale "$home/.agents/skills/muxflow/SKILL.md"
+rm "$assets/muxflow-SKILL.md"
+skill=yes run_installer > "$work/skill-missing.out" 2>&1
+grep -q "Installed Muxflow under $prefix" "$work/skill-missing.out"
+grep -q "has no agent skill" "$work/skill-missing.out"
+cp "$repo_root/skills/muxflow/SKILL.md" "$assets/muxflow-SKILL.md"
+cp "$work/SHA256SUMS.good" "$assets/SHA256SUMS"
+echo "bad or missing skill only warns: ok"
+
+skill_home="$work/skill-home"
+skill_prefix="$work/skill-prefix"
+run_skill_only() {
+  curl -fsSL "http://127.0.0.1:$port/install.sh" \
+    | HOME="$skill_home" MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" ADE_INSTALL_PREFIX="$skill_prefix" bash -s -- --skill
+}
+mkdir -p "$skill_home/.claude"
+run_skill_only > "$work/skill-only.out"
+cmp -s "$skill_home/.agents/skills/muxflow/SKILL.md" "$repo_root/skills/muxflow/SKILL.md"
+cmp -s "$skill_home/.claude/skills/muxflow/SKILL.md" "$repo_root/skills/muxflow/SKILL.md"
+[[ ! -e "$skill_prefix" ]]
+if grep -q "Downloading Muxflow" "$work/skill-only.out"; then
+  echo "--skill downloaded the app" >&2
+  exit 1
+fi
+mv "$assets/muxflow-SKILL.md" "$work/skill.held"
+if run_skill_only > "$work/skill-only-missing.out" 2>&1; then
+  echo "--skill succeeded without a skill to install" >&2
+  exit 1
+fi
+grep -q "the Muxflow skill was not installed" "$work/skill-only-missing.out"
+mv "$work/skill.held" "$assets/muxflow-SKILL.md"
+if curl -fsSL "http://127.0.0.1:$port/install.sh" | MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" bash -s -- --bogus > "$work/usage.out" 2>&1; then
+  echo "installer accepted an unknown argument" >&2
+  exit 1
+fi
+grep -q "usage: install.sh \[--skill\]" "$work/usage.out"
+echo "--skill installs only the skill: ok"
 
 run_installer "v$version" > "$work/pinned.out"
 grep -q "Downloading Muxflow $version for" "$work/pinned.out"

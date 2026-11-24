@@ -98,7 +98,8 @@ uploaded internally, use the distribution action instead of another release tag.
    build number; see [TestFlight releases](mobile/testflight.md).
 5. A draft release named Muxflow X.Y.Z (or X.Y.Z-rc.N) appears with the DMG, both Linux tarballs, the APK,
    `install.sh` (the one-line Linux and macOS installer, from `release/get.sh`),
-   `SHA256SUMS`, and `latest.json`. Its notes start with the install
+   `muxflow-SKILL.md` (the agent skill the installer offers, from
+   `skills/muxflow/SKILL.md`), `SHA256SUMS`, and `latest.json`. Its notes start with the install
    instructions in `release/release-notes.md`, followed by the generated
    changelog.
 6. Review the draft: install each artifact and run the manual checks below.

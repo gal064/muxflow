@@ -3,10 +3,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostConnection } from "../../protocol/HostConnection";
 import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResourceState, ResponseSchema, TerminalBytesSchema, type Envelope, type Request } from "../../protocol/gen/envelope_pb";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
-import { createSessionStore } from "../../store/sessionStore";
+import { createSessionStore, type Agent } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
 import { ATTACH_RETRY_LIMIT, ATTACH_RETRY_MS, SUBMIT_DELAY_MS, TAKE_INTERVAL_MS, TerminalController, type AppForeground, type TerminalControllerOptions, type TerminalSnapshot } from "./TerminalController";
 import { TerminalRegistry } from "./terminalRegistry";
+
+function codexAgent(paneId: string): Agent {
+  return {
+    id: "codex",
+    adapterId: "codex",
+    nativeSessionId: "",
+    displayName: "Codex",
+    lifecycle: "idle",
+    attentionKind: "",
+    stateGeneration: 1n,
+    attentionGeneration: 0n,
+    seenGeneration: 0n,
+    updatedAtMs: 0,
+    lifecycleChangedAtMs: 0,
+    attentionSeenAtMs: 0,
+    present: true,
+    route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId, paneIndexFallback: 0, paneTitleFallback: "" },
+  };
+}
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
 const SEED = new TextEncoder().encode("\x1b[2J$ ");
@@ -325,8 +344,10 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     expect(h.page).toEqual([{ t: "init", fontSize: 17, scheme: "dark" }]);
   });
 
-  it("inits the page in the host's scheme and follows it until stopped", async () => {
+  it("inits the page in the host's scheme while Codex runs in it and follows it until stopped", async () => {
     const h = harness();
+    h.store.getState().applySnapshot(topologySnapshot());
+    h.store.setState({ agents: { codex: codexAgent("%1") } });
     h.store.getState().setTerminalScheme("light");
     h.controller.start();
     h.store.getState().setTerminalScheme("dark");
@@ -335,6 +356,29 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await h.controller.stop();
     h.store.getState().setTerminalScheme("light");
     expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "light" }, { t: "theme", scheme: "dark" }]);
+  });
+
+  it("goes light when Codex starts in the pane and dark again when it leaves", () => {
+    const h = harness();
+    h.store.getState().applySnapshot(topologySnapshot());
+    h.store.getState().setTerminalScheme("light");
+    h.controller.start();
+    h.store.setState({ agents: { codex: codexAgent("%1") } });
+    h.store.setState({ agents: { codex: { ...codexAgent("%1"), present: false } } });
+    expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "dark" }, { t: "theme", scheme: "light" }, { t: "theme", scheme: "dark" }]);
+  });
+
+  it("keeps a Codex pane's scheme while a resubscribe empties and refills the store", () => {
+    const h = harness();
+    h.store.getState().applySnapshot(topologySnapshot());
+    h.store.setState({ agents: { codex: codexAgent("%1") } });
+    h.store.getState().setTerminalScheme("light");
+    h.controller.start();
+    const { sessions, windows, panes, agents } = h.store.getState();
+    h.store.getState().clearHostState();
+    // A snapshot brings the panes and their agents back in one update.
+    h.store.setState({ sessions, windows, panes, agents });
+    expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "light" }]);
   });
 
   it("takes focus, inits the page, and after the first size sends claim window size → attach in that order", async () => {
