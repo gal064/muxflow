@@ -1,12 +1,15 @@
 import * as Clipboard from "expo-clipboard";
-import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, Fragment, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type TextStyle } from "react-native";
 
 import { externalLinkTarget } from "../../../ui/externalLinks";
+import type { ChatFileLinks } from "../chatFileLinks";
 import { colors, fixedChromeText, fonts, metrics, radii, typeScale } from "../../../ui/tokens";
 import {
   columnWidth,
+  fileName,
   parseChatMarkdown,
+  splitPosition,
   streamingCodeText,
   TABLE_CELL_PADDING,
   type ChatBlock,
@@ -37,6 +40,14 @@ export interface ChatMarkdownHold {
 /** Whether the text of the reply being drawn can be selected in place. */
 const Selectable = createContext(true);
 const Hold = createContext<ChatMarkdownHold | undefined>(undefined);
+/** The reply being drawn is still being written: a path in it may not be whole yet. */
+const Streaming = createContext(false);
+
+/**
+ * The file links of the conversation the reply is in. Outside one, a link to
+ * a path is its label and a path in code is code.
+ */
+export const ChatFilesContext = createContext<ChatFileLinks | undefined>(undefined);
 
 /**
  * What scrolls sideways takes its touches itself. Left to a pressable around
@@ -59,21 +70,39 @@ function openLink(href: string): void {
   if (target) void Linking.openURL(target).catch(() => {});
 }
 
-function runStyle(run: ChatInline, dim: boolean): TextStyle[] {
+function runStyle(run: ChatInline, dim: boolean, link: boolean): TextStyle[] {
   const style: TextStyle[] = [];
   if (run.strong) style.push(dim ? styles.strongDim : styles.strong);
   if (run.emphasis) style.push(styles.emphasis);
   if (run.code) style.push(styles.inlineCode);
-  if (run.href) style.push(styles.link);
-  if (run.strike) style.push(run.href ? styles.strikeLink : styles.strike);
+  if (link) style.push(styles.link);
+  if (run.strike) style.push(link ? styles.strikeLink : styles.strike);
   return style;
 }
 
+/** Inline code that could name a file: the file's name as a link once the host has it, the code as written until then. */
+function PathRun({ run, dim, files }: { run: ChatInline & { path: string }; dim: boolean; files: ChatFileLinks }) {
+  const { path } = run;
+  const streaming = useContext(Streaming);
+  const probe = useSyncExternalStore(
+    useCallback((changed: () => void) => files.subscribe(splitPosition(path)[0], changed), [files, path]),
+    () => files.get(splitPosition(path)[0]),
+  );
+  useEffect(() => {
+    if (!streaming) files.ask(splitPosition(path)[0]);
+  }, [files, path, streaming]);
+  if (probe !== "exists") return <Text style={runStyle(run, dim, false)}>{run.text}</Text>;
+  return <Text accessibilityRole="link" onPress={() => files.open(splitPosition(path)[0])} style={runStyle(run, dim, true)}>{fileName(path)}</Text>;
+}
+
 function Runs({ content, dim }: { content: ChatInline[]; dim: boolean }) {
+  const files = useContext(ChatFilesContext);
   return content.map((run, index) => {
-    const { href } = run;
-    const style = runStyle(run, dim);
-    if (href) return <Text accessibilityRole="link" key={index} onPress={() => openLink(href)} style={style}>{run.text}</Text>;
+    const { href, file, path } = run;
+    if (path !== undefined && files) return <PathRun dim={dim} files={files} key={index} run={{ ...run, path }} />;
+    const opens = href ? () => openLink(href) : file !== undefined && files ? () => files.open(file) : undefined;
+    const style = runStyle(run, dim, opens !== undefined);
+    if (opens) return <Text accessibilityRole="link" key={index} onPress={opens} style={style}>{run.text}</Text>;
     return style.length > 0 ? <Text key={index} style={style}>{run.text}</Text> : <Fragment key={index}>{run.text}</Fragment>;
   });
 }
@@ -228,7 +257,9 @@ export const ChatMarkdown = memo(function ChatMarkdown({ source, streaming = fal
   return (
     <Selectable.Provider value={selectable}>
       <Hold.Provider value={hold}>
-        <View style={styles.root}><Blocks blocks={blocks} dim={false} tail={streaming} /></View>
+        <Streaming.Provider value={streaming}>
+          <View style={styles.root}><Blocks blocks={blocks} dim={false} tail={streaming} /></View>
+        </Streaming.Provider>
       </Hold.Provider>
     </Selectable.Provider>
   );

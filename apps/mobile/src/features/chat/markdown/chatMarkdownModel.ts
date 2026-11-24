@@ -8,8 +8,11 @@ import { externalLinkTarget } from "../../../ui/externalLinks";
 
 /**
  * One run of text with the styles that apply to it. `href` is set only for a
- * link the phone may open (see `externalLinkTarget`); any other link is its
- * label as plain text.
+ * link the phone may open (see `externalLinkTarget`); `file` for a Markdown
+ * link to a path on the host, relative to the agent's directory unless
+ * absolute; `path` for inline code that could name a file, which is a link
+ * once the host says the file is there. Any other link is its label as plain
+ * text.
  */
 export type ChatInline = {
   text: string;
@@ -18,6 +21,8 @@ export type ChatInline = {
   strike?: true;
   code?: true;
   href?: string;
+  file?: string;
+  path?: string;
 };
 
 export type ChatAlign = "left" | "center" | "right";
@@ -75,13 +80,15 @@ function decodeEntities(text: string): string {
 }
 
 function sameMarks(a: Marks, b: Marks): boolean {
-  return a.strong === b.strong && a.emphasis === b.emphasis && a.strike === b.strike && a.code === b.code && a.href === b.href;
+  return a.strong === b.strong && a.emphasis === b.emphasis && a.strike === b.strike && a.code === b.code && a.href === b.href
+    && a.file === b.file && a.path === b.path;
 }
 
 function push(out: ChatInline[], text: string, marks: Marks): void {
   if (!text) return;
   const previous = out.at(-1);
-  if (previous && sameMarks(previous, marks)) previous.text += text;
+  // Each path stays its own run, even next to the same path.
+  if (previous && previous.path === undefined && sameMarks(previous, marks)) previous.text += text;
   else out.push({ text, ...marks });
 }
 
@@ -105,14 +112,28 @@ function inlines(tokens: Token[] | undefined, marks: Marks = NO_MARKS, out: Chat
       case "del":
         inlines(token.tokens, { ...marks, strike: true }, out);
         break;
-      case "codespan":
-        push(out, token.text, { ...marks, code: true });
+      case "codespan": {
+        const { text } = token;
+        // Code that is a link's label goes where the link does; and only
+        // code in single backticks is asked about, as on the desktop.
+        const path = marks.href === undefined && marks.file === undefined && !token.raw.startsWith("``") && pathLike(text);
+        push(out, text, path ? { ...marks, code: true, path: text } : { ...marks, code: true });
         break;
+      }
       case "br":
         push(out, "\n", marks);
         break;
       case "link":
       case "image": {
+        const target = fileTarget(token);
+        if (target !== undefined) {
+          const file = splitPosition(target)[0];
+          const label = token.tokens.map((inner) => inner.raw).join("").trim();
+          // A label that is the path itself is shown as the file's name.
+          if (!label || label === token.href || label === target || label === file) push(out, fileName(target), { ...marks, file });
+          else inlines(token.tokens, { ...marks, file }, out);
+          break;
+        }
         // An image is never loaded: its alt text stands in, as a link to it.
         const href = externalLinkTarget(token.href);
         const inner = href ? { ...marks, href } : marks;
@@ -148,6 +169,50 @@ function inlines(tokens: Token[] | undefined, marks: Marks = NO_MARKS, out: Chat
     }
   }
   return out;
+}
+
+/** Splits `path:line` or `path:line:column` into the path and that suffix. */
+export function splitPosition(path: string): [path: string, position: string] {
+  const match = /^(.*?)((?::\d+){1,2})$/su.exec(path);
+  return match && match[1] ? [match[1], match[2]!] : [path, ""];
+}
+
+/** The file's name, and the line it points at if it does: `a/b/c.rs:12` is `c.rs:12`. */
+export function fileName(path: string): string {
+  const [file, position] = splitPosition(path);
+  return `${file.slice(file.lastIndexOf("/") + 1)}${position}`;
+}
+
+/**
+ * Inline code that could name a file: one word with a separator in it. The
+ * host says whether it does. The same rule as the desktop app's.
+ */
+export function pathLike(code: string): boolean {
+  const [path] = splitPosition(code);
+  return path.length <= 512
+    && path.includes("/")
+    && !path.endsWith("/")
+    && !path.includes("//")
+    && /\p{L}/u.test(path)
+    && /^[\p{L}\p{N}/._\-~+@,]+$/u.test(path);
+}
+
+/**
+ * A Markdown link's target that is a path, without the `#L42` or `?query` a
+ * web view would read: no scheme, not an anchor, and a separator or a dot in
+ * it, so `src/a.rs`, `Cargo.toml:12`, but not `localhost:3000`.
+ */
+function fileTarget(token: Token): string | undefined {
+  if (token.type !== "link") return undefined;
+  const href: string = token.href;
+  const colon = href.indexOf(":");
+  const scheme = colon > 1
+    && /^[A-Za-z0-9+.-]+$/u.test(href.slice(0, colon))
+    && !/^[\d:]*(?:[#?].*)?$/su.test(href.slice(colon + 1));
+  if (scheme || href.startsWith("#") || href.startsWith("//") || /[\u0000-\u001f\u007f]/u.test(href)) return undefined;
+  const target = href.replace(/[#?].*$/su, "");
+  const [path] = splitPosition(target);
+  return path && (path.includes("/") || path.includes(".")) ? target : undefined;
 }
 
 /** The length of a cell's longest line, for sizing its column; a wide character (CJK, emoji) counts as two. */

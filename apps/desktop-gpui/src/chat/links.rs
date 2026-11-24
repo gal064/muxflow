@@ -97,9 +97,12 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// A Markdown link's target that is a path: no scheme, and not an anchor.
-fn is_file_target(target: &str) -> bool {
-    let scheme = target.split_once(':').is_some_and(|(scheme, rest)| {
+/// A Markdown link's target that is a path, without the `#L42` or `?query`
+/// a browser would read: no scheme, not an anchor, and a separator or a dot
+/// in it, so `src/a.rs` and `Cargo.toml:12` but not `localhost:3000`.
+fn path_target(target: &str) -> Option<&str> {
+    let path = &target[..target.find(['#', '?']).unwrap_or(target.len())];
+    let scheme = path.split_once(':').is_some_and(|(scheme, rest)| {
         scheme.len() > 1
             && scheme
                 .chars()
@@ -108,7 +111,12 @@ fn is_file_target(target: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || byte == b':')
     });
-    !target.is_empty() && !scheme && !target.starts_with('#') && !target.starts_with("//")
+    let (file, _) = split_position(path);
+    (!scheme
+        && !target.starts_with('#')
+        && !target.starts_with("//")
+        && (file.contains('/') || file.contains('.')))
+    .then_some(path)
 }
 
 /// A link starting at `text`'s `[`: its label, its target and its length.
@@ -187,9 +195,11 @@ fn rewrite_line(line: &str, probe: &mut dyn FnMut(&str) -> Probe, out: &mut Stri
                 if !label.trim().is_empty() {
                     let _ = write!(out, "`{}`", label.trim());
                 }
-            } else if is_file_target(target) {
+            } else if let Some(target) = path_target(target) {
                 let (path, position) = split_position(target);
-                let shown = if label.contains('/') || label.trim().is_empty() {
+                // A label that is the path itself is shown as the file's name.
+                let label = label.trim();
+                let shown = if label.is_empty() || label == target || label == path {
                     format!("{}{position}", file_name(target))
                 } else {
                     label.to_owned()
@@ -273,12 +283,30 @@ mod tests {
     }
 
     #[test]
+    fn a_line_anchor_is_left_off_and_a_label_with_a_slash_kept() {
+        assert_eq!(
+            shown(
+                "[app.ts](src/app.ts#L42) [client/server split](docs/arch.md)",
+                &[]
+            ),
+            "[app.ts](muxflow-file:src/app.ts) [client/server split](muxflow-file:docs/arch.md)"
+        );
+        assert_eq!(
+            shown("[Cargo.toml:3](Cargo.toml:3)", &[]),
+            "[Cargo.toml:3](muxflow-file:Cargo.toml)"
+        );
+    }
+
+    #[test]
     fn a_web_link_an_anchor_and_a_mail_link_are_left_alone() {
         for link in [
             "[docs](https://docs.rs/unicode-width)",
             "[top](#top)",
             "[me](mailto:me@example.com)",
             "[cdn](//cdn.example.com/x.js)",
+            "[dev](localhost:3000)",
+            "[call](tel:5551234)",
+            "[readme](README)",
         ] {
             assert_eq!(shown(link, &[]), link);
         }

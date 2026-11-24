@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { columnWidth, parseChatMarkdown, streamingCodeText, type ChatBlock, type ChatCodeBlock } from "./chatMarkdownModel";
+import { columnWidth, fileName, parseChatMarkdown, splitPosition, streamingCodeText, type ChatBlock, type ChatCodeBlock } from "./chatMarkdownModel";
 
 function only(source: string): ChatBlock {
   const blocks = parseChatMarkdown(source);
@@ -257,11 +257,80 @@ describe("chat Markdown links", () => {
   });
 
   it("turns every other link into its label", () => {
-    const block = only("[js](javascript:alert(1)) [file](file:///etc/passwd) [rel](src/a.ts) [intent](intent://x#Intent;end) [data](data:text/html,x) [tel](tel:123) [app](muxflow://open) [*styled*](vbscript:x)");
+    const block = only("[js](javascript:alert(1)) [file](file:///etc/passwd) [top](#top) [cdn](//cdn.example/x.js) [intent](intent://x#Intent;end) [data](data:text/html,x) [tel](tel:5551234) [dev](localhost:3000) [readme](README) [app](muxflow://open) [*styled*](vbscript:x)");
     expect(block).toEqual({
       kind: "paragraph",
-      content: [{ text: "js file rel intent data tel app " }, { text: "styled", emphasis: true }],
+      content: [{ text: "js file top cdn intent data tel dev readme app " }, { text: "styled", emphasis: true }],
     });
+  });
+
+  it("reads a link to a path as a file link, its label the file's name when it is the path", () => {
+    expect(only("In [the join](src/links.rs:171), [crates/term/links.rs:12](crates/term/links.rs:12), [](/etc/hosts), [*it*](<docs/a b.md>), [client/server split](docs/arch.md), [app.ts](src/app.ts#L42) and [Cargo.toml:3](Cargo.toml:3)")).toEqual({
+      kind: "paragraph",
+      content: [
+        { text: "In " },
+        { text: "the join", file: "src/links.rs" },
+        { text: ", " },
+        { text: "links.rs:12", file: "crates/term/links.rs" },
+        { text: ", " },
+        { text: "hosts", file: "/etc/hosts" },
+        { text: ", " },
+        { text: "it", emphasis: true, file: "docs/a b.md" },
+        { text: ", " },
+        { text: "client/server split", file: "docs/arch.md" },
+        { text: ", " },
+        { text: "app.ts", file: "src/app.ts" },
+        { text: " and " },
+        { text: "Cargo.toml:3", file: "Cargo.toml" },
+      ],
+    });
+  });
+
+  it("marks inline code that could name a file, and only that", () => {
+    expect(only("`/home/me/tmp/pr-review.md` `src/a.rs:12:3` `cargo test` `/` `1/2` `a//b` `dir/` `https://x.dev/a` `a b/c`")).toEqual({
+      kind: "paragraph",
+      content: [
+        { text: "/home/me/tmp/pr-review.md", code: true, path: "/home/me/tmp/pr-review.md" },
+        { text: " " },
+        { text: "src/a.rs:12:3", code: true, path: "src/a.rs:12:3" },
+        { text: " " },
+        { text: "cargo test", code: true },
+        { text: " " },
+        { text: "/", code: true },
+        { text: " " },
+        { text: "1/2", code: true },
+        { text: " " },
+        { text: "a//b", code: true },
+        { text: " " },
+        { text: "dir/", code: true },
+        { text: " " },
+        { text: "https://x.dev/a", code: true },
+        { text: " " },
+        { text: "a b/c", code: true },
+      ],
+    });
+  });
+
+  it("leaves code that is a link's label to the link, and code in double backticks as code", () => {
+    expect(only("[`src/a.ts`](https://example.com/blob/src/a.ts) [`src/b.ts`](/repo/src/b.ts) ``src/c.ts``")).toEqual({
+      kind: "paragraph",
+      content: [
+        { text: "src/a.ts", code: true, href: "https://example.com/blob/src/a.ts" },
+        { text: " " },
+        { text: "src/b.ts", code: true, file: "/repo/src/b.ts" },
+        { text: " " },
+        { text: "src/c.ts", code: true },
+      ],
+    });
+  });
+
+  it("splits a line and column off a path, and names its file", () => {
+    expect(splitPosition("src/a.rs:12:3")).toEqual(["src/a.rs", ":12:3"]);
+    expect(splitPosition("src/a.rs:12")).toEqual(["src/a.rs", ":12"]);
+    expect(splitPosition("a:1:2:3")).toEqual(["a:1", ":2:3"]);
+    expect(splitPosition("src/a.rs")).toEqual(["src/a.rs", ""]);
+    expect(fileName("crates/term/links.rs:12")).toBe("links.rs:12");
+    expect(fileName("/etc/hosts")).toBe("hosts");
   });
 });
 

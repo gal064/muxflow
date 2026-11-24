@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { textOf, writeRender } from "../../../testing/renderTree";
 import { byLabel, isHost, press, render, rerender } from "../../../testing/render";
-import { ChatMarkdown } from "./ChatMarkdown";
+import { ChatFileLinks, type ProbeAnswer } from "../chatFileLinks";
+import { ChatFilesContext, ChatMarkdown } from "./ChatMarkdown";
 
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn(async () => true) }));
 
@@ -191,6 +192,29 @@ describe("ChatMarkdown", () => {
     // The rejected ones are still read, as plain text.
     expect(textOf(view.toJSON())).toBe("docs js file rel shot https://bare.example");
     expect(view.root.findAll((node) => isHost(node, "Image"))).toEqual([]);
+  });
+
+  it("opens a link to a path, and a path in code once the host has the file, by its name", async () => {
+    const answers = new Map<string, ProbeAnswer>([["/home/me/tmp/pr-review.md", "exists"], ["src/none.rs", "missing"]]);
+    const open = vi.fn();
+    const files = new ChatFileLinks(async (path) => answers.get(path) ?? "missing", open);
+    const source = "Doc: `/home/me/tmp/pr-review.md:3`, not `src/none.rs`; see [the join](src/links.rs:171) and `cargo test`.";
+    const view = render(<ChatFilesContext.Provider value={files}><ChatMarkdown source={source} /></ChatFilesContext.Provider>);
+    const links = () => view.root.findAll((node) => isHost(node, "Text") && typeof node.props.onPress === "function");
+    expect(links().map(plain)).toEqual(["the join"]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(links().map(plain)).toEqual(["pr-review.md:3", "the join"]);
+    expect(links().every((link) => link.props.accessibilityRole === "link")).toBe(true);
+    for (const link of links()) press(link);
+    expect(open.mock.calls.map((call) => call[0])).toEqual(["/home/me/tmp/pr-review.md", "src/links.rs"]);
+    expect(textOf(view.toJSON())).toBe("Doc: pr-review.md:3, not src/none.rs; see the join and cargo test.");
+  });
+
+  it("does not ask about a path in a reply still being written", () => {
+    const probe = vi.fn(async () => "exists" as ProbeAnswer);
+    const files = new ChatFileLinks(probe, vi.fn());
+    render(<ChatFilesContext.Provider value={files}><ChatMarkdown source={"See `src/a.rs`"} streaming /></ChatFilesContext.Provider>);
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("draws headings, a quote with a bar and dim text, a rule, and inline styles", () => {
