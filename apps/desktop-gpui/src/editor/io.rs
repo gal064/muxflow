@@ -213,10 +213,7 @@ fn write_request(
     path: &str,
     save: &SaveRequest,
 ) -> Result<FileIoRequest, String> {
-    let content = save
-        .line_ending
-        .apply(&save.content.to_string())
-        .into_bytes();
+    let content = save.written().into_bytes();
     if content.len() as u64 > TEXT_FILE_LIMIT_BYTES {
         return Err("Text files larger than 10 MiB cannot be edited.".to_owned());
     }

@@ -646,6 +646,15 @@ impl Document {
                     self.park((!generation.is_empty()).then_some(generation));
                     return;
                 }
+                // Our own commit, usually told before the write answers: the
+                // read would only find what we wrote. A banner over the tab
+                // is still cleared by reading.
+                if self.error.is_none()
+                    && let Some(id) = operation_id.as_deref()
+                    && self.autosave.as_ref().is_some_and(|a| a.is_own(id))
+                {
+                    return;
+                }
                 self.load(operation_id, cx);
             }
             FileNotice::Listed {
