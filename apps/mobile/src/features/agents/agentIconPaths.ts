@@ -48,6 +48,16 @@ export const OPENCODE_ICON = {
   blockOpacity: 0.5,
 } as const;
 
+/**
+ * Hermes: a winged-helmet silhouette, filled, drawn in the same 24-unit box
+ * and at the desktop mark's inset.
+ */
+export const HERMES_ICON = {
+  viewBox: "0 0 24 24",
+  transform: "translate(12 12) scale(.86) translate(-12 -12)",
+  path: "M12 3.2c3.9 0 6.2 2.4 6.2 5.6 0 2.1-1.2 3.7-2.7 4.4l3.4 2.1c-2.4.4-4.4-.2-5.6-1.3l-1.3 4.1-1.3-4.1c-1.2 1.1-3.2 1.7-5.6 1.3l3.4-2.1C6.8 12.5 5.6 10.9 5.6 8.8 5.6 5.6 8.1 3.2 12 3.2Z",
+} as const;
+
 /** Any other adapter: a stroked face — outline circle, two filled eyes, a mouth line. */
 export const GENERIC_ICON = {
   viewBox: "0 0 16 16",
@@ -81,4 +91,8 @@ export function isPiAdapter(adapterId: string): boolean {
 
 export function isOpencodeAdapter(adapterId: string): boolean {
   return adapterId === "opencode";
+}
+
+export function isHermesAdapter(adapterId: string): boolean {
+  return adapterId === "hermes";
 }

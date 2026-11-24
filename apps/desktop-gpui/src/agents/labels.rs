@@ -13,7 +13,7 @@ static UUID_LIKE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid pattern")
 });
 static GENERIC_TAB_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:agent|codex|claude(?:[- ]code)?|opencode|pi)$").expect("valid pattern")
+    Regex::new(r"(?i)^(?:agent|codex|claude(?:[- ]code)?|opencode|pi|hermes)$").expect("valid pattern")
 });
 /// Claude Code and Codex prefix their tmux window titles with a status marker
 /// (Claude's asterisk frames, Codex's braille spinner, quarter circles, check
@@ -75,6 +75,7 @@ pub fn adapter_fallback(adapter_id: &str) -> &'static str {
         "claude-code" => "Claude",
         "pi" => "Pi",
         "opencode" => "OpenCode",
+        "hermes" => "Hermes",
         _ => "Agent",
     }
 }
@@ -201,5 +202,16 @@ mod tests {
             "Codex CLI"
         );
         assert_eq!(agent_session_label(&named("⠋", "", ""), &[]), "Codex");
+    }
+
+    #[test]
+    fn names_hermes_in_the_fallback_and_rejects_it_as_a_generic_tab_name() {
+        assert_eq!(adapter_fallback("hermes"), "Hermes");
+        assert_eq!(agent_session_label(&named("", "", ""), &[]), "Agent");
+        assert_eq!(agent_session_label(&named("hermes", "", ""), &[]), "Hermes");
+        assert_eq!(
+            agent_session_label(&named("hermes", "", "Fix tests"), &[]),
+            "Fix tests"
+        );
     }
 }
