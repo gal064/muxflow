@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package tmux_agent.protocol.v1;
+
+// Workspace restore: the host remembers the tmux sessions it has seen, with
+// the directory of every window, and recreates them when the tmux server
+// comes back after dying — a reboot, a crash, a kill-server. It lives on the
+// host so the phone and every desktop get it, and so the record outlives the
+// clients: a desktop only sees what happened while it was connected, while
+// the host watches sessions close and knows the difference between "the user
+// killed it" and "the server died". Kept in its own file so the feature can
+// be removed with it; envelope.proto names it in exactly three places.
+
+enum WorkspaceRestoreAction {
+  WORKSPACE_RESTORE_ACTION_UNSPECIFIED = 0;
+  // Reads the switch and the remembered layout.
+  WORKSPACE_RESTORE_ACTION_GET = 1;
+  // Turns the remembering and the recreating on or off, per host.
+  WORKSPACE_RESTORE_ACTION_SET_ENABLED = 2;
+}
+
+message WorkspaceRestoreRequest {
+  WorkspaceRestoreAction action = 1;
+  // SET_ENABLED only.
+  bool enabled = 2;
+}
+
+// One remembered window: the directory its first pane was last in. The
+// window's name is deliberately not stored: recreating it would take
+// `new-window -n`, which switches tmux's automatic renaming off for that
+// window forever, and the agents that name their tab after the task would
+// lose it. An empty directory is tmux's own choice, the same rule
+// `TmuxAction.directory` follows.
+message WorkspaceRestoreWindow {
+  string directory = 1;
+}
+
+// One remembered session, named the way tmux names it. The name — not the
+// `$N` id — is the identity that survives the server, and the one that tells
+// a restore the session is already open.
+message WorkspaceRestoreSession {
+  string name = 1;
+  // In window-strip order. The first is the session's own first window.
+  repeated WorkspaceRestoreWindow windows = 2;
+}
+
+message WorkspaceRestoreResponse {
+  bool enabled = 1;
+  // What the host would recreate, in name order. Empty is "nothing
+  // remembered yet", which is also the state right after enabling.
+  repeated WorkspaceRestoreSession sessions = 2;
+}

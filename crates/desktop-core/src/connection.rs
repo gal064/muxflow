@@ -45,6 +45,7 @@ use git_content::GitContentReads;
 pub mod history;
 pub mod ports;
 pub mod tmux_action;
+pub mod workspace_restore;
 // Switch-timeline instrumentation. Compiled out of a plain release build with
 // the rest of `perf_log`; see `perf_log/switch_timing.rs` for what each stamp
 // means and why the counters are relaxed.
