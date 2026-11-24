@@ -63,9 +63,9 @@ impl AgentAdapter for OpenCodeAdapter {
 
     /// The lifecycle names the managed plugin sends. It reports under the names
     /// ingest already understands, so ingest has no OpenCode-specific path; see
-    /// [`Self::parse_hook`]. The raw OpenCode events (session.status, session.idle,
-    /// session.error, session.created, session.deleted, permission.updated,
-    /// permission.replied) are reduced to these inside the plugin.
+    /// [`Self::parse_hook`]. The raw OpenCode events (session.execution.*,
+    /// session.created, session.deleted, permission.asked/updated,
+    /// permission.replied/deleted) are reduced to these inside the plugin.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -79,7 +79,7 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     fn hook_trust_guidance(&self) -> &'static str {
-        "OpenCode runs this plugin with your permissions and does not ask first. It reports only lifecycle state to muxflow; prompts, tool input and tool output never leave OpenCode."
+        "Needs OpenCode 2.x: the plugin uses the version 2 plugin API, which OpenCode 1.x does not load. OpenCode runs this plugin with your permissions and does not ask first. It reports only lifecycle state to muxflow; prompts, tool input and tool output never leave OpenCode."
     }
 
     /// OpenCode is a single native binary whose process title is `opencode`; the

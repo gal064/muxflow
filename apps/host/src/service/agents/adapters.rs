@@ -41,7 +41,7 @@ pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed event set or entry configuration changes. An
 /// older install can otherwise look current while missing an event or carrying
 /// vendor-invalid settings such as an excessive timeout.
-pub(crate) const MANAGED_VERSION: u32 = 7;
+pub(crate) const MANAGED_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {

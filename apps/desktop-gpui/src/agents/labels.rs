@@ -13,7 +13,7 @@ static UUID_LIKE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid pattern")
 });
 static GENERIC_TAB_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:agent|codex|claude(?:[- ]code)?|pi)$").expect("valid pattern")
+    Regex::new(r"(?i)^(?:agent|codex|claude(?:[- ]code)?|opencode|pi)$").expect("valid pattern")
 });
 /// Claude Code and Codex prefix their tmux window titles with a status marker
 /// (Claude's asterisk frames, Codex's braille spinner, quarter circles, check

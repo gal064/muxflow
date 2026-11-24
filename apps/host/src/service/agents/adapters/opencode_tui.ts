@@ -148,12 +148,16 @@ export default Plugin.define({
       queue = queue.then(() => send(body));
     };
 
-    // Report a lifecycle edge for a root only while this terminal owns it, and
-    // only when it differs from what we last sent for that root.
+    // A root this terminal reports for: one it shows now, or one it already
+    // reported, so a run the user navigated away from still sends its Stop.
+    const reportsFor = (root: string): boolean => lastSent.has(root) || ownedRoots().has(root);
+
+    // Report a lifecycle edge for a root this terminal reports for, and only
+    // when it differs from what we last sent for that root.
     const transition = (hook_event_name: string, rawSessionID: string | undefined, withMessage = false) => {
       if (!rawSessionID) return;
       const root = rootOf(rawSessionID);
-      if (!ownedRoots().has(root)) return;
+      if (!reportsFor(root)) return;
       if (lastSent.get(root) === hook_event_name) return;
       lastSent.set(root, hook_event_name);
       report(hook_event_name, root, withMessage);
@@ -187,6 +191,9 @@ export default Plugin.define({
           lastSent.set(root, "SessionStart");
           report("SessionStart", root);
         } else {
+          // Every terminal hears every session's deletion; only the one that
+          // reported this session ends it.
+          if (!lastSent.has(root)) return;
           lastSent.delete(root);
           report("SessionEnd", root);
         }
@@ -197,7 +204,7 @@ export default Plugin.define({
         if (!once(details?.id)) return;
         if (!sessionID) return;
         const root = rootOf(sessionID);
-        if (!ownedRoots().has(root)) return;
+        if (!reportsFor(root)) return;
         // Back to working unless the session is verifiably idle; a status API
         // we cannot read must not park a running agent.
         let status = "running";
