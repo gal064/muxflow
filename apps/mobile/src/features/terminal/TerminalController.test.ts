@@ -368,6 +368,19 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "dark" }, { t: "theme", scheme: "light" }, { t: "theme", scheme: "dark" }]);
   });
 
+  it("keeps a Codex pane's scheme while a resubscribe empties and refills the store", () => {
+    const h = harness();
+    h.store.getState().applySnapshot(topologySnapshot());
+    h.store.setState({ agents: { codex: codexAgent("%1") } });
+    h.store.getState().setTerminalScheme("light");
+    h.controller.start();
+    const { sessions, windows, panes, agents } = h.store.getState();
+    h.store.getState().clearHostState();
+    // A snapshot brings the panes and their agents back in one update.
+    h.store.setState({ sessions, windows, panes, agents });
+    expect(h.page).toEqual([{ t: "init", fontSize: 13, scheme: "light" }]);
+  });
+
   it("takes focus, inits the page, and after the first size sends claim window size → attach in that order", async () => {
     const h = harness();
     const t = await h.connect();

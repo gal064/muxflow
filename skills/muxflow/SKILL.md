@@ -15,7 +15,7 @@ state directory:
 
 Query `agents.json` for the record you need, not the whole file. Each entry in
 `.agents` has `adapter_id` (`claude-code`, `codex`, `pi`), `native_session_id`,
-`lifecycle` (1 working, 2 blocked on the user, 3 idle) and `route.pane_id`.
+`lifecycle` (1 working, 2 blocked on the user, 3 idle, 4 unknown: no hooks) and `route.pane_id`.
 
 ```sh
 jq '.agents[] | {adapter_id, native_session_id, lifecycle, pane: .route.pane_id, session: .route.session_name_fallback, window: .route.window_name_fallback}' ~/.local/state/muxflow/agents.json
@@ -37,7 +37,9 @@ mean the task is done.
 
 ## Start an agent
 
-Pass the task on the command line. In chat mode it is sent as the first message.
+Pass the task on the command line. In chat mode it is sent as the first message,
+and the terminal session it replaces may have begun on it too, so keep a
+task that has side effects safe to start twice.
 
 ```sh
 tmux new-window -d -P -F '#{pane_id}' -n <name> -c <dir> "claude 'TASK'"   # or: codex 'TASK'

@@ -217,6 +217,9 @@ export class TerminalController {
     this.options.page.send({ t: "init", fontSize: this.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE, scheme });
     // Codex starting or leaving the pane changes its scheme as much as the host's colors do.
     this.unsubscribeScheme = store.subscribe((state) => {
+      // Every subscribe empties the store before its snapshot refills it; a pane
+      // missing only for that moment keeps its scheme rather than flash dark.
+      if (!state.panes[this.paneId]) return;
       const next = paneTerminalScheme(state, this.paneId);
       if (next === scheme) return;
       scheme = next;
