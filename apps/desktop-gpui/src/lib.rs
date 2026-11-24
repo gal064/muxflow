@@ -52,6 +52,7 @@ pub mod features;
 pub mod files;
 pub mod fonts;
 pub mod git;
+pub mod host_restore;
 pub mod markdown;
 pub mod menus;
 pub mod notices;

@@ -942,7 +942,45 @@ impl SettingsDialog {
                         .child(hint(agent_command_hint(cx), cx)),
                 ),
         )
+        .child(self.host_restore_section(cx))
         .child(self.snooze_section(cx))
+    }
+
+    /// The host's own workspace-restore switch, in the host's section of the
+    /// Workspace tab. The host keeps this setting, so it is not a preference
+    /// and saves nothing locally: the row shows what the host says and asks
+    /// it to change.
+    fn host_restore_section(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let restore = cx
+            .try_global::<crate::host_restore::HostRestore>()
+            .cloned()
+            .unwrap_or_default();
+        let remembered = match restore.enabled {
+            None => "Ask the connected host about this once its link is up.".to_owned(),
+            Some(_) => match &restore.sessions_note {
+                Some(note) => note.clone(),
+                None => String::new(),
+            },
+        };
+        v_flex()
+            .gap(ui(12.))
+            .child(legend("Reopen after a tmux loss", cx))
+            .child(
+                v_flex()
+                    .gap(ui(5.))
+                    .child(
+                        Checkbox::new("settings-host-restore")
+                            .label("Reopen sessions when the tmux server dies")
+                            .checked(restore.enabled.unwrap_or(false))
+                            .disabled(restore.enabled.is_none() || restore.changing)
+                            .on_change(|on, _, cx| crate::host_restore::set_enabled(*on, cx)),
+                    )
+                    .child(hint(
+                        "The host remembers the sessions it has seen and the directory of every window, and recreates them when its tmux server comes back after dying — a reboot, a crash, a kill-server. A session you close yourself stays closed. While this is off the host remembers nothing.",
+                        cx,
+                    ))
+                    .children((!remembered.is_empty()).then(|| hint(remembered, cx))),
+            )
     }
 
     /// Snooze's wake times, its own section of the Workspace tab.

@@ -25,6 +25,7 @@ use desktop_core::{
         helper::{self, HelperInstallReport},
         history::{HistoryRequest, HistoryResponse, history_request},
         tmux_action,
+        workspace_restore::WorkspaceRestoreState,
     },
     incidents::{IncidentJournal, record_incident},
     platform::{self, EventSink},
@@ -133,6 +134,15 @@ pub trait TerminalBackend: Send + Sync {
         _command: AutomationCommand,
     ) -> BoxFuture<'static, Result<Value, String>> {
         futures::future::ready(Err("automations are unavailable here".to_owned())).boxed()
+    }
+    /// Read or move one host's workspace-restore switch
+    /// (`workspace_restore_request`).
+    fn workspace_restore_request(
+        &self,
+        _client_id: String,
+        _set_enabled: Option<bool>,
+    ) -> BoxFuture<'static, Result<WorkspaceRestoreState, String>> {
+        futures::future::ready(Err("workspace restore is unavailable here".to_owned())).boxed()
     }
     /// One session history request (`history_request`).
     fn history_request(
@@ -434,6 +444,22 @@ impl TerminalBackend for NativeBackend {
     ) -> BoxFuture<'static, Result<Value, String>> {
         let clients = self.clients.clone();
         spawned(async move { automation_request(client_id, command, &clients).await })
+    }
+
+    fn workspace_restore_request(
+        &self,
+        client_id: String,
+        set_enabled: Option<bool>,
+    ) -> BoxFuture<'static, Result<WorkspaceRestoreState, String>> {
+        let clients = self.clients.clone();
+        spawned(async move {
+            desktop_core::connection::workspace_restore::workspace_restore_request(
+                client_id,
+                set_enabled,
+                &clients,
+            )
+            .await
+        })
     }
 
     fn history_request(
