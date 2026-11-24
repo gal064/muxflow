@@ -7,3 +7,4 @@ Icon=@ICON@
 Terminal=false
 Categories=Development;IDE;
 StartupNotify=true
+StartupWMClass=dev.muxflow.desktop
