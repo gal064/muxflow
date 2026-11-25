@@ -152,7 +152,7 @@ fn read_linux_clipboard() -> Result<Option<Value>, String> {
     }
 }
 
-/// Files, then a PNG, then text — the order `read_from_linux_clipboard` uses.
+/// Files first, then `choose_paste`, as `read_from_linux_clipboard` does.
 #[cfg(target_os = "linux")]
 fn read_wayland_clipboard() -> Result<Option<Value>, String> {
     use serde_json::json;
@@ -179,18 +179,21 @@ fn read_wayland_clipboard() -> Result<Option<Value>, String> {
     let png_format = formats
         .iter()
         .find(|format| format.eq_ignore_ascii_case("image/png"));
-    if let Some(png_format) = png_format
-        && let Some(png) = read_wayland_offer(MimeType::Specific(png_format), MAX_NATIVE_PNG_BYTES)?
-    {
-        let staged = super::clipboard_staging::stage_clipboard_png(&png)?;
-        return Ok(Some(json!({ "kind": "image", "staged": staged })));
-    }
-
-    let Some(text) = read_wayland_offer(MimeType::Text, MAX_NATIVE_TEXT_BYTES)? else {
-        return Ok(None);
-    };
-    let text = String::from_utf8(text).map_err(|_| "native clipboard text is not UTF-8")?;
-    native_clipboard_text(text)
+    let paste = choose_paste(
+        &formats,
+        || match png_format {
+            Some(format) => read_wayland_offer(MimeType::Specific(format), MAX_NATIVE_PNG_BYTES),
+            None => Ok(None),
+        },
+        || {
+            read_wayland_offer(MimeType::Text, MAX_NATIVE_TEXT_BYTES)?
+                .map(|text| {
+                    String::from_utf8(text).map_err(|_| "native clipboard text is not UTF-8".into())
+                })
+                .transpose()
+        },
+    )?;
+    paste_payload(paste)
 }
 
 /// One offer's bytes, or `None` when the clipboard emptied or stopped offering
@@ -305,33 +308,32 @@ fn read_from_linux_clipboard(clipboard: &ClipboardContext) -> Result<Option<Valu
     let png_format = formats.iter().find(|format| {
         format.eq_ignore_ascii_case("image/png") || format.eq_ignore_ascii_case("png")
     });
-    if let Some(png_format) = png_format {
-        let png = clipboard
-            .get_buffer(png_format)
-            .map_err(|error| format!("read native clipboard PNG: {error}"))?;
-        let staged = super::clipboard_staging::stage_clipboard_png(&png)?;
-        return Ok(Some(json!({ "kind": "image", "staged": staged })));
-    }
-
-    if !clipboard.has(ContentFormat::Text) {
-        return Ok(None);
-    }
-    let text = clipboard
-        .get_text()
-        .map_err(|error| format!("read native clipboard text: {error}"))?;
-    native_clipboard_text(text)
+    let paste = choose_paste(
+        &formats,
+        || match png_format {
+            Some(format) => clipboard
+                .get_buffer(format)
+                .map(Some)
+                .map_err(|error| format!("read native clipboard PNG: {error}")),
+            None => Ok(None),
+        },
+        || {
+            if !clipboard.has(ContentFormat::Text) {
+                return Ok(None);
+            }
+            clipboard
+                .get_text()
+                .map(Some)
+                .map_err(|error| format!("read native clipboard text: {error}"))
+        },
+    )?;
+    paste_payload(paste)
 }
 
 #[cfg(target_os = "macos")]
 fn read_macos_clipboard() -> Result<Option<Value>, String> {
-    use objc2_app_kit::{
-        NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL,
-        NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
-    };
-    use objc2_foundation::NSDictionary;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString};
     use serde_json::json;
-
-    const MAX_NATIVE_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
     let pasteboard = NSPasteboard::generalPasteboard();
     if let Some(items) = pasteboard.pasteboardItems() {
@@ -352,52 +354,157 @@ fn read_macos_clipboard() -> Result<Option<Value>, String> {
         }
     }
 
-    if let Some(png) = pasteboard.dataForType(unsafe { NSPasteboardTypePNG }) {
-        let bytes = png.to_vec();
-        if bytes.len() > MAX_NATIVE_IMAGE_BYTES {
+    let formats: Vec<String> = pasteboard
+        .types()
+        .map(|types| types.iter().map(|format| format.to_string()).collect())
+        .unwrap_or_default();
+    let paste = choose_paste(
+        &formats,
+        || macos_clipboard_png(&pasteboard),
+        || {
+            Ok(pasteboard
+                .stringForType(unsafe { NSPasteboardTypeString })
+                .map(|text| text.to_string()))
+        },
+    )?;
+    paste_payload(paste)
+}
+
+/// The pasteboard's image as PNG bytes: its PNG flavor, else its TIFF flavor
+/// re-encoded. `None` when neither holds any bytes — Numbers offers both
+/// flavors, empty, next to the cells' text.
+#[cfg(target_os = "macos")]
+fn macos_clipboard_png(
+    pasteboard: &objc2_app_kit::NSPasteboard,
+) -> Result<Option<Vec<u8>>, String> {
+    use objc2_app_kit::{
+        NSBitmapImageFileType, NSBitmapImageRep, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
+    };
+    use objc2_foundation::NSDictionary;
+
+    const MAX_NATIVE_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
+    if let Some(png) = pasteboard
+        .dataForType(unsafe { NSPasteboardTypePNG })
+        .filter(|png| !png.is_empty())
+    {
+        if png.length() > MAX_NATIVE_IMAGE_BYTES {
             return Err("native clipboard image exceeds 32 MiB decode bound".into());
         }
-        let staged = super::clipboard_staging::stage_clipboard_png(&bytes)?;
-        return Ok(Some(json!({ "kind": "image", "staged": staged })));
+        return Ok(Some(png.to_vec()));
     }
 
-    if let Some(tiff) = pasteboard.dataForType(unsafe { NSPasteboardTypeTIFF }) {
-        if tiff.length() > MAX_NATIVE_IMAGE_BYTES {
-            return Err("native clipboard TIFF exceeds 32 MiB decode bound".into());
-        }
-        let image = NSBitmapImageRep::imageRepWithData(&tiff)
-            .ok_or("native clipboard TIFF could not be decoded")?;
-        let width = u64::try_from(image.pixelsWide()).unwrap_or(u64::MAX);
-        let height = u64::try_from(image.pixelsHigh()).unwrap_or(u64::MAX);
-        if width == 0
-            || height == 0
-            || width > 8_192
-            || height > 8_192
-            || width.saturating_mul(height) > 16_777_216
-        {
-            return Err("clipboard image exceeds the 8192px or 16,777,216-pixel limit".into());
-        }
-        let properties = NSDictionary::new();
-        let png = unsafe {
-            image.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
-        }
-        .ok_or("native clipboard TIFF could not be encoded as PNG")?;
-        let bytes = png.to_vec();
-        if bytes.len() > MAX_NATIVE_IMAGE_BYTES {
-            return Err("encoded native clipboard PNG exceeds 32 MiB bridge bound".into());
-        }
-        let staged = super::clipboard_staging::stage_clipboard_png(&bytes)?;
-        return Ok(Some(json!({ "kind": "image", "staged": staged })));
-    }
-
-    // Plain text is the last rung, so a copied file or image still wins. Without
-    // it the webview would have to fall back to `navigator.clipboard`, which
-    // WebKit refuses for content the page did not write itself — that refusal is
-    // M10-E054: pasting from any other application silently did nothing.
-    let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) else {
+    let Some(tiff) = pasteboard
+        .dataForType(unsafe { NSPasteboardTypeTIFF })
+        .filter(|tiff| !tiff.is_empty())
+    else {
         return Ok(None);
     };
-    native_clipboard_text(text.to_string())
+    if tiff.length() > MAX_NATIVE_IMAGE_BYTES {
+        return Err("native clipboard TIFF exceeds 32 MiB decode bound".into());
+    }
+    let image = NSBitmapImageRep::imageRepWithData(&tiff)
+        .ok_or("native clipboard TIFF could not be decoded")?;
+    let width = u64::try_from(image.pixelsWide()).unwrap_or(u64::MAX);
+    let height = u64::try_from(image.pixelsHigh()).unwrap_or(u64::MAX);
+    if width == 0
+        || height == 0
+        || width > 8_192
+        || height > 8_192
+        || width.saturating_mul(height) > 16_777_216
+    {
+        return Err("clipboard image exceeds the 8192px or 16,777,216-pixel limit".into());
+    }
+    let properties = NSDictionary::new();
+    let png = unsafe {
+        image.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+    }
+    .ok_or("native clipboard TIFF could not be encoded as PNG")?;
+    let bytes = png.to_vec();
+    if bytes.len() > MAX_NATIVE_IMAGE_BYTES {
+        return Err("encoded native clipboard PNG exceeds 32 MiB bridge bound".into());
+    }
+    Ok(Some(bytes))
+}
+
+/// What a paste takes from the clipboard once copied files are ruled out.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum Paste {
+    /// PNG bytes, ready to stage.
+    Image(Vec<u8>),
+    Text(String),
+}
+
+/// Flavors only a document or spreadsheet app writes. With one present, an
+/// image on the clipboard is a rendering of the copied text rather than the
+/// thing the user copied. HTML and RTFD are deliberately absent: a browser's
+/// Copy Image writes an `<img>` tag as HTML next to the picture, and Safari's
+/// writes RTFD with the image's URL as plain text.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+const DOCUMENT_FORMATS: [&str; 6] = [
+    "public.rtf",
+    "com.adobe.pdf",
+    "text/rtf",
+    "text/richtext",
+    "application/rtf",
+    "application/pdf",
+];
+
+/// Choose between the clipboard's image and its text.
+///
+/// A copy from a document or spreadsheet app (Numbers, Excel, Word,
+/// LibreOffice) carries the selection's text together with a picture of it,
+/// and the user means the text. Anything else that holds an image, such as a
+/// screenshot or a browser's Copy Image, pastes the image. An empty image
+/// counts as none: Numbers offers 0-byte PNG and TIFF flavors.
+///
+/// `read_image` yields the image as PNG and `read_text` the plain text. Each
+/// is called at most once, and only when the choice needs it.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn choose_paste(
+    formats: impl IntoIterator<Item = impl AsRef<str>>,
+    read_image: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
+    read_text: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<Paste>, String> {
+    let document = formats.into_iter().any(|format| {
+        DOCUMENT_FORMATS
+            .iter()
+            .any(|document| format.as_ref().eq_ignore_ascii_case(document))
+    });
+    let image = |read: Result<Option<Vec<u8>>, String>| {
+        read.map(|png| png.filter(|png| !png.is_empty()).map(Paste::Image))
+    };
+    if document {
+        let text = read_text()?;
+        // U+FFFC stands in for an embedded object: an image copied out of a
+        // document on its own comes with only that as its text.
+        let has_words = text
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|c| !c.is_whitespace() && c != '\u{FFFC}'));
+        if has_words {
+            return Ok(text.map(Paste::Text));
+        }
+        return Ok(image(read_image())?.or(text.map(Paste::Text)));
+    }
+    match image(read_image())? {
+        Some(image) => Ok(Some(image)),
+        None => Ok(read_text()?.map(Paste::Text)),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn paste_payload(paste: Option<Paste>) -> Result<Option<Value>, String> {
+    match paste {
+        Some(Paste::Image(png)) => {
+            let staged = super::clipboard_staging::stage_clipboard_png(&png)?;
+            Ok(Some(
+                serde_json::json!({ "kind": "image", "staged": staged }),
+            ))
+        }
+        Some(Paste::Text(text)) => native_clipboard_text(text),
+        None => Ok(None),
+    }
 }
 
 /// The `file://` URL of the thing a pasteboard entry actually points at, as a
@@ -490,6 +597,163 @@ mod tests {
         let oversized = "a".repeat(tmux_control::MAX_INPUT_REQUEST_BYTES + 1);
         let error = native_clipboard_text(oversized).unwrap_err();
         assert!(error.contains("terminal input bound"), "{error}");
+    }
+
+    mod choosing_a_paste {
+        use super::super::{Paste, choose_paste};
+
+        const PNG: &[u8] = b"\x89PNG\r\n\x1a\nrest";
+
+        fn text(text: &str) -> impl FnOnce() -> Result<Option<String>, String> {
+            let text = text.to_owned();
+            move || Ok(Some(text))
+        }
+
+        fn image(bytes: &[u8]) -> impl FnOnce() -> Result<Option<Vec<u8>>, String> {
+            let bytes = bytes.to_vec();
+            move || Ok(Some(bytes))
+        }
+
+        /// The flavors Numbers put on the pasteboard for an 11-cell range, as
+        /// captured on a Mac (iWork state markers left out): the PNG and TIFF
+        /// are 0 bytes.
+        const NUMBERS_RANGE: &[&str] = &[
+            "com.apple.flat-rtfd",
+            "NeXT RTFD pasteboard type",
+            "com.adobe.pdf",
+            "Apple PDF pasteboard type",
+            "public.utf16-external-plain-text",
+            "public.utf8-plain-text",
+            "NSStringPboardType",
+            "public.png",
+            "Apple PNG pasteboard type",
+            "com.apple.iWork.TSPDescription",
+            "com.apple.iWork.TSPNativeData",
+            "public.rtf",
+            "public.html",
+            "public.tiff",
+            "NeXT TIFF v4.0 pasteboard type",
+        ];
+
+        #[test]
+        fn a_numbers_range_pastes_its_cells_text() {
+            let paste = choose_paste(
+                NUMBERS_RANGE,
+                image(&[]),
+                text("Checksum Internal\nSummation"),
+            );
+            assert_eq!(
+                paste.unwrap(),
+                Some(Paste::Text("Checksum Internal\nSummation".into()))
+            );
+        }
+
+        /// Excel, Word and LibreOffice render the selection as a real image;
+        /// the text still wins, and the image is never read.
+        #[test]
+        fn a_document_copy_with_a_real_image_pastes_text() {
+            for formats in [
+                &[
+                    "public.html",
+                    "public.rtf",
+                    "public.png",
+                    "public.utf8-plain-text",
+                ][..],
+                &[
+                    "text/html",
+                    "TEXT/RTF",
+                    "image/png",
+                    "text/plain;charset=utf-8",
+                ],
+                &["com.adobe.pdf", "public.tiff", "public.utf8-plain-text"],
+            ] {
+                let paste = choose_paste(formats, || panic!("image read"), text("a\tb"));
+                assert_eq!(
+                    paste.unwrap(),
+                    Some(Paste::Text("a\tb".into())),
+                    "{formats:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_screenshot_pastes_as_an_image_without_reading_text() {
+            let paste = choose_paste(["public.png"], image(PNG), || panic!("text read"));
+            assert_eq!(paste.unwrap(), Some(Paste::Image(PNG.to_vec())));
+        }
+
+        /// A browser's Copy Image adds an `<img>` tag as HTML, and may add the
+        /// URL as text. HTML alone does not make it a document.
+        #[test]
+        fn a_browser_image_copy_pastes_as_an_image() {
+            let formats = ["public.html", "public.png", "public.utf8-plain-text"];
+            let paste = choose_paste(formats, image(PNG), || panic!("text read"));
+            assert_eq!(paste.unwrap(), Some(Paste::Image(PNG.to_vec())));
+        }
+
+        /// Safari's Copy Image writes RTFD, and the image's URL as plain
+        /// text. RTFD does not make it a document.
+        #[test]
+        fn a_safari_image_copy_pastes_as_an_image() {
+            let formats = [
+                "public.tiff",
+                "public.url",
+                "public.utf8-plain-text",
+                "com.apple.flat-rtfd",
+            ];
+            let paste = choose_paste(formats, image(PNG), || panic!("text read"));
+            assert_eq!(paste.unwrap(), Some(Paste::Image(PNG.to_vec())));
+        }
+
+        /// Preview writes a TIFF and a PDF of the selection but no text.
+        #[test]
+        fn a_preview_image_copy_pastes_as_an_image() {
+            let paste = choose_paste(["public.tiff", "com.adobe.pdf"], image(PNG), || Ok(None));
+            assert_eq!(paste.unwrap(), Some(Paste::Image(PNG.to_vec())));
+        }
+
+        /// An image copied alone out of a document carries rich text whose
+        /// only plain text is the object placeholder.
+        #[test]
+        fn an_image_copied_alone_from_a_document_pastes_as_an_image() {
+            let formats = [
+                "com.apple.flat-rtfd",
+                "public.rtf",
+                "public.tiff",
+                "public.utf8-plain-text",
+            ];
+            let paste = choose_paste(formats, image(PNG), text("\u{FFFC}\n"));
+            assert_eq!(paste.unwrap(), Some(Paste::Image(PNG.to_vec())));
+        }
+
+        /// The Numbers bug without the document flavors: an empty image offer
+        /// is no image, on macOS, Wayland and X11 alike.
+        #[test]
+        fn an_empty_image_falls_through_to_text() {
+            for formats in [
+                ["public.png", "public.utf8-plain-text"],
+                ["image/png", "text/plain"],
+            ] {
+                let paste = choose_paste(formats, image(&[]), text("cells"));
+                assert_eq!(paste.unwrap(), Some(Paste::Text("cells".into())));
+            }
+        }
+
+        #[test]
+        fn an_empty_image_and_no_text_is_nothing() {
+            let paste = choose_paste(["image/png"], image(&[]), || Ok(None));
+            assert_eq!(paste.unwrap(), None);
+        }
+
+        #[test]
+        fn a_failed_image_read_is_reported_not_skipped() {
+            let paste = choose_paste(
+                ["image/png", "text/plain"],
+                || Err("read native clipboard PNG: gone".into()),
+                || panic!("text read"),
+            );
+            assert_eq!(paste.unwrap_err(), "read native clipboard PNG: gone");
+        }
     }
 
     #[test]
