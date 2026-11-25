@@ -59,12 +59,14 @@ pub(super) async fn handle(
                 v1::ChatAction::Fork,
                 v1::ChatAction::SideFork,
                 v1::ChatAction::SetMode,
+                v1::ChatAction::End,
             ]
             .iter()
             .any(|action| chat.action == i32::from(*action));
             match attached {
                 // A fork reads the agent's record, runs tmux and reads the
-                // agent's process, and a change of mode is synced to disk:
+                // agent's process, an end waits for the agent to go, and a
+                // change of mode is synced to disk:
                 // off the runtime's workers, as an agent operation is, so a
                 // stalled disk parks only the blocking pool.
                 Ok(attached) if blocks => {
@@ -305,6 +307,9 @@ fn dispatch(
             task_id: request.task_id,
         }),
         Action::LoadOlder => runtime.load_older(&key, &adapter_id, &request.older_cursor),
+        // The pane's own tag says whether it is a chat: the topology this
+        // connection saw may be from before it became one.
+        Action::End => runtime.end(&key).map(|()| v1::ChatResponse::default()),
         Action::SideFork => {
             let forked_pane_id = side_fork(runtime, &key, &adapter_id, &request.text, &title)?;
             // The topology actor publishes the server as it is with the fork.

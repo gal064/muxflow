@@ -50,6 +50,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the last output of an agent that has ended is waited for. A
 /// process it started may hold its output open for as long as it likes.
 const LAST_WORDS_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long an agent asked to stop has to end by itself, and end what it
+/// started, before it is killed.
+const STOP_WAIT: Duration = Duration::from_secs(3);
 const USAGE: &str = "usage: muxflow-host chat-pipe [--env FILE] [--socket PATH] -- <command>";
 
 struct Options {
@@ -194,6 +197,21 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
+/// Asks the agent to stop, as closing a terminal would, so that it ends the
+/// commands it started; kills it once [`STOP_WAIT`] has passed.
+async fn stop(child: &mut tokio::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // SAFETY: kill(2) takes any pid; this one is the child's, not yet
+        // reaped, since `id` still answers.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    if let Ok(status) = tokio::time::timeout(STOP_WAIT, child.wait()).await {
+        return status;
+    }
+    let _ = child.start_kill();
+    child.wait().await
+}
+
 /// Runs a child that talks to the daemon by itself, until it ends or the pane
 /// closes. Returns the exit code to leave with.
 async fn attend(command: std::process::Command) -> anyhow::Result<i32> {
@@ -209,8 +227,7 @@ async fn attend(command: std::process::Command) -> anyhow::Result<i32> {
         _ = hangup.recv() => {}
         _ = terminate.recv() => {}
     }
-    let _ = child.start_kill();
-    let status = child.wait().await.context("wait for the chat agent")?;
+    let status = stop(&mut child).await.context("wait for the chat agent")?;
     Ok(exit_code(status))
 }
 
@@ -374,10 +391,7 @@ async fn bridge(command: std::process::Command, socket: &Path) -> anyhow::Result
         }
         // The agent's output ended, or the pane is closing: either way it
         // goes.
-        None => {
-            let _ = child.start_kill();
-            child.wait().await
-        }
+        None => stop(&mut child).await,
     };
     drop(to_child);
     writer.abort();
@@ -544,5 +558,32 @@ mod tests {
             .await
             .expect("the pipe waited for a process that was not the agent");
         assert_eq!(code.unwrap(), 3);
+    }
+
+    /// An agent told to stop is asked, not killed: it ends the way it chooses.
+    #[tokio::test]
+    async fn an_agent_told_to_stop_ends_by_itself() {
+        let mut child = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "trap 'exit 7' TERM; echo ready; while :; do sleep 0.05; done",
+            ])
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut ready = [0_u8; 6];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut ready)
+            .await
+            .unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(2), stop(&mut child))
+            .await
+            .expect("the agent was not asked to stop")
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 }

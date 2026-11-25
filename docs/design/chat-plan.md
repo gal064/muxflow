@@ -203,6 +203,12 @@ What differs from the plan above:
   runs, `chat-pipe` turns off echo and the signal keys on the pane's terminal,
   and throws away what was typed when the agent ends, so the shell that follows
   runs none of it.
+- **Leaving a chat.** Ctrl+C in a chat stops the agent while it works, as Stop
+  does, and a second Ctrl+C within 2 s sends `CHAT_ACTION_END`; text selected
+  in the composer is copied instead. The host sends `SIGTERM` to the pane's
+  `chat-pipe`, which asks the agent to stop and kills it 3 s later, and once
+  the pipe has gone it untags the pane: the shell that follows is the
+  terminal the desktop draws in its place.
 - **The environment** is written to a file only the owner can read, in the
   runtime directory, and `chat-pipe` deletes it as it reads it. A chat that
   never starts has its file removed when the daemon gives up on it or sweeps

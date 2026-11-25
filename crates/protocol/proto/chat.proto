@@ -51,6 +51,9 @@ enum ChatAction {
   // For a terminal pane, not a chat; an empty list when the pane runs no agent
   // whose commands the host can read.
   CHAT_ACTION_TERMINAL_COMMANDS = 13;
+  // Ends the chat's agent. The pane becomes a terminal again, running the
+  // user's shell, and stops being a chat.
+  CHAT_ACTION_END = 14;
 }
 
 enum ChatPermissionMode {

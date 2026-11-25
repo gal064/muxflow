@@ -8,11 +8,15 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
 
-use super::provider::Launch;
+use super::{
+    processes::Processes,
+    provider::{ChatError, Launch},
+};
 use crate::service::{snapshot::tmux_command, tmux_actions::escaped_format_literal};
 
 /// The chat adapter's id. Its presence is what makes a pane a chat.
@@ -165,6 +169,61 @@ pub(super) fn set(pane_id: &str, options: &[(&str, &str)]) -> anyhow::Result<()>
 pub(super) fn untag(pane_id: &str) {
     set_title(pane_id, "");
     let _ = set(pane_id, &TAG_OPTIONS.map(|name| (name, "")));
+}
+
+/// Ends the chat in `pane_id` (`CHAT_ACTION_END`). Its `chat-pipe` is told to
+/// stop, which stops the agent and gives the terminal back, and the pane's
+/// line goes on to the user's shell. Once the pipe has gone the pane is a
+/// terminal again. Blocks for as long as that takes, up to `wait`.
+pub(super) fn end(
+    pane_id: &str,
+    processes: &impl Processes,
+    wait: Duration,
+) -> Result<(), ChatError> {
+    let tag = read(pane_id)
+        .filter(|tag| !tag.adapter.is_empty())
+        .ok_or_else(|| ChatError::new("chat_unavailable", "This pane is not running a chat."))?;
+    let (pipe, started) = chat_pipe(processes, tag.pid)
+        .ok_or_else(|| ChatError::new("chat_unavailable", "This chat's agent is not running."))?;
+    if let Ok(pid) = libc::pid_t::try_from(pipe) {
+        // SAFETY: kill(2) takes any pid; this one was just seen beneath the
+        // pane, with its start stamp, which the wait below checks.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    let deadline = Instant::now() + wait;
+    while processes.start_stamp(pipe) == Some(started) {
+        if Instant::now() >= deadline {
+            return Err(ChatError::new(
+                "chat_end_failed",
+                "The agent did not stop. Try again.",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    match read(pane_id) {
+        Some(now) if now.socket == tag.socket => untag(pane_id),
+        // Made a chat anew meanwhile: that one is not the chat that was ended.
+        Some(now) if !now.adapter.is_empty() => {
+            return Err(ChatError::new(
+                "chat_unavailable",
+                "This pane is running another chat now.",
+            ));
+        }
+        // Already a terminal, or closed.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The `chat-pipe` the pane's own process `pane_pid` runs, and its start
+/// stamp: what [`shell_line`] starts first.
+fn chat_pipe(processes: &impl Processes, pane_pid: u32) -> Option<(u32, u64)> {
+    processes.children(pane_pid).into_iter().find_map(|pid| {
+        let argv = processes.argv(pid)?;
+        (argv.get(1).map(String::as_str) == Some("chat-pipe"))
+            .then(|| processes.start_stamp(pid).map(|started| (pid, started)))
+            .flatten()
+    })
 }
 
 /// Gives the pane a title, as an agent in a terminal gives its own: a
@@ -371,6 +430,43 @@ pub(super) fn sweep(panes: &[tmux_control::Pane]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pipe_an_end_stops_is_the_one_the_panes_line_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let process = |pid: u32, argv: &[&str], children: &[u32]| {
+            let directory = root.path().join(pid.to_string());
+            let task = directory.join("task").join(pid.to_string());
+            std::fs::create_dir_all(&task).unwrap();
+            let mut cmdline = argv.join("\0");
+            cmdline.push('\0');
+            std::fs::write(directory.join("cmdline"), cmdline).unwrap();
+            let children: Vec<String> = children.iter().map(u32::to_string).collect();
+            std::fs::write(task.join("children"), children.join(" ")).unwrap();
+            let fields = ["0"; 18].join(" ");
+            std::fs::write(
+                directory.join("stat"),
+                format!("{pid} (x) S {fields} {} 0 0\n", pid * 100),
+            )
+            .unwrap();
+        };
+        process(10, &["/bin/sh", "-c", "line"], &[11, 12]);
+        process(11, &["/opt/muxflow-host", "chat-pipes"], &[]);
+        process(
+            12,
+            &["/opt/muxflow-host", "chat-pipe", "--", "claude"],
+            &[13],
+        );
+        process(13, &["claude"], &[]);
+        process(20, &["-zsh"], &[21]);
+        process(21, &["claude"], &[]);
+
+        let processes = super::super::processes::Proc(root.path());
+        assert_eq!(chat_pipe(&processes, 10), Some((12, 1200)));
+        // The pipe is the pane's process's child, never one further down.
+        assert_eq!(chat_pipe(&processes, 12), None);
+        assert_eq!(chat_pipe(&processes, 20), None);
+    }
 
     #[test]
     fn a_launch_survives_being_a_pane_option() {
