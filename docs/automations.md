@@ -276,13 +276,13 @@ The parser is hand-written and adds no dependencies.
 
 ### The automation workspace
 
-- The helper looks for the session tagged with the session option
-  `@muxflow-automation-workspace` set to `1`, so renaming the session doesn't
-  break anything.
-- If there is none, it creates one named `automation`, or `automation-2`, … if
-  an untagged session already has that name. It uses the same session setup as
-  `CreateSession` (`configure_new_session`), and the new session's first tab
-  becomes the run's tab.
+- Each run opens a new tab in the session named `automation` if it exists.
+  The helper marks that session with `@muxflow-automation-workspace` so it
+  can keep using the workspace if you rename it.
+- If both the named session and a previously tagged session exist, the tag
+  moves to `automation`. Existing tabs stay where they are.
+- If neither session exists, the helper creates `automation` with the same
+  setup as `CreateSession` and uses its first tab for the run.
 - When the helper is what starts the tmux server, the session gets the
   embedded-Codex marker the same way `CreateSession` sets it.
 - All tmux calls go through `snapshot::tmux_command()`, so they use the same
@@ -395,6 +395,7 @@ for that automation:
 
 - considers only tabs still alone in the automation workspace: a tab the user
   split or moved to another workspace is theirs now and is never closed
+- preserves run tabs already present when the helper adopts a workspace
 - keeps the `keepTabs` highest run numbers
 - kills an older window only if its run is final, past `maxRuntimeMinutes`, or
   has no record at all

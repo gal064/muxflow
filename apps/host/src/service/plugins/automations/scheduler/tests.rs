@@ -199,6 +199,55 @@ fn due_runs_start_finish_and_old_tabs_close() {
 }
 
 #[test]
+fn adoption_preserves_a_run_tab_moved_in_before_the_workspace_was_adopted() {
+    let harness = Harness::new();
+    let tmux = &harness.fixture;
+    tmux.run(&["new-session", "-d", "-s", "automation-2", "-n", "saved"]);
+    tmux.run(&[
+        "set-option",
+        "-t",
+        "automation-2:",
+        launch::WORKSPACE_TAG,
+        "1",
+    ]);
+    tmux.run(&[
+        "set-option",
+        "-w",
+        "-t",
+        "automation-2:saved",
+        launch::AUTOMATION_TAG,
+        "quick",
+    ]);
+    tmux.run(&[
+        "set-option",
+        "-w",
+        "-t",
+        "automation-2:saved",
+        launch::RUN_TAG,
+        "1",
+    ]);
+    tmux.run(&["new-session", "-d", "-s", "automation", "-n", "shell"]);
+    tmux.run(&[
+        "move-window",
+        "-s",
+        "automation-2:saved",
+        "-t",
+        "automation:",
+    ]);
+
+    let mut quick = automation("quick", &harness.work_dir(), "true");
+    quick["keepTabs"] = 1.into();
+    harness.write(serde_json::json!([quick]));
+    let mut state = State::new(harness.paths(), harness.clock.get());
+    harness.tick(&mut state, &utc_minute);
+    for _ in 0..2 {
+        harness.advance(60);
+        harness.tick(&mut state, &utc_minute);
+    }
+    assert_eq!(harness.windows(), ["shell", "saved", "quick #3"]);
+}
+
+#[test]
 fn a_run_still_working_skips_the_next_until_its_limit() {
     let harness = Harness::new();
     let work = harness.work_dir();
