@@ -7,7 +7,7 @@ use std::sync::{Mutex, PoisonError};
 use tmux_agent_protocol::v1;
 
 use super::{
-    launch::{AUTOMATION_TAG, RUN_TAG, Tmux, WORKSPACE_TAG},
+    launch::{AUTOMATION_TAG, RUN_SESSION_TAG, RUN_TAG, Tmux, WORKSPACE_TAG},
     store::{LAST_MESSAGE_MAX_BYTES, Run, Status, truncated},
 };
 
@@ -35,7 +35,7 @@ pub(super) fn observe(tmux: &Tmux) -> Option<Vec<Pane>> {
             "-a",
             "-F",
             &format!(
-                "#{{window_id}}\t#{{pane_id}}\t#{{pane_pid}}\t#{{{AUTOMATION_TAG}}}\t#{{{RUN_TAG}}}\t#{{&&:#{{{WORKSPACE_TAG}}},#{{==:#{{window_panes}},1}}}}"
+                "#{{window_id}}\t#{{pane_id}}\t#{{pane_pid}}\t#{{{AUTOMATION_TAG}}}\t#{{{RUN_TAG}}}\t#{{window_panes}}\t#{{session_id}}\t#{{{WORKSPACE_TAG}}}\t#{{{RUN_SESSION_TAG}}}"
             ),
         ])
         .output()
@@ -55,7 +55,10 @@ pub(super) fn observe(tmux: &Tmux) -> Option<Vec<Pane>> {
                     pane_pid,
                     automation_id,
                     run_number,
-                    untouched,
+                    pane_count,
+                    session,
+                    workspace_tag,
+                    run_session,
                 ] = fields.as_slice()
                 else {
                     return None;
@@ -66,7 +69,16 @@ pub(super) fn observe(tmux: &Tmux) -> Option<Vec<Pane>> {
                     pane_pid: pane_pid.parse().unwrap_or_default(),
                     automation_id: (*automation_id).to_owned(),
                     run_number: run_number.parse().ok(),
-                    untouched: *untouched == "1",
+                    untouched: *pane_count == "1"
+                        && match *run_session {
+                            // Runs predating the session stamp belong to a helper-created
+                            // workspace. Adoption must never claim those tabs for pruning.
+                            "" => *workspace_tag == "1",
+                            origin => {
+                                origin == *session
+                                    && (*workspace_tag == "1" || workspace_tag == session)
+                            }
+                        },
                 })
             })
             .collect(),

@@ -27,6 +27,7 @@ const CODEX_COMMAND: &str = "codex --approve-for-me";
 /// Marks the one session runs open in. A tag rather than a name, so renaming
 /// the workspace does not make the helper create another.
 pub(super) const WORKSPACE_TAG: &str = "@muxflow-automation-workspace";
+pub(super) const RUN_SESSION_TAG: &str = "@muxflow-automation-run-session";
 const WORKSPACE_NAME: &str = "automation";
 pub(super) const AUTOMATION_TAG: &str = "@muxflow-automation";
 pub(super) const RUN_TAG: &str = "@muxflow-automation-run";
@@ -107,24 +108,26 @@ pub(super) fn launch(
 
     // A tab that cannot be named and typed into would sit idle and untagged,
     // where retention never finds it.
-    if let Err(error) = tag_and_type(tmux, definition, &window_id, &pane_id, &name, number, &line) {
-        if let Ok(mut kill) = tmux() {
-            let _ = kill.args(["kill-window", "-t", &window_id]).output();
-        }
-        return Err(error);
-    }
-    Ok(Launched {
+    let launched = Launched {
         session_id,
         window_id,
         pane_id,
-    })
+    };
+    if let Err(error) = tag_and_type(tmux, definition, &launched, &name, number, &line) {
+        if let Ok(mut kill) = tmux() {
+            let _ = kill
+                .args(["kill-window", "-t", &launched.window_id])
+                .output();
+        }
+        return Err(error);
+    }
+    Ok(launched)
 }
 
 fn tag_and_type(
     tmux: &Tmux,
     definition: &Definition,
-    window_id: &str,
-    pane_id: &str,
+    launched: &Launched,
     name: &str,
     number: u32,
     line: &str,
@@ -132,8 +135,11 @@ fn tag_and_type(
     let number = number.to_string();
     let escaped_name = escaped_format_literal(name);
     let mut tag = tmux()?;
+    let window_id = launched.window_id.as_str();
+    let pane_id = launched.pane_id.as_str();
     tag.args(["rename-window", "-t", window_id, &escaped_name]);
     for (option, value) in [
+        (RUN_SESSION_TAG, launched.session_id.as_str()),
         (AUTOMATION_TAG, definition.id.as_str()),
         (RUN_TAG, number.as_str()),
         (NAME_LOCK_OPTION, "1"),
@@ -183,14 +189,15 @@ fn ensure_workspace(
         if name == WORKSPACE_NAME {
             named = Some(id);
         }
-        if tag == "1" {
+        if tag == "1" || tag == id {
             tagged = Some(id);
         }
     }
     if let Some(id) = named {
         if tagged != Some(id) {
             let mut tag = tmux()?;
-            tag.args(["set-option", "-t", id, WORKSPACE_TAG, "1"]);
+            // Only runs launched here may be pruned from an adopted workspace.
+            tag.args(["set-option", "-t", id, WORKSPACE_TAG, id]);
             if let Some(previous) = tagged {
                 tag.args([";", "set-option", "-u", "-t", previous, WORKSPACE_TAG]);
             }
@@ -360,7 +367,7 @@ mod tests {
         assert_eq!(fixture.display("=automation:", "#{session_windows}"), "2");
         assert_eq!(
             fixture.display("=automation:", "#{@muxflow-automation-workspace}"),
-            "1"
+            launched.session_id
         );
     }
 
