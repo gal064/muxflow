@@ -81,6 +81,9 @@ pub enum Command {
     },
     /// A resync restored ordering but not content.
     ReseedMounted(String),
+    /// A hidden pane's kept screen no longer describes it, as when its
+    /// process was replaced: its next mount starts from a seed.
+    Forget(String),
     /// The host's server identity changed: nothing kept here describes it.
     ClearTerminalState,
     Stop,
@@ -185,6 +188,7 @@ impl Engine {
                     .hub
                     .reseed_subscribed_panes(&reason, &mut self.shared.hub_out);
             }
+            Command::Forget(pane_id) => self.drop_retained(&pane_id),
             Command::ClearTerminalState => {
                 self.clear_retained();
                 self.shared

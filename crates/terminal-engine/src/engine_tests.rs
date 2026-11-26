@@ -1250,3 +1250,19 @@ fn drops_a_page_in_flight_when_output_makes_the_view_outdated() {
     assert_eq!(superseded.len(), 1);
     assert_eq!(superseded[0]["reason"], "screenGone");
 }
+
+#[test]
+fn a_forgotten_screen_is_not_kept_for_the_next_mount() {
+    let mut host = Host::connected();
+    host.shown_pane(1, "the agent's screen");
+    host.unmount();
+    assert!(host.visibility().last().unwrap().holds_snapshot);
+    host.answer_last_visibility(Ok(()));
+    host.command(Command::Forget(PANE.into()));
+    assert_eq!(host.engine.retained_screen_count(), 0);
+    // The reveal asks the host for a seed rather than for what came since.
+    host.mount();
+    let reveal = *host.visibility().last().unwrap();
+    assert!(reveal.visible);
+    assert!(!reveal.holds_snapshot);
+}

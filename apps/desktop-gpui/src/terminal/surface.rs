@@ -1,6 +1,7 @@
 //! The tiled area that holds a window's panes, measures itself and tells tmux
 //! how big a client that is worth. Port of `app/TerminalWorkspaceSurface.tsx`.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -158,6 +159,8 @@ pub struct TerminalSurface {
     take_timer: Option<Task<()>>,
     pending_focus: bool,
     active_pane: Option<String>,
+    /// The panes of the host on screen that are chats, as last synced.
+    chat_panes: HashSet<String>,
     terminal_visible: bool,
     /// Where the surface's top-left corner is in the window, for hit-testing
     /// a grabbed pane's drop.
@@ -248,6 +251,7 @@ impl TerminalSurface {
                 take_timer: None,
                 pending_focus: false,
                 active_pane: None,
+                chat_panes: HashSet::new(),
                 terminal_visible: true,
                 origin: Point::default(),
                 divider: None,
@@ -318,6 +322,15 @@ impl TerminalSurface {
             }
             None => (None, Vec::new()),
         };
+        let chat_panes: HashSet<String> = active.as_ref().map_or_else(HashSet::new, |link| {
+            link.host_state
+                .snapshot
+                .panes
+                .iter()
+                .filter(|pane| chat::is_chat(pane))
+                .map(|pane| pane.id.clone())
+                .collect()
+        });
         let unchanged_link = self.link.as_ref().map(Entity::entity_id)
             == link_entity.as_ref().map(Entity::entity_id);
         if !unchanged_link {
@@ -340,11 +353,35 @@ impl TerminalSurface {
             self.pending_focus = true;
         }
         self.apply_panes(wanted, window, cx);
+        self.forget_new_chats(&chat_panes, !unchanged_link, cx);
         self.keep_chats(cx);
         if target_changed {
             self.schedule_resize(cx);
         }
         cx.notify();
+    }
+
+    /// A pane that has become a chat had its process replaced, and tmux says
+    /// nothing of the screen the new one starts with: a screen kept from when
+    /// it was a terminal must not come back when it is one again. Forgotten
+    /// once, after the unmount that keeps it, and in the same order on the
+    /// engine's channel.
+    fn forget_new_chats(
+        &mut self,
+        chat_panes: &HashSet<String>,
+        new_link: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(link) = self.link.clone() {
+            link.update(cx, |link, _| {
+                for pane_id in chat_panes {
+                    if new_link || !self.chat_panes.contains(pane_id) {
+                        link.forget(pane_id);
+                    }
+                }
+            });
+        }
+        self.chat_panes.clone_from(chat_panes);
     }
 
     /// An app tab covers the terminal, or stops covering it. Coming back is a
