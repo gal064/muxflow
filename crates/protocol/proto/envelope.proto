@@ -646,6 +646,8 @@ enum FileContentKind {
   FILE_CONTENT_KIND_BINARY = 2;
   FILE_CONTENT_KIND_IMAGE = 3;
   FILE_CONTENT_KIND_TOO_LARGE = 4;
+  // A PDF document. Its bytes stream under the image preview limit.
+  FILE_CONTENT_KIND_PDF = 5;
 }
 
 enum CollisionPolicy {
@@ -720,7 +722,7 @@ message FileStreamHeader {
   uint64 generation = 3;
   uint64 total_bytes = 4;
   // False when policy answers with classification only: binary, over the text
-  // limit, or an image beyond the preview limit. No body frame follows.
+  // limit, or an image or PDF beyond the preview limit. No body frame follows.
   bool content_streaming = 5;
 }
 

@@ -399,6 +399,7 @@ pub(super) fn content_kind_name(kind: v1::FileContentKind) -> &'static str {
         v1::FileContentKind::Binary => "binary",
         v1::FileContentKind::Image => "image",
         v1::FileContentKind::TooLarge => "tooLarge",
+        v1::FileContentKind::Pdf => "pdf",
         v1::FileContentKind::Unspecified => "unspecified",
     }
 }

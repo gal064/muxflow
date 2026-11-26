@@ -195,6 +195,34 @@ fn terminal_single_file_capability_opens_and_saves_one_outside_file_and_nothing_
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// A PDF streams under the preview limit and is classified, not read, past it.
+#[test]
+fn a_pdf_streams_under_the_preview_limit_and_is_classified_past_it() {
+    let (root, service) = fixture();
+    fs::write(root.join("doc.PDF"), b"%PDF-1.7\n").unwrap();
+    let huge = File::create(root.join("huge.pdf")).unwrap();
+    huge.set_len(MAX_IMAGE_BYTES + 1).unwrap();
+    drop(huge);
+
+    let pdf = service
+        .open_file_stream(root.to_str().unwrap(), "doc.PDF")
+        .unwrap();
+    assert_eq!(pdf.header().content_kind, v1::FileContentKind::Pdf as i32);
+    assert!(pdf.header().content_streaming);
+    assert_eq!(pdf.header().total_bytes, 9);
+    let metadata = pdf.header().metadata.as_ref().unwrap();
+    assert_eq!(metadata.mime, "application/pdf");
+    assert!(!metadata.image_preview_eligible);
+
+    let huge = service
+        .open_file_stream(root.to_str().unwrap(), "huge.pdf")
+        .unwrap();
+    assert_eq!(huge.header().content_kind, v1::FileContentKind::Pdf as i32);
+    assert!(!huge.header().content_streaming);
+    assert_eq!(huge.chunks().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn an_oversized_text_file_is_classified_without_being_read() {
     let (root, service) = fixture();

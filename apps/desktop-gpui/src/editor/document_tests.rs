@@ -557,7 +557,7 @@ fn binary_and_oversized_files_get_no_editor_and_no_autosave(cx: &mut TestAppCont
         generation: "1".into(),
         size_bytes: 3,
         mime: "application/octet-stream".into(),
-        image: false,
+        kind: crate::editor::io::BinaryKind::Other,
         preview: None,
     };
     fixture.read(0, Ok(Opened::Binary(binary.clone())), cx);

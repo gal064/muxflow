@@ -1259,7 +1259,13 @@ browser's active root.
        `--term-bg`, horizontal scroll, no wrapping, line numbers off.
    - `TOO_LARGE` → placeholder: `"This file is too large to show here ({size})."`
    - `BINARY` → `"This is a binary file."`
-   - `IMAGE` → `"Images aren't shown in this version."`
+   - `IMAGE` / `PDF` with `contentStreaming === true`: accumulate the body
+     as for `TEXT` and draw it natively, fitted to the screen (an image with
+     `Image`, a PDF with react-native-pdf: scroll, pinch zoom). If the phone
+     cannot draw it → `"This image can't be shown on the phone."` /
+     `"This PDF can't be shown on the phone."`
+   - `IMAGE` / `PDF` without a body (over the 25 MiB preview limit) →
+     `"This file is too large to show here (over 25 MB)."`
    - `UNSPECIFIED` or missing header → `"Couldn't open this file."`
 2. While streaming, show a thin indeterminate progress bar under the app
    bar. Frames for a different `operationId` are ignored.

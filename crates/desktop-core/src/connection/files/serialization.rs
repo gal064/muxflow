@@ -71,6 +71,7 @@ fn content_json(value: &v1::FileContent) -> Value {
             v1::FileContentKind::Binary => "binary",
             v1::FileContentKind::Image => "image",
             v1::FileContentKind::TooLarge => "tooLarge",
+            v1::FileContentKind::Pdf => "pdf",
             v1::FileContentKind::Unspecified => "unspecified",
         },
         "content": value.content,

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Muxflow",
     "slug": "muxflow-mobile",
-    "version": "0.1.40",
+    "version": "0.1.41",
     "scheme": "muxflow",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/adaptive-icon-monochrome.png",
         "backgroundColor": "#021962"
       },
-      "versionCode": 140,
+      "versionCode": 141,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false,
       "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"]

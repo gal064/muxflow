@@ -82,17 +82,20 @@ impl FileService {
         let mut file = root.anchor(&logical_opened)?.open_file()?;
         let opened_before = file.metadata()?;
         root.authorize_opened_file(&logical_opened, &opened_before)?;
-        let image = image_mime(&opened_path).is_some();
+        let preview = if image_mime(&opened_path).is_some() {
+            Some(v1::FileContentKind::Image)
+        } else {
+            is_pdf(&opened_path).then_some(v1::FileContentKind::Pdf)
+        };
         let size = opened_before.len();
 
-        let (kind, content) = if image {
+        // Images and PDFs share the preview limit; past it the editor shows
+        // only what the file is.
+        let (kind, content) = if let Some(kind) = preview {
             if size <= MAX_IMAGE_BYTES {
-                (
-                    v1::FileContentKind::Image,
-                    read_bounded(&mut file, size, cancellation)?,
-                )
+                (kind, read_bounded(&mut file, size, cancellation)?)
             } else {
-                (v1::FileContentKind::Image, Vec::new())
+                (kind, Vec::new())
             }
         } else if size > MAX_TEXT_BYTES {
             (v1::FileContentKind::TooLarge, Vec::new())
@@ -125,11 +128,14 @@ impl FileService {
         if metadata.symlink {
             metadata.symlink_target_kind = v1::FileKind::File.into();
         }
-        metadata.image_preview_eligible = image && size <= MAX_IMAGE_BYTES;
+        metadata.image_preview_eligible =
+            kind == v1::FileContentKind::Image && size <= MAX_IMAGE_BYTES;
 
-        let content_streaming =
-            matches!(kind, v1::FileContentKind::Text | v1::FileContentKind::Image)
-                && !(image && !metadata.image_preview_eligible);
+        let content_streaming = match kind {
+            v1::FileContentKind::Text => true,
+            v1::FileContentKind::Image | v1::FileContentKind::Pdf => size <= MAX_IMAGE_BYTES,
+            _ => false,
+        };
         let digest = blake3::hash(&content).to_hex().to_string();
         Ok(FileStreamBody {
             header: v1::FileStreamHeader {

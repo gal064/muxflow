@@ -24,6 +24,7 @@ pub mod io;
 pub mod language;
 mod open;
 mod pane;
+mod pdf;
 pub mod save_status;
 pub mod tabs;
 

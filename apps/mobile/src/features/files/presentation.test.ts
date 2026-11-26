@@ -30,20 +30,34 @@ describe("mode selection (§9.7 step 1)", () => {
 });
 
 describe("placeholders (§9.7 step 1)", () => {
-  it("spells each of the four strings the document gives", () => {
+  it("spells the strings the document gives", () => {
     expect(filePresentation({ kind: "tooLarge", size: 3n * 1024n * 1024n }, "big.log")).toEqual({
       kind: "placeholder",
       message: "This file is too large to show here (3.0 MB).",
     });
     expect(filePresentation({ kind: "binary" }, "a.bin").kind).toBe("placeholder");
-    expect(filePresentation({ kind: "image" }, "a.png")).toEqual({
-      kind: "placeholder",
-      message: "Images aren't shown in this version.",
-    });
     expect(filePresentation({ kind: "unavailable" }, "a.txt")).toEqual({
       kind: "placeholder",
       message: "Couldn't open this file.",
     });
+  });
+});
+
+describe("previews", () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+
+  it("draws an image or a PDF the host streamed", () => {
+    expect(filePresentation({ kind: "image", bytes }, "a.png")).toEqual({ kind: "image", bytes });
+    expect(filePresentation({ kind: "pdf", bytes }, "a.pdf")).toEqual({ kind: "pdf", bytes });
+  });
+
+  it("names the preview limit for one the host did not stream", () => {
+    for (const body of [{ kind: "image" }, { kind: "pdf" }] as const) {
+      expect(filePresentation(body, "big")).toEqual({
+        kind: "placeholder",
+        message: "This file is too large to show here (over 25 MB).",
+      });
+    }
   });
 });
 

@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Stack } from "expo-router";
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Directory, File, Paths } from "expo-file-system";
+import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import Pdf from "react-native-pdf";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
 import { useStore } from "zustand";
@@ -12,7 +14,7 @@ import { externalLinkTarget, markdownNavigationStaysInApp } from "../../../ui/ex
 import { MARKDOWN_HTML } from "../../../webview/markdownBundle";
 import { relativeToRoot, subtitleFor } from "../activeRoot";
 import { filesStore } from "../filesStore";
-import type { FilePresentation, ViewerMode } from "../presentation";
+import { FILE_VIEWER_COPY, type FilePresentation, type ViewerMode } from "../presentation";
 import { useFileBody } from "../useFileBody";
 import { CentredMessage, CentredSpinner, ErrorState, StreamingBar, TitleBlock } from "./parts";
 
@@ -59,6 +61,10 @@ function Body({ presentation, mode }: { presentation: FilePresentation; mode: Vi
       return mode === "rendered" ? <MarkdownView source={presentation.text} /> : <PlainView text={presentation.text} />;
     case "plain":
       return <PlainView text={presentation.text} />;
+    case "image":
+      return <ImagePreview bytes={presentation.bytes} />;
+    case "pdf":
+      return <PdfPreview bytes={presentation.bytes} />;
     case "placeholder":
       return <CentredMessage message={presentation.message} />;
   }
@@ -104,6 +110,98 @@ function PlainView({ text }: { text: string }) {
       </ScrollView>
     </ScrollView>
   );
+}
+
+/** Where a preview's bytes are on the phone. */
+type CacheFile = { state: "writing" } | { state: "written"; uri: string } | { state: "failed" };
+
+let previews = 0;
+
+/**
+ * Writes `bytes` to a cache file of their own for as long as the caller is
+ * mounted: `Image` and react-native-pdf draw from a file, not from bytes. A
+ * fresh name per open keeps the image cache, which goes by URI, from showing
+ * an earlier file. The file is deleted when the view goes.
+ */
+function useCacheFile(bytes: Uint8Array, extension: string): CacheFile {
+  const [file, setFile] = useState<CacheFile>({ state: "writing" });
+  useEffect(() => {
+    let live = true;
+    setFile({ state: "writing" });
+    const directory = new Directory(Paths.cache, "file-previews");
+    // The first preview of this run clears what a run that ended with one open left behind.
+    const sweep = previews === 0;
+    previews += 1;
+    const target = new File(directory, `${Date.now().toString(36)}-${previews}.${extension}`);
+    const discard = () => {
+      try {
+        if (target.exists) target.delete();
+      } catch {
+        // Already cleared from the cache, which is what was wanted.
+      }
+    };
+    const write = async () => {
+      if (sweep && directory.exists) directory.delete();
+      if (!directory.exists) directory.create({ intermediates: true });
+      await target.write(bytes);
+    };
+    write().then(
+      () => (live ? setFile({ state: "written", uri: target.uri }) : discard()),
+      () => {
+        if (live) setFile({ state: "failed" });
+        discard();
+      },
+    );
+    return () => {
+      live = false;
+      discard();
+    };
+  }, [bytes, extension]);
+  return file;
+}
+
+/** An image fitted to the screen. */
+function ImagePreview({ bytes }: { bytes: Uint8Array }) {
+  const file = useCacheFile(bytes, "img");
+  // The file is there and is not something the phone can draw (an SVG, say).
+  const [undrawn, setUndrawn] = useState<string>();
+  if (file.state === "writing") return <CentredSpinner />;
+  if (file.state === "failed" || undrawn === file.uri) return <CentredMessage message={FILE_VIEWER_COPY.imageNotShown} />;
+  const { uri } = file;
+  return (
+    <Image
+      onError={() => setUndrawn(uri)}
+      resizeMethod="resize"
+      resizeMode="contain"
+      source={{ uri }}
+      style={styles.preview}
+    />
+  );
+}
+
+/** A PDF, with react-native-pdf's own scrolling, paging and pinch zoom. */
+function PdfPreview({ bytes }: { bytes: Uint8Array }) {
+  const file = useCacheFile(bytes, "pdf");
+  // Damaged, encrypted, or otherwise not a PDF the platform can open.
+  const [undrawn, setUndrawn] = useState<string>();
+  if (file.state === "writing") return <CentredSpinner />;
+  if (file.state === "failed" || undrawn === file.uri) return <CentredMessage message={FILE_VIEWER_COPY.pdfNotShown} />;
+  const { uri } = file;
+  return (
+    <Pdf
+      onError={() => setUndrawn(uri)}
+      onPressLink={openExternal}
+      source={{ uri }}
+      style={styles.preview}
+      trustAllCerts={false}
+    />
+  );
+}
+
+/** Opens an `http(s)`/`mailto` link with the phone; anything else is ignored. */
+function openExternal(href: string) {
+  const target = externalLinkTarget(href);
+  if (target) void Linking.openURL(target).catch(() => {});
 }
 
 type Inbound = { t?: unknown; href?: unknown };
@@ -186,6 +284,11 @@ const styles = StyleSheet.create({
   },
   webView: {
     backgroundColor: colors.chromeBg,
+  },
+  preview: {
+    backgroundColor: colors.chromeBg,
+    flex: 1,
+    width: "100%",
   },
   webViewContainer: {
     backgroundColor: colors.chromeBg,

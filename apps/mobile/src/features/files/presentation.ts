@@ -5,7 +5,7 @@
 // classification the host sent.
 
 import { formatSize, isMarkdownName } from "./entries";
-import type { FileBody } from "./fileStream";
+import { MAX_IMAGE_BYTES, type FileBody } from "./fileStream";
 
 export type ViewerMode = "rendered" | "source";
 
@@ -14,15 +14,23 @@ export type FilePresentation =
   | { kind: "markdown"; text: string }
   /** Any other text file: monospace, horizontally scrollable, no wrapping. */
   | { kind: "plain"; text: string }
-  /** One of the four placeholders §9.7 spells. */
+  /** An image the host streamed, drawn by the phone. */
+  | { kind: "image"; bytes: Uint8Array }
+  /** A PDF the host streamed, drawn by the phone. */
+  | { kind: "pdf"; bytes: Uint8Array }
+  /** One of the placeholders §9.7 spells. */
   | { kind: "placeholder"; message: string };
 
 /** §9.7's exact strings. */
 export const FILE_VIEWER_COPY = {
   binary: "This is a binary file.",
-  image: "Images aren't shown in this version.",
   unavailable: "Couldn't open this file.",
   tooLarge: (size: string) => `This file is too large to show here (${size}).`,
+  /** An image or a PDF over the host's preview limit, which streams no bytes. */
+  tooLargeToPreview: (limit: string) => `This file is too large to show here (over ${limit}).`,
+  /** The phone has the bytes and cannot draw them (an SVG, a damaged or encrypted PDF). */
+  imageNotShown: "This image can't be shown on the phone.",
+  pdfNotShown: "This PDF can't be shown on the phone.",
   error: (displayMessage: string) => `Couldn't open this file: ${displayMessage}`,
 } as const;
 
@@ -50,7 +58,10 @@ export function filePresentation(body: FileBody, name: string): FilePresentation
     case "binary":
       return { kind: "placeholder", message: FILE_VIEWER_COPY.binary };
     case "image":
-      return { kind: "placeholder", message: FILE_VIEWER_COPY.image };
+    case "pdf":
+      return body.bytes
+        ? { kind: body.kind, bytes: body.bytes }
+        : { kind: "placeholder", message: FILE_VIEWER_COPY.tooLargeToPreview(formatSize(BigInt(MAX_IMAGE_BYTES))) };
     case "unavailable":
       return { kind: "placeholder", message: FILE_VIEWER_COPY.unavailable };
   }

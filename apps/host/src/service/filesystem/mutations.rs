@@ -430,7 +430,7 @@ pub(super) fn mutation_metadata(
     };
     let entry_name = logical.file_name().unwrap_or(logical.as_os_str());
     let name = entry_name.to_string_lossy().into_owned();
-    let mime = image_mime(logical).unwrap_or_default().to_owned();
+    let mime = preview_mime(logical).to_owned();
     Ok(v1::FileMetadata {
         path: logical.to_string_lossy().into_owned(),
         name: name.clone(),
@@ -448,7 +448,7 @@ pub(super) fn mutation_metadata(
         generation: metadata.generation(),
         mime: mime.clone(),
         image_preview_eligible: metadata.is_file()
-            && !mime.is_empty()
+            && image_mime(logical).is_some()
             && metadata.len() <= MAX_IMAGE_BYTES,
         symlink_target_kind: v1::FileKind::Unspecified.into(),
     })
