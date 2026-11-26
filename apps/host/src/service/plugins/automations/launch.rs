@@ -152,7 +152,8 @@ fn tag_and_type(
     run(enter)
 }
 
-/// The tagged workspace, or a new one. A new one also returns its first tab.
+/// Reuse the named workspace, or the tagged workspace after a rename.
+/// A new workspace also returns its first tab.
 fn ensure_workspace(
     tmux: &Tmux,
     cwd: &str,
@@ -171,28 +172,40 @@ fn ensure_workspace(
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default();
-    let mut names = Vec::new();
+    let mut named = None;
+    let mut tagged = None;
     for line in listed.lines() {
         let mut fields = line.splitn(3, '\t');
         let (Some(id), Some(tag), Some(name)) = (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
-        if tag == "1" {
-            return Ok((id.to_owned(), None));
+        if name == WORKSPACE_NAME {
+            named = Some(id);
         }
-        names.push(name.to_owned());
+        if tag == "1" {
+            tagged = Some(id);
+        }
     }
-    // A session someone else already called `automation` is theirs.
-    let name = std::iter::once(WORKSPACE_NAME.to_owned())
-        .chain((2..).map(|index| format!("{WORKSPACE_NAME}-{index}")))
-        .find(|candidate| !names.contains(candidate))
-        .expect("an unused name exists");
+    if let Some(id) = named {
+        if tagged != Some(id) {
+            let mut tag = tmux()?;
+            tag.args(["set-option", "-t", id, WORKSPACE_TAG, "1"]);
+            if let Some(previous) = tagged {
+                tag.args([";", "set-option", "-u", "-t", previous, WORKSPACE_TAG]);
+            }
+            run(tag)?;
+        }
+        return Ok((id.to_owned(), None));
+    }
+    if let Some(id) = tagged {
+        return Ok((id.to_owned(), None));
+    }
     let mut create = tmux()?;
     configure_new_session(
         &mut create,
         &v1::TmuxAction {
-            name,
+            name: WORKSPACE_NAME.to_owned(),
             directory: cwd.to_owned(),
             ..Default::default()
         },
@@ -323,9 +336,10 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_session_named_automation_is_left_alone() {
+    fn runs_append_to_an_existing_automation_workspace() {
         let fixture = TmuxFixture::new();
         fixture.run(&["new-session", "-d", "-s", "automation"]);
+        let original = fixture.display("=automation:", "#{window_id}");
         let dir = tempfile::tempdir().unwrap();
         let prompt = dir.path().join("ci-1.txt");
         std::fs::write(&prompt, "hello").unwrap();
@@ -339,8 +353,33 @@ mod tests {
         .unwrap();
         assert_eq!(
             fixture.display(&launched.window_id, "#{session_name}"),
-            "automation-2"
+            "automation"
         );
+        assert_ne!(launched.window_id, original);
+        assert_eq!(fixture.display("=automation:", "#{window_id}"), original);
+        assert_eq!(fixture.display("=automation:", "#{session_windows}"), "2");
+        assert_eq!(
+            fixture.display("=automation:", "#{@muxflow-automation-workspace}"),
+            "1"
+        );
+    }
+
+    #[test]
+    fn an_existing_numbered_workspace_yields_to_automation() {
+        let fixture = TmuxFixture::new();
+        fixture.run(&["new-session", "-d", "-s", "automation-2"]);
+        fixture.run(&["set-option", "-t", "automation-2:", WORKSPACE_TAG, "1"]);
+        fixture.run(&["new-session", "-d", "-s", "automation"]);
+        let named = fixture.display("=automation:", "#{session_id}");
+        let workspace = || ensure_workspace(&fixture.factory(), "/tmp", false).unwrap();
+        assert_eq!(workspace(), (named.clone(), None));
+        assert!(
+            fixture
+                .display("=automation-2:", "#{@muxflow-automation-workspace}")
+                .is_empty()
+        );
+        fixture.run(&["rename-session", "-t", &named, "scheduled"]);
+        assert_eq!(workspace(), (named, None));
     }
 
     #[test]
