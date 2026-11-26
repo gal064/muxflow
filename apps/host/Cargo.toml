@@ -1,6 +1,6 @@
 [package]
 name = "muxflow-host"
-version = "0.1.40"
+version = "0.1.41"
 license = "MIT"
 edition.workspace = true
 rust-version.workspace = true
