@@ -206,6 +206,14 @@ impl TerminalLink {
         });
     }
 
+    /// Drops `pane_id`'s kept screen: its process was replaced, as when it
+    /// became a chat, and tmux said nothing of the screen it started over
+    /// with. Its next mount starts from a seed.
+    pub fn forget(&mut self, pane_id: &str) {
+        self.held.remove(pane_id);
+        self.send(Command::Forget(pane_id.to_owned()));
+    }
+
     pub fn set_grid(&self, pane_id: &str, size: GridSize) {
         self.send(Command::SetGrid {
             pane_id: pane_id.to_owned(),

@@ -1280,6 +1280,100 @@ fn escape_stops_nothing_while_the_agent_is_idle_or_waits_for_an_answer(cx: &mut 
     assert_eq!(shell.host.actions(), [ChatAction::Open]);
 }
 
+const AGAIN: &str = "Press Ctrl+C again to return to the terminal";
+
+#[gpui_kit::test]
+fn ctrl_c_stops_the_agent_and_a_second_press_returns_to_the_terminal(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.chat(event(11, ChatChange::State(state(ChatTurnState::Working))));
+    // Even while a command runs, which Escape leaves alone.
+    shell.press("ctrl-c");
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+    assert!(shell.named(AGAIN));
+    shell.press("ctrl-c");
+    assert_eq!(shell.host.count(ChatAction::End), 1);
+    assert!(shell.named("Returning to the terminal…"));
+    // Once: more presses send nothing more.
+    shell.press("ctrl-c");
+    assert_eq!(shell.host.count(ChatAction::End), 1);
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 1);
+}
+
+#[gpui_kit::test]
+fn ctrl_c_while_idle_asks_for_a_second_press_in_time(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.press("ctrl-c");
+    assert!(shell.named(AGAIN));
+    shell.wait(super::pane::END_ARMED_FOR + std::time::Duration::from_millis(100));
+    assert!(!shell.named(AGAIN));
+    // Too late: this press asks again.
+    shell.press("ctrl-c");
+    assert!(shell.named(AGAIN));
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+    shell.press("ctrl-c");
+    assert_eq!(shell.host.actions(), [ChatAction::Open, ChatAction::End]);
+}
+
+#[gpui_kit::test]
+fn a_refused_end_says_why_and_ctrl_c_works_again(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell
+        .host
+        .refuse_next("chat_end_failed: The agent did not stop. Try again.");
+    shell.press("ctrl-c");
+    shell.press("ctrl-c");
+    assert!(shell.named("The agent did not stop. Try again."));
+    shell.press("ctrl-c");
+    assert!(shell.named(AGAIN));
+    shell.press("ctrl-c");
+    assert_eq!(shell.host.count(ChatAction::End), 2);
+}
+
+#[gpui_kit::test]
+fn ctrl_c_with_text_selected_in_the_composer_is_left_to_it(cx: &mut TestAppContext) {
+    let mut shell = open(cx);
+    shell.input("Keep this.");
+    shell.press(if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    });
+    shell.press("ctrl-c");
+    assert!(!shell.named(AGAIN));
+    assert_eq!(shell.host.actions(), [ChatAction::Open]);
+}
+
+#[gpui_kit::test]
+fn ctrl_c_with_a_reply_selected_is_left_to_the_reply(cx: &mut TestAppContext) {
+    let mut shell = shell(cx);
+    shell.chat(snapshot_in(
+        10,
+        state(ChatTurnState::Working),
+        vec![item(
+            "a1",
+            ChatItemKind::Assistant,
+            "Some words worth copying from this reply.",
+        )],
+        "",
+    ));
+    let (from, to) = shell.visual.update(|window, _| {
+        let reply = window.find("chat-item-a1").bounds();
+        (
+            reply.origin + point(px(2.), px(10.)),
+            reply.origin + point(px(120.), px(10.)),
+        )
+    });
+    let none = gpui_kit::Modifiers::default();
+    let left = gpui_kit::MouseButton::Left;
+    shell.visual.simulate_mouse_down(from, left, none);
+    shell.visual.simulate_mouse_move(to, Some(left), none);
+    shell.visual.simulate_mouse_up(to, left, none);
+    shell.settle();
+    shell.press("ctrl-c");
+    assert!(!shell.named(AGAIN));
+    assert_eq!(shell.host.count(ChatAction::Interrupt), 0);
+}
+
 #[gpui_kit::test]
 fn typing_or_pressing_in_a_chat_says_its_agent_has_been_seen(cx: &mut TestAppContext) {
     use std::{cell::RefCell, rc::Rc};

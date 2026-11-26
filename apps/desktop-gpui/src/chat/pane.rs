@@ -27,7 +27,7 @@ use desktop_core::connection::chat::{
 use futures::future::BoxFuture;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    Global, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
+    Global, Modifiers, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
     base::{RenderedText, TextViewState},
     component::{
         input::{InputEvent, InputState, TextareaState},
@@ -73,6 +73,8 @@ const WANTED_WAIT: Duration = Duration::from_secs(3);
 /// How long Stop stays pending without the turn ending, so an answer lost
 /// on the way cannot leave it off for good.
 const STOP_WAIT: Duration = Duration::from_secs(10);
+/// How long a first Ctrl+C waits for the second, which ends the agent.
+pub(super) const END_ARMED_FOR: Duration = Duration::from_secs(2);
 /// How long Copy shows its check.
 const COPIED_FOR: Duration = Duration::from_secs(1);
 /// How long Fork from here stays pending without an answer, so an answer
@@ -333,6 +335,10 @@ pub struct ChatPane {
     /// stopped has not ended yet.
     pub(super) stopping: Option<u64>,
     stop_wait: Option<Task<()>>,
+    /// A first Ctrl+C was pressed: a second ends the agent until this ends.
+    pub(super) end_armed: Option<Task<()>>,
+    /// The host was asked to end the agent and has not refused.
+    pub(super) ending: bool,
     pub(super) list: Entity<MessageScrollerState>,
     /// The items as laid out in rows, as the list was last told of them.
     pub(super) entries: Vec<Entry>,
@@ -464,6 +470,21 @@ impl ChatPane {
                     this.seen(cx);
                 }
             }),
+            // Ctrl+C, as in a terminal: see `ctrl_c`. Intercepted ahead of
+            // dispatch, since the composer would take it for itself.
+            {
+                let this = cx.entity().downgrade();
+                cx.intercept_keystrokes(move |event, window, cx| {
+                    if event.keystroke.key == "c"
+                        && event.keystroke.modifiers == Modifiers::control()
+                        && this
+                            .update(cx, |this, cx| this.ctrl_c(window, cx))
+                            .unwrap_or(false)
+                    {
+                        cx.stop_propagation();
+                    }
+                })
+            },
             cx.observe(&controller, |this, _, cx| this.follow_link(cx)),
             cx.subscribe(&controller, |this, _, event, cx| match event {
                 ConnectionEvent::Chat { profile_id, event }
@@ -526,6 +547,8 @@ impl ChatPane {
             choices: 0,
             stopping: None,
             stop_wait: None,
+            end_armed: None,
+            ending: false,
             list,
             entries: Vec::new(),
             rows: (0, 0),
@@ -1751,6 +1774,24 @@ impl ChatPane {
         self.send(stop, cx, |this, result, cx| {
             if let Err(error) = result {
                 this.stopped(cx);
+                this.refused(&error, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Asks the host to end the agent. The pane becomes a terminal, and this
+    /// chat goes once the topology says so.
+    pub(super) fn end(&mut self, cx: &mut Context<Self>) {
+        let end = ChatRequest {
+            action: ChatAction::End.into(),
+            ..Default::default()
+        };
+        self.notice = None;
+        self.ending = true;
+        self.send(end, cx, |this, result, cx| {
+            if let Err(error) = result {
+                this.ending = false;
                 this.refused(&error, cx);
             }
         });

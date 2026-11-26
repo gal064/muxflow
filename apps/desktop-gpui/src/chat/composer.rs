@@ -248,6 +248,63 @@ impl ChatPane {
         cx.propagate();
     }
 
+    /// Ctrl+C with the keyboard in the chat, as in a terminal: stops the
+    /// agent while it works, and a second press within
+    /// [`super::pane::END_ARMED_FOR`] ends it, leaving the pane a terminal.
+    /// Text selected in the composer is copied instead. True when the press
+    /// was taken.
+    pub(super) fn ctrl_c(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // Only the composer's, or the chat's own: selected reply text, an
+        // answer field or a menu keeps Ctrl+C for itself.
+        let here = self.focus.is_focused(window) || self.input_focus(cx).is_focused(window);
+        if !here
+            || !self.is_live()
+            || self.composing(window, cx)
+            || self.composer.update(cx, |composer, cx| {
+                composer
+                    .selected_text_range(false, window, cx)
+                    .is_some_and(|selection| !selection.range.is_empty())
+            })
+        {
+            return false;
+        }
+        if self.ending {
+            return true;
+        }
+        if self.end_armed.take().is_some() {
+            self.end(cx);
+            return true;
+        }
+        if self.stoppable() {
+            self.interrupt(cx);
+        }
+        // The hint takes the line over the composer.
+        self.notice = None;
+        let wait = cx.background_executor().timer(super::pane::END_ARMED_FOR);
+        self.end_armed = Some(cx.spawn(async move |this, cx| {
+            wait.await;
+            this.update(cx, |this, cx| {
+                this.end_armed = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+        true
+    }
+
+    /// What the line over the composer says of Ctrl+C, while it means
+    /// something.
+    fn end_hint(&self) -> Option<&'static str> {
+        if self.ending {
+            Some("Returning to the terminal…")
+        } else if self.end_armed.is_some() {
+            Some("Press Ctrl+C again to return to the terminal")
+        } else {
+            None
+        }
+    }
+
     /// What the empty field says: what typing there would do now.
     fn placeholder_now(&self) -> &'static str {
         if self.editing.is_some() {
@@ -933,6 +990,10 @@ impl ChatPane {
             .notice
             .clone()
             .map(|notice| (notice, p.danger_ink, Role::Alert))
+            .or_else(|| {
+                self.end_hint()
+                    .map(|hint| (hint.into(), p.chrome_dim, Role::Status))
+            })
             .or_else(|| {
                 let ink = if self.connection() == ChatConnection::Failed {
                     p.danger_ink

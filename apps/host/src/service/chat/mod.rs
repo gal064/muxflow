@@ -53,6 +53,9 @@ pub(crate) use terminal_commands::terminal_commands;
 
 /// The most items one snapshot or one older page carries.
 const MAX_PAGE_ITEMS: usize = 200;
+/// How long an ended chat's agent has to go: `chat-pipe` gives it three
+/// seconds before it kills it.
+const END_WAIT: Duration = Duration::from_secs(5);
 /// The most a snapshot's or a page's items weigh, so the frame that carries
 /// them stays far under `MAX_FRAME_BYTES`. One item always fits.
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
@@ -466,6 +469,14 @@ impl ChatRuntime {
             // here.
             return running.command(command);
         }
+    }
+
+    /// Ends the agent in `key`'s pane, which becomes a terminal running the
+    /// user's shell (`CHAT_ACTION_END`). Blocks until the agent has gone.
+    pub(crate) fn end(&self, key: &PaneKey) -> Result<(), ChatError> {
+        pane::end(&key.pane_id, &processes::system(), END_WAIT)?;
+        topology_changed();
+        Ok(())
     }
 
     /// Forks the pane's conversation through the end of the reply `item_id`
