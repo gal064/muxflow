@@ -15,7 +15,7 @@ use crate::connection_ui::backend::TerminalBackend;
 
 /// The editor's limit on a text file, as the host's.
 pub const TEXT_FILE_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
-/// The largest file whose bytes are fetched for an image preview.
+/// The largest file whose bytes are fetched for an image or PDF preview.
 pub const IMAGE_PREVIEW_LIMIT_BYTES: u64 = 25 * 1024 * 1024;
 
 /// The live connection a document reads and writes through.
@@ -49,9 +49,17 @@ pub struct BinaryFile {
     pub generation: String,
     pub size_bytes: u64,
     pub mime: String,
-    pub image: bool,
+    pub kind: BinaryKind,
     /// The bytes, when the host streamed them for a preview.
     pub preview: Option<Arc<[u8]>>,
+}
+
+/// What the editor can draw of a file it cannot edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryKind {
+    Other,
+    Image,
+    Pdf,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -436,7 +444,11 @@ fn opened(completed: Completed, bytes: Vec<u8>) -> Result<Opened, String> {
         generation,
         size_bytes,
         mime,
-        image: kind == "image",
+        kind: match kind.as_str() {
+            "image" => BinaryKind::Image,
+            "pdf" => BinaryKind::Pdf,
+            _ => BinaryKind::Other,
+        },
         preview: (!completed.metadata_only).then(|| Arc::from(bytes)),
     }))
 }
@@ -571,7 +583,7 @@ mod tests {
         };
         assert_eq!(file.mime, "application/octet-stream");
         assert_eq!(file.size_bytes, 20_000_000);
-        assert!(!file.image);
+        assert_eq!(file.kind, BinaryKind::Other);
         assert_eq!(file.preview, None);
     }
 
@@ -592,7 +604,7 @@ mod tests {
         let Some(Ok(Opened::Binary(file))) = slot.lock().unwrap().take() else {
             panic!("no image");
         };
-        assert!(file.image);
+        assert_eq!(file.kind, BinaryKind::Image);
         assert_eq!(file.preview.as_deref(), Some(&b"png"[..]));
     }
 

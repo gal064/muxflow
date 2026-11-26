@@ -1482,3 +1482,16 @@ changing a client’s viewport also changes windows that already follow that
 client. A claim does not transfer another client’s windows. Historical grids
 are not pinned per window; per-client window overrides would clamp a later
 plain-terminal or desktop claim to an older phone’s dimensions.
+
+## File viewer draws images and PDFs (2026-11-25)
+
+- The host classifies `.pdf` as `FILE_CONTENT_KIND_PDF` and streams its bytes
+  under the same 25 MiB limit as an image. This is additive: an older phone
+  meets an unknown kind and shows "Couldn't open this file."; this phone
+  meets an older host's `BINARY` and shows the binary placeholder. No major
+  bump.
+- The phone draws a streamed image with React Native's `Image` and a PDF with
+  `react-native-pdf` 7.0.5 (MIT, with its peer `react-native-blob-util`
+  1.1.1, MIT), both from a per-open cache file. Chosen as the least code to
+  own; it needs a native rebuild. No config plugin is needed under CNG.
+- Desktop rasterizes PDFs with `hayro` (MIT OR Apache-2.0, pure Rust).

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { create } from "@bufbuild/protobuf";
 import { FileContentKind, ResponseSchema, type FileStreamFrame, type Request, type Response } from "../../protocol/gen/envelope_pb";
 import { HostError } from "../../protocol/HostConnection";
-import { FileStreamAssembler, FileStreamError, MAX_CLIENT_FILE_BYTES, readFile } from "./fileStream";
+import { FileStreamAssembler, FileStreamError, MAX_CLIENT_FILE_BYTES, MAX_IMAGE_BYTES, readFile } from "./fileStream";
 import { bodyFrame, headerFrame } from "./testing";
 
 const OPERATION = "op-1";
@@ -129,10 +129,11 @@ describe("classifications the host answers with (§9.7 step 1)", () => {
     expect(assembler.finish()).toEqual({ kind: "tooLarge", size: 11n * 1024n * 1024n });
   });
 
-  it("reports binary and image classifications", () => {
+  it("reports binary, image and PDF classifications", () => {
     for (const [kind, expected] of [
       [FileContentKind.BINARY, "binary"],
       [FileContentKind.IMAGE, "image"],
+      [FileContentKind.PDF, "pdf"],
       [FileContentKind.UNSPECIFIED, "unavailable"],
     ] as const) {
       const assembler = new FileStreamAssembler(OPERATION);
@@ -151,31 +152,18 @@ describe("classifications the host answers with (§9.7 step 1)", () => {
     expect(() => assembler.push(bodyFrame(OPERATION, 0, encoder.encode("x"), true))).toThrow(FileStreamError);
   });
 
-  it("drains the body of an image the host does stream, and still answers `image`", () => {
-    // `content_streaming`, not the classification, decides whether frames
-    // follow: an image under the host's 25 MiB preview limit streams its bytes
-    // (open_stream.rs), and §9.7 shows a placeholder for it either way.
-    const assembler = new FileStreamAssembler(OPERATION);
-    assembler.push(headerFrame(OPERATION, {
-      contentKind: FileContentKind.IMAGE,
-      totalBytes: 2048n,
-      contentStreaming: true,
-    }));
-    assembler.push(bodyFrame(OPERATION, 0, new Uint8Array(1024)));
-    assembler.push(bodyFrame(OPERATION, 1024, new Uint8Array(1024), true));
-    expect(assembler.finish()).toEqual({ kind: "image" });
-  });
 });
 
-// The chat shows an attached image; the file viewer above never does.
-describe("keeping an image's bytes (keepImages)", () => {
-  const imageHeader = (totalBytes: number, contentStreaming = true): FileStreamFrame =>
-    headerFrame(OPERATION, { contentKind: FileContentKind.IMAGE, totalBytes: BigInt(totalBytes), contentStreaming });
+// The host streams an image or a PDF under its 25 MiB preview limit, and the
+// phone keeps the bytes to draw them.
+describe("previews (images and PDFs)", () => {
+  const previewHeader = (contentKind: FileContentKind, totalBytes: number, contentStreaming = true): FileStreamFrame =>
+    headerFrame(OPERATION, { contentKind, totalBytes: BigInt(totalBytes), contentStreaming });
 
   it("assembles the image the host streams, with its metadata", () => {
-    const assembler = new FileStreamAssembler(OPERATION, { keepImages: true });
+    const assembler = new FileStreamAssembler(OPERATION);
     const bytes = Uint8Array.from({ length: 2048 }, (_, index) => index % 251);
-    assembler.push(imageHeader(bytes.length));
+    assembler.push(previewHeader(FileContentKind.IMAGE, bytes.length));
     assembler.push(bodyFrame(OPERATION, 0, bytes.slice(0, 1024)));
     assembler.push(bodyFrame(OPERATION, 1024, bytes.slice(1024), true));
     const body = assembler.finish();
@@ -185,32 +173,52 @@ describe("keeping an image's bytes (keepImages)", () => {
     expect(image.metadata?.name).toBe("file.txt");
   });
 
-  it("holds an image to the same coverage checks as text", () => {
-    const short = new FileStreamAssembler(OPERATION, { keepImages: true });
-    short.push(imageHeader(2048));
-    short.push(bodyFrame(OPERATION, 0, new Uint8Array(1024), true));
-    expect(() => short.finish()).toThrow(FileStreamError);
-
-    const skipped = new FileStreamAssembler(OPERATION, { keepImages: true });
-    skipped.push(imageHeader(2048));
-    expect(() => skipped.push(bodyFrame(OPERATION, 1024, new Uint8Array(1024), true))).toThrow(FileStreamError);
+  it("assembles the PDF the host streams", () => {
+    const assembler = new FileStreamAssembler(OPERATION);
+    const bytes = encoder.encode("%PDF-1.7\n%%EOF\n");
+    assembler.push(previewHeader(FileContentKind.PDF, bytes.length));
+    assembler.push(bodyFrame(OPERATION, 0, bytes.slice(0, 4)));
+    assembler.push(bodyFrame(OPERATION, 4, bytes.slice(4), true));
+    expect(assembler.finish()).toEqual({ kind: "pdf", bytes });
   });
 
-  it("answers a bare `image` for one the host does not stream", () => {
+  it("holds a preview to the same coverage checks as text", () => {
+    for (const kind of [FileContentKind.IMAGE, FileContentKind.PDF]) {
+      const short = new FileStreamAssembler(OPERATION);
+      short.push(previewHeader(kind, 2048));
+      short.push(bodyFrame(OPERATION, 0, new Uint8Array(1024), true));
+      expect(() => short.finish()).toThrow(FileStreamError);
+
+      const skipped = new FileStreamAssembler(OPERATION);
+      skipped.push(previewHeader(kind, 2048));
+      expect(() => skipped.push(bodyFrame(OPERATION, 1024, new Uint8Array(1024), true))).toThrow(FileStreamError);
+    }
+  });
+
+  it("answers the bare classification for a preview the host does not stream", () => {
     // Over the host's 25 MiB limit the answer is the classification alone.
-    const assembler = new FileStreamAssembler(OPERATION, { keepImages: true });
-    assembler.push(imageHeader(0, false));
-    expect(assembler.finish()).toEqual({ kind: "image" });
+    for (const [kind, expected] of [[FileContentKind.IMAGE, "image"], [FileContentKind.PDF, "pdf"]] as const) {
+      const assembler = new FileStreamAssembler(OPERATION);
+      assembler.push(headerFrame(OPERATION, { contentKind: kind, totalBytes: 0n, contentStreaming: false, size: 30n * 1024n * 1024n }));
+      expect(assembler.finish()).toEqual({ kind: expected });
+    }
+  });
+
+  it("drains a streamed preview past the limit rather than holding it", () => {
+    const assembler = new FileStreamAssembler(OPERATION);
+    assembler.push(previewHeader(FileContentKind.PDF, MAX_IMAGE_BYTES + 1));
+    assembler.push(bodyFrame(OPERATION, 0, new Uint8Array(16), true));
+    expect(assembler.finish()).toEqual({ kind: "pdf" });
   });
 
   it("leaves text under the phone's own cap", () => {
-    const assembler = new FileStreamAssembler(OPERATION, { keepImages: true });
+    const assembler = new FileStreamAssembler(OPERATION);
     assembler.push(textHeader(MAX_CLIENT_FILE_BYTES + 1));
     assembler.push(bodyFrame(OPERATION, 0, new Uint8Array(16), true));
     expect(assembler.finish()).toEqual({ kind: "tooLarge", size: BigInt(MAX_CLIENT_FILE_BYTES + 1) });
   });
 
-  it("reaches the assembler through readFile's options", async () => {
+  it("reaches readFile's caller", async () => {
     const bytes = new Uint8Array([137, 80, 78, 71]);
     const request = async (value: Request, options: { onFileStream: (frame: FileStreamFrame) => void }): Promise<Response> => {
       const operationId = value.file!.operationId;
@@ -219,8 +227,7 @@ describe("keeping an image's bytes (keepImages)", () => {
       return create(ResponseSchema, { ok: true });
     };
     const target = { root: "/w", rootToken: "token", path: "/w/a.png" };
-    expect(await readFile(request, target, "identity")).toEqual({ kind: "image" });
-    expect(await readFile(request, target, "identity", { keepImages: true })).toMatchObject({ kind: "image", bytes });
+    expect(await readFile(request, target, "identity")).toMatchObject({ kind: "image", bytes });
   });
 });
 

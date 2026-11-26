@@ -40,7 +40,8 @@ use super::{
     LiveFind, Root, WatchTarget, Watcher,
     document::{Content, Document, DocumentEvent, Live},
     find::{self, Query},
-    io::{BinaryFile, FileIo, IMAGE_PREVIEW_LIMIT_BYTES},
+    io::{BinaryFile, BinaryKind, FileIo, IMAGE_PREVIEW_LIMIT_BYTES},
+    pdf::PdfView,
     save_status::{SaveStatus, Visible},
     tabs::set_markdown_view_mode,
 };
@@ -212,6 +213,8 @@ pub struct DocumentPane {
     loading_wake: Option<Task<()>>,
     /// The decoded image preview, kept while the file's generation is shown.
     image: Option<(String, Arc<Image>)>,
+    /// The PDF view, kept while the file's generation is shown.
+    pdf: Option<(String, Entity<PdfView>)>,
     /// The Live view's keyboard and what find searches in it, while the
     /// tab shows it.
     live: Option<(FocusHandle, Rc<dyn LiveFind>)>,
@@ -288,6 +291,7 @@ impl DocumentPane {
             loading_shown: false,
             loading_wake: None,
             image: None,
+            pdf: None,
             live: None,
             find: None,
             go_to: None,
@@ -966,7 +970,14 @@ impl Render for DocumentPane {
                 self,
                 cx,
             ),
-            Content::Binary(file) => self.binary(&file, download, cx).into_any_element(),
+            Content::Binary(file) => match self.pdf_view(&file, cx) {
+                Some(pdf) => v_flex()
+                    .size_full()
+                    .child(self.toolbar(None, None, cx))
+                    .child(div().flex_1().min_h_0().child(pdf))
+                    .into_any_element(),
+                None => self.binary(&file, download, cx).into_any_element(),
+            },
             Content::Text => self.text_surface(can_write, window, cx).into_any_element(),
         };
         div()
@@ -1520,6 +1531,26 @@ impl DocumentPane {
         )
     }
 
+    /// The PDF view for a PDF whose bytes arrived, made once per generation.
+    fn pdf_view(&mut self, file: &BinaryFile, cx: &mut Context<Self>) -> Option<Entity<PdfView>> {
+        if file.kind != BinaryKind::Pdf || file.size_bytes > IMAGE_PREVIEW_LIMIT_BYTES {
+            self.pdf = None;
+            return None;
+        }
+        let Some(bytes) = file.preview.clone() else {
+            self.pdf = None;
+            return None;
+        };
+        match &self.pdf {
+            Some((generation, view)) if *generation == file.generation => Some(view.clone()),
+            _ => {
+                let view = cx.new(|cx| PdfView::new(bytes, cx));
+                self.pdf = Some((file.generation.clone(), view.clone()));
+                Some(view)
+            }
+        }
+    }
+
     fn binary(
         &mut self,
         file: &BinaryFile,
@@ -1534,7 +1565,7 @@ impl DocumentPane {
             .unwrap_or(&file.path)
             .to_owned();
         let over_limit = file.size_bytes > IMAGE_PREVIEW_LIMIT_BYTES;
-        let image = match (&file.preview, file.image && !over_limit) {
+        let image = match (&file.preview, file.kind == BinaryKind::Image && !over_limit) {
             (Some(bytes), true) => {
                 let cached = self
                     .image
@@ -1605,12 +1636,14 @@ impl DocumentPane {
                             .collect(),
                     )),
             )
-            .when(file.image && over_limit, |surface| {
-                surface.child(
-                    div()
-                        .text_size(ui(TYPE_SECONDARY))
-                        .child("Image preview is limited to 25 MiB."),
-                )
+            .when(file.kind != BinaryKind::Other && over_limit, |surface| {
+                surface.child(div().text_size(ui(TYPE_SECONDARY)).child(
+                    if file.kind == BinaryKind::Pdf {
+                        "PDF preview is limited to 25 MiB."
+                    } else {
+                        "Image preview is limited to 25 MiB."
+                    },
+                ))
             })
             .when(download, |surface| {
                 surface.child(

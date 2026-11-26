@@ -301,7 +301,7 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
                 v1::FileKind::Other
             }
         });
-    let mime = image_mime(path).unwrap_or_default().to_owned();
+    let mime = preview_mime(path).to_owned();
     let collapsed = is_never_enumerated(entry_name) || symlink;
     Ok(v1::FileMetadata {
         path: path.to_string_lossy().into_owned(),
@@ -371,7 +371,7 @@ fn metadata_for_directory_entry(
     let entry_name = logical.file_name().unwrap_or(logical.as_os_str());
     let name = entry_name.to_string_lossy().into_owned();
     let collapsed = is_never_enumerated(entry_name) || symlink;
-    let mime = image_mime(logical).unwrap_or_default().to_owned();
+    let mime = preview_mime(logical).to_owned();
     Ok(v1::FileMetadata {
         path: logical.to_string_lossy().into_owned(),
         name,
@@ -510,6 +510,22 @@ fn reject_root_target(root: &Path, target: &Path) -> anyhow::Result<()> {
         bail!("the active root itself cannot be mutated");
     }
     Ok(())
+}
+
+/// The type a listing reports for a file: an image type, `application/pdf`,
+/// or empty when the editor has no preview for it.
+fn preview_mime(path: &Path) -> &'static str {
+    if is_pdf(path) {
+        "application/pdf"
+    } else {
+        image_mime(path).unwrap_or_default()
+    }
+}
+
+fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
 fn image_mime(path: &Path) -> Option<&'static str> {

@@ -334,7 +334,7 @@ fn a_binary_file_shows_its_details_instead_of_an_editor(cx: &mut TestAppContext)
         generation: "1".into(),
         size_bytes: 3,
         mime: "application/octet-stream".into(),
-        image: false,
+        kind: crate::editor::io::BinaryKind::Other,
         preview: None,
     });
     let (pane, _, cx) = open(cx, Some(binary), true);

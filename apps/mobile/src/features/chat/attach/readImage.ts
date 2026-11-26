@@ -54,7 +54,6 @@ export async function readAttachedImage(lanes: ImageReadLanes, pane: AttachmentP
     (request, options) => bulk.request(request, options),
     rooted(resolved.root, resolved.path),
     pane.serverIdentity,
-    { keepImages: true },
   );
   if (body.kind !== "image") throw new AttachedImageError("That attachment is not an image.");
   if (!body.bytes) throw new AttachedImageError("That image is too large to show.");
