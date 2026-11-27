@@ -214,10 +214,10 @@ What differs from the plan above:
   never starts has its file removed when the daemon gives up on it or sweeps
   the directory.
 - **Trigger.** Claude converts on its hook when the hook is installed, with or
-  without a client connected. Codex converts on process detection, which runs
-  only while a client is subscribed: `codex` started with no desktop or phone
-  connected stays a terminal. A `SessionStart` older than 10 s starts no chat:
-  one that waited in the mailbox of a daemon that was down is about a session
+  without a client connected. Codex, and Claude without its hook, convert on
+  process detection, which the daemon's 2 s maintenance pass runs in Chat mode
+  whether or not a client is connected, so an automation's `codex` becomes a
+  chat too. A `SessionStart` older than 10 s starts no chat: one that waited in the mailbox of a daemon that was down is about a session
   somebody may already be typing into. The hook names a pane and not a
   process, so the agent found in the pane must itself be under 20 s old: a
   session that resumes another from inside, or starts an agent of its own

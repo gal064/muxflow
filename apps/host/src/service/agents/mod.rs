@@ -957,10 +957,14 @@ impl AgentRuntime {
     /// hook generation resets the count. Retirement is not final — any later
     /// hook re-creates the agent.
     fn retire_departed(&self) -> Vec<v1::AgentEvent> {
+        // In Chat mode a Codex that has just started is found only by looking
+        // at its pane, and with no client subscribed this is the only look.
+        let chat_mode =
+            crate::service::chat::ChatRuntime::global().agent_mode() == v1::ChatAgentMode::Chat;
         // The tmux fork happens outside the lock. `ingest_hook` takes the same
         // mutex, and holding it across a subprocess would stall live hook
         // ingestion behind a discovery that has nothing to do with it.
-        if !self.has_mapped_agents() {
+        if !chat_mode && !self.has_mapped_agents() {
             self.departure_misses.lock().unwrap().clear();
             return Vec::new();
         }
@@ -969,6 +973,14 @@ impl AgentRuntime {
             // briefly unreachable must not empty the agent list.
             return Vec::new();
         };
+        if chat_mode {
+            crate::service::chat::agents_detected(
+                &identity,
+                reconcile::detect_all(&topology)
+                    .values()
+                    .map(|(pane, adapter)| (*pane, adapter.kind())),
+            );
+        }
         self.retire_departed_from(&topology, &identity)
     }
 
@@ -1043,7 +1055,7 @@ impl AgentRuntime {
     }
 
     /// Whether any routed row needs process-presence maintenance. Hosts with
-    /// no mapped agents stay at zero periodic discovery forks.
+    /// no mapped agents stay at zero periodic discovery forks outside Chat mode.
     fn has_mapped_agents(&self) -> bool {
         self.state
             .lock()
